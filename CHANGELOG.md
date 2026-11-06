@@ -9,3 +9,11 @@ launcher. Admitted tasks enforce declared cumulative correction and investigatio
 limits from persisted launch intents. Add pause/resume, offline state inspection
 and an owner-managed upgrade for legacy task records. Automatic scheduling and
 provider integration remain outside this slice.
+
+### Revision-bound results
+
+Bind new admitted assignments and specialist reports to candidate and requirements
+revisions. Preserve stale results as history and require current successful results
+for declared launch dependencies. Completed implementation can return a produced
+commit for independent review. Existing assignments gain no invented evidence
+during the version 2 state upgrade.

@@ -290,13 +290,16 @@ class TaskAdmission(unittest.TestCase):
     def test_legacy_record_migrates_without_relaunch_or_inferred_allowances(self):
         _, original = self.start(purpose=None)
         record = json.loads(self.path.read_text())
-        for key in ("schema_version", "admission", "hold"):
+        for key in ("schema_version", "admission", "hold", "inputs"):
             del record[key]
+        for assignment in record["assignments"].values():
+            del assignment["result"]
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 1)
+        self.assertEqual(migrated["schema_version"], 2)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
-        self.assertEqual(migrated["assignments"], record["assignments"])
+        self.assertEqual(migrated["assignments"],
+                         {key: {**item, "result": None} for key, item in record["assignments"].items()})
         _, reconnected = self.start(purpose=None)
         self.assertEqual(reconnected["block_id"], original["block_id"])
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 1)
@@ -315,6 +318,158 @@ class TaskAdmission(unittest.TestCase):
                 self.start()
             self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
+
+    def report(self, **changes):
+        record = json.loads(self.path.read_text())
+        arguments = dict(assignment_id="qa", candidate=record["admission"]["initial_candidate"],
+                         requirements=record["admission"]["initial_candidate"], outcome="approved",
+                         artifacts=["evidence/qa.txt"])
+        return factory.record_result(self.path, **{**arguments, **changes})
+
+    def test_result_records_exact_inputs_and_does_not_claim_task_acceptance(self):
+        initial = self.admit()["inputs"]
+        _, assignment = self.start()
+        self.assertEqual(assignment["request"]["inputs"], initial)
+        self.assertIn(initial["candidate"], Path(assignment["brief"]).read_text())
+        FakeRex.calls.clear()
+        record = self.report()
+        self.assertEqual(record["assignments"]["qa"]["result"],
+                         dict(inputs=initial, candidate=initial["candidate"], outcome="approved",
+                              artifacts=["evidence/qa.txt"]))
+        self.assertTrue(factory.task_view(record)["assignments"]["qa"]["result_current"])
+        self.assertNotIn("accepted", factory.task_view(record))
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_candidate_or_requirements_change_invalidates_result_without_erasing_it(self):
+        initial = self.admit()["inputs"]
+        self.start()
+        self.report()
+        self.commit("Changed candidate")
+        changed = factory.set_inputs(self.path, candidate="HEAD", requirements=initial["requirements"])
+        self.assertNotEqual(changed["inputs"]["candidate"], initial["candidate"])
+        self.assertFalse(factory.task_view(changed)["assignments"]["qa"]["result_current"])
+        self.assertEqual(changed["assignments"]["qa"]["result"]["inputs"], initial)
+        # Reconnecting preserves the original assignment and brief, even after inputs advance.
+        _, reconnected = self.start()
+        self.assertEqual(reconnected["request"]["inputs"], initial)
+        requirements_changed = factory.set_inputs(self.path, candidate=initial["candidate"],
+                                                   requirements="requirements-v2")
+        self.assertFalse(factory.task_view(requirements_changed)["assignments"]["qa"]["result_current"])
+
+    def test_late_result_stays_historical_and_new_assignment_binds_current_inputs(self):
+        initial = self.admit()["inputs"]
+        self.start()
+        factory.set_inputs(self.path, candidate="HEAD", requirements="requirements-v2")
+        late = self.report()
+        self.assertFalse(factory.task_view(late)["assignments"]["qa"]["result_current"])
+        self.assertEqual(late["assignments"]["qa"]["result"]["inputs"], initial)
+        _, current = self.start(assignment_id="qa-v2")
+        self.assertEqual(current["request"]["inputs"]["requirements"], "requirements-v2")
+        completed = self.report(assignment_id="qa-v2", requirements="requirements-v2")
+        self.assertTrue(factory.task_view(completed)["assignments"]["qa-v2"]["result_current"])
+
+    def test_mismatched_or_empty_result_is_refused_without_changing_state(self):
+        self.admit()
+        self.start()
+        self.commit("Different candidate")
+        before = self.path.read_bytes()
+        for changes in ({"candidate": "HEAD"}, {"requirements": "different"},
+                        {"candidate": "not-a-commit"}, {"artifacts": []},
+                        {"artifacts": [" "]}, {"outcome": "looks-fine"}):
+            with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
+                self.report(**changes)
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_result_resubmission_is_idempotent_and_conflicting_report_is_refused(self):
+        self.admit()
+        self.start()
+        first = self.report()
+        self.assertEqual(self.report(), first)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "different result"):
+            self.report(outcome="findings")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_uncertain_launch_cannot_gain_a_result_before_reconciliation(self):
+        self.admit()
+        FakeRex.fail_after_create = True
+        with self.assertRaises(factory.FactoryError):
+            self.start()
+        with self.assertRaisesRegex(factory.FactoryError, "Reconcile the pending launch"):
+            self.report()
+        FakeRex.fail_after_create = False
+        self.start()
+        self.report()
+
+    def test_version_one_upgrade_never_invents_assignment_revision_evidence(self):
+        self.admit()
+        self.start()
+        record = json.loads(self.path.read_text())
+        record["schema_version"] = 1
+        del record["inputs"]
+        del record["assignments"]["qa"]["request"]["inputs"]
+        del record["assignments"]["qa"]["result"]
+        self.path.write_text(json.dumps(record))
+        upgraded = factory.load_task(self.path)
+        self.assertEqual(upgraded["schema_version"], 2)
+        self.assertIsNone(upgraded["assignments"]["qa"]["result"])
+        self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
+        with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
+            self.report()
+
+    def test_cli_input_selection_and_result_submission(self):
+        self.admit()
+        result, output, errors = self.cli("inputs", "--task", "task", "--candidate", "HEAD",
+                                          "--requirements", "requirements-v1")
+        self.assertEqual((result, errors), (0, ""))
+        candidate = json.loads(output)["inputs"]["candidate"]
+        self.start()
+        result, output, errors = self.cli("result", "--task", "task", "--id", "qa",
+                                          "--candidate", candidate, "--requirements", "requirements-v1",
+                                          "--outcome", "findings", "--artifact", "evidence/finding.md")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertEqual(json.loads(output)["assignments"]["qa"]["result"]["outcome"], "findings")
+
+    def test_dependency_requires_current_successful_result_before_any_external_call(self):
+        self.admit()
+        self.start()
+        FakeRex.calls.clear()
+        with self.assertRaisesRegex(factory.FactoryError, "successful result on current inputs"):
+            self.start(assignment_id="security", role="security", dependencies=["qa"])
+        self.assertEqual(FakeRex.calls, [])
+        self.report()
+        self.start(assignment_id="security", role="security", dependencies=["qa"])
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 2)
+        factory.set_inputs(self.path, candidate="HEAD", requirements="requirements-v2")
+        FakeRex.calls.clear()
+        with self.assertRaises(factory.FactoryError):
+            self.start(assignment_id="other", dependencies=["qa"])
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_findings_and_unknown_dependencies_do_not_advance_work(self):
+        self.admit()
+        self.start()
+        self.report(outcome="findings")
+        FakeRex.calls.clear()
+        for dependencies in (["qa"], ["missing"], ["security"]):
+            with self.subTest(dependencies=dependencies), self.assertRaises(factory.FactoryError):
+                self.start(assignment_id="security", role="security", dependencies=dependencies)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_completed_implementation_can_report_produced_candidate_for_downstream_review(self):
+        initial = self.admit()["inputs"]
+        self.start(assignment_id="backend", role="backend")
+        self.commit("Produced implementation")
+        completed = self.report(assignment_id="backend", candidate="HEAD", outcome="completed",
+                                artifacts=["git:HEAD"])
+        output = completed["assignments"]["backend"]["result"]["candidate"]
+        self.assertNotEqual(output, initial["candidate"])
+        self.assertFalse(factory.task_view(completed)["assignments"]["backend"]["result_current"])
+        factory.set_inputs(self.path, candidate=output, requirements=initial["requirements"])
+        _, reviewer = self.start(dependencies=["backend"])
+        self.assertEqual(reviewer["request"]["inputs"]["candidate"], output)
+        reviewed = self.report(candidate=output)
+        self.assertTrue(factory.task_view(reviewed)["assignments"]["qa"]["result_current"])
 
     def test_cli_admit_pause_resume_and_missing_task(self):
         result, output, errors = self.cli("admit", "--task", "task", "--goal", "Inspect",

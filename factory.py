@@ -14,6 +14,7 @@ from typing import Any
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 
 
 class FactoryError(Exception):
@@ -70,7 +71,7 @@ def task_lock(directory, task):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=1, task=task, admission=None, hold=None, rex=None,
+    return dict(schema_version=2, task=task, admission=None, inputs=None, hold=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -81,7 +82,7 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1):
+    if type(version) is not int or version not in (0, 1, 2):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
             or not all(key in record for key in ("rex", "session_id", "session_label"))):
@@ -106,9 +107,44 @@ def load_task(path) -> dict:
                 or (admission is not None and assignment["request"].get("purpose")
                     not in {"work", "correction", "investigation"})):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
-    if version == 0:
+    if version < 2:
+        record["inputs"] = (dict(candidate=admission["initial_candidate"],
+                                 requirements=admission["initial_candidate"])
+                            if admission is not None else None)
+        for assignment in record["assignments"].values():
+            assignment["result"] = None
+        record["schema_version"] = 2
+    if "inputs" not in record or (admission is not None and not valid_inputs(record["inputs"])):
+        raise FactoryError("Invalid task inputs; restore the original state before continuing")
+    for assignment in record["assignments"].values():
+        if "result" not in assignment:
+            raise FactoryError("Missing assignment result field; restore the original state before continuing")
+        result = assignment["result"]
+        if result is not None and (not isinstance(result, dict)
+                or result.get("outcome") not in RESULT_OUTCOMES
+                or not valid_inputs(result.get("inputs"))
+                or result["inputs"] != assignment["request"].get("inputs")
+                or not isinstance(result.get("candidate"), str) or not result["candidate"]
+                or (result["outcome"] != "completed" and result["candidate"] != result["inputs"]["candidate"])
+                or not isinstance(result.get("artifacts"), list) or not result["artifacts"]):
+            raise FactoryError("Invalid assignment result; restore the original state before continuing")
+    if version < 2:
         save(path, record)
     return record
+
+
+def valid_inputs(value):
+    return isinstance(value, dict) and all(isinstance(value.get(key), str) and value[key].strip()
+                                         for key in ("candidate", "requirements"))
+
+
+def git_commit(repository, revision):
+    result = subprocess.run(["git", "-C", repository, "rev-parse", "--verify", "--end-of-options",
+                             revision + "^{commit}"], capture_output=True, text=True,
+                            timeout=10, check=False)
+    if result.returncode:
+        raise FactoryError("Revision is not an existing Git commit; fetch it or supply a local commit")
+    return result.stdout.strip()
 
 
 def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None):
@@ -129,12 +165,10 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
         return record
     if record["assignments"]:
         raise FactoryError("Existing launches have unclassified attempts; admit a new task ID")
-    revision = subprocess.run(["git", "-C", repository, "rev-parse", "--verify", "HEAD^{commit}"],
-                              capture_output=True, text=True, timeout=10, check=False)
-    if revision.returncode:
-        raise FactoryError("Repository needs an existing Git commit; supply its checkout path")
-    admission["initial_candidate"] = revision.stdout.strip()
+    admission["initial_candidate"] = git_commit(repository, "HEAD")
     record["admission"] = admission
+    record["inputs"] = dict(candidate=admission["initial_candidate"],
+                            requirements=admission["initial_candidate"])
     save(path, record)
     return record
 
@@ -148,7 +182,46 @@ def task_view(record):
             used = sum(item["request"].get("purpose") == purpose
                        for item in record["assignments"].values())
             allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
-    return {**record, "allowances": allowances}
+    assignments = {key: {**item, "result_current": result_current(record, item["result"])}
+                   for key, item in record["assignments"].items()}
+    return {**record, "allowances": allowances, "assignments": assignments}
+
+
+def result_current(record, result):
+    return result is not None and record["inputs"] == dict(
+        candidate=result["candidate"], requirements=result["inputs"]["requirements"])
+
+
+def set_inputs(path, *, candidate, requirements):
+    record = load_task(path)
+    if record["admission"] is None or not requirements.strip():
+        raise FactoryError("Admit a task and supply a nonempty requirements revision first")
+    record["inputs"] = dict(candidate=git_commit(record["admission"]["repository"], candidate),
+                            requirements=requirements)
+    save(path, record)
+    return record
+
+
+def record_result(path, *, assignment_id, candidate, requirements, outcome, artifacts):
+    record = load_task(path)
+    assignment = record["assignments"][assignment_id]
+    inputs = assignment["request"].get("inputs")
+    if not valid_inputs(inputs):
+        raise FactoryError("Assignment predates input binding; launch a new explicit assignment ID")
+    if assignment["state"] != "launched":
+        raise FactoryError("Reconcile the pending launch with status before recording its result")
+    reported = dict(candidate=git_commit(record["admission"]["repository"], candidate),
+                    requirements=requirements)
+    if requirements != inputs["requirements"] or (outcome != "completed" and reported != inputs):
+        raise FactoryError("Result inputs differ from the assignment; report the revision it assessed")
+    if outcome not in RESULT_OUTCOMES or not artifacts or any(not ref.strip() for ref in artifacts):
+        raise FactoryError("Supply a supported outcome and at least one nonempty evidence reference")
+    result = dict(inputs=dict(inputs), candidate=reported["candidate"], outcome=outcome, artifacts=artifacts)
+    if assignment["result"] is not None and assignment["result"] != result:
+        raise FactoryError("Assignment already has a different result; use a new explicit assignment ID")
+    assignment["result"] = result
+    save(path, record)
+    return record
 
 
 def hold_task(path, reason):
@@ -209,7 +282,7 @@ def reconcile(rex, record, assignment):
 
 
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
-           binary=None, server=None, purpose=None):
+           binary=None, server=None, purpose=None, dependencies=()):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id):
         raise FactoryError("Assignment ID must be a lowercase slug, at most 64 characters")
     cwd = str(Path(cwd).resolve(strict=True))
@@ -217,19 +290,29 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Provide an existing directory and an absolute executable command")
     if not Path(command[0]).is_absolute() or not os.access(command[0], os.X_OK):
         raise FactoryError("Command executable must be an absolute executable file")
-    instructions = brief(role, goal)
-    request = dict(role=role, goal=goal, cwd=cwd, command=command,
-                   instructions_sha256=hashlib.sha256(instructions.encode()).hexdigest())
     record = load_task(path) if path.exists() else new_task(task)
+    existing = record["assignments"].get(assignment_id)
+    instructions = brief(role, goal)
+    request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
             raise FactoryError("Admitted tasks require --purpose work, correction or investigation")
         if (role == "investigator") != (purpose == "investigation"):
             raise FactoryError("Use purpose investigation with the investigator role")
         request["purpose"] = purpose
+        inputs = existing["request"].get("inputs") if existing else record["inputs"]
+        if inputs is not None:
+            request["inputs"] = dict(inputs)
+            instructions += (f"\nCandidate commit: {inputs['candidate']}\n"
+                             f"Requirements revision: {inputs['requirements']}\n"
+                             "Bind your result to these inputs and link original evidence.\n")
     elif purpose is not None:
         raise FactoryError("Admit a new task before supplying an attempt purpose")
-    existing = record["assignments"].get(assignment_id)
+    if dependencies:
+        if record["admission"] is None:
+            raise FactoryError("Admit a task before declaring assignment dependencies")
+        request["dependencies"] = sorted(set(dependencies))
+    request["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
     if existing:
         if existing["request"] != request:
             raise FactoryError("Assignment ID already has different inputs; use a new explicit ID")
@@ -242,6 +325,12 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Task is paused: " + record["hold"] + "; use resume before new launches")
     if any(item["state"] == "launching" for item in record["assignments"].values()):
         raise FactoryError("Reconcile the existing pending assignment with status before another launch")
+    for dependency in request.get("dependencies", []):
+        if dependency not in record["assignments"] or dependency == assignment_id:
+            raise FactoryError("Dependency must name an earlier assignment in this task: " + dependency)
+        result = record["assignments"][dependency]["result"]
+        if not result_current(record, result) or result["outcome"] not in {"completed", "approved"}:
+            raise FactoryError("Dependency needs a successful result on current inputs: " + dependency)
     allowances = task_view(record)["allowances"]
     if allowances is not None and purpose in allowances and allowances[purpose]["remaining"] <= 0:
         owner = "investigator" if purpose == "correction" else "operator"
@@ -259,8 +348,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions}
     argv = [replacements.get(part, part) for part in command]
-    assignment = dict(request=request, state="launching", brief=str(brief_path),
-                      window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
+    assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
+                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
     record["assignments"][assignment_id] = assignment
     save(path, record)
     options = ["--cwd", cwd, "--keep-open", "--shell=none", "--json", "--", *argv]
@@ -307,6 +396,7 @@ def main(argv=None):
     start.add_argument("--cwd", required=True)
     start.add_argument("--purpose", choices=("work", "correction", "investigation"),
                        help="Required for admitted tasks; consumes the declared task allowance")
+    start.add_argument("--after", action="append", default=[], help="Earlier assignment that must have a current successful result")
     start.add_argument("command", nargs=argparse.REMAINDER)
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
@@ -315,6 +405,17 @@ def main(argv=None):
     admission.add_argument("--acceptance", action="append", required=True, help="Original evidence reference")
     admission.add_argument("--corrections", type=int)
     admission.add_argument("--investigations", type=int)
+    inputs = sub.add_parser("inputs", help="Select the task's candidate and requirements revision")
+    inputs.add_argument("--task", required=True)
+    inputs.add_argument("--candidate", required=True)
+    inputs.add_argument("--requirements", required=True)
+    result = sub.add_parser("result", help="Record a revision-bound specialist outcome")
+    result.add_argument("--task", required=True)
+    result.add_argument("--id", required=True)
+    result.add_argument("--candidate", required=True)
+    result.add_argument("--requirements", required=True)
+    result.add_argument("--outcome", choices=sorted(RESULT_OUTCOMES), required=True)
+    result.add_argument("--artifact", action="append", required=True)
     for action in ("show", "pause", "resume"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
@@ -327,13 +428,19 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         with task_lock(args.state_dir.resolve(), args.task) as path:
-            if args.action in {"admit", "show", "pause", "resume"}:
+            if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
                                    acceptance=args.acceptance, corrections=args.corrections,
                                    investigations=args.investigations)
                 elif args.action == "show":
                     record = load_task(path)
+                elif args.action == "inputs":
+                    record = set_inputs(path, candidate=args.candidate, requirements=args.requirements)
+                elif args.action == "result":
+                    record = record_result(path, assignment_id=args.id, candidate=args.candidate,
+                                           requirements=args.requirements, outcome=args.outcome,
+                                           artifacts=args.artifact)
                 else:
                     record = hold_task(path, args.reason if args.action == "pause" else None)
                 print(json.dumps(task_view(record), indent=2))
@@ -342,7 +449,7 @@ def main(argv=None):
                 argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
                     role=args.role, goal=args.goal, cwd=args.cwd, command=argv,
-                    binary=args.rex, server=args.server, purpose=args.purpose)
+                    binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after)
                 rex = connect(record)
             else:
                 record = load_task(path)
