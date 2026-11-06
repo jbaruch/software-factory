@@ -7,6 +7,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("read-only", self.spawns[0])
+        self.assertEqual(self.spawns[0][3:7], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
         self.assertEqual(self.spawns[0][-1], self.brief.read_text())
         before = self.args.receipt.read_bytes()
@@ -309,12 +311,14 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertIn("repository identity differs", receipt["error"])
 
-    def launch_assignment(self, codex=sys.executable):
+    def launch_assignment(self, codex=sys.executable, *, execute=True, legacy=False):
         self.path = self.root / "task.json"
         factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
                       acceptance=["docs/acceptance.md"])
         command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=codex,
                                         model="fixture-model", effort="high", cwd=str(self.repo))
+        if legacy:
+            del command[1:3]
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
         with patch.object(factory, "Rex", FakeRex):
@@ -323,15 +327,71 @@ class NativeResults(unittest.TestCase):
                 binary=sys.executable, server="unix:///test.sock")
         actual = next(call for call in FakeRex.calls if call[0] == "new")
         argv = actual[actual.index("--") + 1:]
+        self.worker_argv = argv
         self.assertEqual(argv[:4], (sys.executable, "-E", "-s", str(factory.ROOT / "checkout_exec.py")))
         argv = argv[argv.index("--") + 1:]
-        self.args = worker.parser().parse_args(argv[2:])
+        self.args = worker.parser().parse_args(argv[2:] if legacy else argv[4:])
         self.assertEqual(self.args.candidate, self.candidate)
         self.assertEqual(self.args.brief_sha256, assignment["request"]["instructions_sha256"])
         self.assertEqual(json.loads(self.args.repo_identity), record["admission"]["repository_identity"])
-        self.execute()
+        if execute:
+            self.execute()
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
         return record, assignment
+
+    def test_historical_worker_command_reconnects_and_collects_unchanged(self):
+        record, assignment = self.launch_assignment(legacy=True)
+        frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
+                                        model="fixture-model", effort="high", cwd=str(self.repo))
+        self.assertEqual(frozen, assignment["request"]["command"])
+        original = self.args.receipt.read_bytes()
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            result = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
+        self.assertEqual(self.args.receipt.read_bytes(), original)
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_workspace_python_startup_code_cannot_run_in_the_host_worker(self):
+        effect = self.root / "startup-effect"
+        (self.repo / "sitecustomize.py").write_text(
+            f"from pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                             "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                                             "commit", "-m", "Add startup fixture").returncode, 0)
+        self.candidate = factory.git_commit(".", "HEAD")
+        binary = self.root / "native-fixture"
+        payload_events = events()
+        payload_events.insert(2, dict(type="item.completed", item=dict(type="command_execution", aggregated_output="x" * 100000)))
+        payload = "\n".join(json.dumps(event) for event in payload_events)
+        binary.write_text("#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' " + shlex.quote(payload) + "\n")
+        binary.chmod(0o700)
+        self.launch_assignment(codex=str(binary), execute=False)
+        engine = self.root / "engine"
+        engine.mkdir()
+        for name in ("checkout_exec.py", "codex_worker.py", "factory.py"):
+            (engine / name).write_bytes((factory.ROOT / name).read_bytes())
+        command = [str(engine / Path(arg).name) if arg in {
+            str(factory.ROOT / "checkout_exec.py"), str(factory.ROOT / "codex_worker.py")} else arg for arg in self.worker_argv]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15,
+            env={**os.environ, "PYTHONPATH": str(self.repo), "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(effect.exists())
+        self.assertFalse((engine / "__pycache__").exists())
+        self.assertEqual(json.loads(self.args.receipt.read_text())["state"], "completed")
+        self.assertEqual(worker.read_events(self.args.events), payload_events)
+
+    def test_oversize_native_event_retains_failed_attempt_without_retry(self):
+        with patch.object(self.process, "readline", side_effect=ValueError("Separator is found, but chunk is longer than limit")):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("exceeded the 1 MiB line limit", receipt["error"])
+        self.assertIsNotNone(self.process.returncode)
+        self.assertIsNone(receipt["report"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        with self.assertRaises(factory.FactoryError):
+            self.execute()
+        self.assertEqual(len(self.spawns), 1)
 
     def test_native_preflight_preserves_allowances_and_reconnect_survives_removed_binary(self):
         path = self.root / "task.json"
