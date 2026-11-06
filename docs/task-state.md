@@ -170,7 +170,11 @@ repository, is checked out at the selected candidate and has no uncommitted inpu
 This includes ignored files and directories: use a clean isolated worktree and
 keep runtime state, caches and output outside that checkout. Verification clears
 ambient `GIT_*` overrides so repository/worktree/index/object/config environment
-settings cannot redirect the checks to another source.
+settings cannot redirect the checks to another source. The exec consumer removes
+those overrides from the launched command too. Git reads bind the worktree to the
+actual checkout root; redirecting `core.worktree` settings and hidden index flags
+(`assume-unchanged`/`skip-worktree`) refuse execution. Submodule inspection ignores
+settings that suppress dirty submodules.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults

@@ -47,6 +47,9 @@ allow explicit admission limits when configuration defaults are unavailable.
 Clear ambient Git overrides during verification and refuse ignored worktree
 overlays, keeping revision-bound inputs tied to the selected commit. Decode
 malformed Rex process bytes at the transport boundary with compatibility guidance.
+Clear Git overrides in the launched command as well as verification. Bind Git
+inspection to the actual worktree, reject redirecting worktree configuration and
+hidden index flags, force submodule inspection, and explain malformed Git output.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and
