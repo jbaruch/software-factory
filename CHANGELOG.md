@@ -2,6 +2,14 @@
 
 ## 0.1.0 — 2026-11-05
 
+### Operator-approved runtime and review exceptions
+
+Authorize native provider assignments through the factory's Rex adapter for
+runtime and conformance work, retaining task scope, isolated worktrees, budgets
+and permissions. Record the operator's temporary Claude-review waiver during
+the subscription outage expected to end Saturday afternoon, November 7. Policy
+review and CI remain required; restore the Claude gate on capacity recovery.
+
 ### Task admission
 
 Add task scope, acceptance references and an initial Git revision to the native
