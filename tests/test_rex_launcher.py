@@ -33,7 +33,8 @@ class FakeRex:
             return next(item for item in self.sessions if item["session_id"] == args[2])
         if args[0] == "new" or args[:2] == ("window", "new"):
             if args[0] == "new":
-                session = {"session_id": "session-test", "label": args[1], "windows": []}
+                session = {"session_id": "session-test" if not self.sessions else f"session-test-{len(self.sessions) + 1}",
+                           "label": args[1], "windows": []}
                 self.sessions.append(session)
                 label = args[args.index("--window") + 1]
             else:
@@ -119,6 +120,27 @@ class NativeLauncher(unittest.TestCase):
             self.start()
         self.assertEqual(len(self.creation_calls()), 1)
 
+    def test_wrong_create_ids_keep_pending_intent_and_reconcile_without_relaunch(self):
+        original_call = FakeRex.call
+        def wrong_ids(rex, *args, **kwargs):
+            response: dict = copy.deepcopy(original_call(rex, *args, **kwargs))
+            if args[0] == "new":
+                response["initial_windows"][0]["block_ids"] = ["wrong-block"]
+            elif args[:2] == ("window", "new"):
+                response["window_id"] = "wrong-window"
+            return response
+        for identity, role in (("qa", "qa"), ("security", "security")):
+            with patch.object(FakeRex, "call", wrong_ids):
+                with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain.*pane IDs differ"):
+                    self.start(assignment_id=identity, role=role)
+            pending = factory.load_task(self.path)["assignments"][identity]
+            self.assertEqual(pending["state"], "launching")
+            self.assertNotIn("block_id", pending)
+            self.assertNotIn("window_id", pending)
+            _, assignment = self.start(assignment_id=identity, role=role)
+            self.assertEqual(assignment["state"], "launched")
+        self.assertEqual(len(self.creation_calls()), 2)
+
     def test_another_specialist_gets_same_session_and_separate_window(self):
         first = self.start()
         second = self.start(assignment_id="security", role="security")
@@ -199,8 +221,30 @@ class NativeLauncher(unittest.TestCase):
             record = copy.deepcopy(original)
             record["assignments"]["security"][key] = record["assignments"]["qa"][key]
             factory.save(self.path, record)
-            with self.subTest(key=key), self.assertRaisesRegex(factory.FactoryError, "Duplicate assignment pane"):
+            with self.subTest(key=key), self.assertRaisesRegex(factory.FactoryError,
+                    "Duplicate assignment pane|window marker differs"):
                 factory.load_task(self.path)
+
+    def test_complete_pane_tuple_swaps_and_cross_task_session_identity_refuse_before_rex(self):
+        self.start()
+        original, _ = self.start(assignment_id="security", role="security")
+        swapped = copy.deepcopy(original)
+        keys = ("window_label", "window_id", "block_id")
+        for key in keys:
+            swapped["assignments"]["qa"][key], swapped["assignments"]["security"][key] = (
+                swapped["assignments"]["security"][key], swapped["assignments"]["qa"][key])
+        other, _ = factory.launch(self.root / "other.json", **{**self.arguments, "task": "other"})
+        crossed = copy.deepcopy(original)
+        for key in ("rex", "session_label", "session_id"):
+            crossed[key] = other[key]
+        for record in (swapped, crossed):
+            factory.save(self.path, record)
+            before = self.path.read_bytes()
+            FakeRex.calls.clear()
+            with self.assertRaises(factory.FactoryError):
+                self.start()
+            self.assertEqual(FakeRex.calls, [])
+            self.assertEqual(self.path.read_bytes(), before)
 
     def test_lost_assignment_history_refuses_another_live_launch(self):
         self.start()
@@ -275,9 +319,139 @@ class TaskAdmission(unittest.TestCase):
         expected_head = subprocess.check_output(
             ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
         self.assertEqual(view["admission"]["initial_candidate"], expected_head)
+        marker = self.repo / ".git" / factory.REPOSITORY_MARKER
+        value = json.loads(marker.read_text())
+        self.assertEqual(value["schema_version"], 1)
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(view["admission"]["repository_identity"], dict(
+            common_dir=str((self.repo / ".git").resolve()), repository_id=value["repository_id"]))
         self.assertEqual(view["allowances"]["correction"], dict(limit=1, used=0, remaining=1))
         self.assertIsNone(view["rex"])
         self.assertEqual(FakeRex.calls, [])
+
+    def test_repository_replacement_cannot_rebind_inputs_or_completed_results(self):
+        self.admit()
+        self.start()
+        before = self.path.read_bytes()
+        self.repo.rename(self.root / "original-repo")
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        self.commit("An unrelated repository")
+        for action in (lambda: self.admit(),
+                       lambda: factory.set_inputs(self.path, candidate="HEAD", requirements="v2"),
+                       lambda: self.report(candidate="HEAD", outcome="completed"),
+                       lambda: self.start(assignment_id="security", role="security")):
+            FakeRex.calls.clear()
+            with self.assertRaisesRegex(factory.FactoryError, "admitted repository pin"):
+                action()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_history_sharing_clone_cannot_replace_the_admitted_repository(self):
+        self.admit()
+        self.start()
+        original = factory.load_task(self.path)
+        before = self.path.read_bytes()
+        preserved = self.root / "original-repository"
+        self.repo.rename(preserved)
+        subprocess.run(["git", "clone", "--quiet", str(preserved), str(self.repo)], check=True)
+        self.commit("Replacement-only change")
+        initial = original["admission"]["initial_candidate"]
+        self.assertEqual(factory.git_commit(str(self.repo), initial), initial)
+        self.assertFalse((self.repo / ".git" / factory.REPOSITORY_MARKER).exists())
+        for action in (lambda: factory.set_inputs(self.path, candidate="HEAD", requirements="v2"),
+                       lambda: self.report(candidate="HEAD", outcome="completed"),
+                       lambda: self.start(assignment_id="security", role="security"), lambda: self.admit()):
+            FakeRex.calls.clear()
+            with self.assertRaisesRegex(factory.FactoryError, "repository (pin|marker|identity)"):
+                action()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_git_process_failures_explain_recovery_before_mutation(self):
+        self.admit()
+        before = self.path.read_bytes()
+        for error in (FileNotFoundError("git"), subprocess.TimeoutExpired("git", 10)):
+            with patch.object(factory.subprocess, "run", side_effect=error):
+                for action in (lambda: factory.git_commit(str(self.repo), "HEAD"),
+                               lambda: factory.git_common_dir(str(self.repo)),
+                               lambda: factory.check_checkout(str(self.repo), str(self.repo), "a" * 40)):
+                    with self.assertRaisesRegex(factory.FactoryError, "restore Git availability and checkout access"):
+                        action()
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_recycled_filesystem_identity_cannot_authorize_a_replacement(self):
+        original = self.admit()
+        common = self.repo / ".git"
+        old_stat = common.stat()
+        self.repo.rename(self.root / "preserved")
+        subprocess.run(["git", "clone", "--quiet", str(self.root / "preserved"), str(self.repo)], check=True)
+        factory.save(common / factory.REPOSITORY_MARKER,
+                     dict(schema_version=1, repository_id="b" * 32))
+        real_stat = Path.stat
+
+        def recycled_stat(path, *args, **kwargs):
+            return old_stat if path == common else real_stat(path, *args, **kwargs)
+
+        before = self.path.read_bytes()
+        with patch.object(Path, "stat", recycled_stat):
+            self.assertEqual(common.stat().st_ino, old_stat.st_ino)
+            self.assertNotEqual(factory.repository_identity(str(self.repo)), original["admission"]["repository_identity"])
+            with self.assertRaisesRegex(factory.FactoryError, "repository pin"):
+                factory.set_inputs(self.path, candidate="HEAD", requirements="replacement")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_replacement_between_repository_and_checkout_checks_cannot_launch(self):
+        self.admit()
+        before = self.path.read_bytes()
+        check = factory.check_repository
+
+        def replace_after_check(admission):
+            check(admission)
+            self.repo.rename(self.root / "preserved")
+            subprocess.run(["git", "clone", "--quiet", str(self.root / "preserved"), str(self.repo)], check=True)
+            factory.save(self.repo / ".git" / factory.REPOSITORY_MARKER,
+                         dict(schema_version=1, repository_id="b" * 32))
+
+        with patch.object(factory, "check_repository", side_effect=replace_after_check):
+            with self.assertRaisesRegex(factory.FactoryError, "repository identity differs"):
+                self.start(purpose="correction")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+        self.assertFalse((self.state / "task.qa.md").exists())
+
+    def test_missing_or_damaged_marker_never_heals_existing_admission(self):
+        self.admit()
+        marker = self.repo / ".git" / factory.REPOSITORY_MARKER
+        before = self.path.read_bytes()
+        for content in (None, "{}", '{"schema_version":true,"repository_id":"' + "a" * 32 + '"}',
+                        '{"schema_version":2,"repository_id":"' + "a" * 32 + '"}',
+                        '{"schema_version":1,"schema_version":1,"repository_id":"' + "a" * 32 + '"}'):
+            if content is None:
+                marker.unlink()
+            else:
+                marker.write_text(content)
+            for action in (lambda: self.admit(), lambda: self.start()):
+                with self.assertRaisesRegex(factory.FactoryError, "marker"):
+                    action()
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(marker.read_text() if marker.exists() else None, content)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_marker_publication_uses_existing_concurrent_winner(self):
+        marker = self.repo / ".git" / factory.REPOSITORY_MARKER
+        winner = dict(schema_version=1, repository_id="a" * 32)
+        link = os.link
+
+        def publish_winner(source, target):
+            marker.write_text(json.dumps(winner))
+            link(source, target)
+
+        with patch.object(factory.os, "link", side_effect=publish_winner):
+            record = self.admit()
+        self.assertEqual(record["admission"]["repository_identity"]["repository_id"], "a" * 32)
+        self.assertEqual(json.loads(marker.read_text()), winner)
+        self.assertEqual(list(marker.parent.glob(".saving-*")), [])
 
     def test_invalid_admission_and_changed_limits_cannot_reset_task(self):
         for changes in ({"goal": " "}, {"acceptance": []}, {"acceptance": [""]}, {"corrections": -1}):
@@ -292,6 +466,30 @@ class TaskAdmission(unittest.TestCase):
             self.admit(corrections=10)
         self.admit()
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_explicit_limits_work_without_defaults_and_bad_defaults_explain_recovery(self):
+        config_root = self.root / "config-fixture"
+        (config_root / "config").mkdir(parents=True)
+        config = config_root / "config/coordination.json"
+        for data in (None, b'{"broken":', b'\xff', b'[]', b'{}', b'{"policies": {}}',
+                     b'{"policies": {"max_investigations": true}}'):
+            self.path.unlink(missing_ok=True)
+            if data is None:
+                config.unlink(missing_ok=True)
+            else:
+                config.write_bytes(data)
+            with patch.object(factory, "ROOT", config_root):
+                with self.subTest(data=data), self.assertRaisesRegex(factory.FactoryError,
+                        "repair its policies or supply both --corrections and --investigations"):
+                    self.admit(corrections=1, investigations=None)
+                self.assertFalse(self.path.exists())
+                record = self.admit(corrections=1, investigations=2)
+                self.assertEqual(record["admission"]["limits"], dict(correction=1, investigation=2))
+        self.path.unlink()
+        config.write_text('{"policies": {"max_investigations": 3}}')
+        with patch.object(factory, "ROOT", config_root):
+            record = self.admit(corrections=1, investigations=None)
+        self.assertEqual(record["admission"]["limits"], dict(correction=1, investigation=3))
 
     def test_allowance_survives_new_worker_id_and_controller_restart(self):
         self.admit()
@@ -356,7 +554,7 @@ class TaskAdmission(unittest.TestCase):
             del assignment["result"]
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(migrated["schema_version"], 4)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
                          {key: {**item, "result": None} for key, item in record["assignments"].items()})
@@ -466,16 +664,83 @@ class TaskAdmission(unittest.TestCase):
         self.start()
         record = json.loads(self.path.read_text())
         record["schema_version"] = 1
+        del record["admission"]["repository_identity"]
         del record["inputs"]
         del record["assignments"]["qa"]["request"]["inputs"]
         del record["assignments"]["qa"]["result"]
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 2)
+        self.assertEqual(upgraded["schema_version"], 4)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
             self.report()
+
+    def test_version_two_upgrade_preserves_history_without_inventing_repository_identity(self):
+        self.admit()
+        self.start(purpose="correction")
+        self.report()
+        factory.hold_task(self.path, "Operator hold")
+        original = factory.load_task(self.path)
+        legacy = copy.deepcopy(original)
+        legacy["schema_version"] = 2
+        del legacy["admission"]["repository_identity"]
+        factory.save(self.path, legacy)
+        with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
+            upgraded = factory.load_task(self.path)
+        self.assertEqual(upgraded["schema_version"], 4)
+        self.assertIsNone(upgraded["admission"]["repository_identity"])
+        self.assertEqual(upgraded["assignments"], original["assignments"])
+        self.assertEqual(upgraded["hold"], original["hold"])
+        self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"]["remaining"], 0)
+        factory.hold_task(self.path, None)
+        before = self.path.read_bytes()
+        for action in (lambda: factory.set_inputs(self.path, candidate="HEAD", requirements="v2"),
+                       lambda: self.report(),
+                       lambda: self.start(assignment_id="security", role="security")):
+            FakeRex.calls.clear()
+            with self.assertRaisesRegex(factory.FactoryError, "operator authorize a new admission"):
+                action()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_damaged_repository_identity_and_version_downgrade_refuse_without_rewriting(self):
+        original = self.admit()
+        missing = copy.deepcopy(original)
+        del missing["admission"]["repository_identity"]
+        mistyped = copy.deepcopy(original)
+        mistyped["admission"]["repository_identity"]["repository_id"] = True
+        downgraded = {**copy.deepcopy(original), "schema_version": 2}
+        version_three = {**copy.deepcopy(original), "schema_version": 3}
+        for record in (missing, mistyped, downgraded, version_three):
+            factory.save(self.path, record)
+            before = self.path.read_bytes()
+            with self.assertRaises(factory.FactoryError):
+                factory.load_task(self.path)
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_version_three_filesystem_pin_is_preserved_only_for_inspection(self):
+        self.admit()
+        self.start(purpose="correction")
+        self.report()
+        factory.hold_task(self.path, "Keep original hold")
+        legacy = factory.load_task(self.path)
+        legacy["schema_version"] = 3
+        pin = dict(common_dir=str(self.repo / ".git"), device=42, inode=17)
+        legacy["admission"]["repository_identity"] = pin
+        factory.save(self.path, legacy)
+        with patch.object(factory, "repository_identity", side_effect=AssertionError("No inferred historical identity")):
+            upgraded = factory.load_task(self.path)
+        self.assertEqual(upgraded["schema_version"], 4)
+        self.assertIsNone(upgraded["admission"]["repository_identity"])
+        self.assertEqual(upgraded["admission"]["legacy_repository_identity"], pin)
+        self.assertEqual(upgraded["assignments"], legacy["assignments"])
+        self.assertEqual(upgraded["hold"], legacy["hold"])
+        self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"]["remaining"], 0)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "operator authorize a new admission"):
+            factory.set_inputs(self.path, candidate="HEAD", requirements="v2")
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_damaged_version_cannot_downgrade_or_erase_current_evidence(self):
         self.admit()
@@ -610,7 +875,7 @@ class TaskAdmission(unittest.TestCase):
         self.repo.rename(self.root / "original-repository")
         subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
         self.commit("Replacement checkout")
-        with self.assertRaisesRegex(factory.FactoryError, "not an existing Git commit"):
+        with self.assertRaisesRegex(factory.FactoryError, "repository (pin|marker|identity)"):
             self.start(purpose="correction")
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])

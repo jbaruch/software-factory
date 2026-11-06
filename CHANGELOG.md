@@ -29,6 +29,18 @@ Keep valid task/assignment ID combinations from overwriting another task's brief
 Reject duplicate JSON keys, pending pane IDs and aliased assignment identities.
 Require saved assignment history to match the live session and diagnose malformed
 Rex responses with compatibility/recovery guidance.
+Verify the admitted repository pin on repository-backed mutations, retain pending
+intent when returned Rex IDs disagree with the live pane, and explain Git process
+failures and session/history mismatch recovery.
+Bind session/window marker formats to their task and assignment owners, and
+allow explicit admission limits when configuration defaults are unavailable.
+Pin new admissions to an immutable Git-local repository marker in task schema
+version 4. Ordinary clones do not inherit the marker, and recycled filesystem
+inodes cannot authorize a replacement repository. Preserve older history and
+filesystem pins for inspection; require operator authorization for a new admission
+before further repository-backed work. Pass the saved pin through launch checkout
+validation so a replacement between the repository and checkout checks refuses
+before saving an attempt or contacting Rex.
 
 ### CI and review
 
