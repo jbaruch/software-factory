@@ -95,6 +95,10 @@ the investigator role and investigation purpose remain paired on reads.
 Unadmitted assignments cannot carry admitted-only purpose, input or dependency
 fields. New brief filenames separate task and assignment IDs with a dot; existing
 records keep their original paths and frozen contents.
+Repository-backed mutations recheck the admitted initial commit before selecting
+inputs, registering a result or launching work. Create responses must match the
+live session marker and pane before the launcher saves `launched`; mismatches
+retain the original pending intent for reconciliation without another effect.
 
 This is a gate store under the coding policy's Stateful Artifacts migration
 exception: an unsupported version or damaged gate data refuses the action with a
