@@ -75,6 +75,7 @@ def validate_response(response, questions):
                 or answer["choice"] not in question["criteria"] or not probability(answer.get("confidence"))
                 or not isinstance(distribution, dict) or set(distribution) != set(question["criteria"])
                 or not all(probability(value) for value in distribution.values())
+                or distribution[answer["choice"]] < max(distribution.values())
                 or not math.isclose(sum(distribution.values()), 1, abs_tol=1e-6)):
             raise JevError("TypeSafe returned an invalid Choice answer; use standby reasoning")
     usage = response.get("usage")
@@ -108,7 +109,17 @@ class Jev:
             # API bodies and exception strings may echo credentials or private state.
             status = exc.code
             exc.close()
-            raise JevError(f"TypeSafe HTTP {status}; check authentication/capacity and retain pending work") from None
+            if status in (400, 413, 415, 422):
+                action = "repair the request state/questions/model or size before another evaluation"
+            elif status in (401, 403):
+                action = "check TYPESAFE_API_KEY and account permissions before another request"
+            elif status == 429:
+                action = "retain pending work and wait for account capacity to recover"
+            elif status >= 500:
+                action = "retain pending work and inspect service availability before another request"
+            else:
+                action = "inspect the request endpoint and service status before another request"
+            raise JevError(f"TypeSafe HTTP {status}; {action}") from None
         except (OSError, http.client.HTTPException):
             raise JevError("TypeSafe transport unavailable; retain pending work instead of retrying into a decision") from None
         except (json.JSONDecodeError, UnicodeDecodeError):

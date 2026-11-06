@@ -89,13 +89,33 @@ class JevAdapter(unittest.TestCase):
         original = RESPONSE["answers"]["test-route"]
         variants = [{**original, "choice": "invented-owner"}, {**original, "confidence": float("nan")},
                     {**original, "probabilities": {"qa": 1}}, {**original, "confidence": True},
-                    {**original, "probabilities": {"qa": 1, "backend": 1, "uncertain": 1}}]
+                    {**original, "probabilities": {"qa": 1, "backend": 1, "uncertain": 1}},
+                    {**original, "probabilities": {"qa": 0.1, "backend": 0.8, "uncertain": 0.1}}]
         for answer in variants:
             with self.subTest(answer=answer), self.assertRaises(jev.JevError):
                 self.evaluate({**RESPONSE, "answers": {"test-route": answer}})
         for response in ({**RESPONSE, "answers": {}}, {**RESPONSE, "usage": None}, {**RESPONSE, "model": ""}):
             with self.subTest(response=response), self.assertRaises(jev.JevError):
                 self.evaluate(response)
+
+    def test_tied_maximum_choice_is_valid(self):
+        answer = {**RESPONSE["answers"]["test-route"],
+                  "probabilities": {"qa": 0.5, "backend": 0.5, "uncertain": 0}}
+        result, _ = self.evaluate({**RESPONSE, "answers": {"test-route": answer}})
+        self.assertEqual(result["response"]["answers"]["test-route"]["choice"], "qa")
+
+    def test_http_diagnostics_distinguish_request_repairs_from_account_or_service_waits(self):
+        for status, action in ((400, "repair the request"), (422, "repair the request"),
+                               (401, "TYPESAFE_API_KEY"), (429, "wait for account capacity"),
+                               (503, "service availability"), (404, "request endpoint")):
+            opener = FakeOpener(urllib.error.HTTPError(jev.API, status, "private data", Message(),
+                                                     BytesIO(b"private data")))
+            client = jev.Jev("not-a-real-key", opener=opener)
+            with self.subTest(status=status), self.assertRaises(jev.JevError) as caught:
+                client.models()
+            self.assertIn(action, str(caught.exception))
+            self.assertNotIn("private data", str(caught.exception))
+            self.assertEqual(len(opener.requests), 1)
 
     def test_service_errors_do_not_retry_or_expose_api_body(self):
         for error in (urllib.error.HTTPError(jev.API, 429, "not-a-real-key", Message(), BytesIO(b"private state")),

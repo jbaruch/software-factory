@@ -55,7 +55,10 @@ of evidence freshness or stable model aliases. Application caching must bind
 actual model/version, relevant evidence, question/version and candidate set.
 
 HTTP failures, invalid answers, missing questions and unavailable usage fail
-visibly without retry. The runtime must retain their pending work; generic
+visibly without retry. A selected Choice must have the maximum probability;
+ties are accepted. HTTP diagnostics distinguish request repair, authentication,
+rate limits and unavailable service without printing response bodies.
+The runtime must retain their pending work; generic
 uncertainty needs standby reasoning, while uncertainty after investigation goes
 to the judge. This adapter does not implement those queues or dispatch reasoners.
 

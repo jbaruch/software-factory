@@ -9,6 +9,8 @@ candidate IDs, discover account models and perform explicit shadow evaluation.
 Preserve question/evidence binding, uncertainty, model identity and observed usage.
 Service failures retain actionable diagnostics without automatic retry or exposed
 credentials. Live routing, calibration, durable queues and caching remain separate.
+Reject Choice answers that contradict their distributions and distinguish request
+repair from account/service recovery in HTTP diagnostics.
 
 ### Native Codex metadata
 
