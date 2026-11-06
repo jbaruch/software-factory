@@ -85,7 +85,11 @@ request identity and evidence references before using saved results as dependenc
 Recorded Rex identity without assignment history also refuses action. Live
 connections verify the saved session label before reusing its ID.
 They also match every retained launched window marker and window/block ID to
-that inspected session. Assignment-map order preserves launch order; dependencies
+that inspected session. Duplicate JSON keys or pane identities refuse loading;
+pending launches cannot have pane IDs. The inspected session must contain exactly
+the recorded assignment windows, allowing a pending window to be absent before
+reconciliation. Malformed Rex shapes require API compatibility inspection.
+Assignment-map order preserves launch order; dependencies
 must reference earlier entries. Task inputs are null only without admission, and
 the investigator role and investigation purpose remain paired on reads.
 Unadmitted assignments cannot carry admitted-only purpose, input or dependency
