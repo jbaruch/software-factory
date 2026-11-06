@@ -27,3 +27,5 @@ Add independent policy and quality review triggers, Python diagnostics, offline
 tests, design checks and pinned ACR validation. Dependency updates run weekly;
 the ACR binary pin has a monthly refresh procedure beside its download command.
 Add a pinned Gitleaks pre-commit hook and document skill installation.
+Dispatch reviews from a base-controlled workflow without checking out or executing
+PR code, keeping the cross-repository token outside PR-controlled execution.
