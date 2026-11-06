@@ -491,6 +491,41 @@ class TaskAdmission(unittest.TestCase):
         self.assertFalse((self.state / "missing.json").exists())
         self.assertEqual(FakeRex.calls, [])
 
+    def test_damaged_admission_scope_cannot_launch_or_rewrite_state(self):
+        original = self.admit()
+        for key in ("goal", "repository", "acceptance", "initial_candidate"):
+            admission = {name: value for name, value in original["admission"].items() if name != key}
+            self.path.write_text(json.dumps({**original, "admission": admission}))
+            before = self.path.read_bytes()
+            with self.subTest(missing=key), self.assertRaisesRegex(factory.FactoryError, "Invalid task admission"):
+                self.start()
+            self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_replaced_checkout_refuses_before_reserving_an_attempt_or_contacting_rex(self):
+        self.admit()
+        before = self.path.read_bytes()
+        self.repo.rename(self.root / "original-repository")
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        self.commit("Replacement checkout")
+        with self.assertRaisesRegex(factory.FactoryError, "not an existing Git commit"):
+            self.start(purpose="correction")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_unknown_result_assignment_explains_how_to_find_the_right_id(self):
+        initial = self.admit()["inputs"]
+        before = self.path.read_bytes()
+        result, output, errors = self.cli("result", "--task", "task", "--id", "typo",
+                                          "--candidate", initial["candidate"],
+                                          "--requirements", initial["requirements"],
+                                          "--outcome", "approved", "--artifact", "evidence.txt")
+        self.assertEqual((result, output), (1, ""))
+        self.assertIn("Unknown assignment 'typo'", errors)
+        self.assertIn("show --task task", errors)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()
