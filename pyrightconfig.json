@@ -1,5 +1,5 @@
 {
-  "include": ["factory.py", "contracts.py", "tests", "scripts"],
+  "include": ["*.py", "tests", "scripts"],
   "pythonVersion": "3.11",
   "typeCheckingMode": "basic"
 }
