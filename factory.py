@@ -85,7 +85,7 @@ def task_lock(directory, task):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=2, task=task, admission=None, inputs=None, hold=None, rex=None,
+    return dict(schema_version=3, task=task, admission=None, inputs=None, hold=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -103,7 +103,7 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2):
+    if type(version) is not int or version not in (0, 1, 2, 3):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
             or not all(key in record for key in ("rex", "session_id", "session_label"))):
@@ -113,6 +113,8 @@ def load_task(path) -> dict:
                 isinstance(item.get("request"), dict)
                 and any(key in item["request"] for key in ("inputs", "dependencies"))))
             for item in record["assignments"].values())):
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
+    if version < 3 and isinstance(record.get("admission"), dict) and "repository_identity" in record["admission"]:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     connection = record["rex"]
     if not record["assignments"] and (connection is not None or record["session_id"] is not None):
@@ -225,7 +227,17 @@ def load_task(path) -> dict:
                 or not isinstance(result.get("artifacts"), list) or not result["artifacts"]
                 or any(not isinstance(ref, str) or not ref.strip() for ref in result["artifacts"])):
             raise FactoryError("Invalid assignment result; restore the original state before continuing")
-    if version < 2:
+    if version < 3:
+        if admission is not None:
+            admission["repository_identity"] = None
+        record["schema_version"] = 3
+    if admission is not None:
+        if "repository_identity" not in admission:
+            raise FactoryError("Missing repository identity; restore the original task record")
+        identity = admission["repository_identity"]
+        if identity is not None and not valid_repository_identity(identity):
+            raise FactoryError("Invalid repository identity; restore the original task record")
+    if version < 3:
         save(path, record)
     return record
 
@@ -234,6 +246,13 @@ def valid_inputs(value):
     return isinstance(value, dict) and all(isinstance(value.get(key), str) and value[key].strip()
                                          for key in ("candidate", "requirements")) and bool(
         re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value["candidate"]))
+
+
+def valid_repository_identity(value):
+    return (isinstance(value, dict) and set(value) == {"common_dir", "device", "inode"}
+            and isinstance(value.get("common_dir"), str) and Path(value["common_dir"]).is_absolute()
+            and type(value.get("device")) is int and value["device"] >= 0
+            and type(value.get("inode")) is int and value["inode"] > 0)
 
 
 def git_run(repository, *args):
@@ -258,8 +277,21 @@ def git_common_dir(repository):
     return Path(result.stdout.strip()).resolve()
 
 
-def check_repository(admission):
+def repository_identity(repository):
+    common = git_common_dir(repository)
     try:
+        identity = common.stat()
+    except OSError:
+        raise FactoryError("Cannot inspect repository identity; restore access to the original Git common directory") from None
+    return dict(common_dir=str(common), device=identity.st_dev, inode=identity.st_ino)
+
+
+def check_repository(admission):
+    if admission["repository_identity"] is None:
+        raise FactoryError("Legacy admission lacks repository identity; inspect its history and have the operator authorize a new admission")
+    try:
+        if repository_identity(admission["repository"]) != admission["repository_identity"]:
+            raise FactoryError("Repository filesystem identity differs; restore the original Git common directory")
         observed = git_commit(admission["repository"], admission["initial_candidate"])
     except FactoryError as exc:
         raise FactoryError("Cannot verify the admitted repository pin; inspect/restore the original checkout. " + str(exc)) from exc
@@ -267,7 +299,10 @@ def check_repository(admission):
         raise FactoryError("Admitted repository pin differs; restore the original checkout before continuing")
 
 
-def check_checkout(repository, cwd, candidate):
+def check_checkout(repository, cwd, candidate, *, expected_identity=None):
+    if expected_identity is not None and (not valid_repository_identity(expected_identity)
+            or repository_identity(repository) != expected_identity):
+        raise FactoryError("Assignment repository filesystem identity differs; restore the original Git common directory")
     if git_commit(repository, candidate) != candidate:
         raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
     if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
@@ -312,6 +347,7 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
     if record["assignments"]:
         raise FactoryError("Existing launches have unclassified attempts; admit a new task ID")
     admission["initial_candidate"] = git_commit(repository, "HEAD")
+    admission["repository_identity"] = repository_identity(repository)
     record["admission"] = admission
     record["inputs"] = dict(candidate=admission["initial_candidate"],
                             requirements=admission["initial_candidate"])
