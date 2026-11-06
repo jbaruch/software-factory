@@ -5,6 +5,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -302,6 +303,10 @@ class TaskAdmission(unittest.TestCase):
                          binary=sys.executable, server="unix:///test.sock", purpose="work")
         return factory.launch(self.path, **{**arguments, **changes})
 
+    def creation_calls(self):
+        return [args for args in FakeRex.calls
+                if args[0] == "new" or args[:2] == ("window", "new")]
+
     def cli(self, *arguments):
         output, errors = StringIO(), StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
@@ -452,6 +457,68 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(record["admission"]["repository_identity"]["repository_id"], "a" * 32)
         self.assertEqual(json.loads(marker.read_text()), winner)
         self.assertEqual(list(marker.parent.glob(".saving-*")), [])
+
+    def test_replacement_during_revision_reads_cannot_admit_select_or_report(self):
+        commit = factory.git_commit
+        for action in ("admit", "inputs", "result"):
+            with self.subTest(action=action):
+                if action != "admit":
+                    self.admit()
+                    self.start()
+                before = self.path.read_bytes() if self.path.exists() else None
+
+                def replace_after_revision(repository, revision):
+                    candidate = commit(repository, revision)
+                    if revision == "HEAD":
+                        self.repo.rename(self.root / "preserved")
+                        subprocess.run(["git", "clone", "--quiet", str(self.root / "preserved"), str(self.repo)], check=True)
+                    return candidate
+
+                with patch.object(factory, "git_commit", side_effect=replace_after_revision):
+                    with self.assertRaisesRegex(factory.FactoryError, "repository (marker|identity)"):
+                        if action == "admit":
+                            self.admit()
+                        elif action == "inputs":
+                            factory.set_inputs(self.path, candidate="HEAD", requirements="v2")
+                        else:
+                            self.report(candidate="HEAD", outcome="completed")
+                self.assertEqual(self.path.read_bytes() if self.path.exists() else None, before)
+                # Restore this fixed fixture for the next independent mutation.
+                shutil.rmtree(self.repo)
+                (self.root / "preserved").rename(self.repo)
+
+    def test_spawn_consumer_refuses_replacement_after_checkout_check(self):
+        self.admit()
+        check = factory.check_checkout
+
+        def replace_after_check(*args, **kwargs):
+            check(*args, **kwargs)
+            self.repo.rename(self.root / "preserved")
+            subprocess.run(["git", "clone", "--quiet", str(self.root / "preserved"), str(self.repo)], check=True)
+
+        with patch.object(factory, "check_checkout", side_effect=replace_after_check):
+            self.start(command=[sys.executable, "-c", "print('UNAUTHORIZED')"])
+        created = self.creation_calls()[0]
+        argv = created[created.index("--") + 1:]
+        result = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("repository marker", result.stderr)
+        self.assertEqual(len(self.creation_calls()), 1)
+
+    def test_spawn_consumer_executes_in_the_verified_working_directory(self):
+        self.admit()
+        self.start(command=[sys.executable, "-c", "print('VERIFIED')"])
+        created = self.creation_calls()[0]
+        argv = created[created.index("--") + 1:]
+        result = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "VERIFIED\n", ""))
+        for identity in ("null", "{", '{"repository_id":"a"}'):
+            damaged = list(argv)
+            damaged[damaged.index("--identity") + 1] = identity
+            refused = subprocess.run(damaged, cwd=self.repo, capture_output=True, text=True, check=False)
+            self.assertEqual((refused.returncode, refused.stdout), (1, ""))
+            self.assertIn("repository pin", refused.stderr)
 
     def test_invalid_admission_and_changed_limits_cannot_reset_task(self):
         for changes in ({"goal": " "}, {"acceptance": []}, {"acceptance": [""]}, {"corrections": -1}):

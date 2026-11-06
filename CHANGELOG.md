@@ -16,7 +16,9 @@ Bind new admitted assignments and specialist reports to candidate and requiremen
 revisions. Preserve stale results as history and require current successful results
 for declared launch dependencies. Completed implementation can return a produced
 commit for independent review. Existing assignments gain no invented evidence
-during the version 2 state upgrade.
+during the version 2 state upgrade. Verify marker identity around revision reads
+and check Rex's actual working directory in a small exec wrapper before running
+a new admitted command, closing replacement gaps around persistence and spawn.
 Refuse damaged schema downgrades and incomplete request/evidence identities
 before they can erase history or authorize dependent launches. Unknown assignment
 diagnostics direct the operator to the recorded IDs.

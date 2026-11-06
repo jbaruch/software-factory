@@ -320,13 +320,21 @@ def check_repository(admission):
     if admission["repository_identity"] is None:
         raise FactoryError("Legacy admission lacks repository identity; inspect its history and have the operator authorize a new admission")
     try:
-        if repository_identity(admission["repository"]) != admission["repository_identity"]:
-            raise FactoryError("Repository identity differs; restore the original Git-local marker and common directory")
-        observed = git_commit(admission["repository"], admission["initial_candidate"])
+        observed = pinned_commit(admission["repository"], admission["initial_candidate"],
+                                 admission["repository_identity"])
     except FactoryError as exc:
         raise FactoryError("Cannot verify the admitted repository pin; inspect/restore the original checkout. " + str(exc)) from exc
     if observed != admission["initial_candidate"]:
         raise FactoryError("Admitted repository pin differs; restore the original checkout before continuing")
+
+
+def pinned_commit(repository, revision, identity):
+    if repository_identity(repository) != identity:
+        raise FactoryError("Repository identity differs; restore the original Git-local marker and common directory")
+    candidate = git_commit(repository, revision)
+    if repository_identity(repository) != identity:
+        raise FactoryError("Repository identity differs; restore the original Git-local marker and common directory")
+    return candidate
 
 
 def check_checkout(repository, cwd, candidate, *, expected_identity=None):
@@ -379,8 +387,8 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
         return record
     if record["assignments"]:
         raise FactoryError("Existing launches have unclassified attempts; admit a new task ID")
-    admission["initial_candidate"] = git_commit(repository, "HEAD")
     admission["repository_identity"] = repository_identity(repository, create=True)
+    admission["initial_candidate"] = pinned_commit(repository, "HEAD", admission["repository_identity"])
     record["admission"] = admission
     record["inputs"] = dict(candidate=admission["initial_candidate"],
                             requirements=admission["initial_candidate"])
@@ -412,7 +420,8 @@ def set_inputs(path, *, candidate, requirements):
     if record["admission"] is None or not requirements.strip():
         raise FactoryError("Admit a task and supply a nonempty requirements revision first")
     check_repository(record["admission"])
-    record["inputs"] = dict(candidate=git_commit(record["admission"]["repository"], candidate),
+    record["inputs"] = dict(candidate=pinned_commit(record["admission"]["repository"], candidate,
+                                                   record["admission"]["repository_identity"]),
                             requirements=requirements)
     save(path, record)
     return record
@@ -429,7 +438,8 @@ def record_result(path, *, assignment_id, candidate, requirements, outcome, arti
     if assignment["state"] != "launched":
         raise FactoryError("Reconcile the pending launch with status before recording its result")
     check_repository(record["admission"])
-    reported = dict(candidate=git_commit(record["admission"]["repository"], candidate),
+    reported = dict(candidate=pinned_commit(record["admission"]["repository"], candidate,
+                                            record["admission"]["repository_identity"]),
                     requirements=requirements)
     if requirements != inputs["requirements"] or (outcome != "completed" and reported != inputs):
         raise FactoryError("Result inputs differ from the assignment; report the revision it assessed")
@@ -631,6 +641,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions}
     argv = [replacements.get(part, part) for part in command]
+    if record["admission"] is not None:
+        argv = [sys.executable, str(ROOT / "checkout_exec.py"), "--identity",
+                json.dumps(record["admission"]["repository_identity"], sort_keys=True),
+                "--candidate", record["inputs"]["candidate"], "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
                             window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
     record["assignments"][assignment_id] = assignment
