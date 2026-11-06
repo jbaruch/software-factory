@@ -83,7 +83,9 @@ python3 factory.py codex-collect --task example --id qa-1
 ```
 
 Admission and input selection use the [native launcher commands](native-rex.md).
-The default worker sandbox is read-only. An explicit `--write` selects
+The default worker sandbox is read-only. Inspection commands must work without
+creating temporary files; use direct reads such as `sed`/`rg` or `python -c`
+instead of shell heredocs. An explicit `--write` selects
 `workspace-write`; writers need their own worktree. `--seconds` declares the
 execution allowance, initially 600 seconds. Expiry interrupts only the owned
 native child and records failure. An uncertain attempt never retries itself.

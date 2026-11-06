@@ -10,11 +10,11 @@ the command guides describe operation rather than maintain separate status lists
 | --- | --- | --- |
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
-| Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests; live account evaluation, calibration and consequential routing remain unverified |
-| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts and result collection | Live metadata observation and harmless Rex event/timeout fixtures; adapter model execution and specialist delivery remain unverified |
+| Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
+| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts and result collection | Native subscription sign-in, real read-only execution, revision-bound blocked/completed result collection and exact-pane reconnect; writer delivery and independent quality approval remain unverified |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
 | Local operator view | Stored task facts, holds, allowances, report freshness, evidence references and explicit live process observations | Read-only loopback HTML/API, protected by a per-process capability in a private file; not the complete dashboard contract |
-| CI and review | Offline tests, diagnostics, design/package validation and independent review dispatch | Open PRs remain subject to both required reviews; Claude review is waiting for subscription capacity |
+| CI and review | Offline tests, diagnostics, design/package validation and independent review dispatch | Policy review and CI remain required; the operator temporarily waived waiting for Claude review during its subscription outage, as recorded in AGENTS.md |
 
 The live Rex fixture checks exercise transport, timeout, reconnect and receipt
 collection without a model turn or specialist judgment. The earlier native CLI
@@ -22,11 +22,14 @@ baseline in [native execution](native-rex.md#verification) is a separate observa
 it does not verify the execution adapter or a complete delivery loop. The operator
 view has been inspected in Chrome against the harmless conformance session.
 All five subscription routes remain unverified as complete scheduling routes.
-Those fixture observations used earlier receipts. The marker-bound version-3
-receipt path has offline coverage; it still needs live conformance. Task schema 4
+The harmless fixtures used earlier receipts. Marker-bound version-3 receipts now
+have live read-only coverage: a real review reported blocked, an investigator
+completed source inspection, and reconnect reused both original panes without
+consuming more allowance. The initial protocol-failure attempt remains failed.
+Jev then returned resolved in a live shadow reassessment of the narrow decoder
+question; no acceptance or review gate changed. Task schema 4
 pins new admissions to an immutable Git-local repository marker. Ordinary clones
-do not inherit it, and inode reuse cannot establish continuity. The new spawn-directory wrapper also has offline process coverage and still
-needs native Rex conformance. Older
+do not inherit it, and inode reuse cannot establish continuity. The spawn-directory wrapper was exercised by these native Rex launches. Older
 admissions retain their history with an unknown pin and require operator-approved
 new admission before repository-backed work.
 
