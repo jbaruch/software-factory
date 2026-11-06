@@ -323,7 +323,7 @@ class NativeResults(unittest.TestCase):
                 binary=sys.executable, server="unix:///test.sock")
         actual = next(call for call in FakeRex.calls if call[0] == "new")
         argv = actual[actual.index("--") + 1:]
-        self.assertEqual(argv[:2], (sys.executable, str(factory.ROOT / "checkout_exec.py")))
+        self.assertEqual(argv[:4], (sys.executable, "-E", "-s", str(factory.ROOT / "checkout_exec.py")))
         argv = argv[argv.index("--") + 1:]
         self.args = worker.parser().parse_args(argv[2:])
         self.assertEqual(self.args.candidate, self.candidate)
