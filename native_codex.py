@@ -72,7 +72,9 @@ async def probe(binary, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         for page in range(20):
             catalog = await exchange(process, 3 + page, "model/list",
                                      dict(limit=100, includeHidden=False, cursor=cursor))
-            if not isinstance(catalog.get("data"), list):
+            if (not isinstance(catalog.get("data"), list)
+                    or any(not isinstance(item, dict) or not isinstance(item.get("model"), str)
+                           or not item["model"].strip() for item in catalog["data"])):
                 raise CodexProbeError("Native Codex catalog is unavailable; do not invent model candidates")
             models.extend(catalog["data"])
             cursor = catalog.get("nextCursor")

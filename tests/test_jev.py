@@ -36,7 +36,11 @@ class JevAdapter(unittest.TestCase):
             (root / "config").mkdir()
             path = root / "config/coordination.json"
             for payload in (None, b"\xff", b"{", b"[]", b'{"schema_version":1,"questions":{}}',
-                            b'{"schema_version":1,"questions":[{"id":"task-demand"}]}'):
+                            b'{"schema_version":1,"questions":[{"id":"task-demand"}]}',
+                            *[json.dumps(dict(schema_version=1, questions=[{**SPEC, **change}])).encode()
+                              for change in (dict(options={"yes": {}, "uncertain": 1}),
+                                             dict(options={"yes": " ", "uncertain": "Unsure"}),
+                                             dict(instructions={"nested": float("nan")}))]):
                 if payload is None:
                     if path.exists():
                         path.unlink()

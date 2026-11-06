@@ -123,6 +123,14 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(native_codex.CodexProbeError):
             await self.run_probe(replies)
 
+    async def test_catalog_entries_require_native_model_identity(self):
+        for entry in (None, {}, {"model": ""}, {"model": " "}, {"model": 7}):
+            replies = self.replies()
+            replies["model/list"] = [{"result": {"data": [entry], "nextCursor": None}}]
+            with self.subTest(entry=entry), self.assertRaisesRegex(native_codex.CodexProbeError,
+                    "catalog is unavailable; do not invent model candidates"):
+                await self.run_probe(replies)
+
     async def test_timeout_identifies_the_failed_observation_and_recovery(self):
         process = Process(self.replies())
         with patch.object(process.stdout, "readline", side_effect=TimeoutError):
