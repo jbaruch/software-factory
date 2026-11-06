@@ -643,6 +643,56 @@ class TaskAdmission(unittest.TestCase):
             self.start()
         self.assertEqual(FakeRex.calls, [])
 
+    def assert_source_refuses_at_both_launch_boundaries(self, record):
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs|source bytes or modes differ"):
+            self.start()
+        result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable,
+            "-c", "print('must not launch')"], cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertRegex(result.stderr, "uncommitted inputs|source bytes or modes differ")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_replacement_commit_cannot_substitute_selected_source(self):
+        source = self.repo / "source.txt"
+        source.write_text("original\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Original source")
+        original = factory.git_commit(str(self.repo), "HEAD")
+        record = self.admit()
+        source.write_text("substitute\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Substitute source")
+        substitute = factory.git_commit(str(self.repo), "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "reset", "--soft", original], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "replace", original, substitute], check=True)
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        self.assert_source_refuses_at_both_launch_boundaries(record)
+
+    def test_warmed_untracked_cache_cannot_hide_added_input(self):
+        package = self.repo / "package"
+        package.mkdir()
+        (package / "source.py").write_text("VALUE = 'committed'\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "package"], check=True)
+        self.commit("Package source")
+        record = self.admit()
+        for key, value in (("core.untrackedCache", "true"), ("core.trustctime", "false"),
+                           ("core.checkStat", "minimal")):
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "update-index", "--untracked-cache"], check=True)
+        fixed = 946684800000000000
+        for path in (package, self.repo):
+            os.utime(path, ns=(fixed, fixed))
+        for _ in range(2):
+            self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        (package / "local_config.py").write_text("VALUE = 'uncommitted'\n")
+        for path in (package, self.repo):
+            os.utime(path, ns=(fixed, fixed))
+        self.assert_source_refuses_at_both_launch_boundaries(record)
+
     def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
         source = self.repo / "source.txt"
         source.write_text("committed\n")

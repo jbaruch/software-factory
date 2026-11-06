@@ -30,6 +30,24 @@ class FakeOpener:
 
 
 class JevAdapter(unittest.TestCase):
+    def test_provider_json_and_model_identity_are_unambiguous(self):
+        class RawOpener:
+            def __init__(self, payload):
+                self.payload = payload
+            def open(self, request, *, timeout):
+                return BytesIO(self.payload)
+        for raw in (b'{"model":"first","model":"last"}',
+                    b'{"answers":{"q":{"choice":"a","choice":"b"}}}'):
+            client = jev.Jev("not-a-real-key", opener=RawOpener(raw))
+            with self.subTest(raw=raw), self.assertRaisesRegex(jev.JevError, "returned invalid JSON"):
+                client.request("systemone", {})
+        with self.assertRaisesRegex(jev.JevError, "no model identity"):
+            self.evaluate({**RESPONSE, "model": " \t"})
+        with self.assertRaisesRegex(jev.JevError, "model discovery failed"):
+            jev.Jev("not-a-real-key", opener=FakeOpener({"models": [{"name": " "}]})).models()
+        for value in (10 ** 400, float("nan"), float("inf")):
+            self.assertFalse(jev.probability(value))
+
     def test_damaged_question_catalog_names_repair_before_provider_access(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

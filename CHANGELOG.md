@@ -23,6 +23,9 @@ Reject blank native selections before reserving attempts, damaged saved worker
 arguments and incomplete completed receipts before collection. Validate finite
 question catalogs, option criteria and native model identities before use, and
 retain actionable process/stream I/O recovery diagnostics in failed receipts.
+Validate selections at the public CLI before legacy state upgrades, enforce
+ordered native thread/turn/report events, and reject ambiguous provider JSON or
+blank model identities before recording discovery or shadow evidence.
 
 ### Jev shadow adapter
 
@@ -136,6 +139,7 @@ identify pinned Rex availability failures with restoration/reconciliation guidan
 Compare tracked bytes and modes with the candidate tree even when Git stat hints
 hide an edit. Preserve command SSH, credential, TLS and prompt settings while
 removing Git routing overrides. Pin the CI Python patch with a monthly renewal.
+Disable replacement objects and the untracked cache during source verification.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and

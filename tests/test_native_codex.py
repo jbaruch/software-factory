@@ -138,7 +138,9 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
                 await native_codex.exchange(process, 0, "initialize", {})
 
     async def test_malformed_protocol_identifies_recovery_and_cleans_up_owned_child(self):
-        for line in (b'{"truncated":\n', b'\xff\n'):
+        for line in (b'{"truncated":\n', b'\xff\n',
+                     b'{"id":0,"result":{},"result":{"model":"last"}}\n',
+                     b'{"id":0,"result":{"model":"first","model":"last"}}\n'):
             process = Process(self.replies())
             async def spawn(*args, **kwargs):
                 return process

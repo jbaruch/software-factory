@@ -116,6 +116,12 @@ completed receipt requires finite nonnegative timestamps/duration, a finish at
 or after creation, and a present null error. Missing or malformed metadata refuses
 collection. Model and effort must be nonblank before a launch can reserve an attempt.
 Native events follow the official [non-interactive contract](https://learn.chatgpt.com/docs/non-interactive-mode).
+Collection requires thread start, one turn start, reports inside that active turn,
+then turn completion in that order. Reordered or repeated lifecycle records refuse
+evidence; unrelated telemetry cannot supply a report or completion.
+The observed CLI also emits nonfatal `item.completed` error diagnostics between
+thread start and turn start. These are retained telemetry and supply no lifecycle
+or report evidence; top-level errors and failed turns still refuse collection.
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
 code. Schema changes belong to the worker. Receipt readers accept only version 3;
