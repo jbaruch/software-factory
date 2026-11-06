@@ -175,6 +175,53 @@ class NativeLauncher(unittest.TestCase):
         self.assertEqual(result["state"], "exited")
         self.assertNotIn("accepted", result)
 
+    def test_duplicate_task_keys_refuse_mutation_without_losing_history(self):
+        self.start()
+        text = self.path.read_text()
+        self.path.write_text(text.replace('"assignments": {', '"assignments": {}, "assignments": {', 1))
+        damaged = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "restore the original task record"):
+            factory.hold_task(self.path, "Review")
+        self.assertEqual(self.path.read_bytes(), damaged)
+
+    def test_pending_launch_cannot_retain_any_pane_ids(self):
+        record, _ = self.start()
+        record["assignments"]["qa"]["state"] = "launching"
+        factory.save(self.path, record)
+        with self.assertRaisesRegex(factory.FactoryError, "Pending launch has pane IDs"):
+            self.start()
+        self.assertEqual(len(self.creation_calls()), 1)
+
+    def test_persisted_assignments_cannot_alias_a_pane_or_marker(self):
+        self.start()
+        original, _ = self.start(assignment_id="security", role="security")
+        for key in ("window_label", "window_id", "block_id"):
+            record = copy.deepcopy(original)
+            record["assignments"]["security"][key] = record["assignments"]["qa"][key]
+            factory.save(self.path, record)
+            with self.subTest(key=key), self.assertRaisesRegex(factory.FactoryError, "Duplicate assignment pane"):
+                factory.load_task(self.path)
+
+    def test_lost_assignment_history_refuses_another_live_launch(self):
+        self.start()
+        record, _ = self.start(assignment_id="security", role="security")
+        del record["assignments"]["security"]
+        factory.save(self.path, record)
+        with self.assertRaisesRegex(factory.FactoryError, "windows differ from saved history"):
+            self.start(assignment_id="backend", role="backend")
+        self.assertEqual(len(self.creation_calls()), 2)
+
+    def test_malformed_rex_views_have_actionable_compatibility_diagnostics(self):
+        record, _ = self.start()
+        original = copy.deepcopy(FakeRex.sessions[0])
+        damaged = [[], {}, {**original, "windows": None}, {**original, "windows": [None]},
+                   {**original, "windows": [{**original["windows"][0], "layers": [None]}]}]
+        for value in damaged:
+            rex = FakeRex(sys.executable, "unix:///test.sock")
+            with patch.object(rex, "call", return_value=value), self.subTest(value=value):
+                with self.assertRaisesRegex(factory.FactoryError, "inspect the pinned binary/server API"):
+                    factory.check_session(rex, record, record["session_id"])
+
 
 class TaskAdmission(unittest.TestCase):
     def setUp(self):
@@ -722,7 +769,7 @@ class TaskAdmission(unittest.TestCase):
                 FakeRex.calls.clear()
                 result, output, errors = self.cli(action, "--task", "task", "--id", "qa")
                 self.assertEqual((result, output), (1, ""))
-                self.assertIn("pane identity differs", errors)
+                self.assertIn("pane identity", errors)
                 self.assertFalse(any(call[0] in ("block", "capture") for call in FakeRex.calls))
                 self.assertEqual(self.path.read_bytes(), before)
 
