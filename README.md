@@ -11,7 +11,7 @@ verification limits and the remaining work toward live delivery.
 - [Dashboard contract](docs/dashboard.md): delivery, capacity, utilization and overhead definitions.
 - [Implementation inventory](docs/implementation.md): current coverage and remaining live-delivery work.
 - [Native Rex launcher](docs/native-rex.md): explicit specialist launches, inspection and limited restart reconciliation.
-- [Native provider adapters](docs/native-providers.md): Codex account observations and explicit execution/result collection.
+- [Native provider adapters](docs/native-providers.md): native model catalogs, Codex account observations and explicit execution/result collection.
 - [Local operator view](docs/operator-view.md): task records, current/stale reports and explicit live Rex process checks.
 - [Jev adapter](docs/jev.md): question compilation, model discovery and explicit shadow evaluation.
 - [Task state](docs/task-state.md): admission, attempt limits, holds and the state schema.

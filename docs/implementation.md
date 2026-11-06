@@ -12,6 +12,7 @@ the command guides describe operation rather than maintain separate status lists
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
 | Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests; live account evaluation, calibration and consequential routing remain unverified |
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts and result collection | Live metadata observation and harmless Rex event/timeout fixtures; adapter model execution and specialist delivery remain unverified |
+| Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
 | Local operator view | Stored task facts, holds, allowances, report freshness, evidence references and explicit live process observations | Read-only loopback HTML/API, protected by a per-process capability in a private file; not the complete dashboard contract |
 | CI and review | Offline tests, diagnostics, design/package validation and independent review dispatch | Open PRs remain subject to both required reviews; Claude review is waiting for subscription capacity |
 
@@ -23,13 +24,15 @@ view has been inspected in Chrome against the harmless conformance session.
 All five subscription routes remain unverified as complete scheduling routes.
 
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
-Grok Build 1.0.70 and Antigravity CLI 1.5.1 (`agy`). Claude's `auth status --json`
+Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`
 reported a native subscription sign-in; `grok models` reported a grok.com sign-in
 and model choices; `agy models` returned choices for both Gemini and Claude.
 These commands made no model turn. They establish available discovery interfaces,
 not fresh capacity, native worker conformance or independent allowance pools.
 Refresh through those native commands rather than treating this dated observation
-as scheduling authority.
+as scheduling authority. The structured catalog adapter subsequently observed
+four Grok choices on 1.0.70 and six Antigravity choices on 1.5.2, including
+Gemini and Claude families, without a model turn.
 
 ## Next slices
 

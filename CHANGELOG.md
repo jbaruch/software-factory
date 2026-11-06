@@ -28,6 +28,13 @@ Read runtime credentials from the environment, and identify damaged state/candid
 input files with repair guidance before making any network request.
 Validate input shapes and refuse non-standard numbers or ambiguous duplicate keys.
 
+### Native model catalogs
+
+Expose native Grok and Antigravity model IDs through metadata-only CLI probes.
+Preserve observation time, CLI identity and source output while leaving worker
+readiness, quota sharing and supported effort unverified. Refuse changed catalog
+formats, duplicate IDs and command failures without automatic retries.
+
 ### Native Codex metadata
 
 Read the signed-in native account, metered quota buckets and model/effort catalog
@@ -84,6 +91,8 @@ Rex responses with compatibility/recovery guidance.
 Verify the admitted repository pin on repository-backed mutations, retain pending
 intent when returned Rex IDs disagree with the live pane, and explain Git process
 failures and session/history mismatch recovery.
+Bind session/window marker formats to their task and assignment owners, and
+allow explicit admission limits when configuration defaults are unavailable.
 
 ### CI and review
 

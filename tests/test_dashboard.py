@@ -30,8 +30,8 @@ class OperatorView(unittest.TestCase):
             repository=str(self.root), initial_candidate="a" * 40, acceptance=["requirements.md"],
             limits=dict(correction=1, investigation=1)), inputs=dict(inputs), hold="Waiting for scope decision",
             rex=dict(binary=sys.executable, server="unix:///fixture.sock", host_id="fixture-host"),
-            session_label="factory-fixture", session_id="fixture-session", assignments={"backend": dict(
-                request=request, state="launched", brief=str(self.root / "brief.md"), window_label="fixture-window",
+            session_label="factory-fixture-00000000", session_id="fixture-session", assignments={"backend": dict(
+                request=request, state="launched", brief=str(self.root / "brief.md"), window_label="backend-backend-00000000",
                 window_id="fixture-window", block_id="fixture-block", result=dict(inputs=dict(inputs),
                     candidate="a" * 40, outcome="completed", artifacts=["evidence/original.txt"]))})
         self.path = self.root / "fixture.json"
