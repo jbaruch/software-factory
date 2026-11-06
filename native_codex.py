@@ -24,7 +24,10 @@ async def exchange(process, identity, method, params):
             raise CodexProbeError(f"Native Codex {method} timed out; inspect native sign-in/connection before refreshing") from None
         if not line:
             raise CodexProbeError("Native Codex closed its metadata channel; inspect native sign-in/configuration")
-        message = json.loads(line)
+        try:
+            message = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise CodexProbeError("Malformed native Codex protocol; inspect its connection and update the adapter before scheduling") from None
         if not isinstance(message, dict):
             raise CodexProbeError("Native Codex returned malformed metadata; update the adapter before scheduling")
         if message.get("id") != identity or "method" in message:

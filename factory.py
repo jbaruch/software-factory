@@ -137,6 +137,7 @@ def load_task(path) -> dict:
         if (not isinstance(limits, dict) or set(limits) != {"correction", "investigation"}
                 or any(type(limit) is not int or limit < 0 for limit in limits.values())):
             raise FactoryError("Invalid task limits; restore the original state before continuing")
+    earlier = set()
     for assignment_id, assignment in record["assignments"].items():
         if (not isinstance(assignment, dict) or not isinstance(assignment.get("request"), dict)
                 or assignment.get("state") not in ("launching", "launched")
@@ -144,6 +145,9 @@ def load_task(path) -> dict:
                     not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
         request = assignment["request"]
+        if admission is not None and ((request.get("role") == "investigator")
+                                     != (request.get("purpose") == "investigation")):
+            raise FactoryError("Invalid investigation purpose; restore the original task record")
         if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id)
                 or any(not isinstance(request.get(key), str) or not request[key].strip()
                        for key in ("role", "goal", "cwd", "instructions_sha256"))
@@ -159,13 +163,14 @@ def load_task(path) -> dict:
         if "inputs" in request and (admission is None or not valid_inputs(request["inputs"])):
             raise FactoryError("Invalid assignment inputs; restore the original task record")
         if "dependencies" in request and (not isinstance(request["dependencies"], list)
-                or any(not isinstance(item, str) or item == assignment_id or item not in record["assignments"]
+                or any(not isinstance(item, str) or item not in earlier
                        for item in request["dependencies"])):
             raise FactoryError("Invalid assignment dependencies; restore the original task record")
         if assignment["state"] == "launched" and (record["session_id"] is None
                 or any(not isinstance(assignment.get(key), str) or not assignment[key]
                        for key in ("window_id", "block_id"))):
             raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
+        earlier.add(assignment_id)
     if version < 2:
         record["inputs"] = (dict(candidate=admission["initial_candidate"],
                                  requirements=admission["initial_candidate"])
@@ -173,7 +178,8 @@ def load_task(path) -> dict:
         for assignment in record["assignments"].values():
             assignment["result"] = None
         record["schema_version"] = 2
-    if "inputs" not in record or (admission is not None and not valid_inputs(record["inputs"])):
+    if ("inputs" not in record or (record["inputs"] is not None if admission is None
+                                   else not valid_inputs(record["inputs"]))):
         raise FactoryError("Invalid task inputs; restore the original state before continuing")
     for assignment in record["assignments"].values():
         if "result" not in assignment:
@@ -346,7 +352,12 @@ def connect(record, binary=None, server=None):
     if who["host_id"] != connection["host_id"]:
         raise FactoryError("Connected Rex host differs from the recorded task host")
     if record["session_id"] is not None:
-        check_session(rex, record, record["session_id"])
+        view = check_session(rex, record, record["session_id"])
+        for assignment in record["assignments"].values():
+            if assignment["state"] == "launched":
+                window_id, block_id = assignment_pane(view, assignment)
+                if (window_id, block_id) != (assignment["window_id"], assignment["block_id"]):
+                    raise FactoryError("Rex pane identity differs from the task; inspect the original assignment before continuing")
     return rex
 
 
@@ -355,6 +366,19 @@ def check_session(rex, record, session_id):
     if view.get("label") != record["session_label"]:
         raise FactoryError("Rex session identity differs from the task; inspect the original session before continuing")
     return view
+
+
+def assignment_pane(view, assignment):
+    windows = [item for item in view.get("windows", [])
+               if item.get("label") == assignment["window_label"]]
+    blocks = [block for window in windows for layer in window.get("layers", [])
+              for block in layer.get("blocks", [])]
+    if len(windows) != 1 or len(blocks) != 1:
+        raise FactoryError("Launch outcome unknown; inspect Rex for one exact assignment window/block")
+    window_id, block_id = windows[0].get("window_id"), blocks[0].get("block_id")
+    if not isinstance(window_id, str) or not window_id or not isinstance(block_id, str) or not block_id:
+        raise FactoryError("Rex pane identity is missing; inspect the original assignment before continuing")
+    return window_id, block_id
 
 
 def reconcile(rex, record, assignment):
@@ -368,15 +392,9 @@ def reconcile(rex, record, assignment):
                                + record["session_label"])
         session_id = matches[0]["session_id"]
     view = check_session(rex, record, session_id)
-    windows = [item for item in view.get("windows", [])
-               if item.get("label") == assignment["window_label"]]
-    blocks = [block for window in windows for layer in window.get("layers", [])
-              for block in layer.get("blocks", [])]
-    if len(windows) != 1 or len(blocks) != 1:
-        raise FactoryError("Launch outcome unknown; expected one exact assignment window/block")
+    window_id, block_id = assignment_pane(view, assignment)
     record["session_id"] = session_id
-    assignment.update(window_id=windows[0]["window_id"],
-                      block_id=blocks[0]["block_id"], state="launched")
+    assignment.update(window_id=window_id, block_id=block_id, state="launched")
 
 
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
@@ -392,7 +410,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Command executable must be an absolute executable file")
     record = load_task(path) if path.exists() else new_task(task)
     existing = record["assignments"].get(assignment_id)
-    instructions = brief(role, goal)
+    instructions = "" if existing else brief(role, goal)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
@@ -400,19 +418,24 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if (role == "investigator") != (purpose == "investigation"):
             raise FactoryError("Use purpose investigation with the investigator role")
         request["purpose"] = purpose
+        if not existing:
+            instructions += ("\nTask goal: " + record["admission"]["goal"] + "\nAcceptance references:\n"
+                             + "\n".join("- " + ref for ref in record["admission"]["acceptance"]) + "\n")
         inputs = existing["request"].get("inputs") if existing else record["inputs"]
         if inputs is not None:
             request["inputs"] = dict(inputs)
-            instructions += (f"\nCandidate commit: {inputs['candidate']}\n"
-                             f"Requirements revision: {inputs['requirements']}\n"
-                             "Bind your result to these inputs and link original evidence.\n")
+            if not existing:
+                instructions += (f"\nCandidate commit: {inputs['candidate']}\n"
+                                 f"Requirements revision: {inputs['requirements']}\n"
+                                 "Bind your result to these inputs and link original evidence.\n")
     elif purpose is not None:
         raise FactoryError("Admit a new task before supplying an attempt purpose")
     if dependencies:
         if record["admission"] is None:
             raise FactoryError("Admit a task before declaring assignment dependencies")
         request["dependencies"] = sorted(set(dependencies))
-    request["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
+    request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
+                                      else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
         if existing["request"] != request:
             raise FactoryError("Assignment ID already has different inputs; use a new explicit ID")
@@ -526,14 +549,20 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         receipt = json.loads(args.receipt.read_text())
     except FileNotFoundError:
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
-    if (not isinstance(receipt, dict) or receipt.get("schema_version") != 1
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 1
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
-            or receipt.get("exit_code") != 0 or receipt.get("job") != record["task"] + "/" + assignment_id
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or receipt.get("job") != record["task"] + "/" + assignment_id
             or receipt.get("inputs") != assignment["request"].get("inputs")
             or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
             or receipt.get("cwd") != assignment["request"]["cwd"]
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
-            or receipt.get("writer") != args.write or receipt.get("events") != str(args.events)):
+            or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
+            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
+            or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
     native = parse_events(read_events(args.events))
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):

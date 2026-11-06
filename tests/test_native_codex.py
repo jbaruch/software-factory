@@ -99,6 +99,18 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(native_codex.CodexProbeError, "initialize timed out; inspect"):
                 await native_codex.exchange(process, 0, "initialize", {})
 
+    async def test_malformed_protocol_identifies_recovery_and_cleans_up_owned_child(self):
+        for line in (b'{"truncated":\n', b'\xff\n'):
+            process = Process(self.replies())
+            async def spawn(*args, **kwargs):
+                return process
+            with patch.object(process.stdout, "readline", return_value=line):
+                with self.subTest(line=line), self.assertRaisesRegex(native_codex.CodexProbeError,
+                        "Malformed native Codex protocol; inspect"):
+                    await native_codex.probe(sys.executable, spawn=spawn, clock=lambda: 100,
+                                             timer=lambda: 10)
+            self.assertTrue(process.terminated)
+
 
 if __name__ == "__main__":
     unittest.main()
