@@ -47,9 +47,12 @@ async def probe(binary, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise CodexProbeError("Supply the absolute path to an executable native Codex CLI")
     started = timer()
-    process = await spawn(str(binary), "app-server", "--listen", "stdio://",
-                          stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                          stderr=asyncio.subprocess.DEVNULL)
+    try:
+        process = await spawn(str(binary), "app-server", "--listen", "stdio://",
+                              stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                              stderr=asyncio.subprocess.DEVNULL)
+    except OSError:
+        raise CodexProbeError(f"Cannot start native Codex {str(binary)!r}; restore executable access and local process resources before refreshing metadata") from None
     try:
         initialized = await exchange(process, 0, "initialize", {"clientInfo": {
             "name": "software_factory", "title": "Software Factory", "version": "0.1.0"}})

@@ -52,7 +52,7 @@ def parse_events(events) -> dict:
     if not isinstance(message, str):
         raise WorkerError("Native final message is missing; inspect its original events")
     try:
-        report = json.loads(message)
+        report = json.loads(message, object_pairs_hook=factory.unique_object)
     except (ValueError, TypeError):
         raise WorkerError("Native final message is not a structured result; inspect its original events") from None
     if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
@@ -76,14 +76,17 @@ def read_events(path):
     events = []
     for line in lines:
         try:
-            record = json.loads(line)
-            if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
-                    or record["schema_version"] != 1 or record.get("kind") != "codex-event-line"
-                    or not isinstance(record.get("data"), str)):
-                raise WorkerError("Unsupported native event record; inspect the original stream and update the adapter")
+            record = json.loads(line, object_pairs_hook=factory.unique_object)
+        except (ValueError, UnicodeError):
+            raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
+        if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
+                or record["schema_version"] != 1 or record.get("kind") != "codex-event-line"
+                or not isinstance(record.get("data"), str)):
+            raise WorkerError("Unsupported native event record; inspect the original stream and update the adapter")
+        try:
             record["data"].encode("utf-8")  # Invalid native bytes remain escaped evidence, never valid events.
-            events.append(json.loads(record["data"]))
-        except (json.JSONDecodeError, UnicodeError):
+            events.append(json.loads(record["data"], object_pairs_hook=factory.unique_object))
+        except (ValueError, UnicodeError):
             raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
     return events
 
@@ -105,12 +108,20 @@ async def stop_child(process):
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic):
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Native attempt already has artifacts; collect or inspect it, never relaunch it blindly")
-    binary = args.codex.resolve(strict=True)
-    if not binary.is_file() or not os.access(binary, os.X_OK) or args.seconds <= 0:
-        raise factory.FactoryError("Supply an executable Codex CLI and a positive execution allowance")
+    try:
+        binary = args.codex.resolve(strict=True)
+    except OSError:
+        raise factory.FactoryError(f"Cannot access native CLI {str(args.codex)!r}; inspect/restore the saved executable before authorizing another attempt") from None
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise factory.FactoryError(f"Native CLI {str(binary)!r} is not executable; inspect/restore the saved executable before authorizing another attempt")
+    if args.seconds <= 0:
+        raise factory.FactoryError("Supply a positive native execution allowance before creating an attempt")
     if os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):
         raise factory.FactoryError("Remove API-key overrides from this worker environment and use native ChatGPT sign-in")
-    instructions = args.brief.read_text()
+    try:
+        instructions = args.brief.read_text()
+    except (OSError, UnicodeDecodeError):
+        raise factory.FactoryError(f"Cannot read original brief {str(args.brief)!r}; inspect/restore the saved assignment input before authorizing another attempt") from None
     digest = hashlib.sha256(instructions.encode()).hexdigest()
     if digest != args.brief_sha256:
         raise factory.FactoryError("Assignment brief changed; inspect the original task before launching")
@@ -150,8 +161,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     stream.flush()
                     try:
                         line.decode("utf-8")
-                        event = json.loads(text)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        event = json.loads(text, object_pairs_hook=factory.unique_object)
+                    except (UnicodeDecodeError, ValueError):
                         raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
                     print(text, end="", flush=True)
                     if not isinstance(event, dict):

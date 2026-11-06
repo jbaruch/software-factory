@@ -118,6 +118,13 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
                 await native_codex.probe("/missing/native-codex", spawn=spawn)
             spawn.assert_not_called()
 
+    async def test_spawn_failure_names_executable_and_recovery(self):
+        async def spawn(*args, **kwargs):
+            raise PermissionError("fixture access failure")
+        with self.assertRaisesRegex(native_codex.CodexProbeError,
+                "Cannot start native Codex .*restore executable access and local process resources"):
+            await native_codex.probe(sys.executable, spawn=spawn)
+
 
 if __name__ == "__main__":
     unittest.main()

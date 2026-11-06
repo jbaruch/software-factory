@@ -10,6 +10,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from factory import unique_object
+
 ROOT = Path(__file__).resolve().parent
 API = "https://api.typesafe.ai/v1/"
 
@@ -143,9 +145,19 @@ class Jev:
 
 def read_input(path, option):
     try:
-        return json.loads(path.read_text())
+        value = json.loads(path.read_text(), object_pairs_hook=unique_object)
+        json.dumps(value, allow_nan=False)  # Refuse non-standard constants and numeric overflow.
+        if option == "--candidates":
+            if not isinstance(value, dict) or any(not isinstance(items, dict) or any(
+                    not key.strip() or not isinstance(description, str) or not description.strip()
+                    for key, description in items.items()) for items in value.values()):
+                raise ValueError("Candidates require question-to-ID/description maps")
+        elif not isinstance(value, (str, dict, list)):
+            raise ValueError("State requires a string, object or array")
+        return value
     except (OSError, ValueError, UnicodeDecodeError):
-        raise JevError(f"Cannot read {option} file {str(path)!r}; restore access and repair its UTF-8 JSON before retrying") from None
+        shape = "question-to-ID/description maps" if option == "--candidates" else "a string, object or array"
+        raise JevError(f"Cannot read {option} file {str(path)!r}; restore access and repair its UTF-8 JSON as {shape} before retrying") from None
 
 
 def main(argv=None):

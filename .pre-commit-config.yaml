@@ -1,4 +1,4 @@
-# Refresh the pinned scanner monthly with pre-commit autoupdate.
+# Dependabot checks hook revisions weekly in .github/dependabot.yml.
 repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1

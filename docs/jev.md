@@ -42,6 +42,11 @@ The file maps question IDs to maps of actual eligible IDs and their descriptions
 {"finding-recipient": {"qa-worker": "Owns acceptance coverage for this candidate"}}
 ```
 
+State files contain a JSON string, object or array, as required by the System One
+API. Candidate files contain question-to-ID/description maps. Both refuse duplicate
+keys and non-finite numbers; malformed inputs identify the file to repair before
+any request is made.
+
 The generic `candidate` placeholder never reaches inference. Real options are
 expanded alongside `no_match` and `uncertain`. A supplied empty candidate set has
 only those fallback outcomes. Eligibility and authority remain code decisions;
