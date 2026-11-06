@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "note": "Required routes, not verified entitlements. Discover actual models, tools and allowance-sharing boundaries before scheduling.",
+  "quota_pools": [],
+  "routes": [
+    {
+      "id": "claude-native",
+      "harness": "claude",
+      "requested_family": "Claude",
+      "authentication": "native_subscription",
+      "readiness": "unverified",
+      "models": [],
+      "quota_pool": null,
+      "quota_observation": null,
+      "capabilities": [],
+      "supports_maximum_thinking": null
+    },
+    {
+      "id": "codex-native",
+      "harness": "codex",
+      "requested_family": "Codex",
+      "authentication": "native_subscription",
+      "readiness": "unverified",
+      "models": [],
+      "quota_pool": null,
+      "quota_observation": null,
+      "capabilities": [],
+      "supports_maximum_thinking": null
+    },
+    {
+      "id": "grok-native",
+      "harness": "grok",
+      "requested_family": "Grok",
+      "authentication": "native_subscription",
+      "readiness": "unverified",
+      "models": [],
+      "quota_pool": null,
+      "quota_observation": null,
+      "capabilities": [],
+      "supports_maximum_thinking": null
+    },
+    {
+      "id": "antigravity-gemini",
+      "harness": "antigravity",
+      "requested_family": "Gemini",
+      "authentication": "native_subscription",
+      "readiness": "unverified",
+      "models": [],
+      "quota_pool": null,
+      "quota_observation": null,
+      "capabilities": [],
+      "supports_maximum_thinking": null
+    },
+    {
+      "id": "antigravity-claude",
+      "harness": "antigravity",
+      "requested_family": "Claude",
+      "authentication": "native_subscription",
+      "readiness": "unverified",
+      "models": [],
+      "quota_pool": null,
+      "quota_observation": null,
+      "capabilities": [],
+      "supports_maximum_thinking": null
+    }
+  ]
+}

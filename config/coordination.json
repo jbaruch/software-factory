@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "format": "factory-judgment-spec-v1",
+  "adapter_status": "not_implemented",
+  "note": "Versioned question design, not a TypeSafe SDK request. Candidate-valued options must expand to real IDs plus no_match/uncertain before inference.",
+  "policies": {
+    "max_corrections": 2,
+    "max_investigations": 1,
+    "max_operational_retries": 2,
+    "global_task_wip": 4,
+    "limits_status": "initial_tunable_defaults",
+    "judge_effort": "maximum_supported",
+    "generic_uncertainty_owner": "standby-reasoner",
+    "post_investigation_uncertainty_owner": "judge",
+    "confidence_thresholds": "evaluate_per_question_on_factory_data",
+    "improvement_budget_fraction": 0.1
+  },
+  "questions": [
+    {
+      "id": "specialty-needed",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Is the supplied specialty required for this task and its actual effects?",
+      "options": {
+        "required": "The task needs this discipline; identify it independently of other specialties.",
+        "unnecessary": "The supplied task and policy do not require this discipline.",
+        "uncertain": "Requirements, effects or coverage are insufficient or ambiguous."
+      }
+    },
+    {
+      "id": "task-demand",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "What model capability does this specific assignment require?",
+      "options": {
+        "routine": "Bounded familiar work with clear evidence and little unresolved reasoning.",
+        "demanding": "Substantial implementation or analysis with interacting constraints.",
+        "expert": "Novel or high-consequence reasoning requiring the strongest eligible capability.",
+        "uncertain": "The assignment lacks enough evidence to determine demand."
+      }
+    },
+    {
+      "id": "workflow-recipe",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Which supplied workflow recipe fits this task?",
+      "options": {
+        "candidate": "Select one of the explicitly supplied applicable recipes.",
+        "no_match": "None of the available recipes covers the task.",
+        "uncertain": "Applicability cannot be decided from the supplied evidence."
+      }
+    },
+    {
+      "id": "model-fit",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Is this eligible model/harness suitable for the supplied assignment?",
+      "options": {
+        "suitable": "It has the required capability and demonstrated suitability for this assignment.",
+        "unsuitable": "It lacks a required capability or evidence shows an unsuitable fit.",
+        "uncertain": "Evidence of capability or suitability is insufficient."
+      }
+    },
+    {
+      "id": "finding-recipient",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Who should act on this finding?",
+      "options": {
+        "candidate": "Select the responsible specialist from the supplied eligible recipients.",
+        "no_match": "No supplied recipient owns this finding.",
+        "uncertain": "Ownership or the finding is unclear."
+      }
+    },
+    {
+      "id": "correction-disposition",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Can this finding use a routine correction within existing scope?",
+      "options": {
+        "routine": "The cause and authorized correction are clear within the existing task.",
+        "investigate": "The cause, contradiction or repeated failure requires evidence gathering.",
+        "operator": "The correction needs a concrete scope or authority decision.",
+        "uncertain": "The supplied facts do not support a reliable disposition."
+      }
+    },
+    {
+      "id": "exception-category",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Which owner should handle this exception?",
+      "options": {
+        "operational": "A known operational recovery or named resource wait applies.",
+        "specialist": "A specific engineering discipline must act.",
+        "investigator": "Evidence is missing for a substantive failure or disagreement.",
+        "operator": "Only an operator decision can supply the missing scope or authority.",
+        "uncertain": "The appropriate disposition is not clear."
+      }
+    },
+    {
+      "id": "investigation-resolution",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "Does the new investigation evidence settle the exact outstanding issue?",
+      "options": {
+        "resolved": "The evidence supports a resolution of the outstanding question; substantive affected-specialist objections still prevent closure.",
+        "unresolved": "The evidence leaves a substantive decision unresolved.",
+        "uncertain": "The current evidence does not support a reliable resolution judgment."
+      }
+    },
+    {
+      "id": "activity-purpose",
+      "primitive": "choice",
+      "version": 1,
+      "instructions": "What purpose did this observed activity serve?",
+      "options": {
+        "useful": "Engineering, product or required independent verification advances the accepted outcome.",
+        "coordination": "Routing, handover, bookkeeping, orchestration or recovery of coordination machinery.",
+        "rework": "Repeating or repairing prior unsuccessful or invalidated work.",
+        "uncertain": "The observation does not establish the purpose."
+      }
+    }
+  ]
+}

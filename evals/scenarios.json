@@ -1,0 +1,666 @@
+{
+  "note": "Recorded classifier decisions and synthetic account observations. No live integration or learned-model quality is implied.",
+  "decisions": [
+    {
+      "id": "clear-coordination-does-not-wake-a-model",
+      "operation": "next_owner",
+      "input": {
+        "stage": "coordination",
+        "answer": "clear"
+      },
+      "expected": "script"
+    },
+    {
+      "id": "generic-uncertainty-goes-to-standby",
+      "operation": "next_owner",
+      "input": {
+        "stage": "coordination",
+        "answer": "uncertain"
+      },
+      "expected": "standby-reasoner"
+    },
+    {
+      "id": "judge-cannot-run-before-investigation",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "unresolved"
+      },
+      "expected": "investigator"
+    },
+    {
+      "id": "investigation-settles-question-without-judge",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "resolved",
+        "investigated": true
+      },
+      "expected": "script"
+    },
+    {
+      "id": "investigation-leaves-real-dispute-for-judge",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "unresolved",
+        "investigated": true
+      },
+      "expected": "judge"
+    },
+    {
+      "id": "post-investigation-uncertainty-goes-to-judge",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "uncertain",
+        "investigated": true
+      },
+      "expected": "judge"
+    },
+    {
+      "id": "jev-cannot-overrule-substantive-objection",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "resolved",
+        "investigated": true,
+        "objection": true
+      },
+      "expected": "judge"
+    },
+    {
+      "id": "stale-investigation-is-not-current-evidence",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "resolved",
+        "investigated": true,
+        "evidence_current": false
+      },
+      "expected": "investigator"
+    },
+    {
+      "id": "judgment-does-not-grant-missing-authority",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "resolved",
+        "investigated": true,
+        "authority": false
+      },
+      "expected": "operator"
+    },
+    {
+      "id": "resolution-does-not-reset-exhausted-allowance",
+      "operation": "next_owner",
+      "input": {
+        "stage": "post-investigation",
+        "answer": "resolved",
+        "investigated": true,
+        "corrections_remaining": false
+      },
+      "expected": "operator"
+    },
+    {
+      "id": "exhausted-corrections-trigger-investigation",
+      "operation": "next_owner",
+      "input": {
+        "stage": "correction-limit",
+        "answer": "exhausted"
+      },
+      "expected": "investigator"
+    },
+    {
+      "id": "exhausted-investigation-does-not-restart-itself",
+      "operation": "next_owner",
+      "input": {
+        "stage": "correction-limit",
+        "answer": "exhausted",
+        "investigated": true
+      },
+      "expected": "operator"
+    },
+    {
+      "id": "current-independent-specialist-results-unblock-integration",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-b",
+        "required": [
+          "qa",
+          "security"
+        ],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "approved"
+          }
+        },
+        "objections": [],
+        "contributors": [
+          "developer-worker"
+        ]
+      },
+      "expected": true
+    },
+    {
+      "id": "changed-candidate-invalidates-old-approval",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-c",
+        "required": [
+          "qa",
+          "security"
+        ],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "approved"
+          }
+        },
+        "objections": [],
+        "contributors": [
+          "developer-worker"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "remaining-objection-keeps-task-blocked",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-b",
+        "required": [
+          "qa",
+          "security"
+        ],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "approved"
+          }
+        },
+        "objections": [
+          "security-objection"
+        ],
+        "contributors": [
+          "developer-worker"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "contributors-cannot-verify-their-own-work",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-b",
+        "required": [
+          "qa",
+          "security"
+        ],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "approved"
+          }
+        },
+        "objections": [],
+        "contributors": [
+          "developer-worker",
+          "security-worker"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "missing-required-specialty-does-not-pass",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-b",
+        "required": [
+          "qa",
+          "security",
+          "accessibility"
+        ],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "approved"
+          }
+        },
+        "objections": [],
+        "contributors": [
+          "developer-worker"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "no-selected-verification-is-not-approval",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-b",
+        "required": [],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "approved"
+          }
+        },
+        "objections": [],
+        "contributors": [
+          "developer-worker"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "blocking-specialist-outcome-prevents-integration",
+      "operation": "integration_ready",
+      "input": {
+        "head": "commit-b",
+        "required": [
+          "qa",
+          "security"
+        ],
+        "approvals": {
+          "qa": {
+            "head": "commit-b",
+            "worker": "qa-worker",
+            "outcome": "approved"
+          },
+          "security": {
+            "head": "commit-b",
+            "worker": "security-worker",
+            "outcome": "blocking"
+          }
+        },
+        "objections": [],
+        "contributors": [
+          "developer-worker"
+        ]
+      },
+      "expected": false
+    },
+    {
+      "id": "busy-is-not-productive",
+      "operation": "efficiency",
+      "input": {
+        "useful": 60,
+        "coordination": 20,
+        "rework": 10,
+        "idle": 10
+      },
+      "expected": {
+        "available_seconds": 100,
+        "unavailable_seconds": 0,
+        "occupancy": 0.9,
+        "productive_utilization": 0.6,
+        "coordination_share": 0.2222222222222222,
+        "rework_share": 0.1111111111111111
+      }
+    },
+    {
+      "id": "unavailable-capacity-is-separate",
+      "operation": "efficiency",
+      "input": {
+        "useful": 60,
+        "coordination": 20,
+        "rework": 10,
+        "idle": 10,
+        "unavailable": 40
+      },
+      "expected": {
+        "available_seconds": 100,
+        "unavailable_seconds": 40,
+        "occupancy": 0.9,
+        "productive_utilization": 0.6,
+        "coordination_share": 0.2222222222222222,
+        "rework_share": 0.1111111111111111
+      }
+    },
+    {
+      "id": "zero-denominator-stays-unknown",
+      "operation": "efficiency",
+      "input": {},
+      "expected": {
+        "available_seconds": 0,
+        "unavailable_seconds": 0,
+        "occupancy": null,
+        "productive_utilization": null,
+        "coordination_share": null,
+        "rework_share": null
+      }
+    },
+    {
+      "id": "idle-capacity-is-not-coordination-work",
+      "operation": "efficiency",
+      "input": {
+        "idle": 100
+      },
+      "expected": {
+        "available_seconds": 100,
+        "unavailable_seconds": 0,
+        "occupancy": 0.0,
+        "productive_utilization": 0.0,
+        "coordination_share": null,
+        "rework_share": null
+      }
+    }
+  ],
+  "route_selection": [
+    {
+      "id": "use-current-ranked-fit",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        },
+        {
+          "id": "fixture-b",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-b",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-b",
+        "fixture-a"
+      ],
+      "expected_eligible": [
+        "fixture-a",
+        "fixture-b"
+      ],
+      "expected_selection": "fixture-b"
+    },
+    {
+      "id": "updated-learning-can-change-preferred-fit",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        },
+        {
+          "id": "fixture-b",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-b",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a",
+        "fixture-b"
+      ],
+      "expected_eligible": [
+        "fixture-a",
+        "fixture-b"
+      ],
+      "expected_selection": "fixture-a"
+    },
+    {
+      "id": "reserve-capacity-is-not-spendable",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 2,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        },
+        {
+          "id": "fixture-b",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-b",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a",
+        "fixture-b"
+      ],
+      "expected_eligible": [
+        "fixture-b"
+      ],
+      "expected_selection": "fixture-b"
+    },
+    {
+      "id": "provider-outage-allows-only-eligible-alternative",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": false,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        },
+        {
+          "id": "fixture-b",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-b",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a",
+        "fixture-b"
+      ],
+      "expected_eligible": [
+        "fixture-b"
+      ],
+      "expected_selection": "fixture-b"
+    },
+    {
+      "id": "stale-quota-is-not-unlimited-capacity",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 80,
+          "max_age": 10
+        },
+        {
+          "id": "fixture-b",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-b",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a",
+        "fixture-b"
+      ],
+      "expected_eligible": [
+        "fixture-b"
+      ],
+      "expected_selection": "fixture-b"
+    },
+    {
+      "id": "unknown-sharing-boundary-requires-discovery",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": null,
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a"
+      ],
+      "expected_eligible": [],
+      "expected_selection": null
+    },
+    {
+      "id": "unknown-allowance-is-not-availability",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": null,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a"
+      ],
+      "expected_eligible": [],
+      "expected_selection": null
+    },
+    {
+      "id": "missing-required-tool-excludes-route",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "text"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "fixture-a"
+      ],
+      "expected_eligible": [],
+      "expected_selection": null
+    },
+    {
+      "id": "unranked-route-is-not-invented-fallback",
+      "routes": [
+        {
+          "id": "fixture-a",
+          "ready": true,
+          "capabilities": [
+            "code"
+          ],
+          "pool": "fixture-pool-a",
+          "remaining": 10,
+          "reserve": 2,
+          "observed_at": 95,
+          "max_age": 10
+        }
+      ],
+      "ranking": [
+        "not-a-configured-candidate"
+      ],
+      "expected_eligible": [
+        "fixture-a"
+      ],
+      "expected_selection": null
+    }
+  ]
+}

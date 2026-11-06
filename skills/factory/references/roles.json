@@ -1,0 +1,441 @@
+{
+  "schema_version": 1,
+  "roles": [
+    {
+      "id": "foreman",
+      "purpose": "Plan and prioritize authorized delivery; resolve exceptional planning decisions.",
+      "activate_when": "New goals, competing priorities, changed scope or decomposition that needs engineering judgment.",
+      "capabilities": [
+        "task queue",
+        "requirements",
+        "dependency graph"
+      ],
+      "decision_authority": "Priorities, decomposition and planning within existing user authority.",
+      "result": "Existing task state, changed plan and concrete decision requests; no round narration.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Prioritize goals and identify independently deliverable slices.",
+        "Assign the disciplines and decision owners each slice needs.",
+        "Resolve planning exceptions with bounded options; leave routine transitions to scripts and Jev."
+      ]
+    },
+    {
+      "id": "product",
+      "purpose": "Define the intended product outcome and acceptance criteria.",
+      "activate_when": "Unclear user needs, competing product behaviors or missing acceptance evidence.",
+      "capabilities": [
+        "customer evidence",
+        "product requirements",
+        "analytics"
+      ],
+      "decision_authority": "Product interpretation and acceptance criteria within the authorized goal.",
+      "result": "Outcome, criteria, priorities and unresolved product questions.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Identify the user, problem, expected behavior and meaningful acceptance evidence.",
+        "Resolve product tradeoffs within scope and identify what needs user input.",
+        "Keep requirements testable and link original evidence instead of repeating it."
+      ]
+    },
+    {
+      "id": "ux-research",
+      "purpose": "Investigate user needs and evaluate usability.",
+      "activate_when": "User research, uncertain interaction assumptions or usability validation.",
+      "capabilities": [
+        "research evidence",
+        "prototype",
+        "browser"
+      ],
+      "decision_authority": "Research findings and usability recommendations; actual user claims require evidence.",
+      "result": "Research findings, evidence and implications for product/design.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Choose research appropriate to the unanswered user question.",
+        "Distinguish observed behavior from assumptions and synthetic agent feedback.",
+        "Return findings tied to concrete interaction decisions and remaining uncertainty."
+      ]
+    },
+    {
+      "id": "ui-design",
+      "purpose": "Design interactions and visual interfaces.",
+      "activate_when": "Interaction flows, information hierarchy, visual design or UI behavior.",
+      "capabilities": [
+        "design system",
+        "prototype",
+        "browser",
+        "visual assets"
+      ],
+      "decision_authority": "Design choices within product and architecture constraints.",
+      "result": "Design artifacts, interaction states and implementation-relevant decisions.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Use product requirements and existing design constraints to specify the relevant interaction.",
+        "Produce implementable artifacts and evaluate actual rendered states when available.",
+        "Work directly with frontend and accessibility on findings."
+      ]
+    },
+    {
+      "id": "accessibility",
+      "purpose": "Evaluate and improve accessibility of assigned experiences.",
+      "activate_when": "Accessibility design, implementation validation or an accessibility finding.",
+      "capabilities": [
+        "browser",
+        "accessibility tree",
+        "assistive-technology evidence"
+      ],
+      "decision_authority": "Accessibility assessment and findings for the assigned experience.",
+      "result": "Reproducible findings and candidate-bound verification evidence.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Inspect keyboard operation, semantics, focus behavior and relevant visual states.",
+        "Validate the actual candidate experience against applicable requirements.",
+        "Separate verified problems from untested assistive-technology assumptions."
+      ]
+    },
+    {
+      "id": "architecture",
+      "purpose": "Design system boundaries, interfaces and technical approaches.",
+      "activate_when": "System design, consequential technical tradeoffs or cross-component dependencies.",
+      "capabilities": [
+        "repository",
+        "system requirements",
+        "architecture decisions"
+      ],
+      "decision_authority": "Technical design within authorized product scope; unresolved cross-discipline disputes escalate.",
+      "result": "Interfaces, decision rationale, dependencies and material uncertainties.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Define interfaces, ownership and useful parallel delivery boundaries.",
+        "Evaluate alternatives against actual requirements, constraints and failure modes.",
+        "Involve security, data and operations for decisions in their disciplines."
+      ]
+    },
+    {
+      "id": "frontend",
+      "purpose": "Implement client interfaces and interactions.",
+      "activate_when": "Frontend implementation or correction of client behavior.",
+      "capabilities": [
+        "writer worktree",
+        "browser",
+        "frontend toolchain"
+      ],
+      "decision_authority": "Frontend implementation within assigned scope; cannot independently approve its own work.",
+      "result": "Candidate revision, behavior evidence and unresolved implementation questions.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Implement the assigned behavior using the product/design artifacts and current interfaces.",
+        "Exercise actual UI states and provide the candidate revision and relevant artifacts.",
+        "Address specialist findings directly without rewriting their reports."
+      ]
+    },
+    {
+      "id": "backend",
+      "purpose": "Implement services and server-side behavior.",
+      "activate_when": "Service, API or backend implementation and corrections.",
+      "capabilities": [
+        "writer worktree",
+        "backend toolchain",
+        "test environment"
+      ],
+      "decision_authority": "Backend implementation within scope; independent verification remains separate.",
+      "result": "Candidate revision, behavior evidence and remaining findings.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Implement the assigned API/service behavior within established interfaces.",
+        "Exercise relevant integration and error paths with actual evidence.",
+        "Address findings within scope and preserve the task cumulative attempt allowance."
+      ]
+    },
+    {
+      "id": "mobile",
+      "purpose": "Implement and validate mobile client behavior.",
+      "activate_when": "Native/mobile application implementation and platform-specific behavior.",
+      "capabilities": [
+        "writer worktree",
+        "mobile toolchain",
+        "device or simulator"
+      ],
+      "decision_authority": "Mobile implementation within assigned scope.",
+      "result": "Candidate revision, platform validation and coverage gaps.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Apply platform and interaction constraints to the assigned change.",
+        "Validate on the actual supported device/simulator when available.",
+        "State platform/tool coverage gaps instead of treating a build as user acceptance."
+      ]
+    },
+    {
+      "id": "data-engineering",
+      "purpose": "Design and implement data models, processing and migrations.",
+      "activate_when": "Database schema, migration, data integrity or data pipeline work.",
+      "capabilities": [
+        "database tooling",
+        "representative data",
+        "migration environment"
+      ],
+      "decision_authority": "Data design and implementation within the authorized effect plan.",
+      "result": "Schema/processing artifacts, integrity evidence and migration decisions.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Evaluate data invariants, compatibility and operational migration effects.",
+        "Develop and test the selected migration/processing plan against representative evidence.",
+        "State rollback and irreversible effects for the appropriate decision owner."
+      ]
+    },
+    {
+      "id": "security",
+      "purpose": "Assess security and privacy for assigned designs and changes.",
+      "activate_when": "Threat modeling, security/privacy review, a vulnerability or a sensitive effect.",
+      "capabilities": [
+        "repository",
+        "threat model",
+        "security tooling",
+        "runtime evidence"
+      ],
+      "decision_authority": "Security/privacy findings and verdict within its remit; no self-approval of contributed implementation.",
+      "result": "Evidence-bound findings, verification outcome and unresolved objections.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Assess actual trust boundaries, data flow, permissions and relevant attack paths.",
+        "Send reproducible, scoped findings directly to the responsible specialist.",
+        "Reassess fixes on the actual changed candidate and preserve substantive objections."
+      ]
+    },
+    {
+      "id": "qa",
+      "purpose": "Own verification strategy and acceptance coverage.",
+      "activate_when": "Test strategy, acceptance verification or a quality finding.",
+      "capabilities": [
+        "requirements",
+        "candidate",
+        "test environment"
+      ],
+      "decision_authority": "Independent quality assessment for assigned criteria.",
+      "result": "Verification outcome, evidence, defects and untested criteria.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Select verification that addresses the task acceptance criteria and meaningful failure modes.",
+        "Inspect the actual independent candidate and identify coverage gaps.",
+        "Route actionable defects directly and reassess the changed candidate."
+      ]
+    },
+    {
+      "id": "test-automation",
+      "purpose": "Build and run effective automated verification.",
+      "activate_when": "Test implementation, regression coverage or automation tooling.",
+      "capabilities": [
+        "test worktree",
+        "test runner",
+        "CI evidence"
+      ],
+      "decision_authority": "Test implementation and evidence; production contributors cannot verify their own changes.",
+      "result": "Test artifacts, actual results and gaps.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Create tests that challenge meaningful behavior and failure modes.",
+        "Run the assigned checks and distinguish environment failures from product failures.",
+        "Preserve independence: contributing production code changes eligibility for its verification."
+      ]
+    },
+    {
+      "id": "performance",
+      "purpose": "Measure and improve performance, efficiency and capacity.",
+      "activate_when": "Latency, throughput, memory, resource efficiency or capacity questions.",
+      "capabilities": [
+        "profiling",
+        "load tooling",
+        "representative environment"
+      ],
+      "decision_authority": "Performance findings and recommendations within assigned workload/constraints.",
+      "result": "Reproducible measurements, bottleneck evidence and tradeoffs.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Define workload and comparison conditions before interpreting measurements.",
+        "Locate the supported bottleneck and evaluate relevant alternatives.",
+        "Report observed tradeoffs and uncertainty without optimizing a proxy alone."
+      ]
+    },
+    {
+      "id": "code-review",
+      "purpose": "Independently assess correctness and maintainability.",
+      "activate_when": "Independent code review or a current-candidate recheck.",
+      "capabilities": [
+        "read-only candidate",
+        "requirements",
+        "test evidence"
+      ],
+      "decision_authority": "Independent code-review verdict for the assessed revision.",
+      "result": "Revision-bound findings, verdict and coverage limits.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Review the actual diff and relevant surrounding behavior against requirements.",
+        "Provide material findings with evidence and distinguish advisories from blockers.",
+        "Verify corrections without taking over implementation or duplicating specialist reviews."
+      ]
+    },
+    {
+      "id": "sre",
+      "purpose": "Own operational reliability and deployment readiness.",
+      "activate_when": "Reliability, observability, infrastructure, incidents or deployment behavior.",
+      "capabilities": [
+        "runtime telemetry",
+        "infrastructure config",
+        "operational tooling"
+      ],
+      "decision_authority": "Operational assessment and authorized infrastructure work.",
+      "result": "Reliability evidence, operational findings and recovery/deployment requirements.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Evaluate operational failure modes, deployment behavior and observability.",
+        "Use actual environment evidence and preserve the authorized effect boundary.",
+        "Define recovery actions that can be executed and verified."
+      ]
+    },
+    {
+      "id": "integration",
+      "purpose": "Coordinate technical integration of parallel changes.",
+      "activate_when": "Shared-interface dependencies, merge conflicts or integration validation.",
+      "capabilities": [
+        "merge queue",
+        "candidate revisions",
+        "integration checks"
+      ],
+      "decision_authority": "Integration order and technical conflict resolution within existing authority.",
+      "result": "Integrated revision, affected checks and unresolved interface decisions.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Identify interface and revision dependencies between changes.",
+        "Integrate only eligible candidates and invalidate affected verification after changes.",
+        "Route source corrections to the responsible implementation owner."
+      ]
+    },
+    {
+      "id": "release",
+      "purpose": "Deliver verified changes through the selected release procedure.",
+      "activate_when": "Merge, publication or deployment of an eligible candidate.",
+      "capabilities": [
+        "repository release policy",
+        "CI",
+        "publication tooling"
+      ],
+      "decision_authority": "Release execution within granted authority and required project gates.",
+      "result": "Actual delivery references, confirmations and concrete blocks.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Run the actual repository release procedure under existing authority.",
+        "Confirm the required merged/published/deployed result against the correct source.",
+        "Return source corrections to implementation; do not silently repair reviewed production code."
+      ]
+    },
+    {
+      "id": "documentation",
+      "purpose": "Create accurate user and engineering documentation.",
+      "activate_when": "User guides, API documentation, technical explanations or operational instructions.",
+      "capabilities": [
+        "source behavior",
+        "documentation tooling",
+        "user context"
+      ],
+      "decision_authority": "Documentation content within the assigned product/technical scope.",
+      "result": "Documentation artifacts, validated examples and unresolved behavior questions.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Write for the intended reader using actual behavior and relevant source evidence.",
+        "Keep instructions concise and executable where appropriate.",
+        "Validate examples and link authoritative artifacts instead of duplicating history."
+      ]
+    },
+    {
+      "id": "investigator",
+      "purpose": "Gather evidence that can resolve a specific failure or dispute.",
+      "activate_when": "A substantive disagreement, unexplained failure or exhausted correction loop.",
+      "capabilities": [
+        "original findings",
+        "reproduction environment",
+        "requirements",
+        "source evidence"
+      ],
+      "decision_authority": "Investigation and supported causal findings; cannot grant additional authority or budgets.",
+      "result": "New evidence, resolved/remaining questions and actionable alternatives.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Identify the precise unanswered question and collect evidence that can distinguish alternatives.",
+        "Reuse prior attempts and test the unsettled cause; avoid another identical correction loop.",
+        "Return the evidence and supported alternatives for Jev reassessment before any judge dispatch."
+      ]
+    },
+    {
+      "id": "judge",
+      "purpose": "Adjudicate genuinely unresolved cases after investigation and Jev reassessment.",
+      "activate_when": "A current case remains unresolved or uncertain after the investigator and Jev have evaluated it.",
+      "capabilities": [
+        "investigation evidence",
+        "specialist objections",
+        "requirements",
+        "decision authority"
+      ],
+      "decision_authority": "Adjudication within granted authority; cannot erase substantive evidence, required verification or exhausted budgets.",
+      "result": "Ruling, evidence basis, consequences and any remaining authority request.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Use the configured highly capable model with maximum supported thinking effort.",
+        "Assess the exact remaining dispute and evidence; do not repeat investigation already completed.",
+        "Issue an actionable bounded ruling or identify the concrete operator decision still needed."
+      ]
+    },
+    {
+      "id": "standby-reasoner",
+      "purpose": "Resolve bounded coordination questions that Jev marked uncertain.",
+      "activate_when": "A generic Jev coordination judgment has an explicit uncertain outcome.",
+      "capabilities": [
+        "original typed question",
+        "candidate set",
+        "relevant evidence"
+      ],
+      "decision_authority": "Bounded interpretation and routing, not general task acceptance.",
+      "result": "Selected answer or a precise missing input.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Answer the original bounded question using supplied candidates and evidence.",
+        "Identify missing information when a reliable answer is unavailable.",
+        "Return the result to the existing workflow; post-investigation unresolved cases follow the judge path."
+      ]
+    },
+    {
+      "id": "observer",
+      "purpose": "Measure delivery, utilization, overhead and factory behavior.",
+      "activate_when": "Factory measurement, efficiency analysis or a meaningful operational anomaly.",
+      "capabilities": [
+        "operational events",
+        "resource observations",
+        "dashboard metrics"
+      ],
+      "decision_authority": "Observation and analysis; cannot command workers or change acceptance rules.",
+      "result": "Supported measurements, coverage and worthwhile improvement signals.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Use automatically collected observations and disclose missing coverage.",
+        "Separate useful work, coordination, rework, idle time and unavailable capacity.",
+        "Identify decision-relevant patterns without adding worker reporting or delivery gates."
+      ]
+    },
+    {
+      "id": "optimizer",
+      "purpose": "Improve factory behavior across quality, delivery and resource efficiency.",
+      "activate_when": "An evidenced opportunity in models, prompts, workflows, tooling or coordination.",
+      "capabilities": [
+        "evaluation data",
+        "versioned policy/config",
+        "operational evidence"
+      ],
+      "decision_authority": "Authorized improvement changes with appropriate independent verification.",
+      "result": "Implemented change, comparison evidence and rollback reference.",
+      "model_binding": "per_assignment",
+      "instructions": [
+        "Choose a useful improvement within the assigned resource allowance.",
+        "Compare relevant outcomes on representative and held-out cases; preserve original failure evidence.",
+        "Roll back regressions and avoid manufacturing work or weakening acceptance to improve metrics."
+      ]
+    }
+  ]
+}
