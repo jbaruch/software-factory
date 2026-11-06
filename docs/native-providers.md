@@ -84,7 +84,8 @@ python3 factory.py codex-collect --task example --id qa-1
 Admission and input selection use the [native launcher commands](native-rex.md).
 The default worker sandbox is read-only. An explicit `--write` selects
 `workspace-write`; writers need their own worktree. `--seconds` declares the
-execution allowance, initially 600 seconds. Expiry interrupts only the owned
+execution allowance, initially 600 seconds and bounded to 1–86400 seconds.
+Invalid allowances refuse before task reads, locks or attempts. Expiry interrupts only the owned
 native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
@@ -132,7 +133,7 @@ arguments before launch. Preflight, actual-directory checks, postflight and
 collection use that same binding; another linked worktree cannot substitute even
 at the same commit. Task records keep their existing schema and command contract.
 Provider and event JSON reject duplicate keys, nonstandard numeric constants and
-numbers outside the supported finite range, including in otherwise unused fields.
+numbers outside the supported finite range, including large integers and otherwise unused fields.
 
 The launcher freezes the resolved native binary path after checking it is accessible and executable
 before saving a new assignment or consuming an attempt. Reconnection to an

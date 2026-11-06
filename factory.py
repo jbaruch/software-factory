@@ -15,6 +15,7 @@ from typing import Any
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 REPOSITORY_MARKER = "software-factory-repository.json"
 GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
@@ -53,9 +54,17 @@ def finite_json_float(value):
     return number
 
 
+def finite_json_integer(value):
+    number = int(value)
+    if not -sys.float_info.max <= number <= sys.float_info.max:
+        raise ValueError("JSON number exceeds the supported finite range")
+    return number
+
+
 def decode_json(value, *, object_pairs_hook=unique_object):
     return json.loads(value, object_pairs_hook=object_pairs_hook,
-                      parse_constant=reject_json_constant, parse_float=finite_json_float)
+                      parse_constant=reject_json_constant, parse_float=finite_json_float,
+                      parse_int=finite_json_integer)
 
 
 class Rex:
@@ -855,8 +864,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
-    if not Path(codex).is_absolute() or seconds <= 0:
-        raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
+    if not Path(codex).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS:
+        raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
     binary = Path(codex).resolve()
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None:
@@ -1003,8 +1012,8 @@ def main(argv=None):
     try:
         if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
             raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
-        if args.action == "codex-start" and (not Path(args.codex).is_absolute() or args.seconds <= 0):
-            raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
+        if args.action == "codex-start" and (not Path(args.codex).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
+            raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
         with task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
