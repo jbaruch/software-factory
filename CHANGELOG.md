@@ -2,6 +2,13 @@
 
 ## 0.1.0 — 2026-11-05
 
+### Native Grok metadata
+
+Observe cached native sign-in, access gates, model IDs and supported effort
+choices through an owned ACP child without requesting a model turn or creating
+a conversation. Preserve unknown quota and readiness, omit account identifiers,
+and disable automatic updates and worktree cleanup for the probe process.
+
 ### Local operator view
 
 Generate a local dashboard from existing task records and explicit Rex process
