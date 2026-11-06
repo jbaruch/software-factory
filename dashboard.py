@@ -110,7 +110,7 @@ def render(view, *, csrf_token=None):
                  '<th scope="col">Assignment</th><th scope="col">Process observation</th>'
                  '<th scope="col">Specialist report</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
                  if rows else '<p class="empty">No assignments recorded.</p>')
-        hold = (f'<p class="hold">Paused: {text(task["hold"])}</p>' if task["hold"]
+        hold = (f'<p class="hold">Paused: {text(task["hold"])}</p>' if task["hold"] is not None
                 else '<p class="hold-status">Not paused</p>')
         controls = ""
         if csrf_token is not None:

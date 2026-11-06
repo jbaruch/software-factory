@@ -204,7 +204,7 @@ def load_task(path) -> dict:
         record.update(schema_version=1, admission=None, hold=None)
     if not all(key in record for key in ("admission", "hold")):
         raise FactoryError("Incomplete task record; restore the original state before continuing")
-    if record["hold"] is not None and not isinstance(record["hold"], str):
+    if record["hold"] is not None and (not isinstance(record["hold"], str) or not record["hold"].strip()):
         raise FactoryError("Invalid task hold; restore the original state before continuing")
     admission = record["admission"]
     if admission is not None:

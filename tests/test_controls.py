@@ -107,6 +107,23 @@ class TaskControls(ControlRecord):
                     factory.load_task(self.path)
                 self.assertEqual(self.path.read_bytes(), before)
 
+    def test_blank_holds_refuse_without_migration_or_a_false_unpaused_view(self):
+        for version in (4, 5):
+            for reason in ("", " \t"):
+                with self.subTest(version=version, reason=reason):
+                    record = factory.new_task("fixture")
+                    record.update(schema_version=version, hold=reason)
+                    if version == 4:
+                        del record["control_events"]
+                    factory.save(self.path, record)
+                    before = self.path.read_bytes()
+                    with self.assertRaisesRegex(factory.FactoryError, "Invalid task hold"):
+                        factory.load_task(self.path)
+                    view = dashboard.snapshot(self.root, clock=lambda: 1000, timer=lambda: 10)
+                    self.assertEqual(view["tasks"], [])
+                    self.assertIn("Invalid task hold", view["errors"][0]["error"])
+                    self.assertEqual(self.path.read_bytes(), before)
+
 
 class HTTPControls(ControlRecord):
     def setUp(self):
