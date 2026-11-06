@@ -10,9 +10,11 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 
 
 class FactoryError(Exception):
@@ -23,7 +25,7 @@ class Rex:
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
 
-    def call(self, *args, raw=False):
+    def call(self, *args, raw=False) -> Any:
         result = subprocess.run(
             [self.binary, "--autostart=false", "-S", self.server, *args],
             capture_output=True, text=True, timeout=20, check=False)
@@ -66,6 +68,220 @@ def task_lock(directory, task):
         yield directory / (task + ".json")
     finally:
         os.close(fd)
+
+
+def new_task(task) -> dict:
+    return dict(schema_version=2, task=task, admission=None, inputs=None, hold=None, rex=None,
+                session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
+                session_id=None, assignments={})
+
+
+def load_task(path) -> dict:
+    """Factory owns migration of its gate store; unknown formats cannot launch."""
+    try:
+        record = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise FactoryError(f"Unknown task {path.stem!r}; correct its ID or create it with admit/start") from None
+    if not isinstance(record, dict):
+        raise FactoryError("Invalid task record; restore the original state before continuing")
+    version = record.get("schema_version", 0)
+    if type(version) is not int or version not in (0, 1, 2):
+        raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
+            or not all(key in record for key in ("rex", "session_id", "session_label"))):
+        raise FactoryError("Incomplete task record; restore the original state before continuing")
+    connection = record["rex"]
+    if connection is None:
+        if record["assignments"] or record["session_id"] is not None:
+            raise FactoryError("Missing pinned Rex identity; restore the original task record before continuing")
+    elif (not isinstance(connection, dict)
+            or any(not isinstance(connection.get(key), str) or not connection[key].strip()
+                   for key in ("binary", "server", "host_id"))
+            or not Path(connection["binary"]).is_absolute() or not connection["server"].startswith("unix://")):
+        raise FactoryError("Invalid pinned Rex identity; restore the original task record before continuing")
+    if (not isinstance(record["session_label"], str) or not record["session_label"]
+            or (record["session_id"] is not None
+                and (not isinstance(record["session_id"], str) or not record["session_id"]))):
+        raise FactoryError("Invalid Rex session identity; restore the original task record before continuing")
+    if version == 0:
+        if "admission" in record or "hold" in record:
+            raise FactoryError("Unversioned task has new fields; restore its schema version before continuing")
+        record.update(schema_version=1, admission=None, hold=None)
+    if not all(key in record for key in ("admission", "hold")):
+        raise FactoryError("Incomplete task record; restore the original state before continuing")
+    if record["hold"] is not None and not isinstance(record["hold"], str):
+        raise FactoryError("Invalid task hold; restore the original state before continuing")
+    admission = record["admission"]
+    if admission is not None:
+        if (not isinstance(admission, dict)
+                or any(not isinstance(admission.get(key), str) or not admission[key].strip()
+                       for key in ("goal", "repository", "initial_candidate"))
+                or not Path(admission["repository"]).is_absolute()
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", admission["initial_candidate"])
+                or not isinstance(admission.get("acceptance"), list) or not admission["acceptance"]
+                or any(not isinstance(ref, str) or not ref.strip() for ref in admission["acceptance"])):
+            raise FactoryError("Invalid task admission; restore its goal, repository, acceptance and initial candidate")
+        limits = admission.get("limits") if isinstance(admission, dict) else None
+        if (not isinstance(limits, dict) or set(limits) != {"correction", "investigation"}
+                or any(type(limit) is not int or limit < 0 for limit in limits.values())):
+            raise FactoryError("Invalid task limits; restore the original state before continuing")
+    for assignment in record["assignments"].values():
+        if (not isinstance(assignment, dict) or not isinstance(assignment.get("request"), dict)
+                or assignment.get("state") not in {"launching", "launched"}
+                or (admission is not None and assignment["request"].get("purpose")
+                    not in {"work", "correction", "investigation"})):
+            raise FactoryError("Invalid assignment record; restore the original state before continuing")
+        if assignment["state"] == "launched" and (record["session_id"] is None
+                or any(not isinstance(assignment.get(key), str) or not assignment[key]
+                       for key in ("window_id", "block_id"))):
+            raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
+    if version < 2:
+        record["inputs"] = (dict(candidate=admission["initial_candidate"],
+                                 requirements=admission["initial_candidate"])
+                            if admission is not None else None)
+        for assignment in record["assignments"].values():
+            assignment["result"] = None
+        record["schema_version"] = 2
+    if "inputs" not in record or (admission is not None and not valid_inputs(record["inputs"])):
+        raise FactoryError("Invalid task inputs; restore the original state before continuing")
+    for assignment in record["assignments"].values():
+        if "result" not in assignment:
+            raise FactoryError("Missing assignment result field; restore the original state before continuing")
+        result = assignment["result"]
+        if result is not None and (not isinstance(result, dict)
+                or result.get("outcome") not in RESULT_OUTCOMES
+                or not valid_inputs(result.get("inputs"))
+                or result["inputs"] != assignment["request"].get("inputs")
+                or not isinstance(result.get("candidate"), str) or not result["candidate"]
+                or (result["outcome"] != "completed" and result["candidate"] != result["inputs"]["candidate"])
+                or not isinstance(result.get("artifacts"), list) or not result["artifacts"]):
+            raise FactoryError("Invalid assignment result; restore the original state before continuing")
+    if version < 2:
+        save(path, record)
+    return record
+
+
+def valid_inputs(value):
+    return isinstance(value, dict) and all(isinstance(value.get(key), str) and value[key].strip()
+                                         for key in ("candidate", "requirements"))
+
+
+def git_commit(repository, revision):
+    result = subprocess.run(["git", "-C", repository, "rev-parse", "--verify", "--end-of-options",
+                             revision + "^{commit}"], capture_output=True, text=True,
+                            timeout=10, check=False)
+    if result.returncode:
+        raise FactoryError("Revision is not an existing Git commit; fetch it or supply a local commit")
+    return result.stdout.strip()
+
+
+def git_common_dir(repository):
+    result = subprocess.run(["git", "-C", repository, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode:
+        raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
+    return Path(result.stdout.strip()).resolve()
+
+
+def check_checkout(repository, cwd, candidate):
+    if git_commit(repository, candidate) != candidate:
+        raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
+    if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
+        raise FactoryError("Assignment checkout differs from the selected candidate; use its worktree at that commit")
+    changed = subprocess.run(["git", "-C", cwd, "status", "--porcelain", "--untracked-files=normal"],
+                             capture_output=True, text=True, timeout=10, check=False)
+    if changed.returncode:
+        raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
+    if changed.stdout:
+        raise FactoryError("Assignment checkout has uncommitted inputs; commit them or use a clean worktree before launching")
+
+
+def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None):
+    """Record operator-supplied scope once, without starting Rex or any worker."""
+    if not goal.strip() or not acceptance or any(not ref.strip() for ref in acceptance):
+        raise FactoryError("Supply a goal and at least one nonempty acceptance reference")
+    policies = json.loads((ROOT / "config/coordination.json").read_text())["policies"]
+    limits = dict(correction=policies["max_corrections"] if corrections is None else corrections,
+                  investigation=policies["max_investigations"] if investigations is None else investigations)
+    if any(type(limit) is not int or limit < 0 for limit in limits.values()):
+        raise FactoryError("Attempt limits must be nonnegative integers")
+    repository = str(Path(repository).resolve(strict=True))
+    admission = dict(goal=goal, repository=repository, acceptance=acceptance, limits=limits)
+    record = load_task(path) if path.exists() else new_task(task)
+    if record["admission"] is not None:
+        if any(record["admission"].get(key) != value for key, value in admission.items()):
+            raise FactoryError("Task already has different admission inputs; use a new task ID")
+        return record
+    if record["assignments"]:
+        raise FactoryError("Existing launches have unclassified attempts; admit a new task ID")
+    admission["initial_candidate"] = git_commit(repository, "HEAD")
+    record["admission"] = admission
+    record["inputs"] = dict(candidate=admission["initial_candidate"],
+                            requirements=admission["initial_candidate"])
+    save(path, record)
+    return record
+
+
+def task_view(record):
+    """An offline snapshot, never a live process or task-acceptance verdict."""
+    allowances = None
+    if record["admission"] is not None:
+        allowances = {}
+        for purpose, limit in record["admission"]["limits"].items():
+            used = sum(item["request"].get("purpose") == purpose
+                       for item in record["assignments"].values())
+            allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
+    assignments = {key: {**item, "result_current": result_current(record, item["result"])}
+                   for key, item in record["assignments"].items()}
+    return {**record, "allowances": allowances, "assignments": assignments}
+
+
+def result_current(record, result):
+    return result is not None and record["inputs"] == dict(
+        candidate=result["candidate"], requirements=result["inputs"]["requirements"])
+
+
+def set_inputs(path, *, candidate, requirements):
+    record = load_task(path)
+    if record["admission"] is None or not requirements.strip():
+        raise FactoryError("Admit a task and supply a nonempty requirements revision first")
+    record["inputs"] = dict(candidate=git_commit(record["admission"]["repository"], candidate),
+                            requirements=requirements)
+    save(path, record)
+    return record
+
+
+def record_result(path, *, assignment_id, candidate, requirements, outcome, artifacts):
+    record = load_task(path)
+    if assignment_id not in record["assignments"]:
+        raise FactoryError(f"Unknown assignment {assignment_id!r}; use show --task {record['task']} to find its ID")
+    assignment = record["assignments"][assignment_id]
+    inputs = assignment["request"].get("inputs")
+    if not valid_inputs(inputs):
+        raise FactoryError("Assignment predates input binding; launch a new explicit assignment ID")
+    if assignment["state"] != "launched":
+        raise FactoryError("Reconcile the pending launch with status before recording its result")
+    reported = dict(candidate=git_commit(record["admission"]["repository"], candidate),
+                    requirements=requirements)
+    if requirements != inputs["requirements"] or (outcome != "completed" and reported != inputs):
+        raise FactoryError("Result inputs differ from the assignment; report the revision it assessed")
+    if outcome not in RESULT_OUTCOMES or not artifacts or any(not ref.strip() for ref in artifacts):
+        raise FactoryError("Supply a supported outcome and at least one nonempty evidence reference")
+    result = dict(inputs=dict(inputs), candidate=reported["candidate"], outcome=outcome, artifacts=artifacts)
+    if assignment["result"] is not None and assignment["result"] != result:
+        raise FactoryError("Assignment already has a different result; use a new explicit assignment ID")
+    assignment["result"] = result
+    save(path, record)
+    return record
+
+
+def hold_task(path, reason):
+    if reason is not None and not reason.strip():
+        raise FactoryError("Supply a nonempty pause reason")
+    record = load_task(path)
+    record["hold"] = reason
+    save(path, record)
+    return record
 
 
 def brief(role_id, goal):
@@ -117,7 +333,7 @@ def reconcile(rex, record, assignment):
 
 
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
-           binary=None, server=None):
+           binary=None, server=None, purpose=None, dependencies=()):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id):
         raise FactoryError("Assignment ID must be a lowercase slug, at most 64 characters")
     cwd = str(Path(cwd).resolve(strict=True))
@@ -125,36 +341,69 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Provide an existing directory and an absolute executable command")
     if not Path(command[0]).is_absolute() or not os.access(command[0], os.X_OK):
         raise FactoryError("Command executable must be an absolute executable file")
-    instructions = brief(role, goal)
-    request = dict(role=role, goal=goal, cwd=cwd, command=command,
-                   instructions_sha256=hashlib.sha256(instructions.encode()).hexdigest())
-    if path.exists():
-        record = json.loads(path.read_text())
-        rex = connect(record, binary, server)
-    else:
-        if not binary or not Path(binary).is_file() or not server or not server.startswith("unix://"):
-            raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
-        rex = Rex(str(Path(binary).resolve()), server)
-        who = rex.call("whoami", "--json")
-        record = dict(task=task, session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
-                      session_id=None, assignments={}, rex=dict(binary=rex.binary, server=server,
-                                                               host_id=who["host_id"]))
+    record = load_task(path) if path.exists() else new_task(task)
     existing = record["assignments"].get(assignment_id)
+    instructions = brief(role, goal)
+    request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
+    if record["admission"] is not None:
+        if purpose not in {"work", "correction", "investigation"}:
+            raise FactoryError("Admitted tasks require --purpose work, correction or investigation")
+        if (role == "investigator") != (purpose == "investigation"):
+            raise FactoryError("Use purpose investigation with the investigator role")
+        request["purpose"] = purpose
+        inputs = existing["request"].get("inputs") if existing else record["inputs"]
+        if inputs is not None:
+            request["inputs"] = dict(inputs)
+            instructions += (f"\nCandidate commit: {inputs['candidate']}\n"
+                             f"Requirements revision: {inputs['requirements']}\n"
+                             "Bind your result to these inputs and link original evidence.\n")
+    elif purpose is not None:
+        raise FactoryError("Admit a new task before supplying an attempt purpose")
+    if dependencies:
+        if record["admission"] is None:
+            raise FactoryError("Admit a task before declaring assignment dependencies")
+        request["dependencies"] = sorted(set(dependencies))
+    request["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
     if existing:
         if existing["request"] != request:
             raise FactoryError("Assignment ID already has different inputs; use a new explicit ID")
+        rex = connect(record, binary, server)
         if not existing.get("block_id"):
             reconcile(rex, record, existing)
             save(path, record)
         return record, existing
+    if record["hold"] is not None:
+        raise FactoryError("Task is paused: " + record["hold"] + "; use resume before new launches")
     if any(item["state"] == "launching" for item in record["assignments"].values()):
         raise FactoryError("Reconcile the existing pending assignment with status before another launch")
+    for dependency in request.get("dependencies", []):
+        if dependency not in record["assignments"] or dependency == assignment_id:
+            raise FactoryError("Dependency must name an earlier assignment in this task: " + dependency)
+        result = record["assignments"][dependency]["result"]
+        if not result_current(record, result) or result["outcome"] not in {"completed", "approved"}:
+            raise FactoryError("Dependency needs a successful result on current inputs: " + dependency)
+    allowances = task_view(record)["allowances"]
+    if allowances is not None and purpose in allowances and allowances[purpose]["remaining"] <= 0:
+        owner = "investigator" if purpose == "correction" else "operator"
+        raise FactoryError(f"Task {purpose} allowance exhausted; route to {owner}")
+    if record["admission"] is not None:
+        current = record["inputs"]["candidate"]
+        check_checkout(record["admission"]["repository"], cwd, current)
+    if record["rex"] is not None:
+        rex = connect(record, binary, server)
+    else:
+        if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
+                or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
+            raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
+        rex = Rex(str(Path(binary).resolve()), server)
+        who = rex.call("whoami", "--json")
+        record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
     brief_path = path.parent / (task + "-" + assignment_id + ".md")
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions}
     argv = [replacements.get(part, part) for part in command]
-    assignment = dict(request=request, state="launching", brief=str(brief_path),
-                      window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
+    assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
+                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
     record["assignments"][assignment_id] = assignment
     save(path, record)
     options = ["--cwd", cwd, "--keep-open", "--shell=none", "--json", "--", *argv]
@@ -187,7 +436,7 @@ def status(rex, record, assignment):
                 block_id=assignment["block_id"], exit=last_exit)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".factory-state")
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
@@ -199,22 +448,65 @@ def main():
     start.add_argument("--role", required=True)
     start.add_argument("--goal", required=True)
     start.add_argument("--cwd", required=True)
+    start.add_argument("--purpose", choices=("work", "correction", "investigation"),
+                       help="Required for admitted tasks; consumes the declared task allowance")
+    start.add_argument("--after", action="append", default=[], help="Earlier assignment that must have a current successful result")
     start.add_argument("command", nargs=argparse.REMAINDER)
+    admission = sub.add_parser("admit", help="Record task scope and limits without launching")
+    admission.add_argument("--task", required=True)
+    admission.add_argument("--goal", required=True)
+    admission.add_argument("--repo", required=True)
+    admission.add_argument("--acceptance", action="append", required=True, help="Original evidence reference")
+    admission.add_argument("--corrections", type=int)
+    admission.add_argument("--investigations", type=int)
+    inputs = sub.add_parser("inputs", help="Select the task's candidate and requirements revision")
+    inputs.add_argument("--task", required=True)
+    inputs.add_argument("--candidate", required=True)
+    inputs.add_argument("--requirements", required=True)
+    result = sub.add_parser("result", help="Record a revision-bound specialist outcome")
+    result.add_argument("--task", required=True)
+    result.add_argument("--id", required=True)
+    result.add_argument("--candidate", required=True)
+    result.add_argument("--requirements", required=True)
+    result.add_argument("--outcome", choices=sorted(RESULT_OUTCOMES), required=True)
+    result.add_argument("--artifact", action="append", required=True)
+    for action in ("show", "pause", "resume"):
+        command = sub.add_parser(action)
+        command.add_argument("--task", required=True)
+        if action == "pause":
+            command.add_argument("--reason", required=True)
     for action in ("status", "capture"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         with task_lock(args.state_dir.resolve(), args.task) as path:
+            if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
+                if args.action == "admit":
+                    record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
+                                   acceptance=args.acceptance, corrections=args.corrections,
+                                   investigations=args.investigations)
+                elif args.action == "show":
+                    record = load_task(path)
+                elif args.action == "inputs":
+                    record = set_inputs(path, candidate=args.candidate, requirements=args.requirements)
+                elif args.action == "result":
+                    record = record_result(path, assignment_id=args.id, candidate=args.candidate,
+                                           requirements=args.requirements, outcome=args.outcome,
+                                           artifacts=args.artifact)
+                else:
+                    record = hold_task(path, args.reason if args.action == "pause" else None)
+                print(json.dumps(task_view(record), indent=2))
+                return 0
             if args.action == "start":
                 argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
                     role=args.role, goal=args.goal, cwd=args.cwd, command=argv,
-                    binary=args.rex, server=args.server)
+                    binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after)
                 rex = connect(record)
             else:
-                record = json.loads(path.read_text())
+                record = load_task(path)
                 assignment = record["assignments"][args.id]
                 rex = connect(record, args.rex, args.server)
                 if not assignment.get("block_id"):
