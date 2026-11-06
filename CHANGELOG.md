@@ -26,6 +26,10 @@ cannot break the HTML response; preserve the original source and API values.
 
 ### Adapter input and evidence validation
 
+Bound native execution allowances before state reads or attempts, reject oversized
+integers throughout provider/event decoding and require numeric protocol response
+identities. Preserve actionable recovery without consuming attempts on bad input.
+
 Reject blank native selections before reserving attempts, damaged saved worker
 arguments and incomplete completed receipts before collection. Validate finite
 question catalogs, option criteria and native model identities before use, and

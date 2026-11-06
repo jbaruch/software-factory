@@ -195,7 +195,8 @@ class NativeResults(unittest.TestCase):
                 b'{"type":"thread.started","thread_id":"fixture","unused":[NaN]}\n',
                 b'{"type":"thread.started","thread_id":"fixture","unused":{"n":Infinity}}\n',
                 b'{"type":"thread.started","thread_id":"fixture","unused":-Infinity}\n',
-                b'{"type":"thread.started","thread_id":"fixture","unused":1e999}\n')):
+                b'{"type":"thread.started","thread_id":"fixture","unused":1e999}\n',
+                ('{"type":"thread.started","thread_id":"fixture","unused":{"n":' + str(10 ** 400) + '}}\n').encode())):
             self.args.events = self.root / f"bad-{index}.jsonl"
             self.args.receipt = self.root / f"bad-{index}.json"
             self.process = FakeProcess([])
@@ -228,6 +229,16 @@ class NativeResults(unittest.TestCase):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "not-a-real-key"}):
             with self.assertRaisesRegex(factory.FactoryError, "API-key overrides"):
                 self.execute()
+
+    def test_unrepresentable_allowance_refuses_before_creating_execution_artifacts(self):
+        for seconds in (0, -1, True, factory.MAX_NATIVE_SECONDS + 1, 10 ** 400):
+            self.args.seconds = seconds
+            with self.subTest(seconds=seconds), self.assertRaisesRegex(factory.FactoryError,
+                    "execution allowance of at most 86400 seconds"):
+                self.execute()
+            self.assertEqual(self.spawns, [])
+            for path in (self.args.events, self.args.receipt, self.args.receipt.with_suffix('.schema.json')):
+                self.assertFalse(path.exists())
 
     def test_missing_native_binary_and_damaged_brief_identify_preflight_recovery(self):
         original = self.args.codex
@@ -409,7 +420,8 @@ class NativeResults(unittest.TestCase):
             common_dir=str(self.repo / ".git"), device=1, inode=2)
         factory.save(path, record)
         before = path.read_bytes()
-        for codex, seconds in (("relative-codex", "60"), (sys.executable, "0"), (sys.executable, "-1")):
+        for codex, seconds in (("relative-codex", "60"), (sys.executable, "0"), (sys.executable, "-1"),
+                               (sys.executable, str(factory.MAX_NATIVE_SECONDS + 1)), (sys.executable, str(10 ** 400))):
             errors = StringIO()
             with self.subTest(codex=codex, seconds=seconds), redirect_stderr(errors), redirect_stdout(StringIO()):
                 code = factory.main(["--state-dir", str(self.root), "codex-start", "--task", "task",
