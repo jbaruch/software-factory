@@ -22,9 +22,10 @@ baseline in [native execution](native-rex.md#verification) is a separate observa
 it does not verify the execution adapter or a complete delivery loop. The operator
 view has been inspected in Chrome against the harmless conformance session.
 All five subscription routes remain unverified as complete scheduling routes.
-Those fixture observations used earlier receipts. The repository-bound version-2
-receipt path has offline coverage; it still needs live conformance. Task schema 3
-pins new admissions to the Git common-directory filesystem identity. Older
+Those fixture observations used earlier receipts. The marker-bound version-3
+receipt path has offline coverage; it still needs live conformance. Task schema 4
+pins new admissions to an immutable Git-local repository marker. Ordinary clones
+do not inherit it, and inode reuse cannot establish continuity. Older
 admissions retain their history with an unknown pin and require operator-approved
 new admission before repository-backed work.
 
