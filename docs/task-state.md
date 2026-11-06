@@ -52,7 +52,8 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 ## Schema and ownership
 
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
-the task lock. External consumers must not edit or migrate these records. The
+the task lock. Task records must be regular files; links, directories and FIFOs
+refuse without resetting holds or history. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch` and `record_result` functions define schema version 4:
 
 | Field | Meaning |
@@ -140,7 +141,8 @@ a saved intent, a reported result or process exit.
 directory. This immutable record has exactly `schema_version: 1` and
 `repository_id` (lowercase 32-character UUID hex). New explicit admissions create
 it once with private file permissions and atomic no-replace publication; concurrent
-admissions read the winning marker. Task records and worker checks read it but
+admissions read the winning marker. Reads require an owner-private regular file
+with one hard link and never follow marker symlinks. Task records and worker checks read it but
 never repair, rotate or create it. It is identity data, not a task/approval ledger.
 Git does not include it in commits, so normal clones and forks acquire their own
 marker only on their own admission. Backups of the original Git directory must
@@ -170,7 +172,10 @@ repository, is checked out at the selected candidate and has no uncommitted inpu
 This includes ignored files and directories: use a clean isolated worktree and
 keep runtime state, caches and output outside that checkout. Verification clears
 ambient Git overrides (preserving standard author/committer identity) so repository/worktree/index/object/config environment
-settings cannot redirect the checks to another source. The exec consumer removes
+settings cannot redirect the checks to another source. Verification uses absolute
+Git executables from the operating system's default executable path, ignoring
+inherited `PATH`. The Python exec guard disables environment and user-site startup
+loading; the eventual command retains its environment. The exec consumer removes
 direct routing variables from the launched command too. It preserves inherited
 Git configuration and checks its keys through Git before execution. Inherited
 source-routing options or damaged configuration refuse
