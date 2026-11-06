@@ -10,7 +10,7 @@ __pycache__/
 # output. AGENTS.md / CLAUDE.md / GEMINI.md are NOT ignored — tessl appends to
 # them and they don't churn. Shared dirs (.github, .vscode) keep everything else;
 # only tessl's own paths are listed.
-.tessl/
+.tessl
 .agents/
 .mcp.json
 .claude/settings.json
