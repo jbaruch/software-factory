@@ -134,7 +134,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity)
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
-    receipt = dict(schema_version=2, kind="codex-execution", job=args.job, state="starting",
+    receipt = dict(schema_version=3, kind="codex-execution", job=args.job, state="starting",
                    inputs=dict(candidate=args.candidate, requirements=args.requirements),
                    repository_identity=identity,
                    brief_sha256=digest, cwd=str(args.cwd), requested_model=args.model,

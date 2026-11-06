@@ -728,10 +728,10 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
     except (OSError, ValueError, UnicodeDecodeError):
         raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
-    if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] == 1:
-        raise FactoryError("Legacy native receipt lacks repository identity; inspect the original attempt without relaunching it")
+    if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2):
+        raise FactoryError("Legacy native receipt lacks marker-bound repository identity; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != 2
+            or receipt["schema_version"] != 3
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or receipt.get("job") != record["task"] + "/" + assignment_id

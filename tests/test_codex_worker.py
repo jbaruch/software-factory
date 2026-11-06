@@ -62,7 +62,7 @@ class NativeResults(unittest.TestCase):
                        check=True, env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
                                         "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
         self.candidate = factory.git_commit(str(self.repo), "HEAD")
-        self.identity: dict = factory.repository_identity(str(self.repo))
+        self.identity: dict = factory.repository_identity(str(self.repo), create=True)
         self.brief = self.root / "brief.md"
         self.brief.write_text("Review the exact candidate and link evidence.")
         self.args = worker.parser().parse_args([
@@ -90,7 +90,7 @@ class NativeResults(unittest.TestCase):
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
         self.assertEqual(receipt["state"], "completed")
-        self.assertEqual(receipt["schema_version"], 2)
+        self.assertEqual(receipt["schema_version"], 3)
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertEqual(receipt["candidate"], self.candidate)
         self.assertEqual(receipt["inputs"]["requirements"], "requirements-1")
@@ -211,7 +211,7 @@ class NativeResults(unittest.TestCase):
     def test_replaced_history_sharing_checkout_refuses_before_worker_spawn(self):
         self.replace_with_clone()
         self.assertEqual(factory.git_commit(str(self.repo), "HEAD"), self.candidate)
-        with self.assertRaisesRegex(factory.FactoryError, "repository filesystem identity differs"):
+        with self.assertRaisesRegex(factory.FactoryError, "repository marker"):
             self.execute()
         self.assertEqual(self.spawns, [])
         self.assertFalse(self.args.receipt.exists())
@@ -224,7 +224,7 @@ class NativeResults(unittest.TestCase):
             receipt = asyncio.run(worker.execute(self.args, spawn=replaced))
         self.assertEqual(receipt["state"], "failed")
         self.assertEqual(receipt["repository_identity"], self.identity)
-        self.assertIn("repository filesystem identity differs", receipt["error"])
+        self.assertIn("repository marker", receipt["error"])
 
     def launch_assignment(self, codex=sys.executable):
         self.path = self.root / "task.json"
@@ -338,8 +338,8 @@ class NativeResults(unittest.TestCase):
         original = json.loads(self.args.receipt.read_text())
         for change in (dict(job="task/other"), dict(report=dict(outcome="completed", artifacts=["other"])),
                        dict(schema_version=True), dict(schema_version=1.0),
-                       dict(exit_code=False), dict(writer=0), dict(binary="/bin/false"), dict(schema_version=1),
-                       dict(repository_identity={**self.identity, "inode": self.identity["inode"] + 1})):
+                       dict(exit_code=False), dict(writer=0), dict(binary="/bin/false"), dict(schema_version=1), dict(schema_version=2),
+                       dict(repository_identity={**self.identity, "repository_id": "b" * 32})):
             factory.save(self.args.receipt, {**copy.deepcopy(original), **change})
             with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
                 with self.assertRaises(factory.FactoryError):
@@ -363,7 +363,7 @@ class NativeResults(unittest.TestCase):
         record, assignment = self.launch_assignment()
         receipt = self.args.receipt.read_text()
         events_text = self.args.events.read_text()
-        duplicate_receipt = receipt.replace('"schema_version": 2', '"schema_version": 99, "schema_version": 2', 1)
+        duplicate_receipt = receipt.replace('"schema_version": 3', '"schema_version": 99, "schema_version": 3', 1)
         duplicate_event = events_text.replace('"schema_version": 1', '"schema_version": 99, "schema_version": 1', 1)
         for damaged_receipt, damaged_events, error in (
                 (duplicate_receipt, events_text, "Cannot read native receipt"),

@@ -48,7 +48,7 @@ collection, and preserve malformed native bytes with inspection/update guidance.
 Identify damaged preflight inputs and reject duplicate receipt/event keys before
 registering results.
 Carry the admitted repository identity into worker preflight/postflight checks and
-version-2 receipts. Preserve legacy command reconnection and inspection without
+version-3 receipts using the Git-local marker. Preserve legacy command reconnection and inspection without
 inventing a historical pin or accepting older receipts as new evidence.
 
 ### Task admission
