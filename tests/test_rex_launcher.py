@@ -385,6 +385,105 @@ class TaskAdmission(unittest.TestCase):
                         action()
             self.assertEqual(self.path.read_bytes(), before)
 
+    def test_replacement_clone_cannot_borrow_a_linked_repository_marker(self):
+        self.admit()
+        before = self.path.read_bytes()
+        original = self.root / "preserved"
+        self.repo.rename(original)
+        subprocess.run(["git", "clone", "--quiet", str(original), str(self.repo)], check=True)
+        source = original / ".git" / factory.REPOSITORY_MARKER
+        marker = self.repo / ".git" / factory.REPOSITORY_MARKER
+        contents = source.read_bytes()
+        for kind in ("symlink", "hardlink"):
+            if kind == "symlink":
+                marker.symlink_to(source)
+            else:
+                os.link(source, marker)
+            with self.subTest(kind=kind), self.assertRaisesRegex(factory.FactoryError, "repository marker"):
+                factory.set_inputs(self.path, candidate="HEAD", requirements="v2")
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(source.read_bytes(), contents)
+            self.assertEqual(FakeRex.calls, [])
+            marker.unlink()
+
+    def test_repository_marker_requires_private_owner_permissions(self):
+        self.admit()
+        marker = self.repo / ".git" / factory.REPOSITORY_MARKER
+        before = self.path.read_bytes()
+        marker.chmod(0o644)
+        with self.assertRaisesRegex(factory.FactoryError, "repository marker"):
+            self.start()
+        marker.chmod(0o600)
+        with patch.object(factory.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaisesRegex(factory.FactoryError, "repository marker"):
+                self.start()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_damaged_task_entries_cannot_reset_holds_or_attempt_history(self):
+        self.admit()
+        self.start(purpose="correction")
+        factory.hold_task(self.path, "Operator hold")
+        preserved = self.state / "preserved.json"
+        self.path.rename(preserved)
+        before = preserved.read_bytes()
+        FakeRex.calls.clear()
+        for kind in ("dangling", "symlink", "directory", "fifo"):
+            if kind in {"dangling", "symlink"}:
+                self.path.symlink_to(self.state / "missing.json" if kind == "dangling" else preserved)
+            elif kind == "directory":
+                self.path.mkdir()
+            else:
+                os.mkfifo(self.path)
+            for action in (self.admit, lambda: self.start(purpose=None), lambda: factory.load_task(self.path)):
+                with self.subTest(kind=kind), self.assertRaisesRegex(factory.FactoryError, "restore access to its original state file"):
+                    action()
+                self.assertEqual(preserved.read_bytes(), before)
+                self.assertTrue(os.path.lexists(self.path))
+                self.assertEqual(FakeRex.calls, [])
+            if kind == "directory":
+                self.path.rmdir()
+            else:
+                self.path.unlink()
+
+    def test_candidate_local_git_cannot_run_before_parent_or_wrapper_refusal(self):
+        self.admit()
+        self.start()
+        created = self.creation_calls()[0]
+        command = created[created.index("--") + 1:]
+        before = self.path.read_bytes()
+        effect = self.root / "unexpected-git-effect"
+        helper = self.repo / "git"
+        helper.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n")
+        helper.chmod(0o700)
+        FakeRex.calls.clear()
+        environment = {**os.environ, "PATH": "." + os.pathsep + os.environ.get("PATH", os.defpath)}
+        with patch.dict(os.environ, environment, clear=True):
+            with self.assertRaises(factory.FactoryError):
+                self.start(assignment_id="second")
+        result = subprocess.run(command, cwd=self.repo, env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("checkout-exec:", result.stderr)
+        self.assertFalse(effect.exists())
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_python_startup_cannot_run_unverified_checkout_code(self):
+        self.admit()
+        self.start()
+        created = self.creation_calls()[0]
+        command = created[created.index("--") + 1:]
+        before = self.path.read_bytes()
+        effect = self.root / "unexpected-startup-effect"
+        (self.repo / "sitecustomize.py").write_text(
+            f"from pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n")
+        result = subprocess.run(command, cwd=self.repo, env={**os.environ, "PYTHONPATH": ".",
+            "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("checkout-exec:", result.stderr)
+        self.assertFalse(effect.exists())
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_recycled_filesystem_identity_cannot_authorize_a_replacement(self):
         original = self.admit()
         common = self.repo / ".git"
@@ -451,6 +550,7 @@ class TaskAdmission(unittest.TestCase):
 
         def publish_winner(source, target):
             marker.write_text(json.dumps(winner))
+            marker.chmod(0o600)
             link(source, target)
 
         with patch.object(factory.os, "link", side_effect=publish_winner):

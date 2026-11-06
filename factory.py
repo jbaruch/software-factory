@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -110,10 +111,21 @@ def new_task(task) -> dict:
                 session_id=None, assignments={})
 
 
+def read_record(path, *, private=False):
+    """Read a regular gate record without following links or blocking on FIFOs."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor) as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or (private and (
+                info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077)):
+            raise OSError("Gate record must be a regular file with its required ownership and permissions")
+        return stream.read()
+
+
 def load_task(path) -> dict:
     """Factory owns migration of its gate store; unknown formats cannot launch."""
     try:
-        record = json.loads(path.read_text(), object_pairs_hook=unique_object)
+        record = json.loads(read_record(path), object_pairs_hook=unique_object)
     except FileNotFoundError:
         raise FactoryError(f"Unknown task {path.stem!r}; correct its ID or create it with admit/start") from None
     except (ValueError, UnicodeDecodeError):
@@ -296,12 +308,19 @@ def git_environment():
             if not key.startswith("GIT_") or key in GIT_IDENTITY_VARIABLES}
 
 
+def git_binary():
+    binary = shutil.which("git", path=os.defpath)
+    if binary is None:
+        raise FactoryError("Cannot find trusted Git; install Git on the operating system's default executable path")
+    return binary
+
+
 def command_environment():
     environment = {key: value for key, value in os.environ.items() if key not in GIT_ROUTING_VARIABLES}
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     if any(key.startswith("GIT_CONFIG") for key in environment):
         try:
-            observed = subprocess.run(["git", "--no-replace-objects", "-C", git_worktree("."),
+            observed = subprocess.run([git_binary(), "--no-replace-objects", "-C", git_worktree("."),
                 "config", "--null", "--name-only", "--list", "--show-scope", "--includes"],
                 env=environment, capture_output=True, text=True, timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
@@ -328,7 +347,7 @@ def git_worktree(repository):
 def git_run(repository, *args):
     try:
         worktree = git_worktree(repository)
-        return subprocess.run(["git", "--no-replace-objects", "-C", worktree,
+        return subprocess.run([git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
                               text=True, timeout=10, check=False,
                               env=git_environment())
@@ -363,12 +382,12 @@ def repository_identity(repository, *, create=False):
     common = git_common_dir(repository)
     marker = common / REPOSITORY_MARKER
     try:
-        if create and not marker.exists():
+        if create and not os.path.lexists(marker):
             try:
                 save(marker, dict(schema_version=1, repository_id=uuid.uuid4().hex), exclusive=True)
             except FileExistsError:
                 pass  # A concurrent admission published the shared marker; read it below.
-        value = json.loads(marker.read_text(), object_pairs_hook=unique_object)
+        value = json.loads(read_record(marker, private=True), object_pairs_hook=unique_object)
     except (OSError, ValueError, UnicodeDecodeError):
         raise FactoryError("Cannot read repository marker; restore the original Git-local marker and access, or have the operator authorize a new admission") from None
     if (not isinstance(value, dict) or set(value) != {"schema_version", "repository_id"}
@@ -514,7 +533,7 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
     except OSError:
         raise FactoryError("Cannot access --repo; supply an existing accessible Git checkout") from None
     admission = dict(goal=goal, repository=repository, acceptance=acceptance, limits=limits)
-    record = load_task(path) if path.exists() else new_task(task)
+    record = load_task(path) if os.path.lexists(path) else new_task(task)
     if record["admission"] is not None:
         if any(record["admission"].get(key) != value for key, value in admission.items()):
             raise FactoryError("Task already has different admission inputs; use a new task ID")
@@ -708,7 +727,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Provide an existing directory and an absolute executable command")
     if not Path(command[0]).is_absolute() or not os.access(command[0], os.X_OK):
         raise FactoryError("Command executable must be an absolute executable file")
-    record = load_task(path) if path.exists() else new_task(task)
+    record = load_task(path) if os.path.lexists(path) else new_task(task)
     existing = record["assignments"].get(assignment_id)
     instructions = "" if existing else brief(role, goal)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
@@ -779,7 +798,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions}
     argv = [replacements.get(part, part) for part in command]
     if record["admission"] is not None:
-        argv = [sys.executable, str(ROOT / "checkout_exec.py"), "--identity",
+        argv = [sys.executable, "-E", "-s", str(ROOT / "checkout_exec.py"), "--identity",
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
