@@ -138,11 +138,18 @@ and leaves Git staging/commit to the runtime. Only a successful native run with 
 `completed` report can enter this step. The runtime retains an intent before
 staging, checks regular source files, records the staged tree, then runs one local
 Git commit with the repository's existing hooks, signing and author settings.
+Validated inherited Git configuration also applies to staging/commit. Before any
+index refresh, the runtime refuses source-local configured hooks that differ from
+the admitted candidate, retaining the edits for independent review and an operator
+decision. Operator-owned hooks outside the workspace remain active. Writers may
+start from an admitted subdirectory; source checks still use the worktree root.
 No changes produce no empty commit. Commit errors or lost responses preserve the
 intent and worktree for inspection; they never retry the native job or commit.
 The worker disables Python bytecode generation for its child. Other disposable
 test/build outputs belong outside the source checkout. This step never pushes,
 accepts the task or satisfies independent verification/release requirements.
+New host worker commands ignore Python environment/startup overrides. Historical
+commands and version-4 receipts remain reconnectable/collectable without rewriting.
 
 `codex_worker.py` owns version-5 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,

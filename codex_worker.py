@@ -131,12 +131,55 @@ async def stop_child(process):
         await process.wait()
 
 
+def check_hooks(root, candidate, environment):
+    """A writer cannot replace source-local hook code and have the host run it."""
+    configured = factory.git_run(".", "rev-parse", "--path-format=absolute", "--git-path", "hooks", environment=environment)
+    if configured.returncode:
+        raise factory.FactoryError("Cannot identify configured Git hooks; inspect Git configuration before committing writer changes")
+    hooks = Path(configured.stdout.removesuffix("\n")).resolve()
+    common = factory.git_common_dir(".")
+    if hooks.is_relative_to(common) or not hooks.is_relative_to(root):
+        return  # Protected Git metadata/outside-workspace hooks are operator-owned.
+    relative = hooks.relative_to(root)
+    original = factory.git_run(".", "ls-tree", "-r", "-z", candidate, "--", str(relative))
+    if original.returncode:
+        raise factory.FactoryError("Cannot inspect admitted Git hook sources; restore the original candidate before committing")
+    expected = {}
+    try:
+        for entry in original.stdout.split("\0"):
+            if entry:
+                metadata, name = entry.split("\t", 1)
+                mode, kind, identity = metadata.split()
+                if kind != "blob":
+                    raise ValueError("Unsupported hook source")
+                expected[name] = (mode, identity)
+    except ValueError:
+        raise factory.FactoryError("Cannot decode admitted hook sources; inspect Git compatibility before committing") from None
+    observed = {}
+    if hooks.exists():
+        for path in hooks.rglob("*"):
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise factory.FactoryError("Configured hooks contain linked/non-regular source; inspect the retained changes before committing")
+            hashed = factory.git_run(".", "hash-object", "--no-filters", "--", str(path))
+            if hashed.returncode:
+                raise factory.FactoryError("Cannot read configured hook sources; restore access before committing")
+            observed[str(path.relative_to(root))] = ("100755" if info.st_mode & 0o111 else "100644", hashed.stdout.strip())
+    if observed != expected:
+        raise factory.FactoryError("Writer changed configured Git hooks; independent review and an operator decision are required before committing those changes. No host hook was run")
+
+
 def commit_changes(args, receipt):
     """Commit an opted-in writer's finished work outside the native sandbox."""
     if factory.git_commit(".", "HEAD") != args.candidate:
         raise factory.FactoryError("Writer changed Git HEAD before the factory commit; inspect the original candidate and retained work without retrying")
     if factory.repository_identity(".") != receipt["repository_identity"] or factory.git_dir(".") != args.worktree_git_dir:
         raise factory.FactoryError("Writer repository/worktree changed; restore the original checkout before inspecting its commit")
+    root = Path(factory.git_worktree("."))
+    environment = factory.command_environment()
+    check_hooks(root, args.candidate, environment)
     status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
     if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
         raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
@@ -150,12 +193,12 @@ def commit_changes(args, receipt):
         if not name:
             continue
         try:
-            info = Path(name).lstat()
+            info = (root / name).lstat()
         except FileNotFoundError:
             continue  # Tracked deletions are part of the writer's change.
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise factory.FactoryError("Writer contains linked or non-regular source; inspect the retained changes and use independent regular files")
-    staged = factory.git_run(".", "add", "--all", "--", ".")
+    staged = factory.git_run(".", "add", "--all", "--", ".", environment=environment)
     if staged.returncode:
         raise factory.FactoryError("Cannot stage writer changes; inspect the retained commit intent, index and worktree before correcting it")
     entries = factory.git_run(".", "ls-files", "--stage", "-z")
@@ -167,12 +210,12 @@ def commit_changes(args, receipt):
                 continue
             metadata, name = entry.split("\t", 1)
             mode, _, stage = metadata.split()
-            info = Path(name).lstat()
+            info = (root / name).lstat()
             if mode not in {"100644", "100755"} or stage != "0" or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise factory.FactoryError("Writer staged linked or non-regular source; inspect the retained changes and use independent regular files")
     except ValueError:
         raise factory.FactoryError("Cannot decode the writer index; inspect Git compatibility and the retained changes before committing") from None
-    tree = factory.git_run(".", "write-tree")
+    tree = factory.git_run(".", "write-tree", environment=environment)
     if tree.returncode:
         raise factory.FactoryError("Cannot record the staged writer tree; inspect the retained index and commit intent")
     receipt["commit"].update(state="committing", staged_tree=tree.stdout.strip())
@@ -185,7 +228,7 @@ def commit_changes(args, receipt):
     if unchanged.returncode != 1:
         raise factory.FactoryError("Cannot compare staged writer changes; inspect the retained index before another action")
     try:
-        committed = factory.git_run(".", "commit", "--message", args.commit_message)
+        committed = factory.git_run(".", "commit", "--message", args.commit_message, environment=environment)
     except factory.FactoryError:
         raise factory.FactoryError("Writer commit outcome is uncertain; inspect the retained commit intent, Git HEAD and hooks before another action. No commit was retried") from None
     if committed.returncode:

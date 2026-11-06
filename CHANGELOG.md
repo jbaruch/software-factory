@@ -9,6 +9,9 @@ Let an explicit Codex writer leave Git staging/commit to the runtime through
 receipts, respect existing hooks/signing, and preserve failures without retries.
 Collect valid version-4 receipts unchanged. New commits remain implementation
 outputs requiring independent verification and the repository's release gates.
+Preserve inherited hook/signing policy, resolve writer paths from the worktree
+root, refuse modified source-local hooks before host execution, and isolate new
+host workers from workspace Python startup code while retaining legacy commands.
 
 ### Native Grok metadata
 

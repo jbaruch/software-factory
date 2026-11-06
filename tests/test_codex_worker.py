@@ -7,6 +7,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -209,8 +210,8 @@ class NativeResults(unittest.TestCase):
     def test_lost_commit_response_preserves_uncertainty_without_a_second_commit(self):
         self.writer()
         git_run = factory.git_run
-        def lost_reply(repository, *args):
-            result = git_run(repository, *args)
+        def lost_reply(repository, *args, **options):
+            result = git_run(repository, *args, **options)
             if args[0] == "commit":
                 self.assertEqual(result.returncode, 0)
                 raise factory.FactoryError("fixture lost response")
@@ -226,6 +227,114 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
         self.assertEqual(len(self.spawns), 1)
+
+    def test_factory_commit_works_from_an_admitted_subdirectory(self):
+        self.writer()
+        docs = self.repo / "docs"
+        docs.mkdir()
+        (docs / "contract.txt").write_text("Fixture contract\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add contract fixture").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.args.cwd = docs
+        os.chdir(docs)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["parent"], self.candidate)
+        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
+        self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
+
+    def test_provider_written_hooks_cannot_run_during_host_status_or_commit(self):
+        self.writer()
+        hooks = self.repo / ".githooks"
+        hooks.mkdir()
+        original = hooks / "pre-commit"
+        original.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+        original.chmod(0o700)
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add fixture hooks").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", ".githooks"], check=True)
+        effect = self.root / "unauthorized-hook-effect"
+        unsafe = f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n"
+        for name in ("pre-commit", "post-index-change"):
+            self.args.events = self.root / (name + ".jsonl")
+            self.args.receipt = self.root / (name + ".json")
+            self.process = FakeProcess(events("completed"))
+            async def spawn(*command, **options):
+                (hooks / name).write_text(unsafe)
+                (hooks / name).chmod(0o700)
+                (self.repo / "feature.py").write_text("answer = 42\n")
+                return self.process
+            self.spawn = spawn
+            receipt = self.execute()
+            self.assertEqual(receipt["state"], "failed")
+            self.assertIn("changed configured Git hooks", receipt["error"])
+            self.assertFalse(effect.exists())
+            self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+            self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
+            (self.repo / "feature.py").unlink()
+            if name == "pre-commit":
+                original.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+            else:
+                (hooks / name).unlink()
+
+    def inherited_policy(self, kind, transport):
+        self.writer()
+        log = self.root / (kind + "-calls")
+        program = self.root / (kind + " fixture")
+        program.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nwith Path({str(log)!r}).open('a') as f: f.write('called\\n')\nraise SystemExit(1)\n")
+        program.chmod(0o700)
+        if kind == "hook":
+            hooks = self.root / "hooks with spaces"
+            hooks.mkdir()
+            program.rename(hooks / "pre-commit")
+            settings = {"core.hooksPath": str(hooks)}
+            subprocess.run(["git", "-C", str(self.repo), "config", "--unset", "core.hooksPath"], check=True)
+        else:
+            settings = {"commit.gpgsign": "true", "gpg.format": "openpgp", "gpg.program": str(program)}
+            subprocess.run(["git", "-C", str(self.repo), "config", "--unset", "commit.gpgsign"], check=True)
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_CONFIG")}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        if transport == "count":
+            environment["GIT_CONFIG_COUNT"] = str(len(settings))
+            for index, (key, value) in enumerate(settings.items()):
+                environment[f"GIT_CONFIG_KEY_{index}"] = key
+                environment[f"GIT_CONFIG_VALUE_{index}"] = value
+        elif transport == "parameters":
+            def quoted(value):
+                return "'" + value.replace("'", "'\\''") + "'"
+            environment["GIT_CONFIG_PARAMETERS"] = " ".join(quoted(key + "=" + value) for key, value in settings.items())
+        else:
+            config = self.root / "policy.config"
+            for key, value in settings.items():
+                subprocess.run(["git", "config", "--file", str(config), "--add", key, value], check=True)
+            environment["GIT_CONFIG_GLOBAL"] = str(config)
+        with patch.dict(os.environ, environment, clear=True):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("configured hooks/signing", receipt["error"])
+        self.assertEqual(log.read_text(), "called\n")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+
+    def test_count_supplied_hook_is_enforced(self):
+        self.inherited_policy("hook", "count")
+
+    def test_parameter_supplied_hook_is_enforced(self):
+        self.inherited_policy("hook", "parameters")
+
+    def test_global_file_supplied_hook_is_enforced(self):
+        self.inherited_policy("hook", "global")
+
+    def test_count_supplied_signing_is_enforced(self):
+        self.inherited_policy("signing", "count")
+
+    def test_parameter_supplied_signing_is_enforced(self):
+        self.inherited_policy("signing", "parameters")
+
+    def test_global_file_supplied_signing_is_enforced(self):
+        self.inherited_policy("signing", "global")
 
     def test_factory_commit_refuses_source_links_before_creating_a_commit(self):
         outside = self.root / "outside.txt"
@@ -446,13 +555,15 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertIn("repository identity differs", receipt["error"])
 
-    def launch_assignment(self, codex=sys.executable, *, write=False, commit_message=None):
+    def launch_assignment(self, codex=sys.executable, *, write=False, commit_message=None, execute=True, legacy=False):
         self.path = self.root / "task.json"
         factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
                       acceptance=["docs/acceptance.md"])
         command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=codex,
                                         model="fixture-model", effort="high", cwd=str(self.repo),
                                         write=write, commit_message=commit_message)
+        if legacy:
+            del command[1:3]
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
         with patch.object(factory, "Rex", FakeRex):
@@ -461,13 +572,15 @@ class NativeResults(unittest.TestCase):
                 binary=sys.executable, server="unix:///test.sock")
         actual = next(call for call in FakeRex.calls if call[0] == "new")
         argv = actual[actual.index("--") + 1:]
+        self.worker_argv = argv
         self.assertEqual(argv[:4], (sys.executable, "-E", "-s", str(factory.ROOT / "checkout_exec.py")))
         argv = argv[argv.index("--") + 1:]
-        self.args = worker.parser().parse_args(argv[2:])
+        self.args = worker.parser().parse_args(argv[2:] if legacy else argv[4:])
         self.assertEqual(self.args.candidate, self.candidate)
         self.assertEqual(self.args.brief_sha256, assignment["request"]["instructions_sha256"])
         self.assertEqual(json.loads(self.args.repo_identity), record["admission"]["repository_identity"])
-        self.execute()
+        if execute:
+            self.execute()
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
         return record, assignment
 
@@ -499,7 +612,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
 
     def test_version_four_receipt_remains_collectable_without_migration(self):
-        record, assignment = self.launch_assignment()
+        record, assignment = self.launch_assignment(legacy=True)
         legacy = json.loads(self.args.receipt.read_text())
         legacy["schema_version"] = 4
         del legacy["commit"]
@@ -510,6 +623,25 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
         self.assertEqual(self.args.receipt.read_bytes(), original)
         self.assertEqual(len(self.spawns), 1)
+
+    def test_workspace_python_startup_code_cannot_run_in_the_host_worker(self):
+        effect = self.root / "startup-effect"
+        (self.repo / "sitecustomize.py").write_text(
+            f"from pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                                             "commit", "-m", "Add startup fixture").returncode, 0)
+        self.candidate = factory.git_commit(".", "HEAD")
+        binary = self.root / "native-fixture"
+        payload = "\n".join(json.dumps(event) for event in events())
+        binary.write_text("#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' " + shlex.quote(payload) + "\n")
+        binary.chmod(0o700)
+        self.launch_assignment(codex=str(binary), execute=False)
+        result = subprocess.run(self.worker_argv, capture_output=True, text=True, timeout=15,
+            env={**os.environ, "PYTHONPATH": str(self.repo), "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(effect.exists())
+        self.assertEqual(json.loads(self.args.receipt.read_text())["state"], "completed")
 
     def test_native_preflight_preserves_allowances_and_reconnect_survives_removed_binary(self):
         path = self.root / "task.json"
