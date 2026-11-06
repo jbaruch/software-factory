@@ -99,6 +99,10 @@ Repository-backed mutations recheck the admitted initial commit before selecting
 inputs, registering a result or launching work. Create responses must match the
 live session marker and pane before the launcher saves `launched`; mismatches
 retain the original pending intent for reconciliation without another effect.
+Session markers must match `factory-<task>-<8hex>`; window markers must match
+`<role>-<assignment-id>-<8hex>`. A complete pane tuple cannot be reassigned to
+another owner by swapping saved fields. Admission reads only needed defaults;
+both explicit limit flags work without the defaults file.
 
 This is a gate store under the coding policy's Stateful Artifacts migration
 exception: an unsupported version or damaged gate data refuses the action with a

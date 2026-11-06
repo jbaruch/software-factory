@@ -32,3 +32,5 @@ Rex responses with compatibility/recovery guidance.
 Verify the admitted repository pin on repository-backed mutations, retain pending
 intent when returned Rex IDs disagree with the live pane, and explain Git process
 failures and session/history mismatch recovery.
+Bind session/window marker formats to their task and assignment owners, and
+allow explicit admission limits when configuration defaults are unavailable.

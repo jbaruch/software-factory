@@ -125,7 +125,8 @@ def load_task(path) -> dict:
                    for key in ("binary", "server", "host_id"))
             or not Path(connection["binary"]).is_absolute() or not connection["server"].startswith("unix://")):
         raise FactoryError("Invalid pinned Rex identity; restore the original task record before continuing")
-    if (not isinstance(record["session_label"], str) or not record["session_label"]
+    if (not isinstance(record["session_label"], str)
+            or not re.fullmatch("factory-" + re.escape(record["task"]) + r"-[0-9a-f]{8}", record["session_label"])
             or (record["session_id"] is not None
                 and (not isinstance(record["session_id"], str) or not record["session_id"]))):
         raise FactoryError("Invalid Rex session identity; restore the original task record before continuing")
@@ -176,6 +177,9 @@ def load_task(path) -> dict:
                        for key in ("brief", "window_label"))
                 or not Path(assignment["brief"]).is_absolute()):
             raise FactoryError("Invalid assignment identity or request; restore the original task record")
+        if not re.fullmatch(re.escape(request["role"] + "-" + assignment_id) + r"-[0-9a-f]{8}",
+                            assignment["window_label"]):
+            raise FactoryError("Assignment window marker differs from its owner; restore the original task record")
         if "inputs" in request and (admission is None or not valid_inputs(request["inputs"])):
             raise FactoryError("Invalid assignment inputs; restore the original task record")
         if "dependencies" in request and (not isinstance(request["dependencies"], list)
@@ -279,9 +283,19 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
     """Record operator-supplied scope once, without starting Rex or any worker."""
     if not goal.strip() or not acceptance or any(not ref.strip() for ref in acceptance):
         raise FactoryError("Supply a goal and at least one nonempty acceptance reference")
-    policies = json.loads((ROOT / "config/coordination.json").read_text())["policies"]
-    limits = dict(correction=policies["max_corrections"] if corrections is None else corrections,
-                  investigation=policies["max_investigations"] if investigations is None else investigations)
+    limits = dict(correction=corrections, investigation=investigations)
+    if any(limit is None for limit in limits.values()):
+        try:
+            policies = json.loads((ROOT / "config/coordination.json").read_text(),
+                                  object_pairs_hook=unique_object)["policies"]
+            for purpose, key in (("correction", "max_corrections"), ("investigation", "max_investigations")):
+                if limits[purpose] is None:
+                    default = policies[key]
+                    if type(default) is not int or default < 0:
+                        raise ValueError("Invalid task limit default")
+                    limits[purpose] = default
+        except (OSError, ValueError, KeyError, TypeError):
+            raise FactoryError("Cannot read task limit defaults from config/coordination.json; repair its policies or supply both --corrections and --investigations") from None
     if any(type(limit) is not int or limit < 0 for limit in limits.values()):
         raise FactoryError("Attempt limits must be nonnegative integers")
     try:
