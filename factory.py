@@ -787,6 +787,8 @@ def status(rex, record, assignment):
 
 def codex_command(path, *, task, assignment_id, codex, model, effort, write=False, seconds=600):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
+    if not model.strip() or not effort.strip():
+        raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
     if not Path(codex).is_absolute() or seconds <= 0:
         raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
     binary = Path(codex).resolve()
@@ -819,7 +821,10 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
     if "--repo-identity" not in command:
         raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
-    args = parser().parse_args(command[2:])
+    try:
+        args = parser().parse_args(command[2:])
+    except SystemExit:
+        raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     observed = status(rex, record, assignment)
     if observed["state"] != "exited":
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
@@ -834,6 +839,12 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
             or receipt["schema_version"] != 3
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
+            or any(type(receipt.get(key)) not in (int, float)
+                   or not 0 <= receipt[key] <= sys.float_info.max
+                   for key in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"]
+            or "error" not in receipt or receipt["error"] is not None
+            or any(key not in receipt for key in ("thread_id", "report", "usage"))
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or receipt.get("job") != record["task"] + "/" + assignment_id
             or not valid_inputs(receipt.get("inputs"))

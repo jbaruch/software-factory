@@ -164,12 +164,15 @@ def read_catalog():
     path = ROOT / "config/coordination.json"
     try:
         catalog = json.loads(path.read_text(), object_pairs_hook=unique_object)
+        json.dumps(catalog, allow_nan=False)
         if (not isinstance(catalog, dict) or type(catalog.get("schema_version")) is not int
                 or catalog["schema_version"] != 1 or not isinstance(catalog.get("questions"), list)):
             raise ValueError("Invalid question catalog")
         specs = catalog["questions"]
         if any(not isinstance(spec, dict) or not isinstance(spec.get("id"), str)
                or not isinstance(spec.get("options"), dict)
+               or any(not key.strip() or not isinstance(description, str) or not description.strip()
+                      for key, description in spec["options"].items())
                or not isinstance(spec.get("instructions"), (str, dict, list)) or not spec["instructions"]
                for spec in specs):
             raise ValueError("Invalid question specification")

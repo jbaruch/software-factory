@@ -111,8 +111,11 @@ and writer mode. The worker verifies that repository identity before and after
 execution. Its native child inherits the verified working directory and uses
 `--cd .`, avoiding a second open of a replaceable checkout pathname. It records wall
 timestamps, monotonic duration, exit code, native thread ID, compact report,
-nullable native usage, resulting Git candidate, stream path and error. The
-native events follow the official [non-interactive contract](https://learn.chatgpt.com/docs/non-interactive-mode).
+nullable native usage, resulting Git candidate, stream path and error. A
+completed receipt requires finite nonnegative timestamps/duration, a finish at
+or after creation, and a present null error. Missing or malformed metadata refuses
+collection. Model and effort must be nonblank before a launch can reserve an attempt.
+Native events follow the official [non-interactive contract](https://learn.chatgpt.com/docs/non-interactive-mode).
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
 code. Schema changes belong to the worker. Receipt readers accept only version 3;

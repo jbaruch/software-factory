@@ -1,6 +1,6 @@
 """Native result/lifecycle tests use fake processes and Rex, never model calls."""
 import asyncio
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import copy
 import hashlib
 from io import StringIO
@@ -148,6 +148,16 @@ class NativeResults(unittest.TestCase):
         self.assertIn("restore executable access/local process resources", receipt["error"])
         self.assertIsNone(receipt["exit_code"])
         self.assertIsNone(receipt["report"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_native_pipe_failure_retains_recovery_and_stops_owned_child(self):
+        with patch.object(self.process, "readline", side_effect=ConnectionResetError("raw fixture errno")):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("inspect the retained stream, storage and Rex pane", receipt["error"])
+        self.assertNotIn("raw fixture errno", receipt["error"])
+        self.assertIsNone(receipt["report"])
+        self.assertIsNotNone(self.process.returncode)
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_exit_before_cleanup_kill_still_saves_the_final_receipt(self):
@@ -337,6 +347,33 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(chosen, str(Path(sys.executable).resolve()))
         self.assertNotEqual(chosen, str(binary.resolve()))
 
+    def test_blank_native_selection_refuses_before_reading_or_mutating_task(self):
+        path = self.root / "task.json"
+        record = factory.admit(path, task="task", goal="Verify the change", repository=str(self.repo),
+                               acceptance=["docs/acceptance.md"], corrections=1, investigations=1)
+        before = path.read_bytes()
+        for model, effort in (("", "high"), ("  ", "high"), ("fixture-model", ""), ("fixture-model", "\t")):
+            with self.subTest(model=model, effort=effort), patch.object(factory, "load_task") as read:
+                with self.assertRaisesRegex(factory.FactoryError, "discovered native model and supported effort"):
+                    factory.codex_command(path, task="task", assignment_id="qa", codex=sys.executable,
+                                          model=model, effort=effort)
+                read.assert_not_called()
+            self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"]["remaining"], 1)
+
+    def test_damaged_saved_native_arguments_name_repair_without_collection(self):
+        record, assignment = self.launch_assignment()
+        command = assignment["request"]["command"]
+        at = command.index("--model")
+        del command[at:at + 2]
+        factory.save(self.path, record)
+        factory.load_task(self.path)
+        before = self.path.read_bytes()
+        with redirect_stderr(StringIO()), self.assertRaisesRegex(factory.FactoryError,
+                "restore the original assignment arguments.*without relaunching"):
+            factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_legacy_command_reconnects_without_retrofitted_scope_but_refuses_collection(self):
         record, assignment = self.launch_assignment()
         command = assignment["request"]["command"]
@@ -416,6 +453,26 @@ class NativeResults(unittest.TestCase):
                         "Cannot read native receipt .*inspect or restore the original artifact"):
                     factory.collect_codex(self.path, "qa", self.rex, record, assignment)
             self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
+
+    def test_completed_receipt_requires_valid_timing_and_error_fields(self):
+        record, assignment = self.launch_assignment()
+        original = json.loads(self.args.receipt.read_text())
+        cases = []
+        for key in ("created_at", "finished_at", "elapsed_seconds", "error", "usage"):
+            missing = copy.deepcopy(original)
+            del missing[key]
+            cases.append(missing)
+        for key in ("created_at", "finished_at", "elapsed_seconds"):
+            for bad in (None, "1000", True, -1, float("nan"), float("inf"), 10 ** 400):
+                cases.append({**original, key: bad})
+        cases.extend(({**original, "error": "failed"}, {**original, "finished_at": 999}))
+        before = self.path.read_bytes()
+        for index, receipt in enumerate(cases):
+            factory.save(self.args.receipt, receipt)
+            with self.subTest(index=index), patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.assertRaisesRegex(factory.FactoryError, "receipt does not match"):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertEqual(self.path.read_bytes(), before)
 
     def test_duplicate_receipt_and_event_keys_cannot_register_a_result(self):
         record, assignment = self.launch_assignment()

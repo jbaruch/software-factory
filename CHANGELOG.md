@@ -17,6 +17,13 @@ the view request or changing task evidence.
 Display lone surrogate code points as visible escapes so one accepted record
 cannot break the HTML response; preserve the original source and API values.
 
+### Adapter input and evidence validation
+
+Reject blank native selections before reserving attempts, damaged saved worker
+arguments and incomplete completed receipts before collection. Validate finite
+question catalogs, option criteria and native model identities before use, and
+retain actionable process/stream I/O recovery diagnostics in failed receipts.
+
 ### Jev shadow adapter
 
 Compile factory Choice questions into the TypeSafe HTTP contract, expand actual

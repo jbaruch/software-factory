@@ -206,9 +206,12 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         if not args.write and candidate != args.candidate:
             raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
         receipt.update(candidate=candidate, state="completed")
-    except (factory.FactoryError, OSError, ValueError, KeyError, TypeError, TimeoutError) as exc:
-        receipt.update(state="failed", error=("Native execution allowance expired; inspect the existing attempt"
-                                               if isinstance(exc, TimeoutError) else str(exc)))
+    except TimeoutError:
+        receipt.update(state="failed", error="Native execution allowance expired; inspect the existing attempt")
+    except OSError:
+        receipt.update(state="failed", error="Native process/event-stream I/O failed; inspect the retained stream, storage and Rex pane, restore access/space and reconcile this attempt before another launch")
+    except (factory.FactoryError, ValueError, KeyError, TypeError) as exc:
+        receipt.update(state="failed", error=str(exc))
     finally:
         if process is not None:
             await stop_child(process)
@@ -236,7 +239,10 @@ def main(argv=None):
         if receipt["state"] != "completed":
             print("codex-worker: " + receipt["error"], file=sys.stderr)
             return 1
-    except (factory.FactoryError, OSError, ValueError) as exc:
+    except OSError:
+        print("codex-worker: Cannot access execution artifacts; restore storage access/space and inspect the retained pane/attempt before retrying", file=sys.stderr)
+        return 1
+    except (factory.FactoryError, ValueError) as exc:
         print("codex-worker: " + str(exc), file=sys.stderr)
         return 1
     return 0
