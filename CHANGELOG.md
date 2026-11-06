@@ -15,6 +15,13 @@ Read runtime credentials from the environment, and identify damaged state/candid
 input files with repair guidance before making any network request.
 Validate input shapes and refuse non-standard numbers or ambiguous duplicate keys.
 
+### Native model catalogs
+
+Expose native Grok and Antigravity model IDs through metadata-only CLI probes.
+Preserve observation time, CLI identity and source output while leaving worker
+readiness, quota sharing and supported effort unverified. Refuse changed catalog
+formats, duplicate IDs and command failures without automatic retries.
+
 ### Native Codex metadata
 
 Read the signed-in native account, metered quota buckets and model/effort catalog

@@ -36,9 +36,34 @@ version, native payload and observation time. Revalidate observations before
 using them to schedule work. No local model list establishes cross-route quota
 sharing, supported tools or subscription eligibility for other harnesses.
 
-Claude, Grok and Antigravity need their own account, catalog, allowance and native
-lifecycle adapters. Do not substitute API-key billing for their subscription
-routes. The static provider catalog remains explicitly unverified.
+Account, catalog and allowance observations are distinct from native worker
+lifecycle and subscription eligibility. Do not substitute API-key billing for
+subscription routes.
+
+## Grok and Antigravity catalogs
+
+```sh
+python3 native_catalog.py grok --binary '/absolute/path/to/grok'
+python3 native_catalog.py antigravity --binary '/absolute/path/to/agy'
+```
+
+The adapter invokes only `--version` and `models`, with closed stdin and a
+20-second deadline per command. It uses native sign-in/configuration, leaving
+their contents with the CLI. No prompt, login, worker, settings change or retry
+is requested. The catalog formats were observed with Grok Build 1.0.70 and
+Antigravity CLI 1.5.1/1.5.2. Unexpected rows and duplicate IDs refuse discovery with
+inspection/update guidance. An empty list supplies no candidates.
+
+`native_catalog.py` owns its transient version-1 `native-model-catalog` envelope:
+harness, resolved binary, reported CLI version, observation time/duration,
+ordered `models` (`id`, `name`) and original command stdout in `native_output`.
+Native stderr is omitted. Readiness remains `unverified` and
+`quota_observation` remains null. This is model discovery, not an account
+eligibility, supported-effort or capacity test. The adapter has no persistence
+or migration reader; keep retained observations private and refresh before use.
+
+Native usage follows [Grok's CLI reference](https://docs.x.ai/build/cli/reference) and
+[Antigravity's model listing](https://antigravity.google/docs/cli/headless/#select-a-model-effort-or-agent).
 
 ## Explicit Codex assignments
 
