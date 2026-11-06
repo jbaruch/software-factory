@@ -11,7 +11,7 @@ the command guides describe operation rather than maintain separate status lists
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
 | Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
-| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts and result collection | Native subscription sign-in, real read-only execution, revision-bound blocked/completed result collection and exact-pane reconnect; writer delivery and independent quality approval remain unverified |
+| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, real read-only execution, revision-bound blocked/completed result collection and exact-pane reconnect; writer commit fixtures cover success, hook failure and lost responses. Live writer delivery and independent quality approval remain unverified |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
 | Native Grok metadata | Cached OIDC sign-in, subscription/access-gate metadata and per-model effort choices through a private ACP child | Fixed protocol/process tests and a live owner-script probe of agent 1.0.77: X Premium+, no access gate, four model choices and their reported effort values. Quota and worker lifecycle remain unverified |
 | Local operator view | Stored task facts, holds, allowances, report freshness, evidence references and explicit live process observations | Read-only loopback HTML/API, protected by a per-process capability in a private file; not the complete dashboard contract |
@@ -27,11 +27,13 @@ The harmless fixtures used earlier receipts. Marker-bound version-3 receipts now
 have live read-only coverage: a real review reported blocked, an investigator
 completed source inspection, and reconnect reused both original panes without
 consuming more allowance. The initial protocol-failure attempt remains failed.
-Current version-4 receipts additionally bind the individual worktree Git directory.
+Version-4 receipts additionally bind the individual worktree Git directory.
 Offline two-worktree fixtures and a separate live Rex event-transport fixture
 verify that binding, collection and exact-pane reconnect. The transport fixture
-makes no model turn or specialist judgment; real provider execution with version 4
-remains unverified. Existing version-3 artifacts stay unchanged and inspection-only
+makes no model turn or specialist judgment. Current version-5 receipts retain
+that binding and add the factory commit intent/result. Real provider execution
+with the current receipt remains unverified. Existing version-4 receipts remain
+collectable unchanged; version-3 artifacts stay unchanged and inspection-only
 under the current receipt reader.
 Jev then returned resolved in a live shadow reassessment of the narrow decoder
 question; no acceptance or review gate changed. Task schema 4

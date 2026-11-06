@@ -131,7 +131,19 @@ native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 
-`codex_worker.py` owns version-4 `*.codex.json` execution receipts and their
+For a factory-owned writer commit, supply `--write --commit-message` with the
+intended commit message. The specialist edits/tests within its workspace sandbox
+and leaves Git staging/commit to the runtime. Only a successful native run with a
+`completed` report can enter this step. The runtime retains an intent before
+staging, checks regular source files, records the staged tree, then runs one local
+Git commit with the repository's existing hooks, signing and author settings.
+No changes produce no empty commit. Commit errors or lost responses preserve the
+intent and worktree for inspection; they never retry the native job or commit.
+The worker disables Python bytecode generation for its child. Other disposable
+test/build outputs belong outside the source checkout. This step never pushes,
+accepts the task or satisfies independent verification/release requirements.
+
+`codex_worker.py` owns version-5 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
@@ -162,12 +174,23 @@ evidence; unrelated telemetry cannot supply a report or completion.
 The observed CLI also emits nonfatal `item.completed` error diagnostics between
 thread start and turn start. These are retained telemetry and supply no lifecycle
 or report evidence; top-level errors and failed turns still refuse collection.
+Version 5 adds nullable `commit` evidence. A factory-owned commit records `state`
+(`preparing`, `committing`, `created` or `unchanged`), input `parent`, requested
+`message`, nullable `staged_tree` and nullable produced `candidate`. Intent is saved
+before staging and again before committing. Hooks may change the staged contents;
+the resulting candidate and clean source check bind the actual output assessed by
+later verification. A completed receipt requires a terminal commit state matching
+its frozen assignment and, for a new commit, the actual Git parent.
+
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
-code. Schema changes belong to the worker. Receipt readers accept only version 4;
+code. Schema changes belong to the worker. Receipt readers accept versions 4 and 5;
+version 4 has no factory-owned commit and remains collectable unchanged with its
+original command. Version 5 requires the nullable `commit` field. Neither version
+is migrated or rewritten by collection. Versions below 4 remain inspection-only:
 version 1 lacks the repository pin and version 2 uses a reusable filesystem pin.
-Version 3 binds the repository but not the individual worktree. These versions
-remain inspection-only, without migration or a new launch. Existing commands reconnect unchanged; they cannot acquire
+Version 3 binds the repository but not the individual worktree.
+Existing commands reconnect unchanged; they cannot acquire
 retroactive execution evidence.
 New native commands freeze the worktree Git directory in their existing command
 arguments before launch. Preflight, actual-directory checks, postflight and
