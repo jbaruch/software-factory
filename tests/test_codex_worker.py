@@ -655,10 +655,17 @@ class NativeResults(unittest.TestCase):
         binary.write_text("#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' " + shlex.quote(payload) + "\n")
         binary.chmod(0o700)
         self.launch_assignment(codex=str(binary), execute=False)
-        result = subprocess.run(self.worker_argv, capture_output=True, text=True, timeout=15,
+        engine = self.root / "engine"
+        engine.mkdir()
+        for name in ("checkout_exec.py", "codex_worker.py", "factory.py"):
+            (engine / name).write_bytes((factory.ROOT / name).read_bytes())
+        command = [str(engine / Path(arg).name) if arg in {
+            str(factory.ROOT / "checkout_exec.py"), str(factory.ROOT / "codex_worker.py")} else arg for arg in self.worker_argv]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15,
             env={**os.environ, "PYTHONPATH": str(self.repo), "PYTHONDONTWRITEBYTECODE": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(effect.exists())
+        self.assertFalse((engine / "__pycache__").exists())
         self.assertEqual(json.loads(self.args.receipt.read_text())["state"], "completed")
         self.assertEqual(worker.read_events(self.args.events), payload_events)
 

@@ -11,6 +11,8 @@ import stat
 import sys
 import time
 
+sys.dont_write_bytecode = True
+
 import factory
 
 NATIVE_LINE_LIMIT = 1024 * 1024

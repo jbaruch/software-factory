@@ -14,6 +14,8 @@ root, refuse modified source-local hooks before host execution, and isolate new
 host workers from workspace Python startup code while retaining legacy commands.
 Accept native event lines up to 1 MiB for verbose command results; retain a failed
 attempt with a recovery diagnostic when that bound is exceeded.
+Disable host wrapper/worker bytecode writes so offline subprocess fixtures do not
+leave ignored source artifacts that block a finished writer's commit.
 
 ### Native Grok metadata
 
