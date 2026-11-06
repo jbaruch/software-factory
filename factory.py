@@ -97,6 +97,14 @@ def load_task(path) -> dict:
         raise FactoryError("Invalid task hold; restore the original state before continuing")
     admission = record["admission"]
     if admission is not None:
+        if (not isinstance(admission, dict)
+                or any(not isinstance(admission.get(key), str) or not admission[key].strip()
+                       for key in ("goal", "repository", "initial_candidate"))
+                or not Path(admission["repository"]).is_absolute()
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", admission["initial_candidate"])
+                or not isinstance(admission.get("acceptance"), list) or not admission["acceptance"]
+                or any(not isinstance(ref, str) or not ref.strip() for ref in admission["acceptance"])):
+            raise FactoryError("Invalid task admission; restore its goal, repository, acceptance and initial candidate")
         limits = admission.get("limits") if isinstance(admission, dict) else None
         if (not isinstance(limits, dict) or set(limits) != {"correction", "investigation"}
                 or any(type(limit) is not int or limit < 0 for limit in limits.values())):
@@ -204,6 +212,8 @@ def set_inputs(path, *, candidate, requirements):
 
 def record_result(path, *, assignment_id, candidate, requirements, outcome, artifacts):
     record = load_task(path)
+    if assignment_id not in record["assignments"]:
+        raise FactoryError(f"Unknown assignment {assignment_id!r}; use show --task {record['task']} to find its ID")
     assignment = record["assignments"][assignment_id]
     inputs = assignment["request"].get("inputs")
     if not valid_inputs(inputs):
@@ -335,6 +345,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if allowances is not None and purpose in allowances and allowances[purpose]["remaining"] <= 0:
         owner = "investigator" if purpose == "correction" else "operator"
         raise FactoryError(f"Task {purpose} allowance exhausted; route to {owner}")
+    if record["admission"] is not None:
+        current = record["inputs"]["candidate"]
+        if git_commit(record["admission"]["repository"], current) != current:
+            raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
     if record["rex"] is not None:
         rex = connect(record, binary, server)
     else:
