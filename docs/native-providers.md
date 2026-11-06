@@ -89,23 +89,28 @@ native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 
-`codex_worker.py` owns version-1 `*.codex.json` execution receipts and their
+`codex_worker.py` owns version-2 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
-to the worker. The reader accepts only version 1. Earlier unversioned raw streams
+to the worker. The stream reader accepts only version 1. Earlier unversioned raw streams
 are legacy version 0 and remain available for inspection, but refuse collection;
 they are never rewritten or used as permission to rerun an existing effect.
 Before starting a child the worker exclusively claims
 the stream and writes a `starting` receipt. Existing artifacts refuse a new
 execution. A receipt binds the job, input revisions, brief hash, working
-directory, resolved CLI, requested model/effort and writer mode. It records wall
+directory, frozen repository filesystem identity, resolved CLI, requested model/effort
+and writer mode. The worker verifies that repository identity before and after
+execution. It records wall
 timestamps, monotonic duration, exit code, native thread ID, compact report,
 nullable native usage, resulting Git candidate, stream path and error. The
 native events follow the official [non-interactive contract](https://learn.chatgpt.com/docs/non-interactive-mode).
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
-code. Schema changes belong to the worker. No older receipt versions exist.
+code. Schema changes belong to the worker. Receipt readers accept only version 2;
+version 1 lacks the repository pin and remains inspection-only, without migration
+or a new launch. Existing commands reconnect unchanged; they cannot acquire
+retroactive execution evidence.
 
 The launcher freezes the resolved native binary path after checking it is accessible and executable
 before saving a new assignment or consuming an attempt. Reconnection to an

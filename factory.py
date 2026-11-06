@@ -600,7 +600,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["admission"] is not None:
         replacements.update({"{candidate}": request["inputs"]["candidate"],
                              "{requirements}": request["inputs"]["requirements"],
-                             "{repository}": record["admission"]["repository"]})
+                             "{repository}": record["admission"]["repository"],
+                             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)})
     argv = [replacements.get(part, part) for part in command]
     assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
                             window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
@@ -654,7 +655,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, write=Fals
     if not Path(codex).is_absolute() or seconds <= 0:
         raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
     binary = Path(codex).resolve()
-    if not path.exists() or assignment_id not in load_task(path)["assignments"]:
+    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None:
         try:
             binary = Path(codex).resolve(strict=True)
             if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -668,6 +670,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, write=Fals
                "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
                "--requirements", "{requirements}", "--events", str(prefix) + ".jsonl",
                "--receipt", str(prefix) + ".json"]
+    if existing is None or "--repo-identity" in existing["request"]["command"]:
+        command.extend(["--repo-identity", "{repository_identity}"])
     return command + (["--write"] if write else [])
 
 
@@ -678,6 +682,8 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     command = assignment["request"]["command"]
     if command[:2] != [sys.executable, str(ROOT / "codex_worker.py")]:
         raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
+    if "--repo-identity" not in command:
+        raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
     args = parser().parse_args(command[2:])
     observed = status(rex, record, assignment)
     if observed["state"] != "exited":
@@ -688,13 +694,17 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
     except (OSError, ValueError, UnicodeDecodeError):
         raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
+    if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] == 1:
+        raise FactoryError("Legacy native receipt lacks repository identity; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != 1
+            or receipt["schema_version"] != 2
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or receipt.get("job") != record["task"] + "/" + assignment_id
             or not valid_inputs(receipt.get("inputs"))
             or receipt.get("inputs") != assignment["request"].get("inputs")
+            or not valid_repository_identity(receipt.get("repository_identity"))
+            or receipt["repository_identity"] != record["admission"]["repository_identity"]
             or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
             or receipt.get("cwd") != assignment["request"]["cwd"]
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
