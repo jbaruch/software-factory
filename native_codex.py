@@ -12,9 +12,16 @@ class CodexProbeError(Exception):
     pass
 
 
+async def send(process, message):
+    try:
+        process.stdin.write((json.dumps(message) + "\n").encode())
+        await process.stdin.drain()
+    except OSError:
+        raise CodexProbeError("Cannot write native Codex protocol; inspect the owned process, sign-in/connection and adapter compatibility before refreshing") from None
+
+
 async def exchange(process, identity, method, params):
-    process.stdin.write((json.dumps(dict(id=identity, method=method, params=params)) + "\n").encode())
-    await process.stdin.drain()
+    await send(process, dict(id=identity, method=method, params=params))
     deadline = asyncio.get_running_loop().time() + 20
     while True:
         try:
@@ -22,6 +29,8 @@ async def exchange(process, identity, method, params):
                                           timeout=max(0, deadline - asyncio.get_running_loop().time()))
         except TimeoutError:
             raise CodexProbeError(f"Native Codex {method} timed out; inspect native sign-in/connection before refreshing") from None
+        except OSError:
+            raise CodexProbeError("Cannot read native Codex protocol; inspect the owned process, sign-in/connection and adapter compatibility before refreshing") from None
         if not line:
             raise CodexProbeError("Native Codex closed its metadata channel; inspect native sign-in/configuration")
         try:
@@ -56,8 +65,7 @@ async def probe(binary, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     try:
         initialized = await exchange(process, 0, "initialize", {"clientInfo": {
             "name": "software_factory", "title": "Software Factory", "version": "0.1.0"}})
-        process.stdin.write(b'{"method":"initialized","params":{}}\n')
-        await process.stdin.drain()
+        await send(process, dict(method="initialized", params={}))
         account = await exchange(process, 1, "account/read", {"refreshToken": False})
         limits = await exchange(process, 2, "account/rateLimits/read", {})
         models, cursor = [], None
@@ -89,7 +97,10 @@ async def probe(binary, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         try:
             await asyncio.wait_for(process.wait(), timeout=5)
         except TimeoutError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass  # The owned child exited before the signal; still observe its exit below.
             await process.wait()
 
 

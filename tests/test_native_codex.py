@@ -40,6 +40,36 @@ class Process:
 
 
 class NativeMetadata(unittest.IsolatedAsyncioTestCase):
+    async def test_closed_protocol_pipes_identify_recovery(self):
+        for target, method, error in (("stdin", "write", BrokenPipeError("fixture")),
+                                      ("stdin", "drain", ConnectionResetError("fixture")),
+                                      ("stdout", "readline", ConnectionResetError("fixture"))):
+            process = Process(self.replies())
+            with self.subTest(method=method), patch.object(getattr(process, target), method, side_effect=error):
+                with self.assertRaisesRegex(native_codex.CodexProbeError, "inspect the owned process, sign-in/connection"):
+                    await native_codex.exchange(process, 0, "initialize", {})
+
+    async def test_exit_between_cleanup_timeout_and_kill_is_observed(self):
+        class RaceProcess(Process):
+            waits = 0
+            def terminate(self):
+                self.terminated = True
+            def kill(self):
+                raise ProcessLookupError("Already exited")
+            async def wait(self):
+                self.waits += 1
+                if self.waits == 1:
+                    raise TimeoutError("Fixture cleanup deadline")
+                self.returncode = 0
+                return 0
+        process = RaceProcess(self.replies())
+        async def spawn(*args, **kwargs):
+            return process
+        result = await native_codex.probe(sys.executable, spawn=spawn, clock=lambda: 100, timer=lambda: 10)
+        self.assertEqual(result["models"], [{"model": "fixture-model"}, {"model": "fixture-other"}])
+        self.assertEqual(process.waits, 2)
+        self.assertEqual(process.returncode, 0)
+
     def replies(self):
         return {"initialize": {"result": {"userAgent": "fixture-native/1"}},
                 "account/read": {"result": {"account": {"type": "chatgpt", "planType": "fixture"}}},

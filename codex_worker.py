@@ -16,6 +16,14 @@ class WorkerError(ValueError):
     pass
 
 
+def native_object(pairs):
+    # Observed CLI web-search telemetry repeats its item and execution IDs.
+    # Neither ID supplies evidence or authority; retain the raw line and omit both.
+    if sum(key == "id" for key, _ in pairs) > 1 and dict(pairs).get("type") == "web_search":
+        return factory.unique_object([(key, value) for key, value in pairs if key != "id"])
+    return factory.unique_object(pairs)
+
+
 def outcome_schema():
     return dict(type="object", additionalProperties=False,
                 properties=dict(outcome=dict(type="string", enum=sorted(factory.RESULT_OUTCOMES)),
@@ -85,7 +93,7 @@ def read_events(path):
             raise WorkerError("Unsupported native event record; inspect the original stream and update the adapter")
         try:
             record["data"].encode("utf-8")  # Invalid native bytes remain escaped evidence, never valid events.
-            events.append(json.loads(record["data"], object_pairs_hook=factory.unique_object))
+            events.append(json.loads(record["data"], object_pairs_hook=native_object))
         except (ValueError, UnicodeError):
             raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
     return events
@@ -97,11 +105,15 @@ async def stop_child(process):
     try:
         process.send_signal(signal.SIGINT)
     except ProcessLookupError:
+        await process.wait()
         return  # The owned process already exited.
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except TimeoutError:
-        process.kill()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass  # The owned child exited before the signal; still observe its exit below.
         await process.wait()
 
 
@@ -155,12 +167,15 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     events = []
     try:
         with os.fdopen(fd, "w") as stream:
-            process = await spawn(str(binary), "--no-daemon", "exec", "--json", "--color", "never",
-                                  "--output-schema", str(schema), "--model", args.model,
-                                  "--sandbox", "workspace-write" if args.write else "read-only",
-                                  "-c", "model_reasoning_effort=" + json.dumps(args.effort),
-                                  "--cd", ".", instructions,
-                                  stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+            try:
+                process = await spawn(str(binary), "--no-daemon", "exec", "--json", "--color", "never",
+                                      "--output-schema", str(schema), "--model", args.model,
+                                      "--sandbox", "workspace-write" if args.write else "read-only",
+                                      "-c", "model_reasoning_effort=" + json.dumps(args.effort),
+                                      "--cd", ".", instructions,
+                                      stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+            except OSError:
+                raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
 
             async def consume():
                 while line := await process.stdout.readline():
@@ -169,7 +184,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     stream.flush()
                     try:
                         line.decode("utf-8")
-                        event = json.loads(text, object_pairs_hook=factory.unique_object)
+                        event = json.loads(text, object_pairs_hook=native_object)
                     except (UnicodeDecodeError, ValueError):
                         raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
                     print(text, end="", flush=True)

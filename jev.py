@@ -160,6 +160,27 @@ def read_input(path, option):
         raise JevError(f"Cannot read {option} file {str(path)!r}; restore access and repair its UTF-8 JSON as {shape} before retrying") from None
 
 
+def read_catalog():
+    path = ROOT / "config/coordination.json"
+    try:
+        catalog = json.loads(path.read_text(), object_pairs_hook=unique_object)
+        if (not isinstance(catalog, dict) or type(catalog.get("schema_version")) is not int
+                or catalog["schema_version"] != 1 or not isinstance(catalog.get("questions"), list)):
+            raise ValueError("Invalid question catalog")
+        specs = catalog["questions"]
+        if any(not isinstance(spec, dict) or not isinstance(spec.get("id"), str)
+               or not isinstance(spec.get("options"), dict)
+               or not isinstance(spec.get("instructions"), (str, dict, list)) or not spec["instructions"]
+               for spec in specs):
+            raise ValueError("Invalid question specification")
+        # Check source structure without supplying or choosing real routing candidates.
+        placeholders = {spec["id"]: {} for spec in specs if "candidate" in spec["options"]}
+        compile_questions(specs, placeholders)
+        return specs
+    except (OSError, ValueError, UnicodeDecodeError, KeyError, TypeError, JevError):
+        raise JevError(f"Cannot read question catalog {str(path)!r}; restore access and repair its version-1 questions before compiling or evaluating") from None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -177,7 +198,7 @@ def main(argv=None):
         if args.action == "models":
             result = {"models": Jev().models()}
         else:
-            catalog = json.loads((ROOT / "config/coordination.json").read_text())["questions"]
+            catalog = read_catalog()
             selected = set(args.question)
             specs = [spec for spec in catalog if spec["id"] in selected]
             if len(specs) != len(args.question):

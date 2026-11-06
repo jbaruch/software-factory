@@ -30,6 +30,27 @@ class FakeOpener:
 
 
 class JevAdapter(unittest.TestCase):
+    def test_damaged_question_catalog_names_repair_before_provider_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            path = root / "config/coordination.json"
+            for payload in (None, b"\xff", b"{", b"[]", b'{"schema_version":1,"questions":{}}',
+                            b'{"schema_version":1,"questions":[{"id":"task-demand"}]}'):
+                if payload is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    path.write_bytes(payload)
+                errors = StringIO()
+                with self.subTest(payload=payload), patch.object(jev, "ROOT", root), patch.object(
+                        jev, "Jev", side_effect=AssertionError("No provider access")), redirect_stderr(errors):
+                    result = jev.main(["evaluate", "--question", "task-demand", "--state", str(root / "state.json"),
+                                       "--model", "fixture-model", "--evidence-revision", "fixture"])
+                self.assertEqual(result, 1)
+                self.assertIn("config/coordination.json", errors.getvalue())
+                self.assertIn("restore access and repair its version-1 questions", errors.getvalue())
+
     def evaluate(self, response=None, **changes):
         opener = FakeOpener(RESPONSE if response is None else response)
         client = jev.Jev("not-a-real-key", opener=opener)

@@ -116,6 +116,58 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.args.receipt.read_bytes(), before)
 
+    def test_duplicate_web_search_telemetry_ids_are_not_used_as_evidence(self):
+        raw = (b'{"type":"item.started","item":{"id":"item_20","type":"web_search",'
+               b'"id":"exec-fixed","query":"","action":{"type":"other"}}}\n')
+        payload = events()
+        lines = [json.dumps(event).encode() + b"\n" for event in payload]
+        self.process.lines = iter([*lines[:2], raw, *lines[2:]])
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed")
+        retained = [json.loads(line) for line in self.args.events.read_text().splitlines()]
+        self.assertEqual(retained[2]["data"], raw.decode())
+        decoded = worker.read_events(self.args.events)
+        self.assertNotIn("id", decoded[2]["item"])
+        self.assertEqual(worker.parse_events(decoded)["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
+
+    def test_other_native_duplicate_fields_still_refuse_decoding(self):
+        for raw in (
+            '{"type":"thread.started","thread_id":"first","thread_id":"second"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"first","text":"second"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":1,"input_tokens":2,"output_tokens":3}}',
+            '{"type":"item.started","item":{"type":"web_search","id":"one","id":"two","query":"first","query":"second"}}',
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                json.loads(raw, object_pairs_hook=worker.native_object)
+
+    def test_spawn_failure_retains_an_actionable_failed_receipt(self):
+        async def unavailable(*args, **kwargs):
+            raise FileNotFoundError("Fixture executable disappeared")
+        receipt = asyncio.run(worker.execute(self.args, spawn=unavailable, clock=lambda: 1000, timer=lambda: 10))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("restore executable access/local process resources", receipt["error"])
+        self.assertIsNone(receipt["exit_code"])
+        self.assertIsNone(receipt["report"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_exit_before_cleanup_kill_still_saves_the_final_receipt(self):
+        class RaceProcess(FakeProcess):
+            waits = 0
+            async def wait(self):
+                self.waits += 1
+                if self.waits == 1:
+                    raise TimeoutError("Fixture cleanup deadline")
+                self.returncode = 0
+                return 0
+            def kill(self):
+                raise ProcessLookupError("Already exited")
+        self.process = RaceProcess(events(), timeout=True)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertEqual(self.process.waits, 2)
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
     def test_zero_exit_without_result_is_failed_and_never_retried(self):
         self.process = FakeProcess(events()[:2])
         receipt = self.execute()

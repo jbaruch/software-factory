@@ -169,12 +169,13 @@ Each new admitted launch checks that its working directory belongs to that Git
 repository, is checked out at the selected candidate and has no uncommitted inputs.
 This includes ignored files and directories: use a clean isolated worktree and
 keep runtime state, caches and output outside that checkout. Verification clears
-ambient `GIT_*` overrides so repository/worktree/index/object/config environment
+ambient Git overrides (preserving standard author/committer identity) so repository/worktree/index/object/config environment
 settings cannot redirect the checks to another source. The exec consumer removes
 those overrides from the launched command too. Git reads bind the worktree to the
 actual checkout root; redirecting `core.worktree` settings and hidden index flags
-(`assume-unchanged`/`skip-worktree`) refuse execution. Submodule inspection ignores
-settings that suppress dirty submodules.
+(`assume-unchanged`/`skip-worktree`/`fsmonitor-valid`) refuse execution. Disable
+fsmonitor for the assignment checkout. This runtime refuses repositories containing
+submodules; recursive submodule input validation is not implemented.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults
