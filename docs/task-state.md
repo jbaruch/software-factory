@@ -182,6 +182,10 @@ index timestamps are only hints. Working-tree filters that change those bytes
 require a clean checkout without those transformations for this runtime.
 Verification disables replacement objects and the untracked cache, so neither
 can substitute the selected source or hide an added input.
+The launch wrapper also receives the worktree's absolute Git directory: linked
+worktrees share repository identity but cannot substitute for the assigned checkout.
+Child commands force `GIT_NO_REPLACE_OBJECTS=1`, keeping ordinary Git reads bound
+to the same unreplaced source used by verification.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults

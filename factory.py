@@ -294,8 +294,9 @@ def git_environment():
 
 
 def command_environment():
-    return {key: value for key, value in os.environ.items()
-            if key not in GIT_ROUTING_VARIABLES and not key.startswith("GIT_CONFIG")}
+    return {**{key: value for key, value in os.environ.items()
+               if key not in GIT_ROUTING_VARIABLES and not key.startswith("GIT_CONFIG")},
+            "GIT_NO_REPLACE_OBJECTS": "1"}
 
 
 def git_worktree(repository):
@@ -330,6 +331,13 @@ def git_common_dir(repository):
     result = git_run(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if result.returncode:
         raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
+    return Path(result.stdout.removesuffix("\n")).resolve()
+
+
+def git_dir(repository):
+    result = git_run(repository, "rev-parse", "--absolute-git-dir")
+    if result.returncode:
+        raise FactoryError("Cannot identify assignment worktree; restore its Git directory before launching")
     return Path(result.stdout.removesuffix("\n")).resolve()
 
 
@@ -373,10 +381,12 @@ def pinned_commit(repository, revision, identity):
     return candidate
 
 
-def check_checkout(repository, cwd, candidate, *, expected_identity=None):
+def check_checkout(repository, cwd, candidate, *, expected_identity=None, expected_git_dir=None):
     if expected_identity is not None and (not valid_repository_identity(expected_identity)
             or repository_identity(repository) != expected_identity):
         raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
+    if expected_git_dir is not None and git_dir(cwd) != Path(expected_git_dir):
+        raise FactoryError("Assignment worktree differs; restore its original Git directory and use the assigned checkout")
     if git_commit(repository, candidate) != candidate:
         raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
     if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
@@ -411,6 +421,8 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
     if expected_identity is not None and (repository_identity(repository) != expected_identity
                                           or repository_identity(cwd) != expected_identity):
         raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
+    if expected_git_dir is not None and git_dir(cwd) != Path(expected_git_dir):
+        raise FactoryError("Assignment worktree differs; restore its original Git directory and use the assigned checkout")
 
 
 def check_tracked_bytes(cwd, candidate):
@@ -715,8 +727,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["admission"] is not None:
         check_repository(record["admission"])
         current = record["inputs"]["candidate"]
+        worktree_git_dir = git_dir(cwd)
         check_checkout(record["admission"]["repository"], cwd, current,
-                       expected_identity=record["admission"]["repository_identity"])
+                       expected_identity=record["admission"]["repository_identity"],
+                       expected_git_dir=worktree_git_dir)
     if record["rex"] is not None:
         rex = connect(record, binary, server)
     else:
@@ -739,7 +753,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["admission"] is not None:
         argv = [sys.executable, str(ROOT / "checkout_exec.py"), "--identity",
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
-                "--candidate", record["inputs"]["candidate"], "--", *argv]
+                "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
                             window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
     record["assignments"][assignment_id] = assignment
