@@ -53,6 +53,14 @@ inventing a historical pin or accepting older receipts as new evidence. Execute
 the native child in the inherited, verified directory rather than reopening the
 saved pathname.
 
+### Operator-approved runtime and review exceptions
+
+Authorize native provider assignments through the factory's Rex adapter for
+runtime and conformance work, retaining task scope, isolated worktrees, budgets
+and permissions. Record the operator's temporary Claude-review waiver during
+the subscription outage expected to end Saturday afternoon, November 7. Policy
+review and CI remain required; restore the Claude gate on capacity recovery.
+
 ### Task admission
 
 Add task scope, acceptance references and an initial Git revision to the native
@@ -90,6 +98,9 @@ allow explicit admission limits when configuration defaults are unavailable.
 Clear ambient Git overrides during verification and refuse ignored worktree
 overlays, keeping revision-bound inputs tied to the selected commit. Decode
 malformed Rex process bytes at the transport boundary with compatibility guidance.
+Clear Git overrides in the launched command as well as verification. Bind Git
+inspection to the actual worktree, reject redirecting worktree configuration and
+hidden index flags, force submodule inspection, and explain malformed Git output.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and

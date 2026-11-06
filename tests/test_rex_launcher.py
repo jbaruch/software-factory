@@ -561,6 +561,99 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
 
+    def test_spawn_consumer_does_not_pass_git_overrides_to_the_command(self):
+        record = self.admit()
+        other = self.root / "copy"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(other)], check=True)
+        command = [sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
+            "import subprocess; subprocess.run(['git','branch','from-wrapper'],check=True)"]
+        environment = {**os.environ, "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+                       "GIT_INDEX_FILE": str(other / ".git" / "index")}
+        result = subprocess.run(command, cwd=self.repo, env=environment, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        for path, expected in ((self.repo, 0), (other, 1)):
+            observed = subprocess.run(["git", "-C", str(path), "show-ref", "--verify", "--quiet",
+                                       "refs/heads/from-wrapper"], check=False)
+            self.assertEqual(observed.returncode, expected)
+
+    def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
+        source = self.repo / "source.txt"
+        source.write_text("committed\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Tracked source")
+        record = self.admit()
+        other = self.root / "clean-copy"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(other)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.worktree", str(other)], check=True)
+        source.write_text("not committed\n")
+        before = self.path.read_bytes()
+        self.assertEqual(factory.git_run(str(self.repo), "rev-parse", "--show-toplevel").stdout.strip(), str(self.repo.resolve()))
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            self.start()
+        result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable,
+            "-c", "print('UNAUTHORIZED')"], cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("uncommitted inputs", result.stderr)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+        source.write_text("committed\n")
+        with self.assertRaisesRegex(factory.FactoryError, "restore core.worktree"):
+            self.start()
+
+    def test_hidden_index_flags_refuse_even_from_a_checkout_subdirectory(self):
+        source = self.repo / "source.txt"
+        source.write_text("committed\n")
+        (self.repo / "subdir").mkdir()
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Tracked source")
+        self.admit()
+        before = self.path.read_bytes()
+        for flag in ("assume-unchanged", "skip-worktree"):
+            subprocess.run(["git", "-C", str(self.repo), "update-index", "--" + flag, "source.txt"], check=True)
+            source.write_text("hidden edit\n")
+            with self.assertRaisesRegex(factory.FactoryError, "clear assume-unchanged/skip-worktree"):
+                self.start(cwd=str(self.repo / "subdir"))
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+            subprocess.run(["git", "-C", str(self.repo), "update-index", "--no-" + flag, "source.txt"], check=True)
+
+    def test_submodule_ignore_settings_cannot_hide_dirty_inputs(self):
+        module_source = self.root / "module-source"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(module_source)], check=True)
+        (module_source / "source.txt").write_text("committed\n")
+        subprocess.run(["git", "-C", str(module_source), "add", "source.txt"], check=True)
+        subprocess.run(["git", "-C", str(module_source), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+            "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "Module source"],
+            check=True, env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+                            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        subprocess.run(["git", "-C", str(self.repo), "-c", "protocol.file.allow=always",
+                         "submodule", "add", "--quiet", str(module_source), "module"], check=True)
+        self.commit("Include local fixture submodule")
+        self.admit()
+        subprocess.run(["git", "-C", str(self.repo), "config", "submodule.module.ignore", "all"], check=True)
+        (self.repo / "module" / "source.txt").write_text("dirty module\n")
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            self.start()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_malformed_git_process_output_explains_encoding_recovery(self):
+        self.admit()
+        before = self.path.read_bytes()
+        error = UnicodeDecodeError("utf-8", b"?? bad-\xff\n", 7, 8, "invalid start byte")
+        with patch.object(factory.subprocess, "run", side_effect=error):
+            with self.assertRaisesRegex(factory.FactoryError, "Cannot decode Git output; inspect Git/checkout filename encoding"):
+                self.start()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
     def test_invalid_admission_and_changed_limits_cannot_reset_task(self):
         for changes in ({"goal": " "}, {"acceptance": []}, {"acceptance": [""]}, {"corrections": -1}):
             with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):

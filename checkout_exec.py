@@ -25,7 +25,7 @@ def main(argv=None):
             raise factory.FactoryError("Invalid repository pin; inspect the original assignment before another attempt")
         # '.' uses the working directory Rex actually opened, not the saved pathname.
         factory.check_checkout(".", ".", args.candidate, expected_identity=identity)
-        os.execv(command[0], command)
+        os.execve(command[0], command, factory.git_environment())
     except factory.FactoryError as exc:
         print("checkout-exec: " + str(exc), file=sys.stderr)
         return 1
