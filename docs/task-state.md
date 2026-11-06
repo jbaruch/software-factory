@@ -86,7 +86,11 @@ Version 4 replaces that active pin with `{common_dir, repository_id}`. The path 
 absolute; the ID is a lowercase 32-character UUID hex string. Linked worktrees
 share the Git-local marker described below; ordinary clones do not inherit it.
 Before repository-backed mutations the owner verifies this identity and the
-initial commit. Launch passes the saved identity through checkout validation.
+initial commit. Revision reads verify the marker before and after Git resolves the commit. Launch
+passes the saved identity through checkout validation; `checkout_exec.py` checks
+the selected candidate and marker in Rex's actual working directory before
+executing any new admitted command. A refusal leaves the saved attempt available
+for inspection; it never retries the command. Existing panes reconnect unchanged.
 
 Older admissions upgrade with `repository_identity: null`, preserving scope,
 holds, attempts and reports without inventing a historical pin from today's path.
