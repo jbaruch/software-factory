@@ -17,6 +17,7 @@ repair from account/service recovery in HTTP diagnostics.
 Read the signed-in native account, metered quota buckets and model/effort catalog
 through an owned stdio app-server process. Preserve unknown fields and duplicate
 quota views without treating discovery as model access or lifecycle verification.
+Malformed protocol input gives inspection/update guidance and stops the owned probe.
 
 ### Native Codex results
 
@@ -28,6 +29,8 @@ inspection instead of rerunning them. Offline
 tests cover completion, timeout and collection; live execution remains unverified.
 Version local event records while preserving original native lines. Check the
 native executable before reserving a new attempt, preserving reconnect behavior.
+Reject damaged or mistyped receipts with actionable recovery diagnostics before
+registering any result.
 
 ### Task admission
 

@@ -526,14 +526,20 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         receipt = json.loads(args.receipt.read_text())
     except FileNotFoundError:
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
-    if (not isinstance(receipt, dict) or receipt.get("schema_version") != 1
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 1
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
-            or receipt.get("exit_code") != 0 or receipt.get("job") != record["task"] + "/" + assignment_id
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or receipt.get("job") != record["task"] + "/" + assignment_id
             or receipt.get("inputs") != assignment["request"].get("inputs")
             or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
             or receipt.get("cwd") != assignment["request"]["cwd"]
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
-            or receipt.get("writer") != args.write or receipt.get("events") != str(args.events)):
+            or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
+            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
+            or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
     native = parse_events(read_events(args.events))
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):

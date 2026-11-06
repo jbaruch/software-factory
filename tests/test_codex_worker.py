@@ -234,7 +234,9 @@ class NativeResults(unittest.TestCase):
     def test_tampered_receipt_and_unfinished_process_cannot_supply_result(self):
         record, assignment = self.launch_assignment()
         original = json.loads(self.args.receipt.read_text())
-        for change in (dict(job="task/other"), dict(report=dict(outcome="completed", artifacts=["other"]))):
+        for change in (dict(job="task/other"), dict(report=dict(outcome="completed", artifacts=["other"])),
+                       dict(schema_version=True), dict(schema_version=1.0),
+                       dict(exit_code=False), dict(writer=0)):
             factory.save(self.args.receipt, {**copy.deepcopy(original), **change})
             with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
                 with self.assertRaises(factory.FactoryError):
@@ -243,6 +245,16 @@ class NativeResults(unittest.TestCase):
         with patch.object(self.rex, "call", return_value={"child": {"pid": 1}}):
             with self.assertRaisesRegex(factory.FactoryError, "not exited"):
                 factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+
+    def test_damaged_receipt_explains_how_to_recover_without_recording_a_result(self):
+        record, assignment = self.launch_assignment()
+        for data in (b'{"truncated":', b'\xff'):
+            self.args.receipt.write_bytes(data)
+            with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.subTest(data=data), self.assertRaisesRegex(factory.FactoryError,
+                        "Cannot read native receipt .*inspect or restore the original artifact"):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
 
 
 if __name__ == "__main__":
