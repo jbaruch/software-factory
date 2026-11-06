@@ -66,6 +66,8 @@ identity. Conflicting duplicates, map/identity mismatches and malformed known
 fields fail with inspection/update guidance and no partial CLI output.
 Duplicate comparison uses curated pool facts, so omitted/null unknowns and
 irrelevant private metadata do not create extra pools or false conflicts.
+An ID-less default alongside a nonempty ID-keyed view refuses curation; its
+relationship to those pools is unknown and cannot supply extra capacity.
 
 Missing/null facts remain JSON null, including a null secondary window. Missing
 pools or model catalogs remain null, distinct from explicitly empty collections.

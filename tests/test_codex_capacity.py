@@ -133,6 +133,20 @@ class Curation(unittest.TestCase):
                 capacity.curate(raw)
             self.assertNotIn("PRIVATE_VALUE", str(caught.exception))
 
+    def test_unidentified_default_cannot_supply_an_extra_or_conflicting_pool(self):
+        for used in (11, 99):
+            for identity in (None, "missing"):
+                raw = recorded()
+                default = raw["rate_limits"]["rateLimits"]
+                if identity == "missing":
+                    del default["limitId"]
+                else:
+                    default["limitId"] = None
+                default["primary"]["usedPercent"] = used
+                with self.subTest(used=used, identity=identity), self.assertRaisesRegex(
+                        capacity.CapacityError, "unidentified rateLimits.*inspect native metadata"):
+                    capacity.curate(raw)
+
     def test_identity_plan_and_model_ambiguity_refuse(self):
         for change in (lambda r: r["rate_limits"]["rateLimitsByLimitId"]["codex"].update(limitId="other"),
                        lambda r: r["account"]["account"].update(planType="other"),

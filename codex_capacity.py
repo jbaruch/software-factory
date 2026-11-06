@@ -106,9 +106,11 @@ def curate(observation) -> dict:
         pools.append(pool)
 
     default = limits.get("rateLimits")
-    if default is not None:
-        add_pool(default)
     by_id = limits.get("rateLimitsByLimitId")
+    if default is not None:
+        if by_id and isinstance(default, dict) and default.get("limitId") is None:
+            refuse("unidentified rateLimits alongside rateLimitsByLimitId")
+        add_pool(default)
     if by_id is not None:
         if not isinstance(by_id, dict):
             refuse("rateLimitsByLimitId")
