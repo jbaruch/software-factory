@@ -731,6 +731,17 @@ class TaskAdmission(unittest.TestCase):
             os.utime(path, ns=(fixed, fixed))
         self.assert_source_refuses_at_both_launch_boundaries(record)
 
+    def test_empty_untracked_directory_cannot_change_revision_bound_inputs(self):
+        package = self.repo / "package"
+        package.mkdir()
+        (package / "source.py").write_text("VALUE = 'committed'\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "package"], check=True)
+        self.commit("Package source")
+        record = self.admit()
+        (package / "feature.enabled").mkdir()
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        self.assert_source_refuses_at_both_launch_boundaries(record)
+
     def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
         source = self.repo / "source.txt"
         source.write_text("committed\n")
