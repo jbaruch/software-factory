@@ -43,6 +43,8 @@ during the version 2 state upgrade.
 Refuse damaged schema downgrades and incomplete request/evidence identities
 before they can erase history or authorize dependent launches. Unknown assignment
 diagnostics direct the operator to the recorded IDs.
+Keep surviving Rex IDs from masking missing attempt history, verify the live
+session identity before reuse and explain recovery for unreadable task/repo inputs.
 
 ### CI and review
 

@@ -82,6 +82,10 @@ def load_task(path) -> dict:
         record = json.loads(path.read_text())
     except FileNotFoundError:
         raise FactoryError(f"Unknown task {path.stem!r}; correct its ID or create it with admit/start") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise FactoryError(f"Cannot decode task {path.stem!r}; restore the original task record before continuing") from None
+    except OSError:
+        raise FactoryError(f"Cannot read task {path.stem!r}; restore access to its original state file") from None
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
@@ -97,6 +101,8 @@ def load_task(path) -> dict:
             for item in record["assignments"].values())):
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     connection = record["rex"]
+    if not record["assignments"] and (connection is not None or record["session_id"] is not None):
+        raise FactoryError("Missing assignment history for recorded Rex identity; restore the original task record")
     if connection is None:
         if record["assignments"] or record["session_id"] is not None:
             raise FactoryError("Missing pinned Rex identity; restore the original task record before continuing")
@@ -234,7 +240,10 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
                   investigation=policies["max_investigations"] if investigations is None else investigations)
     if any(type(limit) is not int or limit < 0 for limit in limits.values()):
         raise FactoryError("Attempt limits must be nonnegative integers")
-    repository = str(Path(repository).resolve(strict=True))
+    try:
+        repository = str(Path(repository).resolve(strict=True))
+    except OSError:
+        raise FactoryError("Cannot access --repo; supply an existing accessible Git checkout") from None
     admission = dict(goal=goal, repository=repository, acceptance=acceptance, limits=limits)
     record = load_task(path) if path.exists() else new_task(task)
     if record["admission"] is not None:
@@ -336,7 +345,16 @@ def connect(record, binary=None, server=None):
     who = rex.call("whoami", "--json")
     if who["host_id"] != connection["host_id"]:
         raise FactoryError("Connected Rex host differs from the recorded task host")
+    if record["session_id"] is not None:
+        check_session(rex, record, record["session_id"])
     return rex
+
+
+def check_session(rex, record, session_id):
+    view = rex.call("session", "inspect", session_id, "--json")
+    if view.get("label") != record["session_label"]:
+        raise FactoryError("Rex session identity differs from the task; inspect the original session before continuing")
+    return view
 
 
 def reconcile(rex, record, assignment):
@@ -349,7 +367,7 @@ def reconcile(rex, record, assignment):
             raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
                                + record["session_label"])
         session_id = matches[0]["session_id"]
-    view = rex.call("session", "inspect", session_id, "--json")
+    view = check_session(rex, record, session_id)
     windows = [item for item in view.get("windows", [])
                if item.get("label") == assignment["window_label"]]
     blocks = [block for window in windows for layer in window.get("layers", [])
