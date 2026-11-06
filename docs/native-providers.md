@@ -66,6 +66,44 @@ or migration reader; keep retained observations private and refresh before use.
 Native usage follows [Grok's CLI reference](https://docs.x.ai/build/cli/reference) and
 [Antigravity's model listing](https://antigravity.google/docs/cli/headless/#select-a-model-effort-or-agent).
 
+## Grok authenticated metadata
+
+```sh
+python3 native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
+```
+
+The owner script starts one private ACP stdio child and requests only
+`initialize` and `authenticate(cached_token)`. It uses the initialization model
+state without creating a native conversation or requesting a model turn. The
+native catalog reports effort choices per model; missing effort metadata remains
+unknown. Native catalogs may be cached and do not prove inference eligibility.
+
+The child disables automatic updates, subagents, web search, the shared leader
+and automatic worktree cleanup (`GROK_WORKTREE_AUTO_GC=0`). API-key environment
+overrides refuse the probe, including the legacy `GROK_CODE_XAI_API_KEY` name.
+Cached authentication must report `Oidc`; interactive login and API-key fallback
+are not requested. Only the probe's own child is terminated on completion/failure.
+
+`native_grok.py` owns its transient schema-version-1 `grok-native-metadata`
+envelope: route, resolved binary, requested working directory, agent version,
+observation time/duration, curated `authentication`, original model entries,
+current model ID and native capability metadata. Authentication includes the
+chosen method, native mode, nullable subscription tier, access gate and the
+native backend-billing flag. A gate contains only its message and optional label.
+Email, team identifiers and login URLs are excluded. See the upstream
+[auth metadata contract](https://github.com/xai-org/grok-build/blob/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8/crates/codegen/xai-grok-login/src/meta.rs)
+for field meanings; the backend-billing flag is not a monetary usage amount.
+
+Readiness remains `unverified` and `quota_observation` stays null. A clear access
+gate and a subscription label supply no quota headroom, pool independence or
+worker-lifecycle proof. Consumers use reported model entries, rather than the
+current/default model alone, as candidates. Unsupported versions or malformed
+metadata require a fresh compatible observation, never inferred eligibility.
+The adapter has no persistence/migration reader; keep retained output private.
+
+Tests use fixed ACP replies and fake processes. Live discovery is recorded in
+the [implementation inventory](implementation.md).
+
 ## Explicit Codex assignments
 
 `factory.py codex-start` builds one native `codex exec` invocation in an admitted
