@@ -132,6 +132,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     if not factory.valid_repository_identity(identity):
         raise factory.FactoryError("Invalid repository identity; inspect the original assignment before another attempt")
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity)
+    factory.check_checkout(".", ".", args.candidate, expected_identity=identity)
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
     receipt = dict(schema_version=3, kind="codex-execution", job=args.job, state="starting",
@@ -158,7 +159,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                   "--output-schema", str(schema), "--model", args.model,
                                   "--sandbox", "workspace-write" if args.write else "read-only",
                                   "-c", "model_reasoning_effort=" + json.dumps(args.effort),
-                                  "--cd", str(args.cwd), instructions,
+                                  "--cd", ".", instructions,
                                   stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
 
             async def consume():
@@ -185,8 +186,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
         receipt.update(parse_events(events))
-        candidate = factory.git_commit(str(args.cwd), "HEAD")
-        factory.check_checkout(str(args.repo), str(args.cwd), candidate, expected_identity=identity)
+        candidate = factory.git_commit(".", "HEAD")
+        factory.check_checkout(".", ".", candidate, expected_identity=identity)
         if not args.write and candidate != args.candidate:
             raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
         receipt.update(candidate=candidate, state="completed")

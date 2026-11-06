@@ -49,7 +49,9 @@ Identify damaged preflight inputs and reject duplicate receipt/event keys before
 registering results.
 Carry the admitted repository identity into worker preflight/postflight checks and
 version-3 receipts using the Git-local marker. Preserve legacy command reconnection and inspection without
-inventing a historical pin or accepting older receipts as new evidence.
+inventing a historical pin or accepting older receipts as new evidence. Execute
+the native child in the inherited, verified directory rather than reopening the
+saved pathname.
 
 ### Task admission
 
