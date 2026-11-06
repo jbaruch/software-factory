@@ -132,6 +132,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     if not isinstance(event, dict):
                         raise factory.FactoryError("Native output is not an event object; inspect the retained stream")
                     events.append(event)
+                    if (event.get("type") == "thread.started" and receipt["thread_id"] is None
+                            and isinstance(event.get("thread_id"), str) and event["thread_id"]):
+                        receipt["thread_id"] = event["thread_id"]
                 return await process.wait()
 
             receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
@@ -150,6 +153,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     finally:
         if process is not None:
             await stop_child(process)
+            receipt["exit_code"] = process.returncode
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)
         factory.save(args.receipt, receipt)
     return receipt

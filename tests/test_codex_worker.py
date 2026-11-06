@@ -36,9 +36,10 @@ class FakeProcess:
         self.signals = []
 
     async def readline(self):
-        if self.timeout:
+        line = next(self.lines, None)
+        if line is None and self.timeout:
             raise TimeoutError("fixture")
-        return next(self.lines, b"")
+        return line or b""
 
     async def wait(self):
         self.returncode = self.exit_code
@@ -115,11 +116,13 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
 
     def test_timeout_stops_only_owned_child_and_retains_failed_attempt(self):
-        self.process = FakeProcess([], timeout=True)
+        self.process = FakeProcess(events()[:2], exit_code=-2, timeout=True)
         receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("allowance expired", receipt["error"])
         self.assertEqual(len(self.process.signals), 1)
+        self.assertEqual(receipt["exit_code"], -2)
+        self.assertEqual(receipt["thread_id"], "thread-fixture")
         self.assertTrue(self.args.events.exists())
 
     def test_changed_brief_and_api_override_refuse_before_native_spawn(self):

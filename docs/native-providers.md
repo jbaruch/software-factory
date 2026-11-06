@@ -84,3 +84,9 @@ collection. The task store remains governed by its own schema. Repeated
 collection reuses the same immutable result. Changing task inputs leaves an
 older result visible but stale. A native exit or specialist approval does not
 accept the task, establish independent verification or satisfy release gates.
+
+The complete CLI → Rex → receipt → collection path has also been exercised
+against a harmless local event fixture on Rex API revision 11. Reconnection
+reused the same block. A timed-out fixture was interrupted and refused
+collection. These are mechanical integration observations; no native model turn
+or specialist judgment was performed by that check.

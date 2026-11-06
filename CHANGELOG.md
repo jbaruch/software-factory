@@ -21,7 +21,8 @@ quota views without treating discovery as model access or lifecycle verification
 Add explicit model/effort assignments through Rex with private native events,
 before-start receipts and compact revision-bound result collection. Reject
 altered briefs, unsuccessful or incomplete native runs and conflicting evidence.
-Retain uncertain attempts for inspection instead of rerunning them. Offline
+Retain uncertain attempts, observed thread identity and child exit status for
+inspection instead of rerunning them. Offline
 tests cover completion, timeout and collection; live execution remains unverified.
 
 ### Task admission
