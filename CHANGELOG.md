@@ -34,3 +34,6 @@ intent when returned Rex IDs disagree with the live pane, and explain Git proces
 failures and session/history mismatch recovery.
 Bind session/window marker formats to their task and assignment owners, and
 allow explicit admission limits when configuration defaults are unavailable.
+Pin new admissions to the Git common directory's filesystem identity in task
+schema version 3. Preserve older history with an unknown pin and require operator
+authorization for a new admission before further repository-backed work.
