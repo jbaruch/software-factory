@@ -16,6 +16,8 @@ import uuid
 ROOT = Path(__file__).resolve().parent
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 REPOSITORY_MARKER = "software-factory-repository.json"
+GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+                          "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
 
 
 class FactoryError(Exception):
@@ -42,6 +44,8 @@ class Rex:
                 capture_output=True, text=True, timeout=20, check=False)
         except UnicodeDecodeError:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
+        except (OSError, subprocess.TimeoutExpired):
+            raise FactoryError("Cannot reach the pinned Rex binary/server; restore its availability and reconcile the recorded session before retrying effects") from None
         if result.returncode:
             raise FactoryError(result.stderr.strip() or "Rex command failed")
         if raw:
@@ -279,7 +283,8 @@ def valid_legacy_repository_identity(value):
 
 
 def git_environment():
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("GIT_") or key in GIT_IDENTITY_VARIABLES}
 
 
 def git_worktree(repository):
@@ -313,7 +318,7 @@ def git_common_dir(repository):
     result = git_run(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if result.returncode:
         raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
-    return Path(result.stdout.strip()).resolve()
+    return Path(result.stdout.removesuffix("\n")).resolve()
 
 
 def repository_identity(repository, *, create=False):
@@ -364,12 +369,19 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
         raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
     if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
         raise FactoryError("Assignment checkout differs from the selected candidate; use its worktree at that commit")
-    flags = git_run(cwd, "ls-files", "--recurse-submodules", "-v", "-z")
+    monitor = git_run(cwd, "config", "--get", "core.fsmonitor")
+    if monitor.returncode not in (0, 1):
+        raise FactoryError("Cannot inspect fsmonitor configuration; restore Git config access before launching")
+    if monitor.returncode == 0 and monitor.stdout.strip().lower() not in {"false", "no", "off", "0"}:
+        raise FactoryError("Assignment uses fsmonitor; disable core.fsmonitor and clear fsmonitor-valid flags before launching")
+    flags = git_run(cwd, "ls-files", "--stage", "-v", "-f", "-z")
     if flags.returncode:
         raise FactoryError("Cannot inspect assignment index; restore Git index access before launching")
     if any(entry and (entry[0].islower() or entry[0] == "S") for entry in flags.stdout.split("\0")):
-        raise FactoryError("Assignment index hides tracked inputs; clear assume-unchanged/skip-worktree flags or use a clean full checkout")
-    changed = git_run(cwd, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+        raise FactoryError("Assignment index hides tracked inputs; clear assume-unchanged/skip-worktree/fsmonitor-valid flags or use a clean full checkout")
+    if any(entry[2:].startswith("160000 ") for entry in flags.stdout.split("\0") if entry):
+        raise FactoryError("Assignment contains submodules; this runtime requires a checkout without submodules before launching")
+    changed = git_run(cwd, "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
                       "--ignore-submodules=none")
     if changed.returncode:
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
@@ -380,7 +392,7 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
         raise FactoryError("Cannot inspect worktree configuration; restore Git config access before launching")
     if configured.returncode == 0:
         gitdir = git_run(cwd, "rev-parse", "--absolute-git-dir")
-        if gitdir.returncode or (Path(gitdir.stdout.strip()) / configured.stdout.strip()).resolve() != Path(git_worktree(cwd)):
+        if gitdir.returncode or (Path(gitdir.stdout.removesuffix("\n")) / configured.stdout.removesuffix("\n")).resolve() != Path(git_worktree(cwd)):
             raise FactoryError("Git configuration redirects the command's worktree; restore core.worktree or use a clean isolated worktree")
     if expected_identity is not None and (repository_identity(repository) != expected_identity
                                           or repository_identity(cwd) != expected_identity):
