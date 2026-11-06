@@ -593,6 +593,56 @@ class TaskAdmission(unittest.TestCase):
         identity = subprocess.check_output(["git", "-C", str(self.repo), "log", "-1", "--format=%an|%ae|%cn|%ce"], text=True).strip()
         self.assertEqual(identity, "Fixture Author|author@example.invalid|Fixture Committer|committer@example.invalid")
 
+    def test_spawn_consumer_preserves_git_transport_and_prompt_settings(self):
+        record = self.admit()
+        settings = {"GIT_SSH_COMMAND": "ssh -o BatchMode=yes", "GIT_ASKPASS": "/fixture/askpass",
+                    "GIT_SSL_CAINFO": "/fixture/ca.pem", "GIT_TERMINAL_PROMPT": "0"}
+        result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
+            "import json,os,sys; expected=json.loads(sys.argv[1]); sys.exit(0 if all(os.environ.get(k)==v for k,v in expected.items()) else 2)",
+            json.dumps(settings)], cwd=self.repo, env={**os.environ, **settings},
+            capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_stat_hints_cannot_hide_changed_source_bytes(self):
+        source = self.repo / "source.txt"
+        source.write_bytes(b"committed\n")
+        os.utime(source, ns=(946684800000000000, 946684800000000000))
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Tracked source")
+        record = self.admit()
+        for key, value in (("core.trustctime", "false"), ("core.checkStat", "minimal")):
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
+        source.write_bytes(b"concealed\n")
+        os.utime(source, ns=(946684800000000000, 946684800000000000))
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "source bytes or modes differ"):
+            self.start()
+        result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable,
+            "-c", "print('must not launch')"], cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("source bytes or modes differ", result.stderr)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_filemode_config_cannot_hide_changed_executable_mode(self):
+        source = self.repo / "source.txt"
+        source.write_bytes(b"committed\n")
+        source.chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Executable source")
+        self.admit()
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.filemode", "false"], check=True)
+        source.chmod(0o644)
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        with self.assertRaisesRegex(factory.FactoryError, "source bytes or modes differ"):
+            self.start()
+        self.assertEqual(FakeRex.calls, [])
+
     def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
         source = self.repo / "source.txt"
         source.write_text("committed\n")
