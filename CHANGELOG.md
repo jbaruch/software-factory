@@ -2,6 +2,14 @@
 
 ## 0.1.0 — 2026-11-05
 
+### Safe Codex capacity snapshot
+
+Curate one native metadata probe into account type/plan, native allowance pools,
+overlapping quota windows and actual model/effort IDs. Preserve unknown values,
+deduplicate pool identities and refuse conflicting or malformed observations.
+Omit account identifiers, raw initialization and billing/credit data. This exposes
+metadata facts; it does not establish eligibility or automate scheduling.
+
 ### Native Grok metadata
 
 Observe cached native sign-in, access gates, model IDs and supported effort

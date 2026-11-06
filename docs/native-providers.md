@@ -41,6 +41,39 @@ lifecycle and subscription eligibility. Do not substitute API-key billing for
 subscription routes. See the [implementation inventory](implementation.md) for
 provider coverage.
 
+## Safe Codex capacity snapshot
+
+```sh
+python3 codex_capacity.py --codex '/absolute/path/to/codex'
+```
+
+`snapshot(binary)` calls `native_codex.probe` once, with no retry or local state.
+`curate(observation)` accepts an existing observation without provider access.
+Only native observation schema 1 is accepted; missing or unsupported versions
+refuse rather than interpreting a different format as capacity.
+The version-1 JSON allowlists `observed_at`, resolved `binary`, native `route`,
+account `type`/`plan`, `ordinaryUsageAllowed`, `pools` and actual `models`.
+Account IDs, email, tokens, raw initialization and credit/billing data are omitted.
+Plan comes from native `planType` metadata on the account response, account or
+rate-limit response/snapshots when supplied; conflicting plans refuse curation.
+
+Each pool retains its native `limit_id` and separate `primary`/`secondary`
+windows: `used_percent`, `remaining_percent` (100 minus observed use),
+`duration_minutes` and integer Unix `resets_at`. The windows overlap and cannot
+be added; each observed constraint applies to scheduling. Matching default
+`rateLimits` and `rateLimitsByLimitId` snapshots are deduplicated by native
+identity. Conflicting duplicates, map/identity mismatches and malformed known
+fields fail with inspection/update guidance and no partial CLI output.
+
+Missing/null facts remain JSON null, including a null secondary window. Missing
+pools or model catalogs remain null, distinct from explicitly empty collections.
+Model entries retain the native `model`, optional picker `id`, supported
+`effort_ids` and `default_effort_id`; unknown effort choices remain null.
+Unknown usage is never unlimited. No credits become quota or dollars, and no
+metadata establishes model eligibility, execution readiness or observation
+freshness. Scheduling, reservations and views must validate observations for
+their own decisions. The implementation inventory owns verification status.
+
 ## Grok and Antigravity catalogs
 
 ```sh
