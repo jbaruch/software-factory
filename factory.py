@@ -556,11 +556,14 @@ def collect_codex(path, assignment_id, rex, record, assignment):
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or receipt.get("job") != record["task"] + "/" + assignment_id
+            or not valid_inputs(receipt.get("inputs"))
             or receipt.get("inputs") != assignment["request"].get("inputs")
             or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
             or receipt.get("cwd") != assignment["request"]["cwd"]
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
+            or not isinstance(receipt.get("candidate"), str)
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
             or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
             or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
