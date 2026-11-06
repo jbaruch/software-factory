@@ -24,9 +24,25 @@ python3 scripts/check_design.py
 acr validate . --json
 ```
 
+Install `requirements-dev.txt` to run `pyright --warnings`. The Factory checks
+workflow runs diagnostics, offline tests, design checks and pinned ACR validation.
+Run `pre-commit install` after installing development requirements to enable the
+pinned secret scanner on commits.
+
 The Python checks use the standard library. `acr` is a separate prerequisite for package validation. The reference model in `contracts.py` expresses intended observable behavior. Launcher tests use a fake server; the opt-in live smoke check is separate. Passing these checks does not establish complete provider integration or Jev judgment accuracy.
 
 ## Distribution
+
+| Skill | Purpose |
+| --- | --- |
+| `factory` | Inspect or coordinate an explicitly assigned factory task |
+
+The package declares no global rules. Install its skill with:
+
+```sh
+acr install github:jbaruch/software-factory
+acr realize
+```
 
 The root `agent-plugin.yaml` declares the agent-facing skills. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); no package release is published yet. ACR validation proves source structure, not publication, real-agent operation or live model access.
 
