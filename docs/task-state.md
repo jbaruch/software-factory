@@ -171,11 +171,15 @@ This includes ignored files and directories: use a clean isolated worktree and
 keep runtime state, caches and output outside that checkout. Verification clears
 ambient Git overrides (preserving standard author/committer identity) so repository/worktree/index/object/config environment
 settings cannot redirect the checks to another source. The exec consumer removes
-those overrides from the launched command too. Git reads bind the worktree to the
+those overrides from the launched command too, preserving non-routing settings
+such as SSH, credential helpers, TLS trust and terminal prompting. Git reads bind the worktree to the
 actual checkout root; redirecting `core.worktree` settings and hidden index flags
 (`assume-unchanged`/`skip-worktree`/`fsmonitor-valid`) refuse execution. Disable
 fsmonitor for the assignment checkout. This runtime refuses repositories containing
 submodules; recursive submodule input validation is not implemented.
+Tracked file bytes and executable/symlink modes must match the raw candidate tree;
+index timestamps are only hints. Working-tree filters that change those bytes
+require a clean checkout without those transformations for this runtime.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults

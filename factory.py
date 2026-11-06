@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,11 @@ RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 REPOSITORY_MARKER = "software-factory-repository.json"
 GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
                           "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
+GIT_ROUTING_VARIABLES = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+    "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_IMPLICIT_WORK_TREE",
+    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_QUARANTINE_PATH"}
 
 
 class FactoryError(Exception):
@@ -287,6 +293,11 @@ def git_environment():
             if not key.startswith("GIT_") or key in GIT_IDENTITY_VARIABLES}
 
 
+def command_environment():
+    return {key: value for key, value in os.environ.items()
+            if key not in GIT_ROUTING_VARIABLES and not key.startswith("GIT_CONFIG")}
+
+
 def git_worktree(repository):
     current = Path(repository).resolve()
     for directory in (current, *current.parents):
@@ -387,6 +398,7 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
     if changed.stdout:
         raise FactoryError("Assignment checkout has uncommitted inputs (including ignored files); use a clean worktree and keep runtime state/output outside it")
+    check_tracked_bytes(cwd, candidate)
     configured = git_run(cwd, "config", "--path", "--get", "core.worktree")
     if configured.returncode not in (0, 1):
         raise FactoryError("Cannot inspect worktree configuration; restore Git config access before launching")
@@ -397,6 +409,37 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
     if expected_identity is not None and (repository_identity(repository) != expected_identity
                                           or repository_identity(cwd) != expected_identity):
         raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
+
+
+def check_tracked_bytes(cwd, candidate):
+    """Check source bytes/modes against the commit without trusting index stat hints."""
+    tree = git_run(cwd, "ls-tree", "-r", "-z", "--full-tree", candidate)
+    if tree.returncode:
+        raise FactoryError("Cannot read candidate tree; restore Git object access before launching")
+    root = Path(git_worktree(cwd))
+    try:
+        for entry in tree.stdout.split("\0"):
+            if not entry:
+                continue
+            metadata, name = entry.split("\t", 1)
+            mode, kind, expected = metadata.split()
+            path = root / name
+            info = path.lstat()
+            if kind != "blob" or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
+                raise FactoryError("Assignment source differs from the candidate tree; restore a clean full checkout before launching")
+            if stat.S_ISLNK(info.st_mode):
+                actual_mode, data = "120000", os.fsencode(os.readlink(path))
+            elif stat.S_ISREG(info.st_mode):
+                actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
+                data = path.read_bytes()
+            else:
+                raise FactoryError("Assignment source has an unsupported file type; restore a clean full checkout before launching")
+            algorithm = "sha1" if len(expected) == 40 else "sha256"
+            observed = hashlib.new(algorithm, b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+            if actual_mode != mode or observed != expected:
+                raise FactoryError("Assignment source bytes or modes differ from the candidate; restore a clean full checkout (without working-tree filters) before launching")
+    except OSError:
+        raise FactoryError("Cannot read assignment source; restore candidate files and access before launching") from None
 
 
 def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None):
