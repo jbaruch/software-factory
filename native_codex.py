@@ -41,6 +41,8 @@ async def exchange(process, identity, method, params):
             raise CodexProbeError("Malformed native Codex protocol; inspect its connection and update the adapter before scheduling") from None
         if not isinstance(message, dict):
             raise CodexProbeError("Native Codex returned malformed metadata; update the adapter before scheduling")
+        if "id" in message and type(message["id"]) is not int:
+            raise CodexProbeError("Malformed native Codex response identity; inspect the owned channel and update the adapter before scheduling")
         if message.get("id") != identity or "method" in message:
             continue
         if "error" in message:

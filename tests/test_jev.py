@@ -39,7 +39,7 @@ class JevAdapter(unittest.TestCase):
         for raw in (b'{"model":"first","model":"last"}',
                     b'{"answers":{"q":{"choice":"a","choice":"b"}}}',
                     *[(json.dumps(RESPONSE)[:-1] + ',"diagnostic":{"unused":' + number + '}}').encode()
-                      for number in ('NaN', 'Infinity', '-Infinity', '1e999')]):
+                      for number in ('NaN', 'Infinity', '-Infinity', '1e999', str(10 ** 400))]):
             client = jev.Jev("not-a-real-key", opener=RawOpener(raw))
             with self.subTest(raw=raw), self.assertRaisesRegex(jev.JevError, "returned invalid JSON"):
                 client.request("systemone", {})
@@ -204,6 +204,7 @@ class JevAdapter(unittest.TestCase):
             for option in ("--state", "--candidates"):
                 for data in (None, b'{"truncated":', b'\xff', b'1', b'null', b'true',
                              b'NaN', b'{"invalid": Infinity}', b'{"invalid": 1e309}',
+                             ('{"nested":{"invalid":' + str(10 ** 400) + '}}').encode(),
                              b'{"duplicate": {}, "duplicate": {}}'):
                     if data is not None:
                         path.write_bytes(data)

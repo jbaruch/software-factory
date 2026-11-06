@@ -138,8 +138,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError(f"Cannot access native CLI {str(args.codex)!r}; inspect/restore the saved executable before authorizing another attempt") from None
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise factory.FactoryError(f"Native CLI {str(binary)!r} is not executable; inspect/restore the saved executable before authorizing another attempt")
-    if args.seconds <= 0:
-        raise factory.FactoryError("Supply a positive native execution allowance before creating an attempt")
+    if type(args.seconds) is not int or not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS:
+        raise factory.FactoryError(f"Supply a positive native execution allowance of at most {factory.MAX_NATIVE_SECONDS} seconds before creating an attempt")
     if os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):
         raise factory.FactoryError("Remove API-key overrides from this worker environment and use native ChatGPT sign-in")
     try:

@@ -137,6 +137,14 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(native_codex.CodexProbeError, "initialize timed out; inspect"):
                 await native_codex.exchange(process, 0, "initialize", {})
 
+    async def test_boolean_response_ids_cannot_supply_initialize_or_account_metadata(self):
+        for identity, method, raw in ((0, "initialize", b'{"id":false,"result":{}}\n'),
+                                      (1, "account/read", b'{"id":true,"result":{}}\n')):
+            process = Process(self.replies())
+            with self.subTest(method=method), patch.object(process.stdout, "readline", return_value=raw):
+                with self.assertRaisesRegex(native_codex.CodexProbeError, "response identity; inspect"):
+                    await native_codex.exchange(process, identity, method, {})
+
     async def test_malformed_protocol_identifies_recovery_and_cleans_up_owned_child(self):
         for line in (b'{"truncated":\n', b'\xff\n',
                      b'{"id":0,"result":{},"result":{"model":"last"}}\n',
@@ -144,7 +152,8 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
                      b'{"id":0,"result":{"unused":[NaN]}}\n',
                      b'{"id":0,"result":{"unused":{"n":Infinity}}}\n',
                      b'{"id":0,"result":{"unused":-Infinity}}\n',
-                     b'{"id":0,"result":{"unused":1e999}}\n'):
+                     b'{"id":0,"result":{"unused":1e999}}\n',
+                     ('{"id":0,"result":{"unused":{"n":' + str(10 ** 400) + '}}}\n').encode()):
             process = Process(self.replies())
             async def spawn(*args, **kwargs):
                 return process
