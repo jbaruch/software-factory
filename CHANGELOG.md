@@ -132,6 +132,9 @@ Disable replacement objects and the untracked cache during source verification.
 Disable replacement objects in child commands too, and pin the launch wrapper
 to its exact worktree Git directory rather than only the shared repository.
 Reject empty untracked directories by checking the actual candidate layout.
+Preserve inherited authentication configuration while refusing source-routing
+options. Refuse source symlinks and shared hard links to keep inputs and writes
+inside an independent checkout.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and
