@@ -26,6 +26,12 @@ The harmless fixtures used earlier receipts. Marker-bound version-3 receipts now
 have live read-only coverage: a real review reported blocked, an investigator
 completed source inspection, and reconnect reused both original panes without
 consuming more allowance. The initial protocol-failure attempt remains failed.
+Current version-4 receipts additionally bind the individual worktree Git directory.
+Offline two-worktree fixtures and a separate live Rex event-transport fixture
+verify that binding, collection and exact-pane reconnect. The transport fixture
+makes no model turn or specialist judgment; real provider execution with version 4
+remains unverified. Existing version-3 artifacts stay unchanged and inspection-only
+under the current receipt reader.
 Jev then returned resolved in a live shadow reassessment of the narrow decoder
 question; no acceptance or review gate changed. Task schema 4
 pins new admissions to an immutable Git-local repository marker. Ordinary clones
