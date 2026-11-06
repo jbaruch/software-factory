@@ -17,8 +17,11 @@ async def exchange(process, identity, method, params):
     await process.stdin.drain()
     deadline = asyncio.get_running_loop().time() + 20
     while True:
-        line = await asyncio.wait_for(process.stdout.readline(),
-                                      timeout=max(0, deadline - asyncio.get_running_loop().time()))
+        try:
+            line = await asyncio.wait_for(process.stdout.readline(),
+                                          timeout=max(0, deadline - asyncio.get_running_loop().time()))
+        except TimeoutError:
+            raise CodexProbeError(f"Native Codex {method} timed out; inspect native sign-in/connection before refreshing") from None
         if not line:
             raise CodexProbeError("Native Codex closed its metadata channel; inspect native sign-in/configuration")
         message = json.loads(line)

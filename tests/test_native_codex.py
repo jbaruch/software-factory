@@ -3,6 +3,7 @@ import asyncio
 import json
 import sys
 import unittest
+from unittest.mock import patch
 
 import native_codex
 
@@ -91,6 +92,12 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
         replies["model/list"] = [{"result": {"nextCursor": None}}]
         with self.assertRaises(native_codex.CodexProbeError):
             await self.run_probe(replies)
+
+    async def test_timeout_identifies_the_failed_observation_and_recovery(self):
+        process = Process(self.replies())
+        with patch.object(process.stdout, "readline", side_effect=TimeoutError):
+            with self.assertRaisesRegex(native_codex.CodexProbeError, "initialize timed out; inspect"):
+                await native_codex.exchange(process, 0, "initialize", {})
 
 
 if __name__ == "__main__":
