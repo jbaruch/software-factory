@@ -520,6 +520,47 @@ class TaskAdmission(unittest.TestCase):
             self.assertEqual((refused.returncode, refused.stdout), (1, ""))
             self.assertIn("repository pin", refused.stderr)
 
+    def test_ambient_git_overrides_cannot_authorize_a_different_checkout(self):
+        record = self.admit()
+        other = self.root / "copy"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(other)], check=True)
+        before = self.path.read_bytes()
+        environment = {"GIT_DIR": str(self.repo / ".git"), "GIT_WORK_TREE": str(other),
+                       "GIT_INDEX_FILE": str(self.repo / ".git" / "index"),
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "status.showUntrackedFiles",
+                       "GIT_CONFIG_VALUE_0": "no"}
+        with patch.dict(os.environ, environment):
+            factory.check_repository(record["admission"])
+            with self.assertRaisesRegex(factory.FactoryError, "checkout differs"):
+                self.start(cwd=str(other))
+            result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+                "--identity", json.dumps(record["admission"]["repository_identity"]),
+                "--candidate", record["inputs"]["candidate"], "--", sys.executable,
+                "-c", "print('UNAUTHORIZED')"], cwd=other, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("repository marker", result.stderr)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_ignored_overlay_refuses_parent_and_spawn_consumer(self):
+        (self.repo / ".gitignore").write_text("local_config.py\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        self.commit("Declare an ignored local configuration")
+        record = self.admit()
+        (self.repo / "local_config.py").write_text("VALUE = 'uncommitted'\n")
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            self.start()
+        result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable,
+            "-c", "import local_config; print(local_config.VALUE)"],
+            cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("uncommitted inputs", result.stderr)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
     def test_invalid_admission_and_changed_limits_cannot_reset_task(self):
         for changes in ({"goal": " "}, {"acceptance": []}, {"acceptance": [""]}, {"corrections": -1}):
             with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
@@ -1118,6 +1159,19 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(reconnected["block_id"], assignment["block_id"])
         self.assertEqual(Path(assignment["brief"]).read_text(), instructions)
         self.assertEqual(self.path.read_bytes(), before)
+
+
+class RexTransport(unittest.TestCase):
+    def test_malformed_process_bytes_report_compatibility_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "rex-fixture"
+            for destination in ("stdout", "stderr"):
+                binary.write_text(f"#!{sys.executable}\nimport sys\nsys.{destination}.buffer.write(bytes([255]))\n")
+                binary.chmod(0o700)
+                rex = factory.Rex(str(binary), "unix:///fixture")
+                for raw in (False, True):
+                    with self.assertRaisesRegex(factory.FactoryError, "inspect the pinned binary/server API compatibility"):
+                        rex.call("whoami", "--json", raw=raw)
 
 
 if __name__ == "__main__":
