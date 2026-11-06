@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "format": "factory-judgment-spec-v1",
-  "adapter_status": "not_implemented",
-  "note": "Versioned question design, not a TypeSafe SDK request. Candidate-valued options must expand to real IDs plus no_match/uncertain before inference.",
+  "adapter_status": "shadow_http",
+  "note": "Factory judgment specs compiled to TypeSafe HTTP by jev.py. Candidate options expand to supplied IDs plus no_match/uncertain. No consequential routing thresholds are calibrated or approved.",
   "policies": {
     "max_corrections": 2,
     "max_investigations": 1,

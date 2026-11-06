@@ -2,7 +2,7 @@
 
 A specialist engineering team coordinated by scripts and Jev, with Rex as its execution surface. Product, design, engineering, security, QA and operations retain their own responsibilities. The foreman handles priorities and exceptional planning decisions; routine delivery does not depend on a foreman turn.
 
-This repository contains the agreed design, a specialist role catalog, configuration catalogs, deterministic acceptance scenarios and a **small native Rex launcher**. The launcher runs explicitly supplied commands in specialist panes and reconnects without blindly repeating uncertain launches. It does not yet select models, call Jev, schedule subscription allowances, merge changes or serve a dashboard.
+This repository contains the agreed design, a specialist role catalog, configuration catalogs, deterministic acceptance scenarios and a **small native Rex launcher**. The launcher runs explicitly supplied commands in specialist panes and reconnects without blindly repeating uncertain launches. A separate Jev adapter compiles and evaluates bounded questions in shadow mode. Automatic model selection, Jev routing, subscription scheduling, merge execution and the dashboard remain unimplemented.
 
 ## Read and run
 
@@ -10,6 +10,7 @@ This repository contains the agreed design, a specialist role catalog, configura
 - [Dashboard contract](docs/dashboard.md): delivery, capacity, utilization and overhead definitions.
 - [Implementation sequence](docs/implementation.md): the slices required to turn the contracts into a live factory.
 - [Native Rex launcher](docs/native-rex.md): explicit specialist launches, inspection and limited restart reconciliation.
+- [Jev adapter](docs/jev.md): question compilation, model discovery and explicit shadow evaluation.
 - `skills/factory/references/roles.json`: the specialist catalog, focused prompts and decision authority.
 - `config/providers.json`: the five requested subscription routes, with unknown capabilities and quota sharing preserved explicitly.
 - `config/coordination.json`: bounded Jev judgments and execution policies.
