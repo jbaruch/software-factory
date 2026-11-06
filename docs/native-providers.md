@@ -130,6 +130,7 @@ Invalid allowances refuse before task reads, locks or attempts. Expiry interrupt
 native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
+Owned workers disable both native multi-agent features for these leaf assignments.
 
 For a factory-owned writer commit, supply `--write --commit-message` with the
 intended commit message. The specialist edits/tests within its workspace sandbox

@@ -111,6 +111,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("read-only", self.spawns[0])
+        self.assertEqual(self.spawns[0][3:7], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
         self.assertEqual(self.spawns[0][-1], self.brief.read_text())
         before = self.args.receipt.read_bytes()

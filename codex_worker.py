@@ -285,7 +285,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             if args.commit_message is not None:
                 instructions += "\nFactory commit mode: edit and test only; do not stage or commit Git changes. The factory commits after a completed report. Keep temporary outputs outside this checkout.\n"
             try:
-                process = await spawn(str(binary), "--no-daemon", "exec", "--json", "--color", "never",
+                process = await spawn(str(binary), "--no-daemon", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                                      "--json", "--color", "never",
                                       "--output-schema", str(schema), "--model", args.model,
                                       "--sandbox", "workspace-write" if args.write else "read-only",
                                       "-c", "model_reasoning_effort=" + json.dumps(args.effort),
