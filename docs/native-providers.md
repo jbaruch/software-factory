@@ -82,13 +82,13 @@ The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
 code. Schema changes belong to the worker. No older receipt versions exist.
 
-The launcher checks the declared native binary is accessible and executable
+The launcher freezes the resolved native binary path after checking it is accessible and executable
 before saving a new assignment or consuming an attempt. Reconnection to an
 existing assignment preserves its original command even if that binary is
 subsequently removed.
 
 `codex-collect` is the read-only receipt/stream consumer and task-result writer. It
-requires the exact Rex block to exit successfully, checks assignment binding,
+requires the exact owned worker/interpreter command and Rex block to exit successfully, checks the frozen binary and assignment binding,
 reparses the original events and compares the resulting report, thread and
 usage. Missing, unsupported, damaged or conflicting evidence refuses
 collection. The task store remains governed by its own schema. Repeated

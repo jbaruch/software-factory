@@ -40,7 +40,10 @@ async def exchange(process, identity, method, params):
 
 
 async def probe(binary, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic) -> dict:
-    binary = Path(binary).resolve(strict=True)
+    try:
+        binary = Path(binary).resolve(strict=True)
+    except OSError:
+        raise CodexProbeError("Cannot access --codex; supply an existing executable native Codex CLI") from None
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise CodexProbeError("Supply the absolute path to an executable native Codex CLI")
     started = timer()

@@ -118,6 +118,21 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
 
+    def test_malformed_native_lines_retain_evidence_and_explain_recovery(self):
+        for index, line in enumerate((b'{"truncated":\n', b'\xff\n')):
+            self.args.events = self.root / f"bad-{index}.jsonl"
+            self.args.receipt = self.root / f"bad-{index}.json"
+            self.process = FakeProcess([])
+            self.process.lines = iter([line])
+            receipt = self.execute()
+            self.assertEqual(receipt["state"], "failed")
+            self.assertIn("inspect the retained stream and update the adapter", receipt["error"])
+            self.assertIsNone(receipt["report"])
+            record = json.loads(self.args.events.read_text())
+            self.assertEqual(record["data"].encode("utf-8", errors="surrogateescape"), line)
+            with self.assertRaisesRegex(worker.WorkerError, "Malformed native events; inspect"):
+                worker.read_events(self.args.events)
+
     def test_timeout_stops_only_owned_child_and_retains_failed_attempt(self):
         self.process = FakeProcess(events()[:2], exit_code=-2, timeout=True)
         receipt = self.execute()
@@ -208,6 +223,27 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(command, assignment["request"]["command"])
         self.assertEqual(factory.load_task(path), record)
 
+    def test_native_selection_freezes_symlink_target(self):
+        binary = self.root / "native-fixture"
+        binary.symlink_to(sys.executable)
+        command = factory.codex_command(self.root / "task.json", task="task", assignment_id="qa",
+                                        codex=str(binary), model="fixture-model", effort="high")
+        chosen = command[command.index("--codex") + 1]
+        binary.unlink()
+        binary.symlink_to("/bin/false")
+        self.assertEqual(chosen, str(Path(sys.executable).resolve()))
+        self.assertNotEqual(chosen, str(binary.resolve()))
+
+    def test_impostor_worker_command_cannot_collect_a_native_result(self):
+        record, assignment = self.launch_assignment()
+        for prefix in (["/bin/true", str(factory.ROOT / "codex_worker.py")],
+                       [sys.executable, "/tmp/codex_worker.py"]):
+            impostor = copy.deepcopy(assignment)
+            impostor["request"]["command"][:2] = prefix
+            with self.assertRaisesRegex(factory.FactoryError, "not a native Codex worker"):
+                factory.collect_codex(self.path, "qa", self.rex, record, impostor)
+        self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
+
     def test_unsupported_or_damaged_local_event_records_refuse_collection(self):
         record, assignment = self.launch_assignment()
         original = self.args.events.read_text().splitlines()
@@ -236,7 +272,7 @@ class NativeResults(unittest.TestCase):
         original = json.loads(self.args.receipt.read_text())
         for change in (dict(job="task/other"), dict(report=dict(outcome="completed", artifacts=["other"])),
                        dict(schema_version=True), dict(schema_version=1.0),
-                       dict(exit_code=False), dict(writer=0)):
+                       dict(exit_code=False), dict(writer=0), dict(binary="/bin/false")):
             factory.save(self.args.receipt, {**copy.deepcopy(original), **change})
             with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
                 with self.assertRaises(factory.FactoryError):
