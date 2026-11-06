@@ -27,7 +27,7 @@ Before launch, save the pending assignment. After Rex returns, save its session,
 
 If no unique matching pane is visible, the launch remains uncertain and is not repeated. Missing sessions, changed host identity, inaccessible servers or modified assignment inputs are errors for the operator to inspect; deleting state is not recovery. A user-renamed/deleted pending window may require manual reconciliation. This is deliberately conservative and does not claim exactly-once delivery or complete task recovery.
 
-`running`, `exited`, `failed` and `unknown` describe the terminal process. Exit zero does not approve a review, accept a task or prove the agent completed the goal. `capture` returns original terminal output as data. Long-running agents may return their own final result before exiting; native session/result adapters are still future work.
+`running`, `exited`, `failed` and `unknown` describe the terminal process. Exit zero does not approve a review, accept a task or prove the agent completed the goal. `capture` returns original terminal output as data. Use the applicable [provider adapter](native-providers.md) to collect native results.
 
 ## Verification
 
@@ -47,8 +47,8 @@ Initial local conformance observations on Rex API revision 11:
 - The native Claude CLI launched and returned a weekly-allowance error. This verifies failure visibility, not a successful model task or available Claude capacity.
 - The native ChatGPT-authenticated Codex CLI completed a read-only QA inspection of the supplied reference functions with no findings and no tool use. Its recorded turn consumed 25,626 input tokens (13,184 cached) and 378 output tokens. That is one context-overhead baseline, not evidence of efficient worker bootstrap or general review quality. Existing native user configuration was preserved.
 
-These checks validate the launch slice only. Complete provider adapters, quota observation and lean worker-context handling still need implementation and measured evaluation.
+These historical checks validate only the launch slice.
 
 ## Scope
 
-The [local operator view](operator-view.md) displays the existing task records and explicit live process observations. Automatic Jev routing, subscription allowance scheduling, complete native provider adapters, worktree provisioning, task acceptance, merge/release execution and delivery measurements remain separate slices. All five subscription routes remain unverified as complete scheduling routes until their actual capabilities, model catalogs, allowance boundaries and lifecycle behavior are established.
+See the [implementation inventory](implementation.md) for current application coverage and remaining integration work, and the [local operator guide](operator-view.md) for viewing task records and process observations.

@@ -9,6 +9,9 @@ observations. Show holds, cumulative allowances, current/stale reports, evidence
 references and unknown provider capacity without adding a second datastore or
 automatic polling. Keep process exit, specialist reports and task acceptance
 distinct. Serve rendered HTML and source facts on loopback with no new dependencies.
+Require a random per-process capability before reading state, keeping credentials
+in a private temporary file rather than startup output. Reject invalid ports
+before opening a listener. Consolidate implementation coverage in one inventory.
 
 ### Jev shadow adapter
 

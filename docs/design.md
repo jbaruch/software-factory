@@ -1,6 +1,6 @@
 # Specialist software factory
 
-Status: agreed design with locally testable contracts, an explicit native Rex launcher and a [local operator view](operator-view.md). Numeric limits in configuration are initial tunable defaults, not measured optimums. Automatic scheduling, complete provider adapters, learned routing, delivery measurements and the full [dashboard contract](dashboard.md) are not implemented yet. See [native execution](native-rex.md) for the current working slice and limits.
+Status: agreed design. See the [implementation inventory](implementation.md) for current coverage and verification limits. Numeric limits in configuration are initial tunable defaults, not measured optimums.
 
 ## Outcome and constraints
 
@@ -85,7 +85,7 @@ Use learned outcomes to rank suitable candidates and controlled rotation to expl
 
 Bind review evidence to the inputs it assessed, including candidate commit and requirements revision. A changed input invalidates only dependent work; a new source commit must not inherit an old approval. Integration ownership covers shared interfaces, merge ordering, conflicts and required revalidation.
 
-The future scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. The native launcher now implements a narrow version: one task record, per-assignment intent, exact pane IDs and unique label reconciliation. Full delivery/merge recovery remains unimplemented.
+The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
 

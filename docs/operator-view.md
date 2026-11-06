@@ -6,9 +6,19 @@ Run the view from the application checkout with Python 3.11+:
 python3 dashboard.py --state-dir '/absolute/path/to/factory-state' --port 8090
 ```
 
-Open the printed loopback URL. The server binds only `127.0.0.1`. It has no
+Open the printed loopback URL. The browser asks for username `operator` and the
+password from the private `access_file` path announced at startup. Read that file
+locally; do not paste its contents into logs or messages. The random capability
+changes on each start. The server binds only `127.0.0.1`. It has no
 external assets, client JavaScript, build step or additional dependency. Stop
 it with Control-C. `--port 0` chooses a free local port.
+
+`dashboard.py` owns the temporary access file: schema version 1, `username`,
+`password` and `url`. Its directory is mode 0700 and the file is mode 0600.
+It exists only while this server runs and has no migration or restart reader.
+Startup output contains its path, never its capability. All HTML, CSS and API
+GET requests require HTTP Basic authentication before any state is read. This
+keeps another local OS user from reading task records through the loopback port.
 
 The first page reads stored records. **Refresh records** reads them again.
 **Check live processes** additionally connects to each task's pinned Rex host,
@@ -41,7 +51,5 @@ instruction contents are omitted. Responses are not cached. The endpoint is a
 view, not an authorization or acceptance API; it has no mutation endpoints.
 
 Tests use fixed records, fake Rex observations and a temporary loopback server.
-Manual verification has rendered the page in Chrome and used its live-process
-control against the retained harmless Rex conformance session. Real model
-lifecycle, task delivery, provider capacity, scheduling and independent review
-remain separate requirements. This view does not establish those integrations.
+See the [implementation inventory](implementation.md) for observed integration
+evidence and the remaining dashboard requirements.

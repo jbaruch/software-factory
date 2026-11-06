@@ -1,12 +1,17 @@
 """Local operator view generated from factory-owned records and optional Rex observations."""
 import argparse
+import base64
+import binascii
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+import secrets
 import sys
+import tempfile
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -137,12 +142,46 @@ def render(view):
             f'This view collected records in {view["collection_seconds"]:.3f}s. <a href="{facts}">View source facts</a></footer></main></body></html>')
 
 
-def make_server(state_dir, port=8090):
+def authorized(header, access_key):
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        user, password = base64.b64decode(encoded.strip(), validate=True).decode("utf-8").split(":", 1)
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return False
+    return user == "operator" and secrets.compare_digest(password.encode(), access_key.encode())
+
+
+@contextmanager
+def access_file(access_key, url):
+    """Only the launching user can read this process's temporary capability."""
+    with tempfile.TemporaryDirectory(prefix="software-factory-view-") as directory:
+        path = Path(directory) / "access.json"
+        factory.save(path, dict(schema_version=1, username="operator", password=access_key, url=url))
+        yield path
+
+
+def make_server(state_dir, port=8090, *, access_key):
+    if not isinstance(access_key, str) or not access_key:
+        raise ValueError("Supply a nonempty private per-process access capability")
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             allowed = {f"127.0.0.1:{active_port}", f"localhost:{active_port}"}
+            if active_port == 80:
+                allowed.update(("127.0.0.1", "localhost"))
             if self.headers.get("Host", "").lower() not in allowed:
                 self.send_error(403, "Use this dashboard's loopback address")
+                return
+            if not authorized(self.headers.get("Authorization", ""), access_key):
+                body = b'{"error":"Use operator credentials from the private access file announced at startup"}'
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="Software Factory", charset="UTF-8"')
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
                 return
             target = urlsplit(self.path)
             query = parse_qs(target.query, keep_blank_values=True)
@@ -188,16 +227,26 @@ def make_server(state_dir, port=8090):
     return server
 
 
+def port_number(value):
+    number = int(value)
+    if not 0 <= number <= 65535:
+        raise argparse.ArgumentTypeError("port must be 0–65535; choose 0 for a free local port")
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=factory.ROOT / ".factory-state")
-    parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument("--port", type=port_number, default=8090)
     args = parser.parse_args(argv)
     try:
-        with make_server(args.state_dir.resolve(), args.port) as server:
-            print(json.dumps(dict(url=f"http://127.0.0.1:{server.server_address[1]}",
-                                  state_dir=str(args.state_dir.resolve()))), flush=True)
-            server.serve_forever()
+        access_key = secrets.token_urlsafe(32)
+        with make_server(args.state_dir.resolve(), args.port, access_key=access_key) as server:
+            url = f"http://127.0.0.1:{server.server_port}"
+            with access_file(access_key, url) as path:
+                print(json.dumps(dict(schema_version=1, url=url, username="operator", access_file=str(path),
+                                      state_dir=str(args.state_dir.resolve()))), flush=True)
+                server.serve_forever()
     except (OSError, ValueError) as exc:
         print("dashboard: Cannot start local view; choose an accessible state directory and free --port. " + str(exc), file=sys.stderr)
         return 1

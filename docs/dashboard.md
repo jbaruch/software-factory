@@ -1,6 +1,6 @@
 # Dashboard contract
 
-Status: full application/UI requirements. The [local operator view](operator-view.md) implements a read-only subset of task, report and process visibility. The complete views, controls and measurements below remain the acceptance contract.
+Status: full application/UI acceptance contract. The [implementation inventory](implementation.md) tracks current coverage of the views, controls and measurements below.
 
 ## Views
 

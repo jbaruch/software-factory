@@ -1,6 +1,7 @@
 """View tests use fixed task records and fake observations; never live Rex or providers."""
 import copy
-from contextlib import redirect_stderr
+import base64
+from contextlib import redirect_stderr, redirect_stdout
 from http.client import HTTPConnection
 from io import StringIO
 import json
@@ -9,7 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import dashboard
 import factory
@@ -101,7 +102,9 @@ class OperatorView(unittest.TestCase):
         self.assertIn("do not accept a task", page)
 
     def test_http_serves_only_views_and_rejects_foreign_host_and_file_paths(self):
-        server = dashboard.make_server(self.root, port=0)
+        key = "not-a-real-key"
+        authorization = "Basic " + base64.b64encode(("operator:" + key).encode()).decode()
+        server = dashboard.make_server(self.root, port=0, access_key=key)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         def cleanup():
@@ -109,17 +112,30 @@ class OperatorView(unittest.TestCase):
             server.server_close()
             thread.join()
         self.addCleanup(cleanup)
-        def request(path, *, host=None, method="GET"):
+        def request(path, *, host=None, method="GET", auth: str | None = authorization):
             connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
             try:
-                connection.request(method, path, headers={"Host": host} if host else {})
+                headers = {"Host": host} if host else {}
+                if auth is not None:
+                    headers["Authorization"] = auth
+                connection.request(method, path, headers=headers)
                 response = connection.getresponse()
+                if response.status == 401:
+                    self.assertTrue((response.getheader("WWW-Authenticate") or "").startswith("Basic "))
                 return response.status, response.getheader("Cache-Control"), response.read().decode()
             finally:
                 connection.close()
         status, cache, body = request("/api/state")
         self.assertEqual((status, cache), (200, "no-store"))
         self.assertEqual(json.loads(body)["tasks"][0]["id"], "fixture")
+        with patch.object(dashboard, "snapshot", side_effect=AssertionError("Do not read private state")) as source:
+            for auth in (None, "Basic !!!", "Bearer not-a-real-key", "Basic /w==",
+                         "Basic " + base64.b64encode(b"operator:wrong-key").decode()):
+                status, cache, body = request("/api/state?live=1", auth=auth)
+                self.assertEqual((status, cache), (401, "no-store"))
+                self.assertNotIn("Deliver the agreed change", body)
+                self.assertNotIn(key, body)
+            source.assert_not_called()
         self.assertEqual(request("/api/state", host="untrusted.example")[0], 403)
         self.assertEqual(request("/fixture.json")[0], 404)
         self.assertEqual(request("/?command=launch")[0], 400)
@@ -130,6 +146,36 @@ class OperatorView(unittest.TestCase):
             status, _, body = request("/api/state")
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body)["error"], "Restore source records")
+
+    def test_access_capability_file_is_private_and_expires_with_its_context(self):
+        with dashboard.access_file("not-a-real-key", "http://127.0.0.1:8090") as path:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(json.loads(path.read_text()), dict(schema_version=1, username="operator",
+                password="not-a-real-key", url="http://127.0.0.1:8090"))
+        self.assertFalse(path.exists())
+
+    def test_startup_announces_access_file_without_logging_capability(self):
+        server = MagicMock()
+        server.__enter__.return_value = server
+        server.server_port = 8090
+        server.serve_forever.side_effect = KeyboardInterrupt
+        output = StringIO()
+        with patch.object(dashboard, "make_server", return_value=server), \
+             patch.object(dashboard.secrets, "token_urlsafe", return_value="not-a-real-key"), redirect_stdout(output):
+            self.assertEqual(dashboard.main(["--state-dir", str(self.root)]), 0)
+        announced = json.loads(output.getvalue())
+        self.assertIn("access_file", announced)
+        self.assertNotIn("not-a-real-key", output.getvalue())
+        self.assertFalse(Path(announced["access_file"]).exists())
+
+    def test_invalid_port_fails_before_creating_a_listener(self):
+        for port in ("-1", "65536"):
+            with self.subTest(port=port), patch.object(dashboard, "make_server") as start, redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    dashboard.main(["--port", port])
+                self.assertEqual(stopped.exception.code, 2)
+                start.assert_not_called()
 
 
 if __name__ == "__main__":
