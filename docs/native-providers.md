@@ -155,7 +155,10 @@ commands and version-4 receipts remain reconnectable/collectable without rewriti
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
-to the worker. The stream reader accepts only version 1. Earlier unversioned raw streams
+to the worker. Native event lines support up to 1 MiB, including verbose command
+results. Larger lines fail the attempt with a recovery diagnostic; inspect the
+existing pane/retained stream before authorizing another attempt. The stream reader
+accepts only version 1. Earlier unversioned raw streams
 are legacy version 0 and remain available for inspection, but refuse collection;
 they are never rewritten or used as permission to rerun an existing effect.
 The observed native CLI can repeat `id` inside web-search telemetry items. The

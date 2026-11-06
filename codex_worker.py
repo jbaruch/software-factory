@@ -13,6 +13,8 @@ import time
 
 import factory
 
+NATIVE_LINE_LIMIT = 1024 * 1024
+
 
 class WorkerError(ValueError):
     pass
@@ -133,10 +135,15 @@ async def stop_child(process):
 
 def check_hooks(root, candidate, environment):
     """A writer cannot replace source-local hook code and have the host run it."""
-    configured = factory.git_run(".", "rev-parse", "--path-format=absolute", "--git-path", "hooks", environment=environment)
+    configured = factory.git_run(".", "config", "--path", "--get", "core.hooksPath", environment=environment)
+    if configured.returncode == 1:
+        return  # Default hooks live in protected Git metadata.
     if configured.returncode:
         raise factory.FactoryError("Cannot identify configured Git hooks; inspect Git configuration before committing writer changes")
-    hooks = Path(configured.stdout.removesuffix("\n")).resolve()
+    configured_path = Path(os.path.abspath(root / configured.stdout.removesuffix("\n")))
+    hooks = configured_path.resolve()
+    if configured_path.is_relative_to(root) and hooks != configured_path:
+        raise factory.FactoryError("Configured hooks contain linked source-local paths; inspect retained changes before committing. No host hook was run")
     common = factory.git_common_dir(".")
     if hooks.is_relative_to(common) or not hooks.is_relative_to(root):
         return  # Protected Git metadata/outside-workspace hooks are operator-owned.
@@ -180,6 +187,7 @@ def commit_changes(args, receipt):
     root = Path(factory.git_worktree("."))
     environment = factory.command_environment()
     check_hooks(root, args.candidate, environment)
+    check_hooks(root, args.candidate, factory.git_environment())  # Inspection Git strips inherited overrides.
     status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
     if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
         raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
@@ -335,12 +343,19 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                       "-c", "model_reasoning_effort=" + json.dumps(args.effort),
                                       "--cd", ".", instructions,
                                       env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                                      limit=NATIVE_LINE_LIMIT,
                                       stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
             except OSError:
                 raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
 
             async def consume():
-                while line := await process.stdout.readline():
+                while True:
+                    try:
+                        line = await process.stdout.readline()
+                    except ValueError:
+                        raise factory.FactoryError("Native event exceeded the 1 MiB line limit; inspect the existing Rex pane and retained stream, then reduce command output or update the adapter before authorizing another attempt") from None
+                    if not line:
+                        break
                     text = line.decode("utf-8", errors="surrogateescape")
                     stream.write(json.dumps(dict(schema_version=1, kind="codex-event-line", data=text)) + "\n")
                     stream.flush()

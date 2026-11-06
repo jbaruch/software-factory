@@ -12,6 +12,8 @@ outputs requiring independent verification and the repository's release gates.
 Preserve inherited hook/signing policy, resolve writer paths from the worktree
 root, refuse modified source-local hooks before host execution, and isolate new
 host workers from workspace Python startup code while retaining legacy commands.
+Accept native event lines up to 1 MiB for verbose command results; retain a failed
+attempt with a recovery diagnostic when that bound is exceeded.
 
 ### Native Grok metadata
 

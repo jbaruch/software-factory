@@ -257,27 +257,42 @@ class NativeResults(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", ".githooks"], check=True)
         effect = self.root / "unauthorized-hook-effect"
         unsafe = f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n"
-        for name in ("pre-commit", "post-index-change"):
+        for name in ("pre-commit", "post-index-change", "overridden-post-index-change", "linked-directory"):
             self.args.events = self.root / (name + ".jsonl")
             self.args.receipt = self.root / (name + ".json")
             self.process = FakeProcess(events("completed"))
             async def spawn(*command, **options):
-                (hooks / name).write_text(unsafe)
-                (hooks / name).chmod(0o700)
+                if name == "linked-directory":
+                    hooks.rename(self.root / "original-hooks")
+                    replacement = self.root / "replacement-hooks"
+                    replacement.mkdir()
+                    hooks.symlink_to(replacement, target_is_directory=True)
+                    entry = hooks / "post-index-change"
+                else:
+                    entry = hooks / ("post-index-change" if name == "overridden-post-index-change" else name)
+                entry.write_text(unsafe)
+                entry.chmod(0o700)
                 (self.repo / "feature.py").write_text("answer = 42\n")
                 return self.process
             self.spawn = spawn
-            receipt = self.execute()
+            if name == "overridden-post-index-change":
+                with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null"}):
+                    receipt = self.execute()
+            else:
+                receipt = self.execute()
             self.assertEqual(receipt["state"], "failed")
-            self.assertIn("changed configured Git hooks", receipt["error"])
+            self.assertIn("linked source-local" if name == "linked-directory" else "changed configured Git hooks", receipt["error"])
             self.assertFalse(effect.exists())
             self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
             self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
             (self.repo / "feature.py").unlink()
             if name == "pre-commit":
                 original.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+            elif name == "linked-directory":
+                hooks.unlink()
+                (self.root / "original-hooks").rename(hooks)
             else:
-                (hooks / name).unlink()
+                (hooks / ("post-index-change" if name == "overridden-post-index-change" else name)).unlink()
 
     def inherited_policy(self, kind, transport):
         self.writer()
@@ -629,11 +644,14 @@ class NativeResults(unittest.TestCase):
         (self.repo / "sitecustomize.py").write_text(
             f"from pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n")
         self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
-        self.assertEqual(factory.git_run(".", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+        self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                             "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
                                              "commit", "-m", "Add startup fixture").returncode, 0)
         self.candidate = factory.git_commit(".", "HEAD")
         binary = self.root / "native-fixture"
-        payload = "\n".join(json.dumps(event) for event in events())
+        payload_events = events()
+        payload_events.insert(2, dict(type="item.completed", item=dict(type="command_execution", aggregated_output="x" * 100000)))
+        payload = "\n".join(json.dumps(event) for event in payload_events)
         binary.write_text("#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' " + shlex.quote(payload) + "\n")
         binary.chmod(0o700)
         self.launch_assignment(codex=str(binary), execute=False)
@@ -642,6 +660,19 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(effect.exists())
         self.assertEqual(json.loads(self.args.receipt.read_text())["state"], "completed")
+        self.assertEqual(worker.read_events(self.args.events), payload_events)
+
+    def test_oversize_native_event_retains_failed_attempt_without_retry(self):
+        with patch.object(self.process, "readline", side_effect=ValueError("Separator is found, but chunk is longer than limit")):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("exceeded the 1 MiB line limit", receipt["error"])
+        self.assertIsNotNone(self.process.returncode)
+        self.assertIsNone(receipt["report"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        with self.assertRaises(factory.FactoryError):
+            self.execute()
+        self.assertEqual(len(self.spawns), 1)
 
     def test_native_preflight_preserves_allowances_and_reconnect_survives_removed_binary(self):
         path = self.root / "task.json"
