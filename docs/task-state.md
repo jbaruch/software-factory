@@ -43,6 +43,11 @@ not automatic dispatch or a substitute for investigation -> Jev -> judge.
 Pause blocks new launches for that task. It does not interrupt existing processes.
 Inspection, capture and reconciliation remain available while paused, including
 repeating `start` for an existing assignment. Resume removes only the hold.
+Each pause/resume records one control request in the task itself. Supply
+`--request-id ID` to retry the same decision safely, including after a lost reply
+or an intervening decision. Reusing an ID with different inputs refuses. Optional
+`--expected-revision N` compares against the current number of control events and
+refuses stale decisions. The dashboard supplies both values automatically.
 
 `show` generates a snapshot and allowance arithmetic from the task record. It does
 not query live processes, quota, results or acceptance. Without admission, allowances
@@ -54,15 +59,16 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. Task records must be regular files; links, directories and FIFOs
 refuse without resetting holds or history. External consumers must not edit or migrate these records. The
-runtime's `new_task`, `admit`, `launch` and `record_result` functions define schema version 4:
+runtime's `new_task`, `admit`, `launch`, `hold_task` and `record_result` functions define schema version 5:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `4` on every task record |
+| `schema_version` | Integer `5` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
 | `hold` | `null`, or the operator's pause reason |
+| `control_events` | Ordered pause/resume requests; each has a unique `id`, nullable integer `expected_revision`, `previous_hold`, resulting `hold`, and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
 | `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker and returned pane IDs |
@@ -73,6 +79,15 @@ snapshot and any declared dependencies. Each assignment has a nullable `result`.
 States are
 `launching` or `launched`, describing the effect, not completion of engineering work.
 Allowance totals are generated output; no second usage ledger is stored.
+Control revision is generated from the event count. A supplied expected revision
+equals the event's position; `null` records a request without that precondition.
+Hold values in an event are null or nonempty strings. Timestamps are finite,
+nonnegative epoch seconds through year 9999; sequence comes from list order rather
+than wall-clock order. Later events chain from the previous hold, and the final
+event agrees with the current hold. Duplicate IDs or damaged history refuse reads.
+An identical request replay returns the current record without another write,
+even when a subsequent decision has changed the hold. These records trace control
+effects; they do not interrupt workers or change scope, reports or allowances.
 
 The original unversioned launcher record is legacy version 0. Version 1 added
 admission and holds. The owner migrates either on read, preserving requests,
@@ -86,6 +101,10 @@ numbers can be reused after deletion and cannot establish admission continuity.
 Version 4 replaces that active pin with `{common_dir, repository_id}`. The path is
 absolute; the ID is a lowercase 32-character UUID hex string. Linked worktrees
 share the Git-local marker described below; ordinary clones do not inherit it.
+Version 5 adds `control_events`. The owner migrates versions 0–4 on read,
+preserving their holds/history and adding an empty event list. It never invents
+historical control requests. Existing holds without events remain valid. Version-4
+consumers must update before using version-5 task files; they refuse newer gates.
 Before repository-backed mutations the owner verifies this identity and the
 initial commit. Revision reads verify the marker before and after Git resolves the commit. Launch
 passes the saved identity through checkout validation; `checkout_exec.py` checks
