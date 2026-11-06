@@ -25,7 +25,8 @@ All five subscription routes remain unverified as complete scheduling routes.
 Those fixture observations used earlier receipts. The marker-bound version-3
 receipt path has offline coverage; it still needs live conformance. Task schema 4
 pins new admissions to an immutable Git-local repository marker. Ordinary clones
-do not inherit it, and inode reuse cannot establish continuity. Older
+do not inherit it, and inode reuse cannot establish continuity. The new spawn-directory wrapper also has offline process coverage and still
+needs native Rex conformance. Older
 admissions retain their history with an unknown pin and require operator-approved
 new admission before repository-backed work.
 
