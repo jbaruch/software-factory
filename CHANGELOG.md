@@ -2,6 +2,14 @@
 
 ## 0.1.0 — 2026-11-05
 
+### Local operator view
+
+Generate a local dashboard from existing task records and explicit Rex process
+observations. Show holds, cumulative allowances, current/stale reports, evidence
+references and unknown provider capacity without adding a second datastore or
+automatic polling. Keep process exit, specialist reports and task acceptance
+distinct. Serve rendered HTML and source facts on loopback with no new dependencies.
+
 ### Jev shadow adapter
 
 Compile factory Choice questions into the TypeSafe HTTP contract, expand actual

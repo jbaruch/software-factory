@@ -51,4 +51,4 @@ These checks validate the launch slice only. Complete provider adapters, quota o
 
 ## Scope
 
-Automatic Jev routing, subscription allowance scheduling, native provider result/session adapters, worktree provisioning, task acceptance, merge/release execution and the dashboard remain separate slices. All five subscription routes remain unverified as complete scheduling routes until their actual capabilities, model catalogs, allowance boundaries and lifecycle behavior are established.
+The [local operator view](operator-view.md) displays the existing task records and explicit live process observations. Automatic Jev routing, subscription allowance scheduling, complete native provider adapters, worktree provisioning, task acceptance, merge/release execution and delivery measurements remain separate slices. All five subscription routes remain unverified as complete scheduling routes until their actual capabilities, model catalogs, allowance boundaries and lifecycle behavior are established.

@@ -2,7 +2,7 @@
 
 A specialist engineering team coordinated by scripts and Jev, with Rex as its execution surface. Product, design, engineering, security, QA and operations retain their own responsibilities. The foreman handles priorities and exceptional planning decisions; routine delivery does not depend on a foreman turn.
 
-This repository contains the agreed design, a specialist role catalog, configuration catalogs, deterministic acceptance scenarios and a **small native Rex launcher**. The launcher records admitted scope, enforces correction/investigation limits, honors holds and tracks revision-bound results and dependencies. A separate Jev adapter evaluates bounded questions in shadow mode. Automatic model selection, Jev routing, subscription scheduling, merge execution and the dashboard remain unimplemented.
+This repository contains the agreed design, a specialist role catalog, configuration catalogs, deterministic acceptance scenarios and a **small native Rex launcher**. The launcher records admitted scope, enforces correction/investigation limits, honors holds and tracks revision-bound results and dependencies. A separate Jev adapter evaluates bounded questions in shadow mode. The local operator view reads task facts and can query live Rex process states. Automatic model selection, Jev routing, subscription scheduling, merge execution and delivery measurements remain unimplemented.
 
 ## Read and run
 
@@ -11,6 +11,7 @@ This repository contains the agreed design, a specialist role catalog, configura
 - [Implementation sequence](docs/implementation.md): the slices required to turn the contracts into a live factory.
 - [Native Rex launcher](docs/native-rex.md): explicit specialist launches, inspection and limited restart reconciliation.
 - [Native provider adapters](docs/native-providers.md): Codex account observations and explicit execution/result collection.
+- [Local operator view](docs/operator-view.md): task records, current/stale reports and explicit live Rex process checks.
 - [Jev adapter](docs/jev.md): question compilation, model discovery and explicit shadow evaluation.
 - [Task state](docs/task-state.md): admission, attempt limits, holds and the state schema.
 - `skills/factory/references/roles.json`: the specialist catalog, focused prompts and decision authority.

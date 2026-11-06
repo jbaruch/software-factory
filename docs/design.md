@@ -1,6 +1,6 @@
 # Specialist software factory
 
-Status: agreed design with locally testable contracts and an explicit native Rex launcher. Numeric limits in configuration are initial tunable defaults, not measured optimums. Automatic scheduling, complete provider adapters, learned routing and the dashboard are not implemented yet. See [native execution](native-rex.md) for the current working slice and limits.
+Status: agreed design with locally testable contracts, an explicit native Rex launcher and a [local operator view](operator-view.md). Numeric limits in configuration are initial tunable defaults, not measured optimums. Automatic scheduling, complete provider adapters, learned routing, delivery measurements and the full [dashboard contract](dashboard.md) are not implemented yet. See [native execution](native-rex.md) for the current working slice and limits.
 
 ## Outcome and constraints
 

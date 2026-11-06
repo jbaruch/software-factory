@@ -1,6 +1,6 @@
 # Dashboard contract
 
-Status: application/UI requirements; no web dashboard is implemented yet.
+Status: full application/UI requirements. The [local operator view](operator-view.md) implements a read-only subset of task, report and process visibility. The complete views, controls and measurements below remain the acceptance contract.
 
 ## Views
 
