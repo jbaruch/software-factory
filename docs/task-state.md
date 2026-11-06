@@ -53,11 +53,11 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. External consumers must not edit or migrate these records. The
-runtime's `new_task`, `admit`, `launch` and `record_result` functions define schema version 3:
+runtime's `new_task`, `admit`, `launch` and `record_result` functions define schema version 4:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `3` on every task record |
+| `schema_version` | Integer `4` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
@@ -80,17 +80,22 @@ without inventing revision-bound evidence. Old assignments can reconnect but
 cannot acquire results retroactively. Admitted version 1 tasks initialize current
 inputs from their recorded initial candidate. `show` can write a legacy format
 upgrade, but never contacts Rex. Version 2 added revision-bound inputs/results.
-Version 3 adds `admission.repository_identity`: the absolute Git common-directory
-path and its integer `device`/`inode` filesystem identity. New admissions capture
-it from the selected repository. Linked worktrees share it; clones and forks do not.
+Version 3 used a Git common-directory path plus filesystem device/inode. Those
+numbers can be reused after deletion and cannot establish admission continuity.
+Version 4 replaces that active pin with `{common_dir, repository_id}`. The path is
+absolute; the ID is a lowercase 32-character UUID hex string. Linked worktrees
+share the Git-local marker described below; ordinary clones do not inherit it.
 Before repository-backed mutations the owner verifies this identity and the
-initial commit against the live source.
+initial commit. Launch passes the saved identity through checkout validation.
 
 Older admissions upgrade with `repository_identity: null`, preserving scope,
 holds, attempts and reports without inventing a historical pin from today's path.
-They remain inspectable and reconnectable, but refuse new repository-backed work.
-The operator must inspect the original history and authorize a new admission;
-migration never resets the old task or automatically carries its approvals forward.
+Version 3's nonnull filesystem pin is retained as `legacy_repository_identity`
+with its original `common_dir`, integer `device` (nonnegative) and `inode` (positive).
+This optional field is inspection-only. Old tasks remain inspectable and
+reconnectable, but refuse new repository-backed work. The operator must inspect
+the original history and authorize a new admission; migration never resets the
+old task or automatically carries its approvals forward.
 Legacy records containing newer-version fields refuse migration. The loader validates
 request identity and evidence references before using saved results as dependencies.
 Recorded Rex identity without assignment history also refuses action. Live
@@ -124,6 +129,26 @@ inspection and pause/resume of a missing task fail.
 Resource reservations, automatic dependency scheduling and cross-task capacity
 enforcement remain future work. No acceptance or release is implied by admission,
 a saved intent, a reported result or process exit.
+
+## Repository marker
+
+`factory.py` also owns `software-factory-repository.json` in the Git common
+directory. This immutable record has exactly `schema_version: 1` and
+`repository_id` (lowercase 32-character UUID hex). New explicit admissions create
+it once with private file permissions and atomic no-replace publication; concurrent
+admissions read the winning marker. Task records and worker checks read it but
+never repair, rotate or create it. It is identity data, not a task/approval ledger.
+Git does not include it in commits, so normal clones and forks acquire their own
+marker only on their own admission. Backups of the original Git directory must
+preserve it; copying that entire directory also copies its identity.
+
+Missing, damaged, duplicate-key or unsupported markers refuse repository-backed
+work. Restore the original marker/access, or inspect the retained task history and
+have the operator authorize a new admission. Never replace a missing marker to
+repair an existing task's pin. There is no inferred migration from filesystem
+identity and no automatic marker-version migration. Unsupported versions require
+an updated owner. This record is a gate store under the same Stateful Artifacts
+exception as task state; readers must refuse unknown/damaged records.
 
 ## Results and dependencies
 

@@ -15,6 +15,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
+REPOSITORY_MARKER = "software-factory-repository.json"
 
 
 class FactoryError(Exception):
@@ -48,7 +49,7 @@ class Rex:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 
-def save(path, value):
+def save(path, value, *, exclusive=False):
     """Save intent before launch, atomically; files are private to this user."""
     content = value if isinstance(value, str) else json.dumps(value, indent=2) + "\n"
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=".saving-")
@@ -57,7 +58,10 @@ def save(path, value):
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, path)
+        if exclusive:
+            os.link(name, path)
+        else:
+            os.replace(name, path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
@@ -85,7 +89,7 @@ def task_lock(directory, task):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=3, task=task, admission=None, inputs=None, hold=None, rex=None,
+    return dict(schema_version=4, task=task, admission=None, inputs=None, hold=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -103,7 +107,7 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
             or not all(key in record for key in ("rex", "session_id", "session_label"))):
@@ -115,6 +119,8 @@ def load_task(path) -> dict:
             for item in record["assignments"].values())):
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 3 and isinstance(record.get("admission"), dict) and "repository_identity" in record["admission"]:
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
+    if version < 4 and isinstance(record.get("admission"), dict) and "legacy_repository_identity" in record["admission"]:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     connection = record["rex"]
     if not record["assignments"] and (connection is not None or record["session_id"] is not None):
@@ -230,14 +236,21 @@ def load_task(path) -> dict:
     if version < 3:
         if admission is not None:
             admission["repository_identity"] = None
-        record["schema_version"] = 3
     if admission is not None:
         if "repository_identity" not in admission:
             raise FactoryError("Missing repository identity; restore the original task record")
         identity = admission["repository_identity"]
-        if identity is not None and not valid_repository_identity(identity):
+        validator = valid_legacy_repository_identity if version == 3 else valid_repository_identity
+        if identity is not None and not validator(identity):
             raise FactoryError("Invalid repository identity; restore the original task record")
-    if version < 3:
+        if version == 3 and identity is not None:
+            admission["legacy_repository_identity"] = identity
+            admission["repository_identity"] = None
+        if ("legacy_repository_identity" in admission
+                and not valid_legacy_repository_identity(admission["legacy_repository_identity"])):
+            raise FactoryError("Invalid legacy repository identity; restore the original task record")
+    if version < 4:
+        record["schema_version"] = 4
         save(path, record)
     return record
 
@@ -249,6 +262,13 @@ def valid_inputs(value):
 
 
 def valid_repository_identity(value):
+    return (isinstance(value, dict) and set(value) == {"common_dir", "repository_id"}
+            and isinstance(value.get("common_dir"), str) and Path(value["common_dir"]).is_absolute()
+            and isinstance(value.get("repository_id"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{32}", value["repository_id"])))
+
+
+def valid_legacy_repository_identity(value):
     return (isinstance(value, dict) and set(value) == {"common_dir", "device", "inode"}
             and isinstance(value.get("common_dir"), str) and Path(value["common_dir"]).is_absolute()
             and type(value.get("device")) is int and value["device"] >= 0
@@ -277,13 +297,23 @@ def git_common_dir(repository):
     return Path(result.stdout.strip()).resolve()
 
 
-def repository_identity(repository):
+def repository_identity(repository, *, create=False):
     common = git_common_dir(repository)
+    marker = common / REPOSITORY_MARKER
     try:
-        identity = common.stat()
-    except OSError:
-        raise FactoryError("Cannot inspect repository identity; restore access to the original Git common directory") from None
-    return dict(common_dir=str(common), device=identity.st_dev, inode=identity.st_ino)
+        if create and not marker.exists():
+            try:
+                save(marker, dict(schema_version=1, repository_id=uuid.uuid4().hex), exclusive=True)
+            except FileExistsError:
+                pass  # A concurrent admission published the shared marker; read it below.
+        value = json.loads(marker.read_text(), object_pairs_hook=unique_object)
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise FactoryError("Cannot read repository marker; restore the original Git-local marker and access, or have the operator authorize a new admission") from None
+    if (not isinstance(value, dict) or set(value) != {"schema_version", "repository_id"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or not valid_repository_identity(dict(common_dir=str(common), repository_id=value["repository_id"]))):
+        raise FactoryError("Unsupported or damaged repository marker; update the factory or restore the original marker before continuing")
+    return dict(common_dir=str(common), repository_id=value["repository_id"])
 
 
 def check_repository(admission):
@@ -291,7 +321,7 @@ def check_repository(admission):
         raise FactoryError("Legacy admission lacks repository identity; inspect its history and have the operator authorize a new admission")
     try:
         if repository_identity(admission["repository"]) != admission["repository_identity"]:
-            raise FactoryError("Repository filesystem identity differs; restore the original Git common directory")
+            raise FactoryError("Repository identity differs; restore the original Git-local marker and common directory")
         observed = git_commit(admission["repository"], admission["initial_candidate"])
     except FactoryError as exc:
         raise FactoryError("Cannot verify the admitted repository pin; inspect/restore the original checkout. " + str(exc)) from exc
@@ -302,7 +332,7 @@ def check_repository(admission):
 def check_checkout(repository, cwd, candidate, *, expected_identity=None):
     if expected_identity is not None and (not valid_repository_identity(expected_identity)
             or repository_identity(repository) != expected_identity):
-        raise FactoryError("Assignment repository filesystem identity differs; restore the original Git common directory")
+        raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
     if git_commit(repository, candidate) != candidate:
         raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
     if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
@@ -312,6 +342,9 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
     if changed.stdout:
         raise FactoryError("Assignment checkout has uncommitted inputs; commit them or use a clean worktree before launching")
+    if expected_identity is not None and (repository_identity(repository) != expected_identity
+                                          or repository_identity(cwd) != expected_identity):
+        raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
 
 
 def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None):
@@ -347,7 +380,7 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
     if record["assignments"]:
         raise FactoryError("Existing launches have unclassified attempts; admit a new task ID")
     admission["initial_candidate"] = git_commit(repository, "HEAD")
-    admission["repository_identity"] = repository_identity(repository)
+    admission["repository_identity"] = repository_identity(repository, create=True)
     record["admission"] = admission
     record["inputs"] = dict(candidate=admission["initial_candidate"],
                             requirements=admission["initial_candidate"])
@@ -583,7 +616,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["admission"] is not None:
         check_repository(record["admission"])
         current = record["inputs"]["candidate"]
-        check_checkout(record["admission"]["repository"], cwd, current)
+        check_checkout(record["admission"]["repository"], cwd, current,
+                       expected_identity=record["admission"]["repository_identity"])
     if record["rex"] is not None:
         rex = connect(record, binary, server)
     else:
