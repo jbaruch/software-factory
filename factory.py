@@ -90,6 +90,12 @@ def load_task(path) -> dict:
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
             or not all(key in record for key in ("rex", "session_id", "session_label"))):
         raise FactoryError("Incomplete task record; restore the original state before continuing")
+    if version < 2 and ("inputs" in record or any(
+            isinstance(item, dict) and ("result" in item or (
+                isinstance(item.get("request"), dict)
+                and any(key in item["request"] for key in ("inputs", "dependencies"))))
+            for item in record["assignments"].values())):
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     connection = record["rex"]
     if connection is None:
         if record["assignments"] or record["session_id"] is not None:
@@ -125,12 +131,31 @@ def load_task(path) -> dict:
         if (not isinstance(limits, dict) or set(limits) != {"correction", "investigation"}
                 or any(type(limit) is not int or limit < 0 for limit in limits.values())):
             raise FactoryError("Invalid task limits; restore the original state before continuing")
-    for assignment in record["assignments"].values():
+    for assignment_id, assignment in record["assignments"].items():
         if (not isinstance(assignment, dict) or not isinstance(assignment.get("request"), dict)
-                or assignment.get("state") not in {"launching", "launched"}
+                or assignment.get("state") not in ("launching", "launched")
                 or (admission is not None and assignment["request"].get("purpose")
-                    not in {"work", "correction", "investigation"})):
+                    not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
+        request = assignment["request"]
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id)
+                or any(not isinstance(request.get(key), str) or not request[key].strip()
+                       for key in ("role", "goal", "cwd", "instructions_sha256"))
+                or not Path(request["cwd"]).is_absolute()
+                or not re.fullmatch(r"[0-9a-f]{64}", request["instructions_sha256"])
+                or not isinstance(request.get("command"), list) or not request["command"]
+                or any(not isinstance(part, str) for part in request["command"])
+                or not Path(request["command"][0]).is_absolute()
+                or any(not isinstance(assignment.get(key), str) or not assignment[key].strip()
+                       for key in ("brief", "window_label"))
+                or not Path(assignment["brief"]).is_absolute()):
+            raise FactoryError("Invalid assignment identity or request; restore the original task record")
+        if "inputs" in request and (admission is None or not valid_inputs(request["inputs"])):
+            raise FactoryError("Invalid assignment inputs; restore the original task record")
+        if "dependencies" in request and (not isinstance(request["dependencies"], list)
+                or any(not isinstance(item, str) or item == assignment_id or item not in record["assignments"]
+                       for item in request["dependencies"])):
+            raise FactoryError("Invalid assignment dependencies; restore the original task record")
         if assignment["state"] == "launched" and (record["session_id"] is None
                 or any(not isinstance(assignment.get(key), str) or not assignment[key]
                        for key in ("window_id", "block_id"))):
@@ -149,12 +174,15 @@ def load_task(path) -> dict:
             raise FactoryError("Missing assignment result field; restore the original state before continuing")
         result = assignment["result"]
         if result is not None and (not isinstance(result, dict)
-                or result.get("outcome") not in RESULT_OUTCOMES
+                or assignment["state"] != "launched"
+                or not isinstance(result.get("outcome"), str) or result["outcome"] not in RESULT_OUTCOMES
                 or not valid_inputs(result.get("inputs"))
                 or result["inputs"] != assignment["request"].get("inputs")
-                or not isinstance(result.get("candidate"), str) or not result["candidate"]
+                or not isinstance(result.get("candidate"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", result["candidate"])
                 or (result["outcome"] != "completed" and result["candidate"] != result["inputs"]["candidate"])
-                or not isinstance(result.get("artifacts"), list) or not result["artifacts"]):
+                or not isinstance(result.get("artifacts"), list) or not result["artifacts"]
+                or any(not isinstance(ref, str) or not ref.strip() for ref in result["artifacts"])):
             raise FactoryError("Invalid assignment result; restore the original state before continuing")
     if version < 2:
         save(path, record)
@@ -163,7 +191,8 @@ def load_task(path) -> dict:
 
 def valid_inputs(value):
     return isinstance(value, dict) and all(isinstance(value.get(key), str) and value[key].strip()
-                                         for key in ("candidate", "requirements"))
+                                         for key in ("candidate", "requirements")) and bool(
+        re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value["candidate"]))
 
 
 def git_commit(repository, revision):
@@ -334,6 +363,8 @@ def reconcile(rex, record, assignment):
 
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
            binary=None, server=None, purpose=None, dependencies=()):
+    if not goal.strip():
+        raise FactoryError("Supply a nonempty assignment goal before launching")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id):
         raise FactoryError("Assignment ID must be a lowercase slug, at most 64 characters")
     cwd = str(Path(cwd).resolve(strict=True))
@@ -573,6 +604,8 @@ def main(argv=None):
                 rex = connect(record)
             else:
                 record = load_task(path)
+                if args.id not in record["assignments"]:
+                    raise FactoryError(f"Unknown assignment {args.id!r}; use show --task {args.task} to find its ID")
                 assignment = record["assignments"][args.id]
                 rex = connect(record, args.rex, args.server)
                 if not assignment.get("block_id"):
