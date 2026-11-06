@@ -20,10 +20,13 @@ REPOSITORY_MARKER = "software-factory-repository.json"
 GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
                           "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
 GIT_ROUTING_VARIABLES = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_CONFIG",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
     "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_IMPLICIT_WORK_TREE",
     "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_QUARANTINE_PATH"}
+GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatversion",
+    "extensions.objectformat", "extensions.refstorage", "extensions.worktreeconfig"}
 
 
 class FactoryError(Exception):
@@ -310,9 +313,24 @@ def git_environment():
 
 
 def command_environment():
-    return {**{key: value for key, value in os.environ.items()
-               if key not in GIT_ROUTING_VARIABLES and not key.startswith("GIT_CONFIG")},
-            "GIT_NO_REPLACE_OBJECTS": "1"}
+    environment = {key: value for key, value in os.environ.items() if key not in GIT_ROUTING_VARIABLES}
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    if any(key.startswith("GIT_CONFIG") for key in environment):
+        try:
+            observed = subprocess.run(["git", "--no-replace-objects", "-C", git_worktree("."),
+                "config", "--null", "--name-only", "--list", "--show-scope", "--includes"],
+                env=environment, capture_output=True, text=True, timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+            raise FactoryError("Cannot verify inherited Git configuration; repair GIT_CONFIG_* settings and Git access before launching") from None
+        fields = observed.stdout.split("\0")
+        if observed.returncode or fields[-1] != "" or len(fields) % 2 != 1:
+            raise FactoryError("Cannot parse inherited Git configuration; repair GIT_CONFIG_* settings and inspect Git compatibility before launching")
+        for scope, key in zip(fields[0:-1:2], fields[1:-1:2]):
+            inherited = (scope == "command" or scope == "global" and "GIT_CONFIG_GLOBAL" in environment
+                         or scope == "system" and "GIT_CONFIG_SYSTEM" in environment)
+            if inherited and key.lower() in GIT_SOURCE_CONFIG_KEYS:
+                raise FactoryError("Inherited Git configuration contains source-routing options; remove them before launching and keep authentication settings")
+    return environment
 
 
 def git_worktree(repository):
@@ -462,8 +480,10 @@ def check_tracked_bytes(cwd, candidate):
             if kind != "blob" or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
                 raise FactoryError("Assignment source differs from the candidate tree; restore a clean full checkout before launching")
             if stat.S_ISLNK(info.st_mode):
-                actual_mode, data = "120000", os.fsencode(os.readlink(path))
+                raise FactoryError("Assignment source contains symlinks; use a full checkout of independent regular files before launching")
             elif stat.S_ISREG(info.st_mode):
+                if info.st_nlink > 1:
+                    raise FactoryError("Assignment source contains shared hard links; use a full checkout of independent regular files before launching")
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
                 data = path.read_bytes()
             else:

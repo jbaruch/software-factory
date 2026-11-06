@@ -171,13 +171,15 @@ This includes ignored files and directories: use a clean isolated worktree and
 keep runtime state, caches and output outside that checkout. Verification clears
 ambient Git overrides (preserving standard author/committer identity) so repository/worktree/index/object/config environment
 settings cannot redirect the checks to another source. The exec consumer removes
-those overrides from the launched command too, preserving non-routing settings
-such as SSH, credential helpers, TLS trust and terminal prompting. Git reads bind the worktree to the
-actual checkout root; redirecting `core.worktree` settings and hidden index flags
+direct routing variables from the launched command too. It preserves inherited
+Git configuration and checks its keys through Git before execution. Inherited
+source-routing options or damaged configuration refuse
+launch; SSH, credential helpers, TLS trust and terminal prompting remain available.
+Git reads bind the worktree to the actual checkout root; redirecting `core.worktree` settings and hidden index flags
 (`assume-unchanged`/`skip-worktree`/`fsmonitor-valid`) refuse execution. Disable
 fsmonitor for the assignment checkout. This runtime refuses repositories containing
 submodules; recursive submodule input validation is not implemented.
-Tracked file bytes and executable/symlink modes must match the raw candidate tree;
+Tracked file bytes and executable modes must match the raw candidate tree;
 index timestamps are only hints. Working-tree filters that change those bytes
 require a clean checkout without those transformations for this runtime.
 Verification disables replacement objects and the untracked cache, so neither
@@ -189,6 +191,9 @@ to the same unreplaced source used by verification.
 Filesystem enumeration permits only candidate files and their implied directories,
 excluding the root Git metadata entry. Empty untracked directories refuse launch
 even when Git status reports a clean checkout.
+This runtime requires independent regular source files: tracked symlinks and
+shared hard links refuse launch. Materialize linked inputs into the assigned
+checkout before admitting work that needs them.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults

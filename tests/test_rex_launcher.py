@@ -6,6 +6,7 @@ from io import StringIO
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -610,6 +611,46 @@ class TaskAdmission(unittest.TestCase):
             capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stderr), (0, ""))
 
+    def test_spawn_consumer_preserves_configured_credential_helpers(self):
+        record = self.admit()
+        helper = self.root / "credential-fixture.py"
+        helper.write_text("import sys\nsys.stdin.read()\nprint('username=fixture\\npassword=fixture')\n")
+        value = "!" + shlex.quote(sys.executable) + " " + shlex.quote(str(helper))
+        pairs = [("credential.helper", ""), ("credential.helper", value)]
+        quote = lambda text: "'" + text.replace("'", "'\\''") + "'"
+        auth_file = self.root / "auth-config"
+        for key, item in pairs:
+            subprocess.run(["git", "config", "--file", str(auth_file), "--add", key, item], check=True)
+        settings = [dict(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0=pairs[0][0], GIT_CONFIG_VALUE_0="",
+                         GIT_CONFIG_KEY_1=pairs[1][0], GIT_CONFIG_VALUE_1=value),
+                    dict(GIT_CONFIG_PARAMETERS=" ".join(quote(k) + "=" + quote(v) for k, v in pairs)),
+                    dict(GIT_CONFIG_GLOBAL=str(auth_file))]
+        command = [sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
+            "import subprocess; p=subprocess.run(['git','-c','credential.interactive=never','credential','fill'],input='protocol=fixture\\nhost=example.invalid\\n\\n',capture_output=True,text=True,check=True); assert 'username=fixture\\n' in p.stdout and 'password=fixture\\n' in p.stdout"]
+        for index, extra in enumerate(settings):
+            environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+            environment.update(extra)
+            result = subprocess.run(command, cwd=self.repo, env=environment, capture_output=True, text=True, check=False)
+            with self.subTest(format=index):
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_spawn_consumer_refuses_source_routing_configuration(self):
+        record = self.admit()
+        command = [sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c", "print('UNAUTHORIZED')"]
+        environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.worktree", GIT_CONFIG_VALUE_0=str(self.repo))
+        result = subprocess.run(command, cwd=self.repo, env=environment, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("Inherited Git configuration contains source-routing options", result.stderr)
+
     def test_stat_hints_cannot_hide_changed_source_bytes(self):
         source = self.repo / "source.txt"
         source.write_bytes(b"committed\n")
@@ -649,9 +690,10 @@ class TaskAdmission(unittest.TestCase):
             self.start()
         self.assertEqual(FakeRex.calls, [])
 
-    def assert_source_refuses_at_both_launch_boundaries(self, record):
+    def assert_source_refuses_at_both_launch_boundaries(self, record,
+            error="uncommitted inputs|source bytes or modes differ"):
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs|source bytes or modes differ"):
+        with self.assertRaisesRegex(factory.FactoryError, error):
             self.start()
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
@@ -659,7 +701,7 @@ class TaskAdmission(unittest.TestCase):
             "--candidate", record["inputs"]["candidate"], "--", sys.executable,
             "-c", "print('must not launch')"], cwd=self.repo, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
-        self.assertRegex(result.stderr, "uncommitted inputs|source bytes or modes differ")
+        self.assertRegex(result.stderr, error)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
 
@@ -741,6 +783,36 @@ class TaskAdmission(unittest.TestCase):
         (package / "feature.enabled").mkdir()
         self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
         self.assert_source_refuses_at_both_launch_boundaries(record)
+
+    def test_source_symlinks_cannot_import_external_or_git_metadata_inputs(self):
+        external = self.root / "external-config"
+        external.write_text("unversioned\n")
+        (self.repo / "source.py").write_text("VALUE = 'committed'\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.py"], check=True)
+        self.commit("Regular source")
+        self.admit()
+        link = self.repo / "input"
+        for index, target in enumerate((str(external), ".git/config", "source.py")):
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(target)
+            subprocess.run(["git", "-C", str(self.repo), "add", "input"], check=True)
+            self.commit("Symlink fixture " + str(index))
+            record = factory.set_inputs(self.path, candidate=factory.git_commit(str(self.repo), "HEAD"),
+                                        requirements="link-fixture-" + str(index))
+            self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+            with self.subTest(target=target):
+                self.assert_source_refuses_at_both_launch_boundaries(record, "source contains symlinks")
+
+    def test_shared_hard_link_cannot_alias_another_checkouts_source(self):
+        source = self.repo / "source.py"
+        source.write_text("VALUE = 'committed'\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.py"], check=True)
+        self.commit("Regular source")
+        record = self.admit()
+        os.link(source, self.root / "another-checkouts-source.py")
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        self.assert_source_refuses_at_both_launch_boundaries(record, "source contains shared hard links")
 
     def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
         source = self.repo / "source.txt"
