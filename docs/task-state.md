@@ -84,6 +84,10 @@ Legacy records containing version-2 fields refuse migration. The loader validate
 request identity and evidence references before using saved results as dependencies.
 Recorded Rex identity without assignment history also refuses action. Live
 connections verify the saved session label before reusing its ID.
+They also match every retained launched window marker and window/block ID to
+that inspected session. Assignment-map order preserves launch order; dependencies
+must reference earlier entries. Task inputs are null only without admission, and
+the investigator role and investigation purpose remain paired on reads.
 
 This is a gate store under the coding policy's Stateful Artifacts migration
 exception: an unsupported version or damaged gate data refuses the action with a
@@ -116,6 +120,9 @@ the identifier to its initial Git commit. Set it explicitly before launch for
 requirements versioned elsewhere. The runtime does not monitor external documents.
 
 Each new admitted launch puts the selected inputs into its request and role brief.
+The brief also includes the admitted task goal and original acceptance references.
+Reconnection uses the existing instruction hash and brief; a role/template change
+does not rewrite an already-started assignment's context.
 Results report one of `completed`, `approved`, `findings` or `blocked`, plus at
 least one original evidence reference. These are specialist reports; registration
 does not establish their correctness or satisfy the project's release gates.
