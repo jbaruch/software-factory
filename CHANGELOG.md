@@ -56,6 +56,7 @@ identify pinned Rex availability failures with restoration/reconciliation guidan
 Compare tracked bytes and modes with the candidate tree even when Git stat hints
 hide an edit. Preserve command SSH, credential, TLS and prompt settings while
 removing Git routing overrides. Pin the CI Python patch with a monthly renewal.
+Disable replacement objects and the untracked cache during source verification.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and

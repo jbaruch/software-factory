@@ -309,7 +309,8 @@ def git_worktree(repository):
 def git_run(repository, *args):
     try:
         worktree = git_worktree(repository)
-        return subprocess.run(["git", "-C", worktree, "--work-tree=" + worktree, *args], capture_output=True,
+        return subprocess.run(["git", "--no-replace-objects", "-C", worktree,
+                              "--work-tree=" + worktree, *args], capture_output=True,
                               text=True, timeout=10, check=False,
                               env=git_environment())
     except UnicodeDecodeError:
@@ -392,7 +393,8 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
         raise FactoryError("Assignment index hides tracked inputs; clear assume-unchanged/skip-worktree/fsmonitor-valid flags or use a clean full checkout")
     if any(entry[2:].startswith("160000 ") for entry in flags.stdout.split("\0") if entry):
         raise FactoryError("Assignment contains submodules; this runtime requires a checkout without submodules before launching")
-    changed = git_run(cwd, "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+    changed = git_run(cwd, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                      "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
                       "--ignore-submodules=none")
     if changed.returncode:
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
