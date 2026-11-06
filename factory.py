@@ -145,6 +145,8 @@ def load_task(path) -> dict:
                     not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
         request = assignment["request"]
+        if admission is None and any(key in request for key in ("purpose", "inputs", "dependencies")):
+            raise FactoryError("Invalid unadmitted assignment; restore its original task scope before continuing")
         if admission is not None and ((request.get("role") == "investigator")
                                      != (request.get("purpose") == "investigation")):
             raise FactoryError("Invalid investigation purpose; restore the original task record")
@@ -470,7 +472,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         rex = Rex(str(Path(binary).resolve()), server)
         who = rex.call("whoami", "--json")
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
-    brief_path = path.parent / (task + "-" + assignment_id + ".md")
+    brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
                     "{brief_sha256}": request["instructions_sha256"], "{cwd}": cwd}
@@ -556,11 +558,14 @@ def collect_codex(path, assignment_id, rex, record, assignment):
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or receipt.get("job") != record["task"] + "/" + assignment_id
+            or not valid_inputs(receipt.get("inputs"))
             or receipt.get("inputs") != assignment["request"].get("inputs")
             or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
             or receipt.get("cwd") != assignment["request"]["cwd"]
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
+            or not isinstance(receipt.get("candidate"), str)
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
             or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
             or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
