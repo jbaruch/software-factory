@@ -594,6 +594,48 @@ class TaskAdmission(unittest.TestCase):
             self.assertEqual(self.path.read_bytes(), before)
             self.assertEqual(FakeRex.calls, [])
 
+    def test_missing_assignment_history_cannot_reset_allowance(self):
+        self.admit()
+        self.start(purpose="correction")
+        record = json.loads(self.path.read_text())
+        record["assignments"] = {}
+        self.path.write_text(json.dumps(record))
+        before = self.path.read_bytes()
+        FakeRex.calls.clear()
+        with self.assertRaisesRegex(factory.FactoryError, "restore the original task record"):
+            self.start(assignment_id="another-correction", purpose="correction")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_changed_live_session_identity_cannot_receive_more_work(self):
+        self.admit()
+        self.start()
+        record = json.loads(self.path.read_text())
+        FakeRex.sessions.append(dict(session_id="another-session", label="unrelated-session", windows=[]))
+        record["session_id"] = "another-session"
+        self.path.write_text(json.dumps(record))
+        before = self.path.read_bytes()
+        FakeRex.calls.clear()
+        with self.assertRaisesRegex(factory.FactoryError, "session identity differs"):
+            self.start(assignment_id="security", role="security")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(any(call[:2] == ("window", "new") for call in FakeRex.calls))
+
+    def test_malformed_state_and_missing_repository_explain_recovery(self):
+        self.path.write_text('{"truncated":')
+        before = self.path.read_bytes()
+        result, output, errors = self.cli("show", "--task", "task")
+        self.assertEqual((result, output), (1, ""))
+        self.assertIn("restore the original task record", errors)
+        self.assertEqual(self.path.read_bytes(), before)
+        result, output, errors = self.cli("admit", "--task", "new-task", "--goal", "Fixture",
+            "--repo", str(self.root / "missing-checkout"), "--acceptance", "requirements.md")
+        self.assertEqual((result, output), (1, ""))
+        self.assertIn("--repo", errors)
+        self.assertIn("existing accessible Git checkout", errors)
+        self.assertFalse((self.state / "new-task.json").exists())
+        self.assertEqual(FakeRex.calls, [])
+
     def test_other_checkout_and_uncommitted_inputs_refuse_before_rex(self):
         self.admit()
         other = self.root / "other"
