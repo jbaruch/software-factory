@@ -106,7 +106,9 @@ class Jev:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             # API bodies and exception strings may echo credentials or private state.
-            raise JevError(f"TypeSafe HTTP {exc.code}; check authentication/capacity and retain pending work") from None
+            status = exc.code
+            exc.close()
+            raise JevError(f"TypeSafe HTTP {status}; check authentication/capacity and retain pending work") from None
         except (OSError, http.client.HTTPException):
             raise JevError("TypeSafe transport unavailable; retain pending work instead of retrying into a decision") from None
         except (json.JSONDecodeError, UnicodeDecodeError):
