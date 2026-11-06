@@ -14,7 +14,7 @@ the command guides describe operation rather than maintain separate status lists
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, real read-only execution, revision-bound blocked/completed result collection and exact-pane reconnect; writer fixtures cover success, inherited hook/signing enforcement, source-hook refusal, subdirectories, host startup isolation and lost responses. Live writer delivery and independent quality approval remain unverified |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
 | Native Grok metadata | Cached OIDC sign-in, subscription/access-gate metadata and per-model effort choices through a private ACP child | Fixed protocol/process tests and a live owner-script probe of agent 1.0.77: X Premium+, no access gate, four model choices and their reported effort values. Quota and worker lifecycle remain unverified |
-| Local operator view | Stored task facts, holds, allowances, report freshness, evidence references and explicit live process observations | Read-only loopback HTML/API, protected by a per-process capability in a private file; not the complete dashboard contract |
+| Local operator view | Stored task facts, holds, allowances, report freshness, evidence references, explicit live process observations and pause/resume controls | Offline replay/lost-reply/conflict tests and an owned Chrome fixture exercise pause/resume, keyboard submission and visible history. No live worker was interrupted. Other controls and the full seven-view dashboard remain incomplete |
 | CI and review | Offline tests, diagnostics, design/package validation and independent review dispatch | Policy review and CI remain required; the operator temporarily waived waiting for Claude review during its subscription outage, as recorded in AGENTS.md |
 
 The live Rex fixture checks exercise transport, timeout, reconnect and receipt
@@ -41,6 +41,9 @@ pins new admissions to an immutable Git-local repository marker. Ordinary clones
 do not inherit it, and inode reuse cannot establish continuity. The spawn-directory wrapper was exercised by these native Rex launches. Older
 admissions retain their history with an unknown pin and require operator-approved
 new admission before repository-backed work.
+Task schema 5 adds ordered operator-control requests without changing task limits
+or evidence. Legacy holds migrate without invented request history. Native receipt
+versions remain separate from the task store.
 
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
 Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`

@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 import uuid
 
@@ -32,6 +33,10 @@ GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatve
 
 
 class FactoryError(Exception):
+    pass
+
+
+class ControlConflict(FactoryError):
     pass
 
 
@@ -131,7 +136,7 @@ def task_lock(directory, task):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=4, task=task, admission=None, inputs=None, hold=None, rex=None,
+    return dict(schema_version=5, task=task, admission=None, inputs=None, hold=None, control_events=[], rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -160,8 +165,10 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if version < 5 and "control_events" in record:
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
             or not all(key in record for key in ("rex", "session_id", "session_label"))):
         raise FactoryError("Incomplete task record; restore the original state before continuing")
@@ -197,7 +204,7 @@ def load_task(path) -> dict:
         record.update(schema_version=1, admission=None, hold=None)
     if not all(key in record for key in ("admission", "hold")):
         raise FactoryError("Incomplete task record; restore the original state before continuing")
-    if record["hold"] is not None and not isinstance(record["hold"], str):
+    if record["hold"] is not None and (not isinstance(record["hold"], str) or not record["hold"].strip()):
         raise FactoryError("Invalid task hold; restore the original state before continuing")
     admission = record["admission"]
     if admission is not None:
@@ -304,8 +311,34 @@ def load_task(path) -> dict:
             raise FactoryError("Invalid legacy repository identity; restore the original task record")
     if version < 4:
         record["schema_version"] = 4
+    if version < 5:
+        record.update(schema_version=5, control_events=[])
+    validate_control_events(record)
+    if version < 5:
         save(path, record)
     return record
+
+
+def validate_control_events(record):
+    events = record.get("control_events")
+    if not isinstance(events, list):
+        raise FactoryError("Missing task control history; restore the original state before continuing")
+    seen, previous = set(), None
+    for index, event in enumerate(events):
+        if (not isinstance(event, dict) or set(event) != {"id", "expected_revision", "previous_hold", "hold", "at"}
+                or not isinstance(event["id"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", event["id"])
+                or event["id"] in seen
+                or (event["expected_revision"] is not None and (
+                    type(event["expected_revision"]) is not int or event["expected_revision"] != index))
+                or any(value is not None and (not isinstance(value, str) or not value.strip())
+                       for value in (event["previous_hold"], event["hold"]))
+                or type(event["at"]) not in (int, float) or not 0 <= event["at"] <= 253402300799
+                or (index > 0 and event["previous_hold"] != previous)):
+            raise FactoryError("Invalid task control history; restore the original state before continuing")
+        seen.add(event["id"])
+        previous = event["hold"]
+    if events and previous != record["hold"]:
+        raise FactoryError("Task hold differs from its control history; restore the original state before continuing")
 
 
 def valid_inputs(value):
@@ -632,10 +665,28 @@ def record_result(path, *, assignment_id, candidate, requirements, outcome, arti
     return record
 
 
-def hold_task(path, reason):
-    if reason is not None and not reason.strip():
+def hold_task(path, reason, *, request_id=None, expected_revision=None, clock=time.time):
+    if reason is not None and (not isinstance(reason, str) or not reason.strip()):
         raise FactoryError("Supply a nonempty pause reason")
+    if request_id is not None and (not isinstance(request_id, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", request_id)):
+        raise FactoryError("Supply a lowercase request ID of at most 64 characters")
+    if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+        raise FactoryError("Supply a nonnegative task control revision")
     record = load_task(path)
+    events = record["control_events"]
+    previous = next((event for event in events if event["id"] == request_id), None)
+    if previous is not None:
+        if previous["hold"] != reason or previous["expected_revision"] != expected_revision:
+            raise ControlConflict("Control request ID already has different inputs; use a new request ID")
+        return record  # A replay cannot overwrite a later operator decision.
+    if expected_revision is not None and len(events) != expected_revision:
+        raise ControlConflict("Task controls changed; refresh the task before submitting a new decision")
+    occurred = clock()
+    if type(occurred) not in (int, float) or not 0 <= occurred <= 253402300799:
+        raise FactoryError("Cannot timestamp the control request; restore the system clock before submitting")
+    events.append(dict(id=request_id or uuid.uuid4().hex, expected_revision=expected_revision,
+                       previous_hold=record["hold"], hold=reason, at=occurred))
     record["hold"] = reason
     save(path, record)
     return record
@@ -1039,6 +1090,9 @@ def main(argv=None):
         command.add_argument("--task", required=True)
         if action == "pause":
             command.add_argument("--reason", required=True)
+        if action in {"pause", "resume"}:
+            command.add_argument("--request-id", help="Stable ID makes a repeated control request idempotent")
+            command.add_argument("--expected-revision", type=int, help="Apply only to this control-history revision")
     for action in ("status", "capture", "codex-collect"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
@@ -1066,7 +1120,8 @@ def main(argv=None):
                                            requirements=args.requirements, outcome=args.outcome,
                                            artifacts=args.artifact)
                 else:
-                    record = hold_task(path, args.reason if args.action == "pause" else None)
+                    record = hold_task(path, args.reason if args.action == "pause" else None,
+                                       request_id=args.request_id, expected_revision=args.expected_revision)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
             if args.action in {"start", "codex-start"}:

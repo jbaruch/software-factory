@@ -38,6 +38,12 @@ Keep timed-out Rex connection/process observations unavailable without aborting
 the view request or changing task evidence.
 Display lone surrogate code points as visible escapes so one accepted record
 cannot break the HTML response; preserve the original source and API values.
+Add authenticated pause/resume forms with visible hold/history feedback and no
+client dependencies. Keep control requests in task schema 5, preserving legacy
+holds without invented events. Stable request IDs prevent a repeated submission
+from overwriting later decisions; stale forms refuse under the existing task lock.
+Require same-page CSRF credentials and bound form inputs before reading task data.
+Serve control history in dashboard snapshot version 2.
 
 ### Adapter input and evidence validation
 
