@@ -519,6 +519,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, write=Fals
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not Path(codex).is_absolute() or seconds <= 0:
         raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
+    binary = Path(codex).resolve()
     if not path.exists() or assignment_id not in load_task(path)["assignments"]:
         try:
             binary = Path(codex).resolve(strict=True)
@@ -528,7 +529,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, write=Fals
             raise FactoryError("Cannot access --codex; supply an existing executable native Codex path") from None
     prefix = path.parent / (task + "." + assignment_id + ".codex")
     command = [sys.executable, str(ROOT / "codex_worker.py"), "--job", task + "/" + assignment_id,
-               "--codex", codex, "--model", model, "--effort", effort, "--seconds", str(seconds),
+               "--codex", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds),
                "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
                "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
                "--requirements", "{requirements}", "--events", str(prefix) + ".jsonl",
@@ -541,7 +542,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     from codex_worker import parse_events, parser, read_events
 
     command = assignment["request"]["command"]
-    if len(command) < 2 or Path(command[1]).name != "codex_worker.py":
+    if command[:2] != [sys.executable, str(ROOT / "codex_worker.py")]:
         raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
     args = parser().parse_args(command[2:])
     observed = status(rex, record, assignment)
@@ -563,6 +564,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
             or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
             or receipt.get("cwd") != assignment["request"]["cwd"]
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or receipt.get("binary") != str(args.codex) or not args.codex.is_absolute()
             or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
             or not isinstance(receipt.get("candidate"), str)
             or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])

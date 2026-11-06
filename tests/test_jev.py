@@ -146,16 +146,33 @@ class JevAdapter(unittest.TestCase):
         self.assertIn("uncertain", json.loads(output.getvalue())["questions"]["task-demand"]["criteria"])
         self.assertIn("Set TYPESAFE_API_KEY", errors.getvalue())
 
-    def test_explicit_private_file_supplies_credentials_without_echoing_them(self):
+    def test_environment_supplies_credentials_without_echoing_them(self):
+        opener = FakeOpener({"models": []})
+        with patch.dict(jev.os.environ, {"TYPESAFE_API_KEY": "not-a-real-key"}):
+            client = jev.Jev(opener=opener)
+        self.assertEqual(client.models(), [])
+        self.assertEqual(opener.requests[0].get_header("Authorization"), "Bearer not-a-real-key")
+
+    def test_damaged_cli_inputs_identify_the_file_and_repair_before_network_access(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "key"
-            path.write_text("not-a-real-key\n")
-            opener = FakeOpener({"models": []})
-            client = jev.Jev(key_file=path, opener=opener)
-            self.assertEqual(client.models(), [])
-            self.assertEqual(opener.requests[0].get_header("Authorization"), "Bearer not-a-real-key")
-            with self.assertRaises(jev.JevError):
-                jev.Jev("not-a-real-key", key_file=path, opener=opener)
+            path = Path(directory) / "input.json"
+            for option in ("--state", "--candidates"):
+                for data in (None, b'{"truncated":', b'\xff'):
+                    if data is not None:
+                        path.write_bytes(data)
+                    elif path.exists():
+                        path.unlink()
+                    argv = ["evaluate", "--question", "task-demand", "--model", "fixture-model",
+                            "--evidence-revision", "v1", "--state", str(path)]
+                    if option == "--candidates":
+                        argv.extend(["--candidates", str(path)])
+                    errors = StringIO()
+                    with patch.object(jev, "Jev") as client, redirect_stderr(errors):
+                        self.assertEqual(jev.main(argv), 1)
+                    self.assertIn(option + " file", errors.getvalue())
+                    self.assertIn(str(path), errors.getvalue())
+                    self.assertIn("repair its UTF-8 JSON", errors.getvalue())
+                    client.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -81,8 +81,9 @@ def read_events(path):
                     or record["schema_version"] != 1 or record.get("kind") != "codex-event-line"
                     or not isinstance(record.get("data"), str)):
                 raise WorkerError("Unsupported native event record; inspect the original stream and update the adapter")
+            record["data"].encode("utf-8")  # Invalid native bytes remain escaped evidence, never valid events.
             events.append(json.loads(record["data"]))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeError):
             raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
     return events
 
@@ -144,11 +145,15 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
 
             async def consume():
                 while line := await process.stdout.readline():
-                    text = line.decode("utf-8")
+                    text = line.decode("utf-8", errors="surrogateescape")
                     stream.write(json.dumps(dict(schema_version=1, kind="codex-event-line", data=text)) + "\n")
                     stream.flush()
+                    try:
+                        line.decode("utf-8")
+                        event = json.loads(text)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
                     print(text, end="", flush=True)
-                    event = json.loads(text)
                     if not isinstance(event, dict):
                         raise factory.FactoryError("Native output is not an event object; inspect the retained stream")
                     events.append(event)

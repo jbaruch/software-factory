@@ -11,6 +11,8 @@ Service failures retain actionable diagnostics without automatic retry or expose
 credentials. Live routing, calibration, durable queues and caching remain separate.
 Reject Choice answers that contradict their distributions and distinguish request
 repair from account/service recovery in HTTP diagnostics.
+Read runtime credentials from the environment, and identify damaged state/candidate
+input files with repair guidance before making any network request.
 
 ### Native Codex metadata
 
@@ -18,6 +20,7 @@ Read the signed-in native account, metered quota buckets and model/effort catalo
 through an owned stdio app-server process. Preserve unknown fields and duplicate
 quota views without treating discovery as model access or lifecycle verification.
 Malformed protocol input gives inspection/update guidance and stops the owned probe.
+Missing native binaries identify the executable path recovery before starting a child.
 
 ### Native Codex results
 
@@ -31,6 +34,8 @@ Version local event records while preserving original native lines. Check the
 native executable before reserving a new attempt, preserving reconnect behavior.
 Reject damaged or mistyped receipts with actionable recovery diagnostics before
 registering any result.
+Freeze the resolved native CLI, require the owned worker/interpreter during
+collection, and preserve malformed native bytes with inspection/update guidance.
 
 ### Task admission
 

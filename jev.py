@@ -86,12 +86,8 @@ def validate_response(response, questions):
 
 
 class Jev:
-    def __init__(self, api_key=None, *, key_file=None, opener=None):
-        if key_file is not None:
-            if api_key is not None:
-                raise JevError("Choose one credential source: an API key or a private key file")
-            api_key = Path(key_file).read_text().strip()
-        elif api_key is None:
+    def __init__(self, api_key=None, *, opener=None):
+        if api_key is None:
             api_key = os.environ.get("TYPESAFE_API_KEY")
         if not api_key or not api_key.strip() or "\r" in api_key or "\n" in api_key:
             raise JevError("Set TYPESAFE_API_KEY in the execution environment before making a live request")
@@ -145,9 +141,15 @@ class Jev:
                     request_sha256=request_hash, response=response)
 
 
+def read_input(path, option):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise JevError(f"Cannot read {option} file {str(path)!r}; restore access and repair its UTF-8 JSON before retrying") from None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--key-file", type=Path, help="Private file containing only the API key; overrides the environment")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("models", help="Discover models on the authenticated TypeSafe account")
     for action in ("compile", "evaluate"):
@@ -161,19 +163,20 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == "models":
-            result = {"models": Jev(key_file=args.key_file).models()}
+            result = {"models": Jev().models()}
         else:
             catalog = json.loads((ROOT / "config/coordination.json").read_text())["questions"]
             selected = set(args.question)
             specs = [spec for spec in catalog if spec["id"] in selected]
             if len(specs) != len(args.question):
                 raise JevError("Select unique question IDs from config/coordination.json")
-            candidates = json.loads(args.candidates.read_text()) if args.candidates else None
+            candidates = read_input(args.candidates, "--candidates") if args.candidates else None
             if args.action == "compile":
                 result = {"questions": compile_questions(specs, candidates)}
             else:
-                result = Jev(key_file=args.key_file).evaluate(
-                    state=json.loads(args.state.read_text()), specs=specs, model=args.model,
+                state = read_input(args.state, "--state")
+                result = Jev().evaluate(
+                    state=state, specs=specs, model=args.model,
                     evidence_revision=args.evidence_revision, candidates=candidates)
         print(json.dumps(result, indent=2, allow_nan=False))
     except (JevError, OSError, ValueError, KeyError, TypeError) as exc:

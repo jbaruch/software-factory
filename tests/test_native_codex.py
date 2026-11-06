@@ -111,6 +111,13 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
                                              timer=lambda: 10)
             self.assertTrue(process.terminated)
 
+    async def test_missing_binary_identifies_recovery_before_starting_a_child(self):
+        with patch.object(native_codex.Path, "resolve", side_effect=FileNotFoundError), patch.object(
+                native_codex.asyncio, "create_subprocess_exec") as spawn:
+            with self.assertRaisesRegex(native_codex.CodexProbeError, "supply an existing executable"):
+                await native_codex.probe("/missing/native-codex", spawn=spawn)
+            spawn.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

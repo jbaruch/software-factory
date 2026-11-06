@@ -18,10 +18,9 @@ python3 jev.py models
 ```
 
 Compilation is offline and credential-free. Live commands read `TYPESAFE_API_KEY`
-from their execution environment. Alternatively, pass `--key-file` before the
-subcommand to read a private file containing only the key. The path is explicit;
-the adapter does not search other repositories or credential stores. Keep the
-file outside Git, with mode 0600. Credentials are not printed. HTTP redirects are
+from their execution environment. Supply the variable through your environment
+or secrets manager; the adapter does not read credential files. Credentials are
+not printed. HTTP redirects are
 refused, and error bodies are not echoed.
 
 Use a model name returned by discovery. No model name, access entitlement or quota
