@@ -83,9 +83,13 @@ intent when returned Rex IDs disagree with the live pane, and explain Git proces
 failures and session/history mismatch recovery.
 Bind session/window marker formats to their task and assignment owners, and
 allow explicit admission limits when configuration defaults are unavailable.
-Pin new admissions to the Git common directory's filesystem identity in task
-schema version 3. Preserve older history with an unknown pin and require operator
-authorization for a new admission before further repository-backed work.
+Pin new admissions to an immutable Git-local repository marker in task schema
+version 4. Ordinary clones do not inherit the marker, and recycled filesystem
+inodes cannot authorize a replacement repository. Preserve older history and
+filesystem pins for inspection; require operator authorization for a new admission
+before further repository-backed work. Pass the saved pin through launch checkout
+validation so a replacement between the repository and checkout checks refuses
+before saving an attempt or contacting Rex.
 
 ### CI and review
 
