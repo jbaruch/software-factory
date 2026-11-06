@@ -64,6 +64,8 @@ be added; each observed constraint applies to scheduling. Matching default
 `rateLimits` and `rateLimitsByLimitId` snapshots are deduplicated by native
 identity. Conflicting duplicates, map/identity mismatches and malformed known
 fields fail with inspection/update guidance and no partial CLI output.
+Duplicate comparison uses curated pool facts, so omitted/null unknowns and
+irrelevant private metadata do not create extra pools or false conflicts.
 
 Missing/null facts remain JSON null, including a null secondary window. Missing
 pools or model catalogs remain null, distinct from explicitly empty collections.

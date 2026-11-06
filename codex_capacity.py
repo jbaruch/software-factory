@@ -99,10 +99,10 @@ def curate(observation) -> dict:
         pool = dict(limit_id=identity, primary=window(raw.get("primary"), "primary"),
                     secondary=window(raw.get("secondary"), "secondary"))
         if identity in originals:
-            if originals[identity] != raw:
+            if originals[identity] != pool:
                 refuse("duplicate rate limit snapshot")
             return
-        originals[identity] = raw
+        originals[identity] = pool
         pools.append(pool)
 
     default = limits.get("rateLimits")

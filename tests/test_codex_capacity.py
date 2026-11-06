@@ -95,6 +95,18 @@ class Curation(unittest.TestCase):
             with self.subTest(version=version), self.assertRaisesRegex(capacity.CapacityError, "schema_version"):
                 capacity.curate(raw)
 
+    def test_matching_pool_facts_deduplicate_despite_omitted_or_private_fields(self):
+        raw = recorded()
+        alternate = raw["rate_limits"]["rateLimitsByLimitId"]["codex"]
+        del alternate["limitId"]  # The native map key still supplies this identity.
+        del alternate["secondary"]  # Missing and null both preserve an unknown window.
+        alternate["credits"] = {"balance": "PRIVATE_BALANCE"}
+        result = capacity.curate(raw)
+        self.assertEqual(len(result["pools"]), 1)
+        self.assertEqual(result["pools"][0]["limit_id"], "codex")
+        self.assertEqual(result["pools"][0]["primary"]["remaining_percent"], 89)
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
     def test_malformed_known_fields_refuse_without_echoing_private_values(self):
         cases = [(["observed_at"], True), (["observed_at"], float("nan")),
                  (["observed_at"], 10 ** 400), (["binary"], "relative"),
