@@ -1,0 +1,42 @@
+name: Factory checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          # Refresh this full patch pin monthly against actions/python-versions.
+          python-version: '3.11.18'
+      - name: Install diagnostics
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check Python diagnostics
+        run: pyright --warnings
+      - name: Run offline tests
+        run: python -m unittest discover -s tests -v
+      - name: Check design catalogs
+        run: python scripts/check_design.py
+      - name: Install pinned ACR validator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Refresh the ACR version and digest monthly against upstream releases.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/factory-tools"
+          gh release download v0.2.1 --repo jbaruch/agentic-context-registry \
+            --pattern acr-linux-amd64.tar.gz --dir "$RUNNER_TEMP/factory-tools"
+          cd "$RUNNER_TEMP/factory-tools"
+          echo 'd6c435927507e1ccdf4f2147069335aa92084d786c201127d5670deddb3cca5d  acr-linux-amd64.tar.gz' | sha256sum --check
+          tar -xzf acr-linux-amd64.tar.gz
+      - name: Validate ACR package
+        run: '"$RUNNER_TEMP/factory-tools/acr" validate . --json'

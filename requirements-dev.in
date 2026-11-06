@@ -1,0 +1,6 @@
+# Direct dev dependencies; Dependabot checks the requirements files weekly.
+# Refresh the Python target monthly with the CI pin.
+# Regenerate the resolved lock after changes:
+# uv pip compile --python-version 3.11.18 --universal --no-annotate requirements-dev.in -o requirements-dev.txt
+pyright==1.1.414
+pre-commit==4.7.0

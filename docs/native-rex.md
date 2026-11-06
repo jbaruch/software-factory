@@ -19,7 +19,7 @@ The actual native agent flags depend on that harness. `{instructions}` as a whol
 
 State defaults to `.factory-state/` beside the application; `--state-dir PATH` overrides it. Each task has one private JSON record and a short-lived advisory lock. The record pins the Rex binary, endpoint and host identity and retains assignment inputs, a unique session/window marker and returned full IDs. A short role brief is the only generated handoff artifact.
 
-Repeat `start` with the same task, assignment ID and inputs to reconnect to the original pane. Changed inputs require a new explicit assignment ID. The current slice does not authorize new attempts, enforce cumulative task budgets or select new roles: those remain explicit operator decisions until scheduling is implemented.
+Repeat `start` with the same task, assignment ID and inputs to reconnect to the original pane. Changed inputs require a new explicit assignment ID. [Admitted tasks](task-state.md) require an explicit attempt purpose and enforce cumulative correction/investigation limits before new launches. They bind new assignments and reported results to selected revisions and check any `--after` dependencies before launch. Direct `start` without admission retains the original explicit-launch behavior with unknown task allowances. Neither mode selects roles or authorizes additional scope.
 
 ## Recovery and status meanings
 
@@ -51,4 +51,4 @@ These checks validate the launch slice only. Complete provider adapters, quota o
 
 ## Scope
 
-Automatic Jev routing, allowance scheduling, native provider result/session adapters, worktree provisioning, task acceptance, merge/release execution and the dashboard remain separate slices. All five subscription routes remain unverified as complete scheduling routes until their actual capabilities, model catalogs, allowance boundaries and lifecycle behavior are established.
+Automatic Jev routing, subscription allowance scheduling, native provider result/session adapters, worktree provisioning, task acceptance, merge/release execution and the dashboard remain separate slices. All five subscription routes remain unverified as complete scheduling routes until their actual capabilities, model catalogs, allowance boundaries and lifecycle behavior are established.
