@@ -103,6 +103,9 @@ python3 factory.py result --task example --id qa --candidate '<full-commit-sha>'
 ```
 
 Candidate references resolve to existing commits in the admitted repository.
+Each new admitted launch checks that its working directory belongs to that Git
+repository, is checked out at the selected candidate and has no uncommitted inputs.
+Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults
 the identifier to its initial Git commit. Set it explicitly before launch for

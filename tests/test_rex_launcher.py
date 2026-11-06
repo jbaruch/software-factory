@@ -487,7 +487,8 @@ class TaskAdmission(unittest.TestCase):
         self.assertIn("nonempty pause reason", errors)
         result, output, errors = self.cli("show", "--task", "missing")
         self.assertEqual((result, output), (1, ""))
-        self.assertIn("factory:", errors)
+        self.assertIn("Unknown task 'missing'", errors)
+        self.assertIn("create it with admit/start", errors)
         self.assertFalse((self.state / "missing.json").exists())
         self.assertEqual(FakeRex.calls, [])
 
@@ -525,6 +526,50 @@ class TaskAdmission(unittest.TestCase):
         self.assertIn("show --task task", errors)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
+
+    def test_damaged_rex_pin_cannot_repin_a_launched_task(self):
+        self.admit()
+        self.start()
+        original = json.loads(self.path.read_text())
+        for connection in (None, {}, {**original["rex"], "host_id": ""},
+                           {**original["rex"], "binary": "relative-rex"}):
+            self.path.write_text(json.dumps({**original, "rex": connection}))
+            before = self.path.read_bytes()
+            FakeRex.calls.clear()
+            with self.subTest(connection=connection), self.assertRaises(factory.FactoryError):
+                self.start(assignment_id="other", binary=sys.executable, server="unix:///other.sock")
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_other_checkout_and_uncommitted_inputs_refuse_before_rex(self):
+        self.admit()
+        other = self.root / "other"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(other)], check=True)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "checkout differs"):
+            self.start(cwd=str(other))
+        with self.assertRaisesRegex(factory.FactoryError, "not a Git checkout"):
+            self.start(cwd=str(self.state))
+        (self.repo / "uncommitted.txt").write_text("Input outside the selected commit\n")
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            self.start()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_linked_worktree_must_match_the_selected_candidate(self):
+        initial = self.admit()["inputs"]["candidate"]
+        other = self.root / "worktree"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach",
+                        str(other), initial], check=True)
+        self.addCleanup(subprocess.run, ["git", "-C", str(self.repo), "worktree", "remove", str(other)], check=True)
+        self.commit("A newer selected candidate")
+        factory.set_inputs(self.path, candidate="HEAD", requirements="requirements-v2")
+        with self.assertRaisesRegex(factory.FactoryError, "checkout differs"):
+            self.start(cwd=str(other))
+        self.assertEqual(FakeRex.calls, [])
+        factory.set_inputs(self.path, candidate=initial, requirements="requirements-v1")
+        _, assignment = self.start(cwd=str(other))
+        self.assertEqual(assignment["block_id"], "block-1")
 
 
 if __name__ == "__main__":
