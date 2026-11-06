@@ -17,3 +17,9 @@ revisions. Preserve stale results as history and require current successful resu
 for declared launch dependencies. Completed implementation can return a produced
 commit for independent review. Existing assignments gain no invented evidence
 during the version 2 state upgrade.
+
+### CI and review
+
+Add independent policy and quality review triggers, Python diagnostics, offline
+tests, design checks and pinned ACR validation. Dependency updates run weekly;
+the ACR binary pin has a monthly refresh procedure beside its download command.

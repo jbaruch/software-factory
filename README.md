@@ -24,6 +24,9 @@ python3 scripts/check_design.py
 acr validate . --json
 ```
 
+Install `requirements-dev.txt` to run `pyright --warnings`. The Factory checks
+workflow runs diagnostics, offline tests, design checks and pinned ACR validation.
+
 The Python checks use the standard library. `acr` is a separate prerequisite for package validation. The reference model in `contracts.py` expresses intended observable behavior. Launcher tests use a fake server; the opt-in live smoke check is separate. Passing these checks does not establish complete provider integration or Jev judgment accuracy.
 
 ## Distribution
