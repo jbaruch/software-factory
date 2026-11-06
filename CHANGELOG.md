@@ -35,3 +35,4 @@ the ACR binary pin has a monthly refresh procedure beside its download command.
 Add a pinned Gitleaks pre-commit hook and document skill installation.
 Dispatch reviews from a base-controlled workflow without checking out or executing
 PR code, keeping the cross-repository token outside PR-controlled execution.
+Dispatch again when PR metadata or its base changes.
