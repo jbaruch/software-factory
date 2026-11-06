@@ -171,6 +171,33 @@ class OperatorView(unittest.TestCase):
                 password="not-a-real-key", url="http://127.0.0.1:8090"))
         self.assertFalse(path.exists())
 
+    def test_http_displays_lone_surrogate_without_losing_the_page_or_source(self):
+        goal = "Visible \ud800 café <script>"
+        self.record["admission"]["goal"] = goal
+        factory.save(self.path, self.record)
+        before = self.path.read_bytes()
+        key = "not-a-real-key"
+        authorization = "Basic " + base64.b64encode(("operator:" + key).encode()).decode()
+        with dashboard.make_server(self.root, port=0, access_key=key) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                connection.request("GET", "/", headers={"Authorization": authorization})
+                response = connection.getresponse()
+                body = response.read().decode("utf-8")
+                self.assertEqual(response.status, 200)
+                self.assertIn(r"Visible \ud800 café &lt;script&gt;", body)
+                connection.request("GET", "/api/state", headers={"Authorization": authorization})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read())["tasks"][0]["goal"], goal)
+            finally:
+                connection.close()
+                server.shutdown()
+                thread.join()
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_startup_announces_access_file_without_logging_capability(self):
         server = MagicMock()
         server.__enter__.return_value = server

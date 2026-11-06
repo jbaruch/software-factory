@@ -80,7 +80,7 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
 
 
 def text(value):
-    return escape(str(value), quote=True)
+    return escape(str(value).encode("utf-8", errors="backslashreplace").decode("utf-8"), quote=True)
 
 
 def render(view):

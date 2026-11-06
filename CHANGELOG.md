@@ -14,6 +14,8 @@ in a private temporary file rather than startup output. Reject invalid ports
 before opening a listener. Consolidate implementation coverage in one inventory.
 Keep timed-out Rex connection/process observations unavailable without aborting
 the view request or changing task evidence.
+Display lone surrogate code points as visible escapes so one accepted record
+cannot break the HTML response; preserve the original source and API values.
 
 ### Jev shadow adapter
 
