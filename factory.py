@@ -432,11 +432,15 @@ def check_tracked_bytes(cwd, candidate):
         raise FactoryError("Cannot read candidate tree; restore Git object access before launching")
     root = Path(git_worktree(cwd))
     try:
+        allowed = set()
         for entry in tree.stdout.split("\0"):
             if not entry:
                 continue
             metadata, name = entry.split("\t", 1)
             mode, kind, expected = metadata.split()
+            relative = Path(name)
+            allowed.add(relative)
+            allowed.update(parent for parent in relative.parents if parent != Path("."))
             path = root / name
             info = path.lstat()
             if kind != "blob" or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
@@ -452,6 +456,16 @@ def check_tracked_bytes(cwd, candidate):
             observed = hashlib.new(algorithm, b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
             if actual_mode != mode or observed != expected:
                 raise FactoryError("Assignment source bytes or modes differ from the candidate; restore a clean full checkout (without working-tree filters) before launching")
+        pending = [root]
+        while pending:
+            for path in pending.pop().iterdir():
+                relative = path.relative_to(root)
+                if relative == Path(".git"):
+                    continue
+                if relative not in allowed:
+                    raise FactoryError("Assignment checkout has uncommitted inputs (including empty directories); use a clean full worktree before launching")
+                if path.is_dir() and not path.is_symlink():
+                    pending.append(path)
     except OSError:
         raise FactoryError("Cannot read assignment source; restore candidate files and access before launching") from None
 

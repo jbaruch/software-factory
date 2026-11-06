@@ -186,6 +186,9 @@ The launch wrapper also receives the worktree's absolute Git directory: linked
 worktrees share repository identity but cannot substitute for the assigned checkout.
 Child commands force `GIT_NO_REPLACE_OBJECTS=1`, keeping ordinary Git reads bound
 to the same unreplaced source used by verification.
+Filesystem enumeration permits only candidate files and their implied directories,
+excluding the root Git metadata entry. Empty untracked directories refuse launch
+even when Git status reports a clean checkout.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults
