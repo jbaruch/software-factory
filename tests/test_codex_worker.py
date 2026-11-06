@@ -94,7 +94,10 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["usage"], dict(input_tokens=100, output_tokens=30))
         self.assertEqual(receipt["finished_at"], 1000.0)
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
-        self.assertEqual([json.loads(line) for line in self.args.events.read_text().splitlines()], events())
+        self.assertEqual(worker.read_events(self.args.events), events())
+        first = json.loads(self.args.events.read_text().splitlines()[0])
+        self.assertEqual(first, dict(schema_version=1, kind="codex-event-line",
+                                    data=json.dumps(events()[0]) + "\n"))
         self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("read-only", self.spawns[0])
@@ -164,11 +167,11 @@ class NativeResults(unittest.TestCase):
         del payload[-1]["usage"]
         self.assertIsNone(worker.parse_events(payload)["usage"])
 
-    def launch_assignment(self):
+    def launch_assignment(self, codex=sys.executable):
         self.path = self.root / "task.json"
         factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
                       acceptance=["docs/acceptance.md"])
-        command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
+        command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=codex,
                                         model="fixture-model", effort="high")
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
@@ -184,6 +187,38 @@ class NativeResults(unittest.TestCase):
         self.execute()
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
         return record, assignment
+
+    def test_native_preflight_preserves_allowances_and_reconnect_survives_removed_binary(self):
+        path = self.root / "task.json"
+        factory.admit(path, task="task", goal="Verify the change", repository=str(self.repo),
+                      acceptance=["docs/acceptance.md"])
+        before = path.read_bytes()
+        for binary in (self.root / "missing", self.root, self.brief):
+            with self.subTest(binary=binary), self.assertRaises(factory.FactoryError):
+                factory.codex_command(path, task="task", assignment_id="qa", codex=str(binary),
+                                      model="fixture-model", effort="high")
+            self.assertEqual(path.read_bytes(), before)
+        binary = self.root / "native-fixture"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o700)
+        record, assignment = self.launch_assignment(codex=str(binary))
+        binary.unlink()
+        command = factory.codex_command(path, task="task", assignment_id="qa", codex=str(binary),
+                                        model="fixture-model", effort="high")
+        self.assertEqual(command, assignment["request"]["command"])
+        self.assertEqual(factory.load_task(path), record)
+
+    def test_unsupported_or_damaged_local_event_records_refuse_collection(self):
+        record, assignment = self.launch_assignment()
+        original = self.args.events.read_text().splitlines()
+        first = json.loads(original[0])
+        for damaged in (dict(schema_version=99, kind="codex-event-line", data=first["data"]),
+                        events()[0], dict(schema_version=1, kind="codex-event-line", data=None)):
+            self.args.events.write_text("\n".join([json.dumps(damaged), *original[1:]]) + "\n")
+            with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.assertRaisesRegex(worker.WorkerError, "Unsupported native event record"):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
 
     def test_collection_binds_current_inputs_and_reuses_completed_result(self):
         record, assignment = self.launch_assignment()

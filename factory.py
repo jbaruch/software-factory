@@ -494,6 +494,13 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, write=Fals
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not Path(codex).is_absolute() or seconds <= 0:
         raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
+    if not path.exists() or assignment_id not in load_task(path)["assignments"]:
+        try:
+            binary = Path(codex).resolve(strict=True)
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                raise FactoryError("Supply a regular executable native Codex file before creating an assignment")
+        except OSError:
+            raise FactoryError("Cannot access --codex; supply an existing executable native Codex path") from None
     prefix = path.parent / (task + "." + assignment_id + ".codex")
     command = [sys.executable, str(ROOT / "codex_worker.py"), "--job", task + "/" + assignment_id,
                "--codex", codex, "--model", model, "--effort", effort, "--seconds", str(seconds),
@@ -506,7 +513,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, write=Fals
 
 def collect_codex(path, assignment_id, rex, record, assignment):
     """Register a finished native report; this never accepts the whole task."""
-    from codex_worker import parse_events, parser
+    from codex_worker import parse_events, parser, read_events
 
     command = assignment["request"]["command"]
     if len(command) < 2 or Path(command[1]).name != "codex_worker.py":
@@ -528,7 +535,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or receipt.get("writer") != args.write or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
-    native = parse_events([json.loads(line) for line in args.events.read_text().splitlines()])
+    native = parse_events(read_events(args.events))
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))

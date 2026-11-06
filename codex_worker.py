@@ -67,6 +67,26 @@ def parse_events(events) -> dict:
     return dict(thread_id=thread, report=report, usage=usage)
 
 
+def read_events(path):
+    """Read versioned local records without changing the original native lines."""
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        raise WorkerError("Cannot read native events; restore the original stream and its access before collection") from None
+    events = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+            if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
+                    or record["schema_version"] != 1 or record.get("kind") != "codex-event-line"
+                    or not isinstance(record.get("data"), str)):
+                raise WorkerError("Unsupported native event record; inspect the original stream and update the adapter")
+            events.append(json.loads(record["data"]))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
+    return events
+
+
 async def stop_child(process):
     if process.returncode is not None:
         return
@@ -125,7 +145,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             async def consume():
                 while line := await process.stdout.readline():
                     text = line.decode("utf-8")
-                    stream.write(text)
+                    stream.write(json.dumps(dict(schema_version=1, kind="codex-event-line", data=text)) + "\n")
                     stream.flush()
                     print(text, end="", flush=True)
                     event = json.loads(text)

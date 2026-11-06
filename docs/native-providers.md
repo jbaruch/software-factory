@@ -65,7 +65,13 @@ The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 
 `codex_worker.py` owns version-1 `*.codex.json` execution receipts and their
-private original JSONL streams. Before starting a child it exclusively claims
+private JSONL streams. Each stream record has `schema_version: 1`,
+`kind: codex-event-line` and `data`, the unchanged original native line including
+its newline. Native fields remain inside that line; the local version belongs
+to the worker. The reader accepts only version 1. Earlier unversioned raw streams
+are legacy version 0 and remain available for inspection, but refuse collection;
+they are never rewritten or used as permission to rerun an existing effect.
+Before starting a child the worker exclusively claims
 the stream and writes a `starting` receipt. Existing artifacts refuse a new
 execution. A receipt binds the job, input revisions, brief hash, working
 directory, resolved CLI, requested model/effort and writer mode. It records wall
@@ -76,7 +82,12 @@ The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
 code. Schema changes belong to the worker. No older receipt versions exist.
 
-`codex-collect` is the read-only receipt consumer and task-result writer. It
+The launcher checks the declared native binary is accessible and executable
+before saving a new assignment or consuming an attempt. Reconnection to an
+existing assignment preserves its original command even if that binary is
+subsequently removed.
+
+`codex-collect` is the read-only receipt/stream consumer and task-result writer. It
 requires the exact Rex block to exit successfully, checks assignment binding,
 reparses the original events and compares the resulting report, thread and
 usage. Missing, unsupported, damaged or conflicting evidence refuses

@@ -26,6 +26,8 @@ altered briefs, unsuccessful or incomplete native runs and conflicting evidence.
 Retain uncertain attempts, observed thread identity and child exit status for
 inspection instead of rerunning them. Offline
 tests cover completion, timeout and collection; live execution remains unverified.
+Version local event records while preserving original native lines. Check the
+native executable before reserving a new attempt, preserving reconnect behavior.
 
 ### Task admission
 
