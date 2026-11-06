@@ -52,6 +52,9 @@ before they can erase history or authorize dependent launches. Unknown assignmen
 diagnostics direct the operator to the recorded IDs.
 Keep surviving Rex IDs from masking missing attempt history, verify the live
 session identity before reuse and explain recovery for unreadable task/repo inputs.
+Validate admission/input consistency, investigation purposes, dependency ordering
+and live pane identities. Include admitted scope and acceptance references in new
+briefs, preserving frozen instructions on reconnect.
 
 ### CI and review
 

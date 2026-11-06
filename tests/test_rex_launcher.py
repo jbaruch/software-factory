@@ -667,5 +667,63 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(assignment["block_id"], "block-1")
 
 
+    def test_inconsistent_admission_purpose_and_dependency_history_refuse(self):
+        empty = self.admit()
+        lost_scope = {**copy.deepcopy(empty), "admission": None}
+        self.start(role="investigator", purpose="investigation")
+        wrong_purpose = json.loads(self.path.read_text())
+        wrong_purpose["assignments"]["qa"]["request"]["purpose"] = "work"
+        factory.save(self.path, empty)
+        FakeRex.sessions.clear()
+        self.start()
+        self.report()
+        self.start(assignment_id="security", role="security", dependencies=["qa"])
+        self.report(assignment_id="security")
+        cycle = json.loads(self.path.read_text())
+        cycle["assignments"]["qa"]["request"]["dependencies"] = ["security"]
+        for record, purpose, diagnostic in ((lost_scope, None, "Invalid task inputs"),
+            (wrong_purpose, "work", "Invalid investigation purpose"),
+            (cycle, "work", "Invalid assignment dependencies")):
+            factory.save(self.path, record)
+            before = self.path.read_bytes()
+            FakeRex.calls.clear()
+            with self.subTest(diagnostic=diagnostic), self.assertRaisesRegex(factory.FactoryError, diagnostic):
+                self.start(assignment_id="next", role="backend", purpose=purpose)
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_crossed_pane_ids_cannot_expose_another_assignments_output(self):
+        self.admit()
+        self.start()
+        self.start(assignment_id="security", role="security")
+        original = json.loads(self.path.read_text())
+        for field in ("window_id", "block_id"):
+            changed = copy.deepcopy(original)
+            changed["assignments"]["qa"][field] = changed["assignments"]["security"][field]
+            factory.save(self.path, changed)
+            before = self.path.read_bytes()
+            for action in ("status", "capture"):
+                FakeRex.calls.clear()
+                result, output, errors = self.cli(action, "--task", "task", "--id", "qa")
+                self.assertEqual((result, output), (1, ""))
+                self.assertIn("pane identity differs", errors)
+                self.assertFalse(any(call[0] in ("block", "capture") for call in FakeRex.calls))
+                self.assertEqual(self.path.read_bytes(), before)
+
+    def test_brief_contains_admitted_scope_and_reconnect_keeps_frozen_instructions(self):
+        self.admit()
+        _, assignment = self.start()
+        instructions = Path(assignment["brief"]).read_text()
+        self.assertIn("Task goal: Verify the example", instructions)
+        self.assertIn("Acceptance references:\n- docs/example.md#acceptance", instructions)
+        self.assertIn("Inspect only", instructions)
+        before = self.path.read_bytes()
+        with patch.object(factory, "brief", side_effect=AssertionError("Do not rebuild existing instructions")):
+            _, reconnected = self.start()
+        self.assertEqual(reconnected["block_id"], assignment["block_id"])
+        self.assertEqual(Path(assignment["brief"]).read_text(), instructions)
+        self.assertEqual(self.path.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
