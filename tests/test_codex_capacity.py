@@ -35,7 +35,8 @@ class Curation(unittest.TestCase):
         self.assertEqual(result["account"], {"type": "chatgpt", "plan": "plus"})
         self.assertIs(result["ordinaryUsageAllowed"], True)
         self.assertEqual(result["pools"], [dict(limit_id="codex", primary=dict(
-            used_percent=11, remaining_percent=89, duration_minutes=10080, resets_at=1794000000), secondary=None)])
+            used_percent=11, remaining_percent=89, duration_minutes=10080, resets_at=1794000000), secondary=None,
+            rate_limit_reached_type=None, spend_control_reached=None)])
         self.assertEqual(result["models"], [dict(model="actual-native-model", id="picker-id",
             effort_ids=["high"], default_effort_id="high")])
         self.assertNotIn("PRIVATE", json.dumps(result))
@@ -146,6 +147,34 @@ class Curation(unittest.TestCase):
                 with self.subTest(used=used, identity=identity), self.assertRaisesRegex(
                         capacity.CapacityError, "unidentified rateLimits.*inspect native metadata"):
                     capacity.curate(raw)
+
+    def test_pool_blocking_status_survives_positive_ordinary_and_window_capacity(self):
+        for reached in (None, "workspace_member_usage_limit_reached"):
+            for spend in (None, False, True):
+                raw = recorded()
+                for pool in (raw["rate_limits"]["rateLimits"], raw["rate_limits"]["rateLimitsByLimitId"]["codex"]):
+                    pool.update(rateLimitReachedType=reached, spendControlReached=spend)
+                result = capacity.curate(raw)
+                self.assertIs(result["ordinaryUsageAllowed"], True)
+                self.assertEqual(result["pools"][0]["primary"]["remaining_percent"], 89)
+                self.assertEqual(result["pools"][0]["rate_limit_reached_type"], reached)
+                self.assertIs(result["pools"][0]["spend_control_reached"], spend)
+
+    def test_pool_blocking_conflicts_and_unsupported_spending_constraints_refuse(self):
+        for key, value in (("rateLimitReachedType", "workspace_member_usage_limit_reached"),
+                           ("spendControlReached", True)):
+            raw = recorded()
+            raw["rate_limits"]["rateLimitsByLimitId"]["codex"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(capacity.CapacityError, "duplicate"):
+                capacity.curate(raw)
+        for key, value in (("rateLimitReachedType", 3), ("spendControlReached", 1),
+                           ("spendControlReached", "PRIVATE_VALUE"),
+                           ("individualLimit", {"remainingPercent": 0, "limit": "PRIVATE_VALUE", "used": "PRIVATE_VALUE"})):
+            raw = recorded()
+            raw["rate_limits"]["rateLimits"][key] = value
+            with self.subTest(key=key), self.assertRaises(capacity.CapacityError) as caught:
+                capacity.curate(raw)
+            self.assertNotIn("PRIVATE_VALUE", str(caught.exception))
 
     def test_identity_plan_and_model_ambiguity_refuse(self):
         for change in (lambda r: r["rate_limits"]["rateLimitsByLimitId"]["codex"].update(limitId="other"),

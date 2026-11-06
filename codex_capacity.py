@@ -96,8 +96,15 @@ def curate(observation) -> dict:
         plan = text(raw.get("planType"), "rate limit planType")
         if plan is not None:
             plans.append(plan)
+        reached = text(raw.get("rateLimitReachedType"), "rate limit rateLimitReachedType")
+        spend = raw.get("spendControlReached")
+        if spend is not None and type(spend) is not bool:
+            refuse("rate limit spendControlReached")
+        if raw.get("individualLimit") is not None:
+            refuse("unsupported individualLimit constraint")
         pool = dict(limit_id=identity, primary=window(raw.get("primary"), "primary"),
-                    secondary=window(raw.get("secondary"), "secondary"))
+                    secondary=window(raw.get("secondary"), "secondary"),
+                    rate_limit_reached_type=reached, spend_control_reached=spend)
         if identity in originals:
             if originals[identity] != pool:
                 refuse("duplicate rate limit snapshot")

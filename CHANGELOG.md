@@ -9,6 +9,8 @@ overlapping quota windows and actual model/effort IDs. Preserve unknown values,
 deduplicate pool identities and refuse conflicting, ambiguous or malformed observations.
 Omit account identifiers, raw initialization and billing/credit data. This exposes
 metadata facts; it does not establish eligibility or automate scheduling.
+Preserve per-pool reached/spend-control status and refuse unsupported individual
+spending limits rather than presenting window headroom without its constraints.
 
 ### Native Grok metadata
 

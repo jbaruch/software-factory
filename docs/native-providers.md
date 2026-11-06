@@ -68,6 +68,12 @@ Duplicate comparison uses curated pool facts, so omitted/null unknowns and
 irrelevant private metadata do not create extra pools or false conflicts.
 An ID-less default alongside a nonempty ID-keyed view refuses curation; its
 relationship to those pools is unknown and cannot supply extra capacity.
+Pools also preserve nullable `rate_limit_reached_type` and boolean
+`spend_control_reached`. Positive window capacity and `ordinaryUsageAllowed`
+do not override these per-pool constraints. Their conflicts refuse duplicate
+curation; false remains distinct from unknown. Non-null `individualLimit`
+constraints are unsupported and refuse curation with update guidance rather
+than exposing spending amounts or dropping a constraint.
 
 Missing/null facts remain JSON null, including a null secondary window. Missing
 pools or model catalogs remain null, distinct from explicitly empty collections.
