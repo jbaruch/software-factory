@@ -125,11 +125,18 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     digest = hashlib.sha256(instructions.encode()).hexdigest()
     if digest != args.brief_sha256:
         raise factory.FactoryError("Assignment brief changed; inspect the original task before launching")
-    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate)
+    try:
+        identity = json.loads(args.repo_identity, object_pairs_hook=factory.unique_object)
+    except (ValueError, TypeError):
+        raise factory.FactoryError("Cannot decode repository identity; inspect the original assignment before another attempt") from None
+    if not factory.valid_repository_identity(identity):
+        raise factory.FactoryError("Invalid repository identity; inspect the original assignment before another attempt")
+    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity)
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
-    receipt = dict(schema_version=1, kind="codex-execution", job=args.job, state="starting",
+    receipt = dict(schema_version=2, kind="codex-execution", job=args.job, state="starting",
                    inputs=dict(candidate=args.candidate, requirements=args.requirements),
+                   repository_identity=identity,
                    brief_sha256=digest, cwd=str(args.cwd), requested_model=args.model,
                    requested_effort=args.effort, binary=str(binary), writer=args.write,
                    created_at=clock(), finished_at=None,
@@ -179,7 +186,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
         receipt.update(parse_events(events))
         candidate = factory.git_commit(str(args.cwd), "HEAD")
-        factory.check_checkout(str(args.repo), str(args.cwd), candidate)
+        factory.check_checkout(str(args.repo), str(args.cwd), candidate, expected_identity=identity)
         if not args.write and candidate != args.candidate:
             raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
         receipt.update(candidate=candidate, state="completed")
@@ -199,7 +206,7 @@ def parser():
     command = argparse.ArgumentParser(description=__doc__)
     for field in ("codex", "repo", "cwd", "brief", "events", "receipt"):
         command.add_argument("--" + field, type=Path, required=True)
-    for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort"):
+    for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
     command.add_argument("--write", action="store_true")
     command.add_argument("--seconds", type=int, default=600, help="Initial execution allowance; no automatic retry")

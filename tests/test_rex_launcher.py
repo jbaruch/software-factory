@@ -319,6 +319,9 @@ class TaskAdmission(unittest.TestCase):
         expected_head = subprocess.check_output(
             ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
         self.assertEqual(view["admission"]["initial_candidate"], expected_head)
+        identity = (self.repo / ".git").stat()
+        self.assertEqual(view["admission"]["repository_identity"], dict(
+            common_dir=str((self.repo / ".git").resolve()), device=identity.st_dev, inode=identity.st_ino))
         self.assertEqual(view["allowances"]["correction"], dict(limit=1, used=0, remaining=1))
         self.assertIsNone(view["rex"])
         self.assertEqual(FakeRex.calls, [])
@@ -336,6 +339,27 @@ class TaskAdmission(unittest.TestCase):
                        lambda: self.start(assignment_id="security", role="security")):
             FakeRex.calls.clear()
             with self.assertRaisesRegex(factory.FactoryError, "admitted repository pin"):
+                action()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_history_sharing_clone_cannot_replace_the_admitted_repository(self):
+        self.admit()
+        self.start()
+        original = factory.load_task(self.path)
+        before = self.path.read_bytes()
+        preserved = self.root / "original-repository"
+        self.repo.rename(preserved)
+        subprocess.run(["git", "clone", "--quiet", str(preserved), str(self.repo)], check=True)
+        self.commit("Replacement-only change")
+        initial = original["admission"]["initial_candidate"]
+        self.assertEqual(factory.git_commit(str(self.repo), initial), initial)
+        self.assertNotEqual(factory.repository_identity(str(self.repo)), original["admission"]["repository_identity"])
+        for action in (lambda: factory.set_inputs(self.path, candidate="HEAD", requirements="v2"),
+                       lambda: self.report(candidate="HEAD", outcome="completed"),
+                       lambda: self.start(assignment_id="security", role="security"), lambda: self.admit()):
+            FakeRex.calls.clear()
+            with self.assertRaisesRegex(factory.FactoryError, "filesystem identity differs"):
                 action()
             self.assertEqual(self.path.read_bytes(), before)
             self.assertEqual(FakeRex.calls, [])
@@ -453,7 +477,7 @@ class TaskAdmission(unittest.TestCase):
             del assignment["result"]
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(migrated["schema_version"], 3)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
                          {key: {**item, "result": None} for key, item in record["assignments"].items()})
@@ -563,16 +587,59 @@ class TaskAdmission(unittest.TestCase):
         self.start()
         record = json.loads(self.path.read_text())
         record["schema_version"] = 1
+        del record["admission"]["repository_identity"]
         del record["inputs"]
         del record["assignments"]["qa"]["request"]["inputs"]
         del record["assignments"]["qa"]["result"]
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 2)
+        self.assertEqual(upgraded["schema_version"], 3)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
             self.report()
+
+    def test_version_two_upgrade_preserves_history_without_inventing_repository_identity(self):
+        self.admit()
+        self.start(purpose="correction")
+        self.report()
+        factory.hold_task(self.path, "Operator hold")
+        original = factory.load_task(self.path)
+        legacy = copy.deepcopy(original)
+        legacy["schema_version"] = 2
+        del legacy["admission"]["repository_identity"]
+        factory.save(self.path, legacy)
+        with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
+            upgraded = factory.load_task(self.path)
+        self.assertEqual(upgraded["schema_version"], 3)
+        self.assertIsNone(upgraded["admission"]["repository_identity"])
+        self.assertEqual(upgraded["assignments"], original["assignments"])
+        self.assertEqual(upgraded["hold"], original["hold"])
+        self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"]["remaining"], 0)
+        factory.hold_task(self.path, None)
+        before = self.path.read_bytes()
+        for action in (lambda: factory.set_inputs(self.path, candidate="HEAD", requirements="v2"),
+                       lambda: self.report(),
+                       lambda: self.start(assignment_id="security", role="security")):
+            FakeRex.calls.clear()
+            with self.assertRaisesRegex(factory.FactoryError, "operator authorize a new admission"):
+                action()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_damaged_repository_identity_and_version_downgrade_refuse_without_rewriting(self):
+        original = self.admit()
+        missing = copy.deepcopy(original)
+        del missing["admission"]["repository_identity"]
+        mistyped = copy.deepcopy(original)
+        mistyped["admission"]["repository_identity"]["device"] = True
+        downgraded = {**copy.deepcopy(original), "schema_version": 2}
+        for record in (missing, mistyped, downgraded):
+            factory.save(self.path, record)
+            before = self.path.read_bytes()
+            with self.assertRaises(factory.FactoryError):
+                factory.load_task(self.path)
+            self.assertEqual(self.path.read_bytes(), before)
 
     def test_damaged_version_cannot_downgrade_or_erase_current_evidence(self):
         self.admit()
@@ -707,7 +774,7 @@ class TaskAdmission(unittest.TestCase):
         self.repo.rename(self.root / "original-repository")
         subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
         self.commit("Replacement checkout")
-        with self.assertRaisesRegex(factory.FactoryError, "not an existing Git commit"):
+        with self.assertRaisesRegex(factory.FactoryError, "filesystem identity differs"):
             self.start(purpose="correction")
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])

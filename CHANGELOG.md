@@ -60,6 +60,9 @@ Freeze the resolved native CLI, require the owned worker/interpreter during
 collection, and preserve malformed native bytes with inspection/update guidance.
 Identify damaged preflight inputs and reject duplicate receipt/event keys before
 registering results.
+Carry the admitted repository identity into worker preflight/postflight checks and
+version-2 receipts. Preserve legacy command reconnection and inspection without
+inventing a historical pin or accepting older receipts as new evidence.
 
 ### Task admission
 
@@ -93,6 +96,9 @@ intent when returned Rex IDs disagree with the live pane, and explain Git proces
 failures and session/history mismatch recovery.
 Bind session/window marker formats to their task and assignment owners, and
 allow explicit admission limits when configuration defaults are unavailable.
+Pin new admissions to the Git common directory's filesystem identity in task
+schema version 3. Preserve older history with an unknown pin and require operator
+authorization for a new admission before further repository-backed work.
 
 ### CI and review
 

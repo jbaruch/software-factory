@@ -53,13 +53,13 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. External consumers must not edit or migrate these records. The
-runtime's `new_task`, `admit`, `launch` and `record_result` functions define schema version 2:
+runtime's `new_task`, `admit`, `launch` and `record_result` functions define schema version 3:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `2` on every task record |
+| `schema_version` | Integer `3` on every task record |
 | `task` | Task slug matching the JSON filename |
-| `admission` | `null`, or goal, repository, initial candidate, acceptance references and correction/investigation limits |
+| `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
 | `hold` | `null`, or the operator's pause reason |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
@@ -79,8 +79,19 @@ launch intents, limits, holds and IDs. It adds `result: null` to old assignments
 without inventing revision-bound evidence. Old assignments can reconnect but
 cannot acquire results retroactively. Admitted version 1 tasks initialize current
 inputs from their recorded initial candidate. `show` can write a legacy format
-upgrade, but never contacts Rex.
-Legacy records containing version-2 fields refuse migration. The loader validates
+upgrade, but never contacts Rex. Version 2 added revision-bound inputs/results.
+Version 3 adds `admission.repository_identity`: the absolute Git common-directory
+path and its integer `device`/`inode` filesystem identity. New admissions capture
+it from the selected repository. Linked worktrees share it; clones and forks do not.
+Before repository-backed mutations the owner verifies this identity and the
+initial commit against the live source.
+
+Older admissions upgrade with `repository_identity: null`, preserving scope,
+holds, attempts and reports without inventing a historical pin from today's path.
+They remain inspectable and reconnectable, but refuse new repository-backed work.
+The operator must inspect the original history and authorize a new admission;
+migration never resets the old task or automatically carries its approvals forward.
+Legacy records containing newer-version fields refuse migration. The loader validates
 request identity and evidence references before using saved results as dependencies.
 Recorded Rex identity without assignment history also refuses action. Live
 connections verify the saved session label before reusing its ID.
@@ -95,8 +106,7 @@ the investigator role and investigation purpose remain paired on reads.
 Unadmitted assignments cannot carry admitted-only purpose, input or dependency
 fields. New brief filenames separate task and assignment IDs with a dot; existing
 records keep their original paths and frozen contents.
-Repository-backed mutations recheck the admitted initial commit before selecting
-inputs, registering a result or launching work. Create responses must match the
+Create responses must match the
 live session marker and pane before the launcher saves `launched`; mismatches
 retain the original pending intent for reconciliation without another effect.
 Session markers must match `factory-<task>-<8hex>`; window markers must match
