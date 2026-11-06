@@ -10,6 +10,7 @@ This repository contains the agreed design, a specialist role catalog, configura
 - [Dashboard contract](docs/dashboard.md): delivery, capacity, utilization and overhead definitions.
 - [Implementation sequence](docs/implementation.md): the slices required to turn the contracts into a live factory.
 - [Native Rex launcher](docs/native-rex.md): explicit specialist launches, inspection and limited restart reconciliation.
+- [Native provider adapters](docs/native-providers.md): Codex account observations and explicit execution/result collection.
 - [Jev adapter](docs/jev.md): question compilation, model discovery and explicit shadow evaluation.
 - [Task state](docs/task-state.md): admission, attempt limits, holds and the state schema.
 - `skills/factory/references/roles.json`: the specialist catalog, focused prompts and decision authority.

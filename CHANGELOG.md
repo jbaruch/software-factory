@@ -16,6 +16,14 @@ Read the signed-in native account, metered quota buckets and model/effort catalo
 through an owned stdio app-server process. Preserve unknown fields and duplicate
 quota views without treating discovery as model access or lifecycle verification.
 
+### Native Codex results
+
+Add explicit model/effort assignments through Rex with private native events,
+before-start receipts and compact revision-bound result collection. Reject
+altered briefs, unsuccessful or incomplete native runs and conflicting evidence.
+Retain uncertain attempts for inspection instead of rerunning them. Offline
+tests cover completion, timeout and collection; live execution remains unverified.
+
 ### Task admission
 
 Add task scope, acceptance references and an initial Git revision to the native

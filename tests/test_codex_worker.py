@@ -1,0 +1,211 @@
+"""Native result/lifecycle tests use fake processes and Rex, never model calls."""
+import asyncio
+from contextlib import redirect_stdout
+import copy
+import hashlib
+from io import StringIO
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import codex_worker as worker
+import factory
+from test_rex_launcher import FakeRex
+
+
+def events():
+    return [dict(type="thread.started", thread_id="thread-fixture"),
+            dict(type="turn.started"),
+            dict(type="item.completed", item=dict(type="agent_message", text="Checking the candidate")),
+            dict(type="item.completed", item=dict(type="agent_message", text=json.dumps(
+                dict(outcome="approved", artifacts=["evidence/qa.txt"])))),
+            dict(type="turn.completed", usage=dict(input_tokens=100, output_tokens=30))]
+
+
+class FakeProcess:
+    def __init__(self, payload, exit_code=0, timeout=False):
+        self.lines = iter([json.dumps(event).encode() + b"\n" for event in payload])
+        self.stdout = self
+        self.returncode = None
+        self.exit_code, self.timeout = exit_code, timeout
+        self.signals = []
+
+    async def readline(self):
+        if self.timeout:
+            raise TimeoutError("fixture")
+        return next(self.lines, b"")
+
+    async def wait(self):
+        self.returncode = self.exit_code
+        return self.returncode
+
+    def send_signal(self, signal):
+        self.signals.append(signal)
+
+
+class NativeResults(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=Fixture",
+                        "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                        "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--allow-empty", "-m", "Fixture"],
+                       check=True, env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+                                        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        self.candidate = factory.git_commit(str(self.repo), "HEAD")
+        self.brief = self.root / "brief.md"
+        self.brief.write_text("Review the exact candidate and link evidence.")
+        self.args = worker.parser().parse_args([
+            "--codex", sys.executable, "--repo", str(self.repo), "--cwd", str(self.repo),
+            "--brief", str(self.brief), "--brief-sha256", hashlib.sha256(self.brief.read_bytes()).hexdigest(),
+            "--candidate", self.candidate, "--requirements", "requirements-1", "--job", "task/qa",
+            "--model", "fixture-model", "--effort", "high", "--events", str(self.root / "events.jsonl"),
+            "--receipt", str(self.root / "receipt.json")])
+        self.env = patch.dict(os.environ, {"CODEX_API_KEY": "", "OPENAI_API_KEY": ""})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.spawns = []
+        self.process = FakeProcess(events())
+
+    async def spawn(self, *command, **options):
+        self.spawns.append(command)
+        return self.process
+
+    def execute(self):
+        with redirect_stdout(StringIO()):
+            return asyncio.run(worker.execute(self.args, spawn=self.spawn,
+                                               clock=lambda: 1000.0, timer=lambda: 10.0))
+
+    def test_completion_preserves_original_events_and_private_bound_receipt(self):
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed")
+        self.assertEqual(receipt["candidate"], self.candidate)
+        self.assertEqual(receipt["inputs"]["requirements"], "requirements-1")
+        self.assertEqual(receipt["thread_id"], "thread-fixture")
+        self.assertEqual(receipt["usage"], dict(input_tokens=100, output_tokens=30))
+        self.assertEqual(receipt["finished_at"], 1000.0)
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        self.assertEqual([json.loads(line) for line in self.args.events.read_text().splitlines()], events())
+        self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
+        self.assertIn("read-only", self.spawns[0])
+        self.assertEqual(self.spawns[0][-1], self.brief.read_text())
+        before = self.args.receipt.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "never relaunch"):
+            self.execute()
+        self.assertEqual(len(self.spawns), 1)
+        self.assertEqual(self.args.receipt.read_bytes(), before)
+
+    def test_zero_exit_without_result_is_failed_and_never_retried(self):
+        self.process = FakeProcess(events()[:2])
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIsNone(receipt["report"])
+        self.assertIn("completion", receipt["error"])
+        with self.assertRaises(factory.FactoryError):
+            self.execute()
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_timeout_stops_only_owned_child_and_retains_failed_attempt(self):
+        self.process = FakeProcess([], timeout=True)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("allowance expired", receipt["error"])
+        self.assertEqual(len(self.process.signals), 1)
+        self.assertTrue(self.args.events.exists())
+
+    def test_changed_brief_and_api_override_refuse_before_native_spawn(self):
+        self.brief.write_text("Changed instructions")
+        with self.assertRaisesRegex(factory.FactoryError, "brief changed"):
+            self.execute()
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.events.exists())
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "not-a-real-key"}):
+            with self.assertRaisesRegex(factory.FactoryError, "API-key overrides"):
+                self.execute()
+
+    def test_dirty_checkout_after_native_exit_cannot_be_verification(self):
+        async def changed(*command, **options):
+            (self.repo / "uncommitted.txt").write_text("Uncommitted changes")
+            return self.process
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(worker.execute(self.args, spawn=changed,
+                                                 clock=lambda: 1000.0, timer=lambda: 10.0))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("clean", receipt["error"])
+
+    def test_invalid_streams_and_reports_cannot_be_registered(self):
+        malformed = [events()[1:], events() + [dict(type="turn.completed")],
+                     events() + [dict(type="turn.failed")], [None],
+                     events() + [dict(type="item.completed", item=None)]]
+        for change in (dict(artifacts=[""]), dict(outcome="accepted")):
+            payload = events()
+            report = dict(outcome="approved", artifacts=["evidence.txt"])
+            payload[-2]["item"]["text"] = json.dumps({**report, **change})
+            malformed.append(payload)
+        payload = events()
+        payload[-1]["usage"] = dict(input_tokens=True, output_tokens=0)
+        malformed.append(payload)
+        for payload in malformed:
+            with self.subTest(payload=payload), self.assertRaises(worker.WorkerError):
+                worker.parse_events(payload)
+        payload = events()
+        del payload[-1]["usage"]
+        self.assertIsNone(worker.parse_events(payload)["usage"])
+
+    def launch_assignment(self):
+        self.path = self.root / "task.json"
+        factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
+                      acceptance=["docs/acceptance.md"])
+        command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
+                                        model="fixture-model", effort="high")
+        FakeRex.sessions, FakeRex.calls = [], []
+        FakeRex.fail_after_create, FakeRex.host = False, "test-host"
+        with patch.object(factory, "Rex", FakeRex):
+            record, assignment = factory.launch(self.path, task="task", assignment_id="qa", role="qa",
+                goal="Review the change", cwd=str(self.repo), command=command, purpose="work",
+                binary=sys.executable, server="unix:///test.sock")
+        actual = next(call for call in FakeRex.calls if call[0] == "new")
+        argv = actual[actual.index("--") + 1:]
+        self.args = worker.parser().parse_args(argv[2:])
+        self.assertEqual(self.args.candidate, self.candidate)
+        self.assertEqual(self.args.brief_sha256, assignment["request"]["instructions_sha256"])
+        self.execute()
+        self.rex = FakeRex(sys.executable, "unix:///test.sock")
+        return record, assignment
+
+    def test_collection_binds_current_inputs_and_reuses_completed_result(self):
+        record, assignment = self.launch_assignment()
+        with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+            first = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            second = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        self.assertEqual(first, second)
+        self.assertTrue(factory.task_view(first)["assignments"]["qa"]["result_current"])
+        self.assertEqual(first["assignments"]["qa"]["result"]["artifacts"][0], str(self.args.receipt))
+        factory.set_inputs(self.path, candidate=self.candidate, requirements="requirements-2")
+        self.assertFalse(factory.task_view(factory.load_task(self.path))["assignments"]["qa"]["result_current"])
+
+    def test_tampered_receipt_and_unfinished_process_cannot_supply_result(self):
+        record, assignment = self.launch_assignment()
+        original = json.loads(self.args.receipt.read_text())
+        for change in (dict(job="task/other"), dict(report=dict(outcome="completed", artifacts=["other"]))):
+            factory.save(self.args.receipt, {**copy.deepcopy(original), **change})
+            with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.assertRaises(factory.FactoryError):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
+        with patch.object(self.rex, "call", return_value={"child": {"pid": 1}}):
+            with self.assertRaisesRegex(factory.FactoryError, "not exited"):
+                factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+
+
+if __name__ == "__main__":
+    unittest.main()

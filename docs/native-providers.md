@@ -39,3 +39,48 @@ sharing, supported tools or subscription eligibility for other harnesses.
 Claude, Grok and Antigravity need their own account, catalog, allowance and native
 lifecycle adapters. Do not substitute API-key billing for their subscription
 routes. The static provider catalog remains explicitly unverified.
+
+## Explicit Codex assignments
+
+`factory.py codex-start` builds one native `codex exec` invocation in an admitted
+task's Rex pane. Select an actual model and supported effort from fresh native
+observations. Existing project policy and operator authority must permit native
+delegation before execution. This adapter has offline conformance coverage;
+live specialist execution and eligibility remain unverified.
+
+```sh
+python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  codex-start --task example --id qa-1 --role qa --goal 'Review the selected candidate' \
+  --cwd '/absolute/path/to/clean/worktree' --purpose work \
+  --codex '/absolute/path/to/codex' --model 'discovered-model-id' --effort high
+python3 factory.py codex-collect --task example --id qa-1
+```
+
+Admission and input selection use the [native launcher commands](native-rex.md).
+The default worker sandbox is read-only. An explicit `--write` selects
+`workspace-write`; writers need their own worktree. `--seconds` declares the
+execution allowance, initially 600 seconds. Expiry interrupts only the owned
+native child and records failure. An uncertain attempt never retries itself.
+The adapter rejects API-key environment overrides and preserves native config;
+it does not establish authentication type or eligibility from that check alone.
+
+`codex_worker.py` owns version-1 `*.codex.json` execution receipts and their
+private original JSONL streams. Before starting a child it exclusively claims
+the stream and writes a `starting` receipt. Existing artifacts refuse a new
+execution. A receipt binds the job, input revisions, brief hash, working
+directory, resolved CLI, requested model/effort and writer mode. It records wall
+timestamps, monotonic duration, exit code, native thread ID, compact report,
+nullable native usage, resulting Git candidate, stream path and error. The
+native events follow the official [non-interactive contract](https://learn.chatgpt.com/docs/non-interactive-mode).
+The schema file beside the receipt requires only `outcome` and original
+`artifacts` from the specialist; runtime identity and Git facts are gathered by
+code. Schema changes belong to the worker. No older receipt versions exist.
+
+`codex-collect` is the read-only receipt consumer and task-result writer. It
+requires the exact Rex block to exit successfully, checks assignment binding,
+reparses the original events and compares the resulting report, thread and
+usage. Missing, unsupported, damaged or conflicting evidence refuses
+collection. The task store remains governed by its own schema. Repeated
+collection reuses the same immutable result. Changing task inputs leaves an
+older result visible but stale. A native exit or specialist approval does not
+accept the task, establish independent verification or satisfy release gates.

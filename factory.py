@@ -400,7 +400,12 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
     brief_path = path.parent / (task + "-" + assignment_id + ".md")
     save(brief_path, instructions)
-    replacements = {"{brief}": str(brief_path), "{instructions}": instructions}
+    replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
+                    "{brief_sha256}": request["instructions_sha256"], "{cwd}": cwd}
+    if record["admission"] is not None:
+        replacements.update({"{candidate}": request["inputs"]["candidate"],
+                             "{requirements}": request["inputs"]["requirements"],
+                             "{repository}": record["admission"]["repository"]})
     argv = [replacements.get(part, part) for part in command]
     assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
                             window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
@@ -436,22 +441,77 @@ def status(rex, record, assignment):
                 block_id=assignment["block_id"], exit=last_exit)
 
 
+def codex_command(path, *, task, assignment_id, codex, model, effort, write=False, seconds=600):
+    """Generate one explicit worker invocation; no model/effort or permission fallback."""
+    if not Path(codex).is_absolute() or seconds <= 0:
+        raise FactoryError("Supply an absolute native Codex path and a positive execution allowance")
+    prefix = path.parent / (task + "." + assignment_id + ".codex")
+    command = [sys.executable, str(ROOT / "codex_worker.py"), "--job", task + "/" + assignment_id,
+               "--codex", codex, "--model", model, "--effort", effort, "--seconds", str(seconds),
+               "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
+               "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
+               "--requirements", "{requirements}", "--events", str(prefix) + ".jsonl",
+               "--receipt", str(prefix) + ".json"]
+    return command + (["--write"] if write else [])
+
+
+def collect_codex(path, assignment_id, rex, record, assignment):
+    """Register a finished native report; this never accepts the whole task."""
+    from codex_worker import parse_events, parser
+
+    command = assignment["request"]["command"]
+    if len(command) < 2 or Path(command[1]).name != "codex_worker.py":
+        raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
+    args = parser().parse_args(command[2:])
+    observed = status(rex, record, assignment)
+    if observed["state"] != "exited":
+        raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
+    try:
+        receipt = json.loads(args.receipt.read_text())
+    except FileNotFoundError:
+        raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
+    if (not isinstance(receipt, dict) or receipt.get("schema_version") != 1
+            or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
+            or receipt.get("exit_code") != 0 or receipt.get("job") != record["task"] + "/" + assignment_id
+            or receipt.get("inputs") != assignment["request"].get("inputs")
+            or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
+            or receipt.get("cwd") != assignment["request"]["cwd"]
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or receipt.get("writer") != args.write or receipt.get("events") != str(args.events)):
+        raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
+    native = parse_events([json.loads(line) for line in args.events.read_text().splitlines()])
+    if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
+        raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
+    artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
+    return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+                         requirements=receipt["inputs"]["requirements"],
+                         outcome=native["report"]["outcome"], artifacts=artifacts)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".factory-state")
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
     parser.add_argument("--server", help="Explicit local unix:// Rex endpoint; pinned per task")
     sub = parser.add_subparsers(dest="action", required=True)
-    start = sub.add_parser("start", help="Launch an explicit command, or reuse the same assignment")
-    start.add_argument("--task", required=True)
-    start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
-    start.add_argument("--role", required=True)
-    start.add_argument("--goal", required=True)
-    start.add_argument("--cwd", required=True)
-    start.add_argument("--purpose", choices=("work", "correction", "investigation"),
-                       help="Required for admitted tasks; consumes the declared task allowance")
-    start.add_argument("--after", action="append", default=[], help="Earlier assignment that must have a current successful result")
-    start.add_argument("command", nargs=argparse.REMAINDER)
+    for action in ("start", "codex-start"):
+        start = sub.add_parser(action, help="Launch or reconnect to an explicit assignment")
+        start.add_argument("--task", required=True)
+        start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
+        start.add_argument("--role", required=True)
+        start.add_argument("--goal", required=True)
+        start.add_argument("--cwd", required=True)
+        start.add_argument("--purpose", choices=("work", "correction", "investigation"),
+                           help="Required for admitted tasks; consumes the declared task allowance")
+        start.add_argument("--after", action="append", default=[], help="Earlier assignment requiring a current successful result")
+        if action == "start":
+            start.add_argument("command", nargs=argparse.REMAINDER)
+        else:
+            start.add_argument("--codex", required=True)
+            start.add_argument("--model", required=True)
+            start.add_argument("--effort", required=True)
+            start.add_argument("--write", action="store_true")
+            start.add_argument("--seconds", type=int, default=600)
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -475,7 +535,7 @@ def main(argv=None):
         command.add_argument("--task", required=True)
         if action == "pause":
             command.add_argument("--reason", required=True)
-    for action in ("status", "capture"):
+    for action in ("status", "capture", "codex-collect"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
@@ -499,8 +559,14 @@ def main(argv=None):
                     record = hold_task(path, args.reason if args.action == "pause" else None)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
-            if args.action == "start":
-                argv = args.command[1:] if args.command[:1] == ["--"] else args.command
+            if args.action in {"start", "codex-start"}:
+                if args.action == "codex-start":
+                    if load_task(path)["admission"] is None:
+                        raise FactoryError("Admit a task before starting a native Codex assignment")
+                    argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
+                                         model=args.model, effort=args.effort, write=args.write, seconds=args.seconds)
+                else:
+                    argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
                     role=args.role, goal=args.goal, cwd=args.cwd, command=argv,
                     binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after)
@@ -512,7 +578,9 @@ def main(argv=None):
                 if not assignment.get("block_id"):
                     reconcile(rex, record, assignment)
                     save(path, record)
-            if args.action == "capture":
+            if args.action == "codex-collect":
+                print(json.dumps(task_view(collect_codex(path, args.id, rex, record, assignment)), indent=2))
+            elif args.action == "capture":
                 print(rex.call("capture", "-s", record["session_id"], "-b",
                                assignment["block_id"], "--trim", "--unwrap", raw=True), end="")
             else:
