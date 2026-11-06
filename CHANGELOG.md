@@ -68,6 +68,9 @@ Keep valid task/assignment ID combinations from overwriting another task's brief
 Reject duplicate JSON keys, pending pane IDs and aliased assignment identities.
 Require saved assignment history to match the live session and diagnose malformed
 Rex responses with compatibility/recovery guidance.
+Verify the admitted repository pin on repository-backed mutations, retain pending
+intent when returned Rex IDs disagree with the live pane, and explain Git process
+failures and session/history mismatch recovery.
 
 ### CI and review
 

@@ -33,7 +33,8 @@ class FakeRex:
             return next(item for item in self.sessions if item["session_id"] == args[2])
         if args[0] == "new" or args[:2] == ("window", "new"):
             if args[0] == "new":
-                session = {"session_id": "session-test", "label": args[1], "windows": []}
+                session = {"session_id": "session-test" if not self.sessions else f"session-test-{len(self.sessions) + 1}",
+                           "label": args[1], "windows": []}
                 self.sessions.append(session)
                 label = args[args.index("--window") + 1]
             else:
@@ -118,6 +119,27 @@ class NativeLauncher(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "outcome unknown"):
             self.start()
         self.assertEqual(len(self.creation_calls()), 1)
+
+    def test_wrong_create_ids_keep_pending_intent_and_reconcile_without_relaunch(self):
+        original_call = FakeRex.call
+        def wrong_ids(rex, *args, **kwargs):
+            response: dict = copy.deepcopy(original_call(rex, *args, **kwargs))
+            if args[0] == "new":
+                response["initial_windows"][0]["block_ids"] = ["wrong-block"]
+            elif args[:2] == ("window", "new"):
+                response["window_id"] = "wrong-window"
+            return response
+        for identity, role in (("qa", "qa"), ("security", "security")):
+            with patch.object(FakeRex, "call", wrong_ids):
+                with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain.*pane IDs differ"):
+                    self.start(assignment_id=identity, role=role)
+            pending = factory.load_task(self.path)["assignments"][identity]
+            self.assertEqual(pending["state"], "launching")
+            self.assertNotIn("block_id", pending)
+            self.assertNotIn("window_id", pending)
+            _, assignment = self.start(assignment_id=identity, role=role)
+            self.assertEqual(assignment["state"], "launched")
+        self.assertEqual(len(self.creation_calls()), 2)
 
     def test_another_specialist_gets_same_session_and_separate_window(self):
         first = self.start()
@@ -278,6 +300,35 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(view["allowances"]["correction"], dict(limit=1, used=0, remaining=1))
         self.assertIsNone(view["rex"])
         self.assertEqual(FakeRex.calls, [])
+
+    def test_repository_replacement_cannot_rebind_inputs_or_completed_results(self):
+        self.admit()
+        self.start()
+        before = self.path.read_bytes()
+        self.repo.rename(self.root / "original-repo")
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        self.commit("An unrelated repository")
+        for action in (lambda: self.admit(),
+                       lambda: factory.set_inputs(self.path, candidate="HEAD", requirements="v2"),
+                       lambda: self.report(candidate="HEAD", outcome="completed"),
+                       lambda: self.start(assignment_id="security", role="security")):
+            FakeRex.calls.clear()
+            with self.assertRaisesRegex(factory.FactoryError, "admitted repository pin"):
+                action()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_git_process_failures_explain_recovery_before_mutation(self):
+        self.admit()
+        before = self.path.read_bytes()
+        for error in (FileNotFoundError("git"), subprocess.TimeoutExpired("git", 10)):
+            with patch.object(factory.subprocess, "run", side_effect=error):
+                for action in (lambda: factory.git_commit(str(self.repo), "HEAD"),
+                               lambda: factory.git_common_dir(str(self.repo)),
+                               lambda: factory.check_checkout(str(self.repo), str(self.repo), "a" * 40)):
+                    with self.assertRaisesRegex(factory.FactoryError, "restore Git availability and checkout access"):
+                        action()
+            self.assertEqual(self.path.read_bytes(), before)
 
     def test_invalid_admission_and_changed_limits_cannot_reset_task(self):
         for changes in ({"goal": " "}, {"acceptance": []}, {"acceptance": [""]}, {"corrections": -1}):
