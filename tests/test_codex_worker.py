@@ -140,6 +140,34 @@ class NativeResults(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 json.loads(raw, object_pairs_hook=worker.native_object)
 
+    def test_spawn_failure_retains_an_actionable_failed_receipt(self):
+        async def unavailable(*args, **kwargs):
+            raise FileNotFoundError("Fixture executable disappeared")
+        receipt = asyncio.run(worker.execute(self.args, spawn=unavailable, clock=lambda: 1000, timer=lambda: 10))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("restore executable access/local process resources", receipt["error"])
+        self.assertIsNone(receipt["exit_code"])
+        self.assertIsNone(receipt["report"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_exit_before_cleanup_kill_still_saves_the_final_receipt(self):
+        class RaceProcess(FakeProcess):
+            waits = 0
+            async def wait(self):
+                self.waits += 1
+                if self.waits == 1:
+                    raise TimeoutError("Fixture cleanup deadline")
+                self.returncode = 0
+                return 0
+            def kill(self):
+                raise ProcessLookupError("Already exited")
+        self.process = RaceProcess(events(), timeout=True)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertEqual(self.process.waits, 2)
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
     def test_zero_exit_without_result_is_failed_and_never_retried(self):
         self.process = FakeProcess(events()[:2])
         receipt = self.execute()

@@ -105,11 +105,15 @@ async def stop_child(process):
     try:
         process.send_signal(signal.SIGINT)
     except ProcessLookupError:
+        await process.wait()
         return  # The owned process already exited.
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except TimeoutError:
-        process.kill()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass  # The owned child exited before the signal; still observe its exit below.
         await process.wait()
 
 
@@ -163,12 +167,15 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     events = []
     try:
         with os.fdopen(fd, "w") as stream:
-            process = await spawn(str(binary), "--no-daemon", "exec", "--json", "--color", "never",
-                                  "--output-schema", str(schema), "--model", args.model,
-                                  "--sandbox", "workspace-write" if args.write else "read-only",
-                                  "-c", "model_reasoning_effort=" + json.dumps(args.effort),
-                                  "--cd", ".", instructions,
-                                  stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+            try:
+                process = await spawn(str(binary), "--no-daemon", "exec", "--json", "--color", "never",
+                                      "--output-schema", str(schema), "--model", args.model,
+                                      "--sandbox", "workspace-write" if args.write else "read-only",
+                                      "-c", "model_reasoning_effort=" + json.dumps(args.effort),
+                                      "--cd", ".", instructions,
+                                      stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+            except OSError:
+                raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
 
             async def consume():
                 while line := await process.stdout.readline():

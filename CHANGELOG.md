@@ -14,6 +14,7 @@ repair from account/service recovery in HTTP diagnostics.
 Read runtime credentials from the environment, and identify damaged state/candidate
 input files with repair guidance before making any network request.
 Validate input shapes and refuse non-standard numbers or ambiguous duplicate keys.
+Name question-catalog access, encoding and shape repairs before provider access.
 
 ### Native model catalogs
 
@@ -29,6 +30,8 @@ through an owned stdio app-server process. Preserve unknown fields and duplicate
 quota views without treating discovery as model access or lifecycle verification.
 Malformed protocol input gives inspection/update guidance and stops the owned probe.
 Missing native binaries identify the executable path recovery before starting a child.
+Handle closed metadata pipes and exit-before-kill races with recovery guidance
+and observed child exit status.
 Translate metadata-process startup failures into executable/resource recovery guidance.
 
 ### Native Codex results
@@ -54,7 +57,8 @@ Carry the admitted repository identity into worker preflight/postflight checks a
 version-3 receipts using the Git-local marker. Preserve legacy command reconnection and inspection without
 inventing a historical pin or accepting older receipts as new evidence. Execute
 the native child in the inherited, verified directory rather than reopening the
-saved pathname.
+saved pathname. Preserve final receipts when cleanup races with child exit, and
+name recovery for a CLI that disappears before process creation.
 
 ### Operator-approved runtime and review exceptions
 
