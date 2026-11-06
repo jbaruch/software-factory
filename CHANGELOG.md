@@ -11,6 +11,10 @@ retain actionable process/stream I/O recovery diagnostics in failed receipts.
 Validate selections at the public CLI before legacy state upgrades, enforce
 ordered native thread/turn/report events, and reject ambiguous provider JSON or
 blank model identities before recording discovery or shadow evidence.
+Reject stateless path/allowance errors before legacy state reads. Freeze native
+worktree identity in commands and version-4 receipts; older receipts retain their
+history for inspection. Reject nonstandard/non-finite numbers throughout provider
+and event decoding with the existing recovery diagnostics.
 
 ### Jev shadow adapter
 

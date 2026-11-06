@@ -89,7 +89,7 @@ native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 
-`codex_worker.py` owns version-3 `*.codex.json` execution receipts and their
+`codex_worker.py` owns version-4 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
@@ -103,7 +103,8 @@ fields, local envelope keys, lifecycle data and final reports remain strict.
 Before starting a child the worker exclusively claims
 the stream and writes a `starting` receipt. Existing artifacts refuse a new
 execution. A receipt binds the job, input revisions, brief hash, working
-directory, frozen Git-local repository marker identity, resolved CLI, requested model/effort
+directory, frozen Git-local repository marker identity, worktree-specific absolute
+`worktree_git_dir`, resolved CLI, requested model/effort
 and writer mode. The worker verifies that repository identity before and after
 execution. Its native child inherits the verified working directory and uses
 `--cd .`, avoiding a second open of a replaceable checkout pathname. It records wall
@@ -121,10 +122,17 @@ thread start and turn start. These are retained telemetry and supply no lifecycl
 or report evidence; top-level errors and failed turns still refuse collection.
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
-code. Schema changes belong to the worker. Receipt readers accept only version 3;
+code. Schema changes belong to the worker. Receipt readers accept only version 4;
 version 1 lacks the repository pin and version 2 uses a reusable filesystem pin.
-Both remain inspection-only, without migration or a new launch. Existing commands reconnect unchanged; they cannot acquire
+Version 3 binds the repository but not the individual worktree. These versions
+remain inspection-only, without migration or a new launch. Existing commands reconnect unchanged; they cannot acquire
 retroactive execution evidence.
+New native commands freeze the worktree Git directory in their existing command
+arguments before launch. Preflight, actual-directory checks, postflight and
+collection use that same binding; another linked worktree cannot substitute even
+at the same commit. Task records keep their existing schema and command contract.
+Provider and event JSON reject duplicate keys, nonstandard numeric constants and
+numbers outside the supported finite range, including in otherwise unused fields.
 
 The launcher freezes the resolved native binary path after checking it is accessible and executable
 before saving a new assignment or consuming an attempt. Reconnection to an

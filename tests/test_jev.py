@@ -37,7 +37,9 @@ class JevAdapter(unittest.TestCase):
             def open(self, request, *, timeout):
                 return BytesIO(self.payload)
         for raw in (b'{"model":"first","model":"last"}',
-                    b'{"answers":{"q":{"choice":"a","choice":"b"}}}'):
+                    b'{"answers":{"q":{"choice":"a","choice":"b"}}}',
+                    *[(json.dumps(RESPONSE)[:-1] + ',"diagnostic":{"unused":' + number + '}}').encode()
+                      for number in ('NaN', 'Infinity', '-Infinity', '1e999')]):
             client = jev.Jev("not-a-real-key", opener=RawOpener(raw))
             with self.subTest(raw=raw), self.assertRaisesRegex(jev.JevError, "returned invalid JSON"):
                 client.request("systemone", {})

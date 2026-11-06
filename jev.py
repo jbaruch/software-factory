@@ -10,7 +10,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from factory import unique_object
+from factory import decode_json
 
 ROOT = Path(__file__).resolve().parent
 API = "https://api.typesafe.ai/v1/"
@@ -102,7 +102,7 @@ class Jev:
             "Authorization": "Bearer " + self.api_key, "Content-Type": "application/json"})
         try:
             with self.opener.open(request, timeout=20) as response:
-                return json.load(response, object_pairs_hook=unique_object)
+                return decode_json(response.read())
         except urllib.error.HTTPError as exc:
             # API bodies and exception strings may echo credentials or private state.
             status = exc.code
@@ -145,7 +145,7 @@ class Jev:
 
 def read_input(path, option):
     try:
-        value = json.loads(path.read_text(), object_pairs_hook=unique_object)
+        value = decode_json(path.read_text())
         json.dumps(value, allow_nan=False)  # Refuse non-standard constants and numeric overflow.
         if option == "--candidates":
             if not isinstance(value, dict) or any(not isinstance(items, dict) or any(
@@ -163,7 +163,7 @@ def read_input(path, option):
 def read_catalog():
     path = ROOT / "config/coordination.json"
     try:
-        catalog = json.loads(path.read_text(), object_pairs_hook=unique_object)
+        catalog = decode_json(path.read_text())
         json.dumps(catalog, allow_nan=False)
         if (not isinstance(catalog, dict) or type(catalog.get("schema_version")) is not int
                 or catalog["schema_version"] != 1 or not isinstance(catalog.get("questions"), list)):
