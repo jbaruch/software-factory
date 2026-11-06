@@ -73,6 +73,7 @@ class NativeResults(unittest.TestCase):
             "--brief", str(self.brief), "--brief-sha256", hashlib.sha256(self.brief.read_bytes()).hexdigest(),
             "--candidate", self.candidate, "--requirements", "requirements-1", "--job", "task/qa",
             "--repo-identity", json.dumps(self.identity),
+            "--worktree-git-dir", str(factory.git_dir(str(self.repo))),
             "--model", "fixture-model", "--effort", "high", "--events", str(self.root / "events.jsonl"),
             "--receipt", str(self.root / "receipt.json")])
         self.env = patch.dict(os.environ, {"CODEX_API_KEY": "", "OPENAI_API_KEY": ""})
@@ -93,8 +94,9 @@ class NativeResults(unittest.TestCase):
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
         self.assertEqual(receipt["state"], "completed")
-        self.assertEqual(receipt["schema_version"], 3)
+        self.assertEqual(receipt["schema_version"], 4)
         self.assertEqual(receipt["repository_identity"], self.identity)
+        self.assertEqual(receipt["worktree_git_dir"], str(factory.git_dir(str(self.repo))))
         self.assertEqual(receipt["candidate"], self.candidate)
         self.assertEqual(receipt["inputs"]["requirements"], "requirements-1")
         self.assertEqual(receipt["thread_id"], "thread-fixture")
@@ -189,7 +191,11 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
 
     def test_malformed_native_lines_retain_evidence_and_explain_recovery(self):
-        for index, line in enumerate((b'{"truncated":\n', b'\xff\n')):
+        for index, line in enumerate((b'{"truncated":\n', b'\xff\n',
+                b'{"type":"thread.started","thread_id":"fixture","unused":[NaN]}\n',
+                b'{"type":"thread.started","thread_id":"fixture","unused":{"n":Infinity}}\n',
+                b'{"type":"thread.started","thread_id":"fixture","unused":-Infinity}\n',
+                b'{"type":"thread.started","thread_id":"fixture","unused":1e999}\n')):
             self.args.events = self.root / f"bad-{index}.jsonl"
             self.args.receipt = self.root / f"bad-{index}.json"
             self.process = FakeProcess([])
@@ -297,7 +303,7 @@ class NativeResults(unittest.TestCase):
         factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
                       acceptance=["docs/acceptance.md"])
         command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=codex,
-                                        model="fixture-model", effort="high")
+                                        model="fixture-model", effort="high", cwd=str(self.repo))
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
         with patch.object(factory, "Rex", FakeRex):
@@ -324,7 +330,7 @@ class NativeResults(unittest.TestCase):
         for binary in (self.root / "missing", self.root, self.brief):
             with self.subTest(binary=binary), self.assertRaises(factory.FactoryError):
                 factory.codex_command(path, task="task", assignment_id="qa", codex=str(binary),
-                                      model="fixture-model", effort="high")
+                                      model="fixture-model", effort="high", cwd=str(self.repo))
             self.assertEqual(path.read_bytes(), before)
         binary = self.root / "native-fixture"
         binary.write_text("#!/bin/sh\nexit 0\n")
@@ -332,7 +338,7 @@ class NativeResults(unittest.TestCase):
         record, assignment = self.launch_assignment(codex=str(binary))
         binary.unlink()
         command = factory.codex_command(path, task="task", assignment_id="qa", codex=str(binary),
-                                        model="fixture-model", effort="high")
+                                        model="fixture-model", effort="high", cwd=str(self.repo))
         self.assertEqual(command, assignment["request"]["command"])
         self.assertEqual(factory.load_task(path), record)
 
@@ -340,7 +346,7 @@ class NativeResults(unittest.TestCase):
         binary = self.root / "native-fixture"
         binary.symlink_to(sys.executable)
         command = factory.codex_command(self.root / "task.json", task="task", assignment_id="qa",
-                                        codex=str(binary), model="fixture-model", effort="high")
+                                        codex=str(binary), model="fixture-model", effort="high", cwd=str(self.repo))
         chosen = command[command.index("--codex") + 1]
         binary.unlink()
         binary.symlink_to("/bin/false")
@@ -353,10 +359,10 @@ class NativeResults(unittest.TestCase):
                                acceptance=["docs/acceptance.md"], corrections=1, investigations=1)
         before = path.read_bytes()
         for model, effort in (("", "high"), ("  ", "high"), ("fixture-model", ""), ("fixture-model", "\t")):
-            with self.subTest(model=model, effort=effort), patch.object(factory, "load_task") as read:
+            with self.subTest(model=model, effort=effort, cwd=str(self.repo)), patch.object(factory, "load_task") as read:
                 with self.assertRaisesRegex(factory.FactoryError, "discovered native model and supported effort"):
                     factory.codex_command(path, task="task", assignment_id="qa", codex=sys.executable,
-                                          model=model, effort=effort)
+                                          model=model, effort=effort, cwd=str(self.repo))
                 read.assert_not_called()
             self.assertEqual(path.read_bytes(), before)
         self.assertEqual(factory.task_view(record)["allowances"]["correction"]["remaining"], 1)
@@ -385,7 +391,7 @@ class NativeResults(unittest.TestCase):
         before = path.read_bytes()
         for model, effort in ((" ", "high"), ("fixture-model", "\t")):
             errors = StringIO()
-            with self.subTest(model=model, effort=effort), redirect_stderr(errors), redirect_stdout(StringIO()):
+            with self.subTest(model=model, effort=effort, cwd=str(self.repo)), redirect_stderr(errors), redirect_stdout(StringIO()):
                 code = factory.main(["--state-dir", str(self.root), "codex-start", "--task", "task",
                     "--id", "qa", "--role", "qa", "--goal", "Inspect only", "--cwd", str(self.repo),
                     "--codex", sys.executable, "--model", model, "--effort", effort, "--purpose", "correction"])
@@ -393,6 +399,66 @@ class NativeResults(unittest.TestCase):
             self.assertIn("discovered native model and supported effort", errors.getvalue())
             self.assertEqual(path.read_bytes(), before)
             self.assertFalse(path.with_suffix(".lock").exists())
+
+    def test_public_cli_path_and_allowance_errors_do_not_upgrade_legacy_task(self):
+        path = self.root / "task.json"
+        record = factory.admit(path, task="task", goal="Verify the change", repository=str(self.repo),
+                               acceptance=["docs/acceptance.md"], corrections=1, investigations=1)
+        record["schema_version"] = 3
+        record["admission"]["repository_identity"] = dict(
+            common_dir=str(self.repo / ".git"), device=1, inode=2)
+        factory.save(path, record)
+        before = path.read_bytes()
+        for codex, seconds in (("relative-codex", "60"), (sys.executable, "0"), (sys.executable, "-1")):
+            errors = StringIO()
+            with self.subTest(codex=codex, seconds=seconds), redirect_stderr(errors), redirect_stdout(StringIO()):
+                code = factory.main(["--state-dir", str(self.root), "codex-start", "--task", "task",
+                    "--id", "qa", "--role", "qa", "--goal", "Inspect only", "--cwd", str(self.repo),
+                    "--codex", codex, "--model", "fixture-model", "--effort", "high",
+                    "--seconds", seconds, "--purpose", "correction"])
+            self.assertEqual(code, 1)
+            self.assertIn("absolute native Codex path and a positive execution allowance", errors.getvalue())
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(path.with_suffix(".lock").exists())
+
+    def test_another_linked_worktree_cannot_run_or_supply_a_writer_result(self):
+        other = self.root / "other-worktree"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach", str(other), "HEAD"], check=True)
+        self.args.write = True
+        os.chdir(other)
+        try:
+            with self.assertRaisesRegex(factory.FactoryError, "Assignment worktree differs"):
+                self.execute()
+        finally:
+            os.chdir(self.repo)
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.events.exists())
+        self.assertFalse(self.args.receipt.exists())
+
+        async def changed_actual_directory(*command, **options):
+            os.chdir(other)
+            return self.process
+        try:
+            with redirect_stdout(StringIO()):
+                receipt = asyncio.run(worker.execute(self.args, spawn=changed_actual_directory,
+                    clock=lambda: 1000.0, timer=lambda: 10.0))
+        finally:
+            os.chdir(self.repo)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("Assignment worktree differs", receipt["error"])
+        self.assertEqual(receipt["worktree_git_dir"], str(factory.git_dir(str(self.repo))))
+
+    def test_old_worktree_unbound_command_reconnects_but_cannot_collect(self):
+        record, assignment = self.launch_assignment()
+        command = assignment["request"]["command"]
+        index = command.index("--worktree-git-dir")
+        del command[index:index + 2]
+        factory.save(self.path, record)
+        frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
+            model="fixture-model", effort="high", cwd=str(self.repo))
+        self.assertEqual(frozen, command)
+        with self.assertRaisesRegex(factory.FactoryError, "predates worktree identity"):
+            factory.collect_codex(self.path, "qa", self.rex, record, assignment)
 
     def test_reordered_native_lifecycle_cannot_register_a_result(self):
         record, assignment = self.launch_assignment()
@@ -426,7 +492,7 @@ class NativeResults(unittest.TestCase):
         del record["admission"]["repository_identity"]
         factory.save(self.path, record)
         frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
-                                       model="fixture-model", effort="high")
+                                       model="fixture-model", effort="high", cwd=str(self.repo))
         self.assertEqual(frozen, command)
         FakeRex.calls.clear()
         with patch.object(factory, "Rex", FakeRex):
@@ -459,6 +525,13 @@ class NativeResults(unittest.TestCase):
                 with self.assertRaisesRegex(worker.WorkerError, "Unsupported native event record"):
                     factory.collect_codex(self.path, "qa", self.rex, record, assignment)
             self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
+        for number in (float("nan"), float("inf"), float("-inf")):
+            damaged = {**first, "unused": {"numbers": [number]}}
+            self.args.events.write_text("\n".join([json.dumps(damaged), *original[1:]]) + "\n")
+            with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.assertRaisesRegex(worker.WorkerError, "Malformed native events"):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
 
     def test_collection_binds_current_inputs_and_reuses_completed_result(self):
         record, assignment = self.launch_assignment()
@@ -476,7 +549,8 @@ class NativeResults(unittest.TestCase):
         original = json.loads(self.args.receipt.read_text())
         for change in (dict(job="task/other"), dict(report=dict(outcome="completed", artifacts=["other"])),
                        dict(schema_version=True), dict(schema_version=1.0),
-                       dict(exit_code=False), dict(writer=0), dict(binary="/bin/false"), dict(schema_version=1), dict(schema_version=2),
+                       dict(exit_code=False), dict(writer=0), dict(binary="/bin/false"), dict(schema_version=1), dict(schema_version=2), dict(schema_version=3),
+                       dict(worktree_git_dir="/fixture/other-git-dir"),
                        dict(repository_identity={**self.identity, "repository_id": "b" * 32})):
             factory.save(self.args.receipt, {**copy.deepcopy(original), **change})
             with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
@@ -501,7 +575,7 @@ class NativeResults(unittest.TestCase):
         record, assignment = self.launch_assignment()
         original = json.loads(self.args.receipt.read_text())
         cases = []
-        for key in ("created_at", "finished_at", "elapsed_seconds", "error", "usage"):
+        for key in ("created_at", "finished_at", "elapsed_seconds", "error", "usage", "worktree_git_dir"):
             missing = copy.deepcopy(original)
             del missing[key]
             cases.append(missing)
@@ -513,7 +587,7 @@ class NativeResults(unittest.TestCase):
         for index, receipt in enumerate(cases):
             factory.save(self.args.receipt, receipt)
             with self.subTest(index=index), patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
-                with self.assertRaisesRegex(factory.FactoryError, "receipt does not match"):
+                with self.assertRaisesRegex(factory.FactoryError, "Native receipt does not match|Cannot read native receipt"):
                     factory.collect_codex(self.path, "qa", self.rex, record, assignment)
             self.assertEqual(self.path.read_bytes(), before)
 
@@ -521,7 +595,7 @@ class NativeResults(unittest.TestCase):
         record, assignment = self.launch_assignment()
         receipt = self.args.receipt.read_text()
         events_text = self.args.events.read_text()
-        duplicate_receipt = receipt.replace('"schema_version": 3', '"schema_version": 99, "schema_version": 3', 1)
+        duplicate_receipt = receipt.replace('"schema_version": 4', '"schema_version": 99, "schema_version": 4', 1)
         duplicate_event = events_text.replace('"schema_version": 1', '"schema_version": 99, "schema_version": 1', 1)
         for damaged_receipt, damaged_events, error in (
                 (duplicate_receipt, events_text, "Cannot read native receipt"),

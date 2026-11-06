@@ -535,6 +535,7 @@ class TaskAdmission(unittest.TestCase):
                 self.start(cwd=str(other))
             result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
                 "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
                 "--candidate", record["inputs"]["candidate"], "--", sys.executable,
                 "-c", "print('UNAUTHORIZED')"], cwd=other, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
@@ -553,6 +554,7 @@ class TaskAdmission(unittest.TestCase):
             self.start()
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable,
             "-c", "import local_config; print(local_config.VALUE)"],
             cwd=self.repo, capture_output=True, text=True, check=False)
@@ -567,6 +569,7 @@ class TaskAdmission(unittest.TestCase):
         subprocess.run(["git", "clone", "--quiet", str(self.repo), str(other)], check=True)
         command = [sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
             "import subprocess; subprocess.run(['git','branch','from-wrapper'],check=True)"]
         environment = {**os.environ, "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
@@ -586,6 +589,7 @@ class TaskAdmission(unittest.TestCase):
             "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"}
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
             "import subprocess; subprocess.run(['git','-c','commit.gpgsign=false','-c','core.hooksPath=/dev/null','commit','--quiet','--allow-empty','-m','Identity fixture'],check=True)"],
             cwd=self.repo, env=environment, capture_output=True, text=True, check=False)
@@ -599,6 +603,7 @@ class TaskAdmission(unittest.TestCase):
                     "GIT_SSL_CAINFO": "/fixture/ca.pem", "GIT_TERMINAL_PROMPT": "0"}
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
             "import json,os,sys; expected=json.loads(sys.argv[1]); sys.exit(0 if all(os.environ.get(k)==v for k,v in expected.items()) else 2)",
             json.dumps(settings)], cwd=self.repo, env={**os.environ, **settings},
@@ -622,6 +627,7 @@ class TaskAdmission(unittest.TestCase):
             self.start()
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable,
             "-c", "print('must not launch')"], cwd=self.repo, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
@@ -649,6 +655,7 @@ class TaskAdmission(unittest.TestCase):
             self.start()
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable,
             "-c", "print('must not launch')"], cwd=self.repo, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
@@ -671,6 +678,37 @@ class TaskAdmission(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "replace", original, substitute], check=True)
         self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
         self.assert_source_refuses_at_both_launch_boundaries(record)
+
+    def test_child_git_reads_unreplaced_candidate_in_a_clean_checkout(self):
+        source = self.repo / "source.txt"
+        source.write_text("original\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Original source")
+        original = factory.git_commit(str(self.repo), "HEAD")
+        source.write_text("substitute\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Substitute source")
+        substitute = factory.git_commit(str(self.repo), "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "reset", "--quiet", "--hard", original], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "replace", original, substitute], check=True)
+        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "show", "HEAD:source.txt"]), b"substitute\n")
+        self.admit()
+        self.start(command=[sys.executable, "-c", "import subprocess; subprocess.run(['git','show','HEAD:source.txt'],check=True)"])
+        call = self.creation_calls()[0]
+        result = subprocess.run(call[call.index("--") + 1:], cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "original\n", ""))
+
+    def test_spawn_consumer_cannot_substitute_another_linked_worktree(self):
+        self.admit()
+        other = self.root / "other-worktree"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach", str(other), "HEAD"], check=True)
+        self.assertEqual(factory.repository_identity(str(self.repo)), factory.repository_identity(str(other)))
+        self.assertNotEqual(factory.git_dir(str(self.repo)), factory.git_dir(str(other)))
+        self.start(command=[sys.executable, "-c", "print('UNAUTHORIZED')"])
+        call = self.creation_calls()[0]
+        result = subprocess.run(call[call.index("--") + 1:], cwd=other, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("Assignment worktree differs", result.stderr)
 
     def test_warmed_untracked_cache_cannot_hide_added_input(self):
         package = self.repo / "package"
@@ -709,6 +747,7 @@ class TaskAdmission(unittest.TestCase):
             self.start()
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
             "--candidate", record["inputs"]["candidate"], "--", sys.executable,
             "-c", "print('UNAUTHORIZED')"], cwd=self.repo, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout), (1, ""))

@@ -26,6 +26,10 @@ retain actionable process/stream I/O recovery diagnostics in failed receipts.
 Validate selections at the public CLI before legacy state upgrades, enforce
 ordered native thread/turn/report events, and reject ambiguous provider JSON or
 blank model identities before recording discovery or shadow evidence.
+Reject stateless path/allowance errors before legacy state reads. Freeze native
+worktree identity in commands and version-4 receipts; older receipts retain their
+history for inspection. Reject nonstandard/non-finite numbers throughout provider
+and event decoding with the existing recovery diagnostics.
 
 ### Jev shadow adapter
 
@@ -140,6 +144,8 @@ Compare tracked bytes and modes with the candidate tree even when Git stat hints
 hide an edit. Preserve command SSH, credential, TLS and prompt settings while
 removing Git routing overrides. Pin the CI Python patch with a monthly renewal.
 Disable replacement objects and the untracked cache during source verification.
+Disable replacement objects in child commands too, and pin the launch wrapper
+to its exact worktree Git directory rather than only the shared repository.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and

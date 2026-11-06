@@ -11,6 +11,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--identity", required=True)
     parser.add_argument("--candidate", required=True)
+    parser.add_argument("--git-dir", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -24,7 +25,10 @@ def main(argv=None):
         if not factory.valid_repository_identity(identity):
             raise factory.FactoryError("Invalid repository pin; inspect the original assignment before another attempt")
         # '.' uses the working directory Rex actually opened, not the saved pathname.
-        factory.check_checkout(".", ".", args.candidate, expected_identity=identity)
+        if not os.path.isabs(args.git_dir):
+            raise factory.FactoryError("Supply the saved absolute worktree Git directory; inspect the original assignment")
+        factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
+                               expected_git_dir=args.git_dir)
         os.execve(command[0], command, factory.command_environment())
     except factory.FactoryError as exc:
         print("checkout-exec: " + str(exc), file=sys.stderr)

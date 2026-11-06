@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import time
 
-from factory import unique_object
+from factory import decode_json
 
 
 class CodexProbeError(Exception):
@@ -36,7 +36,7 @@ async def exchange(process, identity, method, params):
         if not line:
             raise CodexProbeError("Native Codex closed its metadata channel; inspect native sign-in/configuration")
         try:
-            message = json.loads(line, object_pairs_hook=unique_object)
+            message = decode_json(line)
         except (ValueError, UnicodeDecodeError):
             raise CodexProbeError("Malformed native Codex protocol; inspect its connection and update the adapter before scheduling") from None
         if not isinstance(message, dict):

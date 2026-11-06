@@ -140,7 +140,11 @@ class NativeMetadata(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_protocol_identifies_recovery_and_cleans_up_owned_child(self):
         for line in (b'{"truncated":\n', b'\xff\n',
                      b'{"id":0,"result":{},"result":{"model":"last"}}\n',
-                     b'{"id":0,"result":{"model":"first","model":"last"}}\n'):
+                     b'{"id":0,"result":{"model":"first","model":"last"}}\n',
+                     b'{"id":0,"result":{"unused":[NaN]}}\n',
+                     b'{"id":0,"result":{"unused":{"n":Infinity}}}\n',
+                     b'{"id":0,"result":{"unused":-Infinity}}\n',
+                     b'{"id":0,"result":{"unused":1e999}}\n'):
             process = Process(self.replies())
             async def spawn(*args, **kwargs):
                 return process

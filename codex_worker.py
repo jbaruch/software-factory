@@ -72,7 +72,7 @@ def parse_events(events) -> dict:
     if not isinstance(message, str):
         raise WorkerError("Native final message is missing; inspect its original events")
     try:
-        report = json.loads(message, object_pairs_hook=factory.unique_object)
+        report = factory.decode_json(message)
     except (ValueError, TypeError):
         raise WorkerError("Native final message is not a structured result; inspect its original events") from None
     if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
@@ -96,7 +96,7 @@ def read_events(path):
     events = []
     for line in lines:
         try:
-            record = json.loads(line, object_pairs_hook=factory.unique_object)
+            record = factory.decode_json(line)
         except (ValueError, UnicodeError):
             raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
         if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
@@ -105,7 +105,7 @@ def read_events(path):
             raise WorkerError("Unsupported native event record; inspect the original stream and update the adapter")
         try:
             record["data"].encode("utf-8")  # Invalid native bytes remain escaped evidence, never valid events.
-            events.append(json.loads(record["data"], object_pairs_hook=native_object))
+            events.append(factory.decode_json(record["data"], object_pairs_hook=native_object))
         except (ValueError, UnicodeError):
             raise WorkerError("Malformed native events; inspect the retained stream before collecting or retrying") from None
     return events
@@ -150,18 +150,23 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     if digest != args.brief_sha256:
         raise factory.FactoryError("Assignment brief changed; inspect the original task before launching")
     try:
-        identity = json.loads(args.repo_identity, object_pairs_hook=factory.unique_object)
+        identity = factory.decode_json(args.repo_identity)
     except (ValueError, TypeError):
         raise factory.FactoryError("Cannot decode repository identity; inspect the original assignment before another attempt") from None
     if not factory.valid_repository_identity(identity):
         raise factory.FactoryError("Invalid repository identity; inspect the original assignment before another attempt")
-    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity)
-    factory.check_checkout(".", ".", args.candidate, expected_identity=identity)
+    if not args.worktree_git_dir.is_absolute():
+        raise factory.FactoryError("Restore the saved absolute worktree Git directory before launching")
+    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
+                           expected_git_dir=args.worktree_git_dir)
+    factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
+                           expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
-    receipt = dict(schema_version=3, kind="codex-execution", job=args.job, state="starting",
+    receipt = dict(schema_version=4, kind="codex-execution", job=args.job, state="starting",
                    inputs=dict(candidate=args.candidate, requirements=args.requirements),
                    repository_identity=identity,
+                   worktree_git_dir=str(args.worktree_git_dir),
                    brief_sha256=digest, cwd=str(args.cwd), requested_model=args.model,
                    requested_effort=args.effort, binary=str(binary), writer=args.write,
                    created_at=clock(), finished_at=None,
@@ -196,7 +201,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     stream.flush()
                     try:
                         line.decode("utf-8")
-                        event = json.loads(text, object_pairs_hook=native_object)
+                        event = factory.decode_json(text, object_pairs_hook=native_object)
                     except (UnicodeDecodeError, ValueError):
                         raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
                     print(text, end="", flush=True)
@@ -214,7 +219,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
         receipt.update(parse_events(events))
         candidate = factory.git_commit(".", "HEAD")
-        factory.check_checkout(".", ".", candidate, expected_identity=identity)
+        factory.check_checkout(".", ".", candidate, expected_identity=identity,
+                               expected_git_dir=args.worktree_git_dir)
         if not args.write and candidate != args.candidate:
             raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
         receipt.update(candidate=candidate, state="completed")
@@ -235,7 +241,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
 
 def parser():
     command = argparse.ArgumentParser(description=__doc__)
-    for field in ("codex", "repo", "cwd", "brief", "events", "receipt"):
+    for field in ("codex", "repo", "cwd", "brief", "events", "receipt", "worktree-git-dir"):
         command.add_argument("--" + field, type=Path, required=True)
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
