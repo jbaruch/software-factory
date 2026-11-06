@@ -61,6 +61,9 @@ class NativeResults(unittest.TestCase):
                         "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--allow-empty", "-m", "Fixture"],
                        check=True, env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
                                         "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        previous_cwd = Path.cwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, previous_cwd)
         self.candidate = factory.git_commit(str(self.repo), "HEAD")
         self.identity: dict = factory.repository_identity(str(self.repo), create=True)
         self.brief = self.root / "brief.md"
@@ -105,6 +108,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("read-only", self.spawns[0])
+        self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
         self.assertEqual(self.spawns[0][-1], self.brief.read_text())
         before = self.args.receipt.read_bytes()
         with self.assertRaisesRegex(factory.FactoryError, "never relaunch"):
@@ -224,7 +228,7 @@ class NativeResults(unittest.TestCase):
             receipt = asyncio.run(worker.execute(self.args, spawn=replaced))
         self.assertEqual(receipt["state"], "failed")
         self.assertEqual(receipt["repository_identity"], self.identity)
-        self.assertIn("repository marker", receipt["error"])
+        self.assertIn("repository identity differs", receipt["error"])
 
     def launch_assignment(self, codex=sys.executable):
         self.path = self.root / "task.json"
@@ -240,6 +244,8 @@ class NativeResults(unittest.TestCase):
                 binary=sys.executable, server="unix:///test.sock")
         actual = next(call for call in FakeRex.calls if call[0] == "new")
         argv = actual[actual.index("--") + 1:]
+        self.assertEqual(argv[:2], (sys.executable, str(factory.ROOT / "checkout_exec.py")))
+        argv = argv[argv.index("--") + 1:]
         self.args = worker.parser().parse_args(argv[2:])
         self.assertEqual(self.args.candidate, self.candidate)
         self.assertEqual(self.args.brief_sha256, assignment["request"]["instructions_sha256"])

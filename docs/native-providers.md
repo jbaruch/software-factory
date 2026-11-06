@@ -102,7 +102,8 @@ the stream and writes a `starting` receipt. Existing artifacts refuse a new
 execution. A receipt binds the job, input revisions, brief hash, working
 directory, frozen Git-local repository marker identity, resolved CLI, requested model/effort
 and writer mode. The worker verifies that repository identity before and after
-execution. It records wall
+execution. Its native child inherits the verified working directory and uses
+`--cd .`, avoiding a second open of a replaceable checkout pathname. It records wall
 timestamps, monotonic duration, exit code, native thread ID, compact report,
 nullable native usage, resulting Git candidate, stream path and error. The
 native events follow the official [non-interactive contract](https://learn.chatgpt.com/docs/non-interactive-mode).
