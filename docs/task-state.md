@@ -80,6 +80,8 @@ without inventing revision-bound evidence. Old assignments can reconnect but
 cannot acquire results retroactively. Admitted version 1 tasks initialize current
 inputs from their recorded initial candidate. `show` can write a legacy format
 upgrade, but never contacts Rex.
+Legacy records containing version-2 fields refuse migration. The loader validates
+request identity and evidence references before using saved results as dependencies.
 
 This is a gate store under the coding policy's Stateful Artifacts migration
 exception: an unsupported version or damaged gate data refuses the action with a

@@ -17,6 +17,9 @@ revisions. Preserve stale results as history and require current successful resu
 for declared launch dependencies. Completed implementation can return a produced
 commit for independent review. Existing assignments gain no invented evidence
 during the version 2 state upgrade.
+Refuse damaged schema downgrades and incomplete request/evidence identities
+before they can erase history or authorize dependent launches. Unknown assignment
+diagnostics direct the operator to the recorded IDs.
 
 ### CI and review
 

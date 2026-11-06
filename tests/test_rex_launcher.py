@@ -1,5 +1,6 @@
 """Failure/restart tests use a fake server; no live sessions or providers."""
 import json
+import copy
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import os
@@ -417,6 +418,47 @@ class TaskAdmission(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
             self.report()
 
+    def test_damaged_version_cannot_downgrade_or_erase_current_evidence(self):
+        self.admit()
+        self.start()
+        self.report()
+        factory.set_inputs(self.path, candidate="HEAD", requirements="changed-requirements")
+        original = json.loads(self.path.read_text())
+        for remove in ((), ("inputs",)):
+            record = copy.deepcopy(original)
+            record["schema_version"] = 1
+            for key in remove:
+                del record[key]
+            self.path.write_text(json.dumps(record))
+            before = self.path.read_bytes()
+            result, output, errors = self.cli("show", "--task", "task")
+            self.assertEqual((result, output), (1, ""))
+            self.assertIn("restore its schema version", errors)
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_damaged_request_or_result_cannot_authorize_downstream_launch(self):
+        self.admit()
+        self.start()
+        self.report()
+        original = json.loads(self.path.read_text())
+        variants = []
+        for field in ("role", "goal", "cwd", "command", "instructions_sha256"):
+            record = copy.deepcopy(original)
+            del record["assignments"]["qa"]["request"][field]
+            variants.append(record)
+        for refs in ([None], [""], [" "]):
+            record = copy.deepcopy(original)
+            record["assignments"]["qa"]["result"]["artifacts"] = refs
+            variants.append(record)
+        FakeRex.calls.clear()
+        for record in variants:
+            self.path.write_text(json.dumps(record))
+            before = self.path.read_bytes()
+            with self.subTest(record=record), self.assertRaises(factory.FactoryError):
+                self.start(assignment_id="security", role="security", dependencies=["qa"])
+            self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
     def test_cli_input_selection_and_result_submission(self):
         self.admit()
         result, output, errors = self.cli("inputs", "--task", "task", "--candidate", "HEAD",
@@ -524,6 +566,17 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual((result, output), (1, ""))
         self.assertIn("Unknown assignment 'typo'", errors)
         self.assertIn("show --task task", errors)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_unknown_status_or_capture_assignment_explains_recovery_without_rex(self):
+        self.admit()
+        before = self.path.read_bytes()
+        for action in ("status", "capture"):
+            result, output, errors = self.cli(action, "--task", "task", "--id", "typo")
+            self.assertEqual((result, output), (1, ""))
+            self.assertIn("Unknown assignment 'typo'", errors)
+            self.assertIn("show --task task", errors)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
 
