@@ -612,10 +612,10 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     if observed["state"] != "exited":
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
-        receipt = json.loads(args.receipt.read_text())
+        receipt = json.loads(args.receipt.read_text(), object_pairs_hook=unique_object)
     except FileNotFoundError:
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError):
         raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
             or receipt["schema_version"] != 1

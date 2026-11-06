@@ -13,6 +13,7 @@ Reject Choice answers that contradict their distributions and distinguish reques
 repair from account/service recovery in HTTP diagnostics.
 Read runtime credentials from the environment, and identify damaged state/candidate
 input files with repair guidance before making any network request.
+Validate input shapes and refuse non-standard numbers or ambiguous duplicate keys.
 
 ### Native Codex metadata
 
@@ -21,6 +22,7 @@ through an owned stdio app-server process. Preserve unknown fields and duplicate
 quota views without treating discovery as model access or lifecycle verification.
 Malformed protocol input gives inspection/update guidance and stops the owned probe.
 Missing native binaries identify the executable path recovery before starting a child.
+Translate metadata-process startup failures into executable/resource recovery guidance.
 
 ### Native Codex results
 
@@ -36,6 +38,8 @@ Reject damaged or mistyped receipts with actionable recovery diagnostics before
 registering any result.
 Freeze the resolved native CLI, require the owned worker/interpreter during
 collection, and preserve malformed native bytes with inspection/update guidance.
+Identify damaged preflight inputs and reject duplicate receipt/event keys before
+registering results.
 
 ### Task admission
 

@@ -157,7 +157,9 @@ class JevAdapter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.json"
             for option in ("--state", "--candidates"):
-                for data in (None, b'{"truncated":', b'\xff'):
+                for data in (None, b'{"truncated":', b'\xff', b'1', b'null', b'true',
+                             b'NaN', b'{"invalid": Infinity}', b'{"invalid": 1e309}',
+                             b'{"duplicate": {}, "duplicate": {}}'):
                     if data is not None:
                         path.write_bytes(data)
                     elif path.exists():
@@ -173,6 +175,13 @@ class JevAdapter(unittest.TestCase):
                     self.assertIn(str(path), errors.getvalue())
                     self.assertIn("repair its UTF-8 JSON", errors.getvalue())
                     client.assert_not_called()
+
+    def test_state_file_preserves_all_documented_top_level_shapes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            for state in ("Relevant evidence", {"count": 1}, ["first", "second"]):
+                path.write_text(json.dumps(state))
+                self.assertEqual(jev.read_input(path, "--state"), state)
 
 
 if __name__ == "__main__":

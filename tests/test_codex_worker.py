@@ -153,6 +153,23 @@ class NativeResults(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "API-key overrides"):
                 self.execute()
 
+    def test_missing_native_binary_and_damaged_brief_identify_preflight_recovery(self):
+        original = self.args.codex
+        self.args.codex = self.root / "missing-native"
+        with self.assertRaisesRegex(factory.FactoryError, "Cannot access native CLI .*inspect/restore the saved executable"):
+            self.execute()
+        self.args.codex = original
+        for data in (None, b'\xff'):
+            if data is None:
+                self.brief.unlink()
+            else:
+                self.brief.write_bytes(data)
+            with self.assertRaisesRegex(factory.FactoryError, "Cannot read original brief .*inspect/restore the saved assignment input"):
+                self.execute()
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.receipt.exists())
+        self.assertFalse(self.args.events.exists())
+
     def test_dirty_checkout_after_native_exit_cannot_be_verification(self):
         async def changed(*command, **options):
             (self.repo / "uncommitted.txt").write_text("Uncommitted changes")
@@ -289,6 +306,22 @@ class NativeResults(unittest.TestCase):
             with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
                 with self.subTest(data=data), self.assertRaisesRegex(factory.FactoryError,
                         "Cannot read native receipt .*inspect or restore the original artifact"):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
+
+    def test_duplicate_receipt_and_event_keys_cannot_register_a_result(self):
+        record, assignment = self.launch_assignment()
+        receipt = self.args.receipt.read_text()
+        events_text = self.args.events.read_text()
+        duplicate_receipt = receipt.replace('"schema_version": 1', '"schema_version": 99, "schema_version": 1', 1)
+        duplicate_event = events_text.replace('"schema_version": 1', '"schema_version": 99, "schema_version": 1', 1)
+        for damaged_receipt, damaged_events, error in (
+                (duplicate_receipt, events_text, "Cannot read native receipt"),
+                (receipt, duplicate_event, "Malformed native events")):
+            self.args.receipt.write_text(damaged_receipt)
+            self.args.events.write_text(damaged_events)
+            with patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.assertRaisesRegex((factory.FactoryError, worker.WorkerError), error):
                     factory.collect_codex(self.path, "qa", self.rex, record, assignment)
             self.assertIsNone(factory.load_task(self.path)["assignments"]["qa"]["result"])
 
