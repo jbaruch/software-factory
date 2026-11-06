@@ -36,16 +36,19 @@ class Rex:
         self.binary, self.server = str(binary), server
 
     def call(self, *args, raw=False) -> Any:
-        result = subprocess.run(
-            [self.binary, "--autostart=false", "-S", self.server, *args],
-            capture_output=True, text=True, timeout=20, check=False)
+        try:
+            result = subprocess.run(
+                [self.binary, "--autostart=false", "-S", self.server, *args],
+                capture_output=True, text=True, timeout=20, check=False)
+        except UnicodeDecodeError:
+            raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
         if result.returncode:
             raise FactoryError(result.stderr.strip() or "Rex command failed")
         if raw:
             return result.stdout
         try:
             return json.loads(result.stdout)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except json.JSONDecodeError:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 
@@ -278,7 +281,8 @@ def valid_legacy_repository_identity(value):
 def git_run(repository, *args):
     try:
         return subprocess.run(["git", "-C", repository, *args], capture_output=True,
-                              text=True, timeout=10, check=False)
+                              text=True, timeout=10, check=False,
+                              env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")})
     except (OSError, subprocess.TimeoutExpired):
         raise FactoryError("Cannot run Git; restore Git availability and checkout access, then retry the command") from None
 
@@ -345,11 +349,11 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None):
         raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
     if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
         raise FactoryError("Assignment checkout differs from the selected candidate; use its worktree at that commit")
-    changed = git_run(cwd, "status", "--porcelain", "--untracked-files=normal")
+    changed = git_run(cwd, "status", "--porcelain", "--untracked-files=all", "--ignored=matching")
     if changed.returncode:
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
     if changed.stdout:
-        raise FactoryError("Assignment checkout has uncommitted inputs; commit them or use a clean worktree before launching")
+        raise FactoryError("Assignment checkout has uncommitted inputs (including ignored files); use a clean worktree and keep runtime state/output outside it")
     if expected_identity is not None and (repository_identity(repository) != expected_identity
                                           or repository_identity(cwd) != expected_identity):
         raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
