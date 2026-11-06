@@ -87,6 +87,9 @@ intent when returned Rex IDs disagree with the live pane, and explain Git proces
 failures and session/history mismatch recovery.
 Bind session/window marker formats to their task and assignment owners, and
 allow explicit admission limits when configuration defaults are unavailable.
+Clear ambient Git overrides during verification and refuse ignored worktree
+overlays, keeping revision-bound inputs tied to the selected commit. Decode
+malformed Rex process bytes at the transport boundary with compatibility guidance.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and
