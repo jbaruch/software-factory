@@ -96,6 +96,10 @@ its newline. Native fields remain inside that line; the local version belongs
 to the worker. The stream reader accepts only version 1. Earlier unversioned raw streams
 are legacy version 0 and remain available for inspection, but refuse collection;
 they are never rewritten or used as permission to rerun an existing effect.
+The observed native CLI can repeat `id` inside web-search telemetry items. The
+reader discards both ambiguous IDs from its derived observation and retains the
+original line unchanged. Those IDs supply no result or authority. Other duplicate
+fields, local envelope keys, lifecycle data and final reports remain strict.
 Before starting a child the worker exclusively claims
 the stream and writes a `starting` receipt. Existing artifacts refuse a new
 execution. A receipt binds the job, input revisions, brief hash, working

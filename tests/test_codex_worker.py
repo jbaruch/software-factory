@@ -116,6 +116,30 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.args.receipt.read_bytes(), before)
 
+    def test_duplicate_web_search_telemetry_ids_are_not_used_as_evidence(self):
+        raw = (b'{"type":"item.started","item":{"id":"item_20","type":"web_search",'
+               b'"id":"exec-fixed","query":"","action":{"type":"other"}}}\n')
+        payload = events()
+        lines = [json.dumps(event).encode() + b"\n" for event in payload]
+        self.process.lines = iter([*lines[:2], raw, *lines[2:]])
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed")
+        retained = [json.loads(line) for line in self.args.events.read_text().splitlines()]
+        self.assertEqual(retained[2]["data"], raw.decode())
+        decoded = worker.read_events(self.args.events)
+        self.assertNotIn("id", decoded[2]["item"])
+        self.assertEqual(worker.parse_events(decoded)["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
+
+    def test_other_native_duplicate_fields_still_refuse_decoding(self):
+        for raw in (
+            '{"type":"thread.started","thread_id":"first","thread_id":"second"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"first","text":"second"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":1,"input_tokens":2,"output_tokens":3}}',
+            '{"type":"item.started","item":{"type":"web_search","id":"one","id":"two","query":"first","query":"second"}}',
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                json.loads(raw, object_pairs_hook=worker.native_object)
+
     def test_zero_exit_without_result_is_failed_and_never_retried(self):
         self.process = FakeProcess(events()[:2])
         receipt = self.execute()

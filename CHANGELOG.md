@@ -47,6 +47,9 @@ Freeze the resolved native CLI, require the owned worker/interpreter during
 collection, and preserve malformed native bytes with inspection/update guidance.
 Identify damaged preflight inputs and reject duplicate receipt/event keys before
 registering results.
+Retain observed web-search telemetry with repeated item IDs while discarding the
+ambiguous IDs from derived observations. Keep result, lifecycle and local-envelope
+fields strict; failed attempts remain failed and their original streams unchanged.
 Carry the admitted repository identity into worker preflight/postflight checks and
 version-3 receipts using the Git-local marker. Preserve legacy command reconnection and inspection without
 inventing a historical pin or accepting older receipts as new evidence. Execute
