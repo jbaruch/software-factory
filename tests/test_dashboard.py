@@ -6,6 +6,7 @@ from http.client import HTTPConnection
 from io import StringIO
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -73,6 +74,19 @@ class OperatorView(unittest.TestCase):
         self.assertIn("Inspect", assignment["process"]["error"])
         self.assertFalse(assignment["result_current"])
         self.assertEqual(assignment["result"]["artifacts"], ["evidence/original.txt"])
+
+    def test_live_connection_and_process_timeouts_stay_unavailable_without_mutation(self):
+        before = self.path.read_bytes()
+        rex = Mock()
+        rex.call.side_effect = subprocess.TimeoutExpired("fixture Rex process", 20)
+        for connect in (Mock(side_effect=subprocess.TimeoutExpired("fixture Rex connect", 20)),
+                        Mock(return_value=rex)):
+            task = self.snapshot(live=True, connect=connect)["tasks"][0]
+            assignment = task["assignments"][0]
+            self.assertEqual(assignment["process"]["state"], "unavailable")
+            self.assertIn("Inspect the", assignment["process"]["error"])
+            self.assertEqual(assignment["result"]["outcome"], "completed")
+            self.assertEqual(self.path.read_bytes(), before)
 
     def test_unreconciled_launch_is_not_guessed_or_relaunched(self):
         self.record["assignments"]["backend"].update(state="launching", result=None)

@@ -12,6 +12,8 @@ distinct. Serve rendered HTML and source facts on loopback with no new dependenc
 Require a random per-process capability before reading state, keeping credentials
 in a private temporary file rather than startup output. Reject invalid ports
 before opening a listener. Consolidate implementation coverage in one inventory.
+Keep timed-out Rex connection/process observations unavailable without aborting
+the view request or changing task evidence.
 
 ### Jev shadow adapter
 

@@ -22,6 +22,15 @@ it does not verify the execution adapter or a complete delivery loop. The operat
 view has been inspected in Chrome against the harmless conformance session.
 All five subscription routes remain unverified as complete scheduling routes.
 
+Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
+Grok Build 1.0.70 and Antigravity CLI 1.5.1 (`agy`). Claude's `auth status --json`
+reported a native subscription sign-in; `grok models` reported a grok.com sign-in
+and model choices; `agy models` returned choices for both Gemini and Claude.
+These commands made no model turn. They establish available discovery interfaces,
+not fresh capacity, native worker conformance or independent allowance pools.
+Refresh through those native commands rather than treating this dated observation
+as scheduling authority.
+
 ## Next slices
 
 1. **Operational store and scripted execution.** Add capacity reservations, queue fairness, automatic ready-work execution, worktree provisioning and cross-task concurrency controls. Add task acceptance and integration/merge recovery using the existing general coding/release policy.

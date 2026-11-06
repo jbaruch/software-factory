@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+import subprocess
 import sys
 import tempfile
 import time
@@ -42,7 +43,7 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
             if live and record["rex"] is not None:
                 try:
                     rex = connect(record)
-                except (factory.FactoryError, OSError, ValueError, KeyError) as exc:
+                except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
                     observation_error = "Inspect the pinned Rex host/session: " + str(exc)
             assignments = []
             for identity, assignment in view["assignments"].items():
@@ -55,7 +56,7 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
                     elif rex is not None:
                         try:
                             process = factory.status(rex, record, assignment)
-                        except (factory.FactoryError, OSError, ValueError, KeyError) as exc:
+                        except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
                             process = dict(state="unavailable", error="Inspect the original Rex pane: " + str(exc))
                 assignments.append(dict(id=identity, role=assignment["request"]["role"],
                     goal=assignment["request"]["goal"], launch_state=assignment["state"],
