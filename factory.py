@@ -145,6 +145,8 @@ def load_task(path) -> dict:
                     not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
         request = assignment["request"]
+        if admission is None and any(key in request for key in ("purpose", "inputs", "dependencies")):
+            raise FactoryError("Invalid unadmitted assignment; restore its original task scope before continuing")
         if admission is not None and ((request.get("role") == "investigator")
                                      != (request.get("purpose") == "investigation")):
             raise FactoryError("Invalid investigation purpose; restore the original task record")
@@ -470,7 +472,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         rex = Rex(str(Path(binary).resolve()), server)
         who = rex.call("whoami", "--json")
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
-    brief_path = path.parent / (task + "-" + assignment_id + ".md")
+    brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
                     "{brief_sha256}": request["instructions_sha256"], "{cwd}": cwd}

@@ -88,6 +88,9 @@ They also match every retained launched window marker and window/block ID to
 that inspected session. Assignment-map order preserves launch order; dependencies
 must reference earlier entries. Task inputs are null only without admission, and
 the investigator role and investigation purpose remain paired on reads.
+Unadmitted assignments cannot carry admitted-only purpose, input or dependency
+fields. New brief filenames separate task and assignment IDs with a dot; existing
+records keep their original paths and frozen contents.
 
 This is a gate store under the coding policy's Stateful Artifacts migration
 exception: an unsupported version or damaged gate data refuses the action with a
