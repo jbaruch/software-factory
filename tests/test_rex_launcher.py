@@ -578,13 +578,28 @@ class TaskAdmission(unittest.TestCase):
                                        "refs/heads/from-wrapper"], check=False)
             self.assertEqual(observed.returncode, expected)
 
+    def test_spawn_consumer_preserves_environment_supplied_commit_identity(self):
+        record = self.admit()
+        environment = {**os.environ, "GIT_AUTHOR_NAME": "Fixture Author",
+            "GIT_AUTHOR_EMAIL": "author@example.invalid", "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+            "GIT_COMMITTER_NAME": "Fixture Committer", "GIT_COMMITTER_EMAIL": "committer@example.invalid",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"}
+        result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable, "-c",
+            "import subprocess; subprocess.run(['git','-c','commit.gpgsign=false','-c','core.hooksPath=/dev/null','commit','--quiet','--allow-empty','-m','Identity fixture'],check=True)"],
+            cwd=self.repo, env=environment, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        identity = subprocess.check_output(["git", "-C", str(self.repo), "log", "-1", "--format=%an|%ae|%cn|%ce"], text=True).strip()
+        self.assertEqual(identity, "Fixture Author|author@example.invalid|Fixture Committer|committer@example.invalid")
+
     def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
         source = self.repo / "source.txt"
         source.write_text("committed\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
         self.commit("Tracked source")
         record = self.admit()
-        other = self.root / "clean-copy"
+        other = self.root / "repo "  # A real distinct path whose trailing space must survive config reads.
         subprocess.run(["git", "clone", "--quiet", str(self.repo), str(other)], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "core.worktree", str(other)], check=True)
         source.write_text("not committed\n")
@@ -622,11 +637,12 @@ class TaskAdmission(unittest.TestCase):
             self.assertEqual(FakeRex.calls, [])
             subprocess.run(["git", "-C", str(self.repo), "update-index", "--no-" + flag, "source.txt"], check=True)
 
-    def test_submodule_ignore_settings_cannot_hide_dirty_inputs(self):
+    def test_submodules_refuse_even_when_ignored_content_is_hidden(self):
         module_source = self.root / "module-source"
         subprocess.run(["git", "clone", "--quiet", str(self.repo), str(module_source)], check=True)
         (module_source / "source.txt").write_text("committed\n")
-        subprocess.run(["git", "-C", str(module_source), "add", "source.txt"], check=True)
+        (module_source / ".gitignore").write_text("local_config.py\n")
+        subprocess.run(["git", "-C", str(module_source), "add", "source.txt", ".gitignore"], check=True)
         subprocess.run(["git", "-C", str(module_source), "-c", "user.name=Fixture",
             "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
             "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "Module source"],
@@ -637,9 +653,35 @@ class TaskAdmission(unittest.TestCase):
         self.commit("Include local fixture submodule")
         self.admit()
         subprocess.run(["git", "-C", str(self.repo), "config", "submodule.module.ignore", "all"], check=True)
-        (self.repo / "module" / "source.txt").write_text("dirty module\n")
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+        for overlay in ("clean", "dirty", "ignored"):
+            if overlay == "dirty":
+                (self.repo / "module" / "source.txt").write_text("dirty module\n")
+            elif overlay == "ignored":
+                (self.repo / "module" / "source.txt").write_text("committed\n")
+                (self.repo / "module" / "local_config.py").write_text("VALUE = 'ignored'\n")
+            with self.subTest(overlay=overlay), self.assertRaisesRegex(factory.FactoryError, "checkout without submodules"):
+                self.start()
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(FakeRex.calls, [])
+
+    def test_fsmonitor_cannot_hide_an_edited_tracked_file(self):
+        source = self.repo / "source.txt"
+        source.write_text("committed\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source.txt"], check=True)
+        self.commit("Tracked source")
+        self.admit()
+        helper = self.root / "fsmonitor-helper"
+        helper.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.buffer.write(b'fixture-token\\0')\n")
+        helper.chmod(0o700)
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.fsmonitor", str(helper)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "update-index", "--fsmonitor"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "update-index", "--fsmonitor-valid", "source.txt"], check=True)
+        source.write_text("hidden edit\n")
+        flags = subprocess.check_output(["git", "-C", str(self.repo), "ls-files", "-f"], text=True)
+        self.assertTrue(flags.startswith("h "))
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "disable core.fsmonitor"):
             self.start()
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
@@ -1255,6 +1297,13 @@ class TaskAdmission(unittest.TestCase):
 
 
 class RexTransport(unittest.TestCase):
+    def test_process_availability_failures_explain_recovery(self):
+        rex = factory.Rex(sys.executable, "unix:///fixture")
+        for error in (FileNotFoundError("fixture"), PermissionError("fixture"), subprocess.TimeoutExpired("fixture", 20)):
+            with self.subTest(error=type(error).__name__), patch.object(factory.subprocess, "run", side_effect=error):
+                with self.assertRaisesRegex(factory.FactoryError, "restore its availability and reconcile"):
+                    rex.call("whoami", "--json")
+
     def test_malformed_process_bytes_report_compatibility_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "rex-fixture"

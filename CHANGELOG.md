@@ -107,7 +107,10 @@ overlays, keeping revision-bound inputs tied to the selected commit. Decode
 malformed Rex process bytes at the transport boundary with compatibility guidance.
 Clear Git overrides in the launched command as well as verification. Bind Git
 inspection to the actual worktree, reject redirecting worktree configuration and
-hidden index flags, force submodule inspection, and explain malformed Git output.
+hidden index flags, refuse submodules and enabled fsmonitor, and explain malformed
+Git output. Preserve whitespace in configured worktree paths.
+Preserve environment-supplied author/committer identity for writer commands and
+identify pinned Rex availability failures with restoration/reconciliation guidance.
 Pin new admissions to an immutable Git-local repository marker in task schema
 version 4. Ordinary clones do not inherit the marker, and recycled filesystem
 inodes cannot authorize a replacement repository. Preserve older history and
