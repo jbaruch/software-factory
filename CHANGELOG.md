@@ -25,6 +25,7 @@ session identity before reuse and explain recovery for unreadable task/repo inpu
 Validate admission/input consistency, investigation purposes, dependency ordering
 and live pane identities. Include admitted scope and acceptance references in new
 briefs, preserving frozen instructions on reconnect.
+Keep valid task/assignment ID combinations from overwriting another task's brief.
 
 ### CI and review
 

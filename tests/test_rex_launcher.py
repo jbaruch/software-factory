@@ -78,6 +78,18 @@ class NativeLauncher(unittest.TestCase):
         self.assertEqual(first[1]["block_id"], second[1]["block_id"])
         self.assertEqual(len(self.creation_calls()), 1)
 
+    def test_valid_task_and_assignment_names_cannot_overwrite_another_brief(self):
+        arguments = {key: value for key, value in self.arguments.items()
+                     if key not in ("task", "assignment_id", "goal")}
+        _, first = factory.launch(self.root / "a-b.json", task="a-b", assignment_id="c",
+                                  goal="First independent scope", **arguments)
+        original = Path(first["brief"]).read_bytes()
+        _, second = factory.launch(self.root / "a.json", task="a", assignment_id="b-c",
+                                   goal="Second independent scope", **arguments)
+        self.assertNotEqual(first["brief"], second["brief"])
+        self.assertEqual(Path(first["brief"]).read_bytes(), original)
+        self.assertIn("Second independent scope", Path(second["brief"]).read_text())
+
     def test_role_instructions_are_passed_as_one_argument_without_shell(self):
         self.start()
         command = self.creation_calls()[0]
@@ -673,6 +685,9 @@ class TaskAdmission(unittest.TestCase):
         self.start(role="investigator", purpose="investigation")
         wrong_purpose = json.loads(self.path.read_text())
         wrong_purpose["assignments"]["qa"]["request"]["purpose"] = "work"
+        lost_legacy_scope = copy.deepcopy(wrong_purpose)
+        lost_legacy_scope.update(admission=None, inputs=None)
+        del lost_legacy_scope["assignments"]["qa"]["request"]["inputs"]
         factory.save(self.path, empty)
         FakeRex.sessions.clear()
         self.start()
@@ -683,6 +698,7 @@ class TaskAdmission(unittest.TestCase):
         cycle["assignments"]["qa"]["request"]["dependencies"] = ["security"]
         for record, purpose, diagnostic in ((lost_scope, None, "Invalid task inputs"),
             (wrong_purpose, "work", "Invalid investigation purpose"),
+            (lost_legacy_scope, None, "Invalid unadmitted assignment"),
             (cycle, "work", "Invalid assignment dependencies")):
             factory.save(self.path, record)
             before = self.path.read_bytes()
