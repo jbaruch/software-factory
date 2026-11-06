@@ -78,7 +78,10 @@ def new_task(task) -> dict:
 
 def load_task(path) -> dict:
     """Factory owns migration of its gate store; unknown formats cannot launch."""
-    record = json.loads(path.read_text())
+    try:
+        record = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise FactoryError(f"Unknown task {path.stem!r}; correct its ID or create it with admit/start") from None
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
@@ -87,6 +90,19 @@ def load_task(path) -> dict:
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
             or not all(key in record for key in ("rex", "session_id", "session_label"))):
         raise FactoryError("Incomplete task record; restore the original state before continuing")
+    connection = record["rex"]
+    if connection is None:
+        if record["assignments"] or record["session_id"] is not None:
+            raise FactoryError("Missing pinned Rex identity; restore the original task record before continuing")
+    elif (not isinstance(connection, dict)
+            or any(not isinstance(connection.get(key), str) or not connection[key].strip()
+                   for key in ("binary", "server", "host_id"))
+            or not Path(connection["binary"]).is_absolute() or not connection["server"].startswith("unix://")):
+        raise FactoryError("Invalid pinned Rex identity; restore the original task record before continuing")
+    if (not isinstance(record["session_label"], str) or not record["session_label"]
+            or (record["session_id"] is not None
+                and (not isinstance(record["session_id"], str) or not record["session_id"]))):
+        raise FactoryError("Invalid Rex session identity; restore the original task record before continuing")
     if version == 0:
         if "admission" in record or "hold" in record:
             raise FactoryError("Unversioned task has new fields; restore its schema version before continuing")
@@ -115,6 +131,10 @@ def load_task(path) -> dict:
                 or (admission is not None and assignment["request"].get("purpose")
                     not in {"work", "correction", "investigation"})):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
+        if assignment["state"] == "launched" and (record["session_id"] is None
+                or any(not isinstance(assignment.get(key), str) or not assignment[key]
+                       for key in ("window_id", "block_id"))):
+            raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
     if version < 2:
         record["inputs"] = (dict(candidate=admission["initial_candidate"],
                                  requirements=admission["initial_candidate"])
@@ -153,6 +173,27 @@ def git_commit(repository, revision):
     if result.returncode:
         raise FactoryError("Revision is not an existing Git commit; fetch it or supply a local commit")
     return result.stdout.strip()
+
+
+def git_common_dir(repository):
+    result = subprocess.run(["git", "-C", repository, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode:
+        raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
+    return Path(result.stdout.strip()).resolve()
+
+
+def check_checkout(repository, cwd, candidate):
+    if git_commit(repository, candidate) != candidate:
+        raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
+    if git_common_dir(repository) != git_common_dir(cwd) or git_commit(cwd, "HEAD") != candidate:
+        raise FactoryError("Assignment checkout differs from the selected candidate; use its worktree at that commit")
+    changed = subprocess.run(["git", "-C", cwd, "status", "--porcelain", "--untracked-files=normal"],
+                             capture_output=True, text=True, timeout=10, check=False)
+    if changed.returncode:
+        raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
+    if changed.stdout:
+        raise FactoryError("Assignment checkout has uncommitted inputs; commit them or use a clean worktree before launching")
 
 
 def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None):
@@ -347,8 +388,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError(f"Task {purpose} allowance exhausted; route to {owner}")
     if record["admission"] is not None:
         current = record["inputs"]["candidate"]
-        if git_commit(record["admission"]["repository"], current) != current:
-            raise FactoryError("Stored candidate is not an exact commit; select task inputs before launching")
+        check_checkout(record["admission"]["repository"], cwd, current)
     if record["rex"] is not None:
         rex = connect(record, binary, server)
     else:
