@@ -1,6 +1,6 @@
 # Dashboard contract
 
-Status: application/UI requirements; no web dashboard is implemented yet.
+Status: full application/UI acceptance contract. The [implementation inventory](implementation.md) tracks current coverage of the views, controls and measurements below.
 
 ## Views
 

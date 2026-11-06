@@ -2,6 +2,21 @@
 
 ## 0.1.0 — 2026-11-05
 
+### Local operator view
+
+Generate a local dashboard from existing task records and explicit Rex process
+observations. Show holds, cumulative allowances, current/stale reports, evidence
+references and unknown provider capacity without adding a second datastore or
+automatic polling. Keep process exit, specialist reports and task acceptance
+distinct. Serve rendered HTML and source facts on loopback with no new dependencies.
+Require a random per-process capability before reading state, keeping credentials
+in a private temporary file rather than startup output. Reject invalid ports
+before opening a listener. Consolidate implementation coverage in one inventory.
+Keep timed-out Rex connection/process observations unavailable without aborting
+the view request or changing task evidence.
+Display lone surrogate code points as visible escapes so one accepted record
+cannot break the HTML response; preserve the original source and API values.
+
 ### Adapter input and evidence validation
 
 Bound native execution allowances before state reads or attempts, reject oversized

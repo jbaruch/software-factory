@@ -38,7 +38,8 @@ sharing, supported tools or subscription eligibility for other harnesses.
 
 Account, catalog and allowance observations are distinct from native worker
 lifecycle and subscription eligibility. Do not substitute API-key billing for
-subscription routes.
+subscription routes. See the [implementation inventory](implementation.md) for
+provider coverage.
 
 ## Grok and Antigravity catalogs
 
@@ -50,8 +51,8 @@ python3 native_catalog.py antigravity --binary '/absolute/path/to/agy'
 The adapter invokes only `--version` and `models`, with closed stdin and a
 20-second deadline per command. It uses native sign-in/configuration, leaving
 their contents with the CLI. No prompt, login, worker, settings change or retry
-is requested. The catalog formats were observed with Grok Build 1.0.70 and
-Antigravity CLI 1.5.1/1.5.2. Unexpected rows and duplicate IDs refuse discovery with
+is requested. The parser consumes Grok's model bullet list and Antigravity's
+tab-separated ID/name rows. Unexpected rows and duplicate IDs refuse discovery with
 inspection/update guidance. An empty list supplies no candidates.
 
 `native_catalog.py` owns its transient version-1 `native-model-catalog` envelope:
@@ -70,8 +71,8 @@ Native usage follows [Grok's CLI reference](https://docs.x.ai/build/cli/referenc
 `factory.py codex-start` builds one native `codex exec` invocation in an admitted
 task's Rex pane. Select an actual model and supported effort from fresh native
 observations. Existing project policy and operator authority must permit native
-delegation before execution. This adapter has offline conformance coverage;
-live specialist execution and eligibility remain unverified.
+delegation before execution. The [implementation inventory](implementation.md)
+records execution evidence and eligibility limits.
 
 ```sh
 python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
@@ -82,7 +83,9 @@ python3 factory.py codex-collect --task example --id qa-1
 ```
 
 Admission and input selection use the [native launcher commands](native-rex.md).
-The default worker sandbox is read-only. An explicit `--write` selects
+The default worker sandbox is read-only. Inspection commands must work without
+creating temporary files; use direct reads such as `sed`/`rg` or `python -c`
+instead of shell heredocs. An explicit `--write` selects
 `workspace-write`; writers need their own worktree. `--seconds` declares the
 execution allowance, initially 600 seconds and bounded to 1–86400 seconds.
 Invalid allowances refuse before task reads, locks or attempts. Expiry interrupts only the owned
@@ -149,8 +152,5 @@ collection reuses the same immutable result. Changing task inputs leaves an
 older result visible but stale. A native exit or specialist approval does not
 accept the task, establish independent verification or satisfy release gates.
 
-The complete CLI → Rex → receipt → collection path has also been exercised
-against a harmless local event fixture on Rex API revision 11. Reconnection
-reused the same block. A timed-out fixture was interrupted and refused
-collection. These are mechanical integration observations; no native model turn
-or specialist judgment was performed by that check.
+See the [implementation inventory](implementation.md) for mechanical integration
+observations and the remaining live specialist verification.
