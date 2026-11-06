@@ -26,6 +26,9 @@ Validate admission/input consistency, investigation purposes, dependency orderin
 and live pane identities. Include admitted scope and acceptance references in new
 briefs, preserving frozen instructions on reconnect.
 Keep valid task/assignment ID combinations from overwriting another task's brief.
+Reject duplicate JSON keys, pending pane IDs and aliased assignment identities.
+Require saved assignment history to match the live session and diagnose malformed
+Rex responses with compatibility/recovery guidance.
 
 ### CI and review
 

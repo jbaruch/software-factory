@@ -21,6 +21,15 @@ class FactoryError(Exception):
     pass
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 class Rex:
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
@@ -31,7 +40,12 @@ class Rex:
             capture_output=True, text=True, timeout=20, check=False)
         if result.returncode:
             raise FactoryError(result.stderr.strip() or "Rex command failed")
-        return result.stdout if raw else json.loads(result.stdout)
+        if raw:
+            return result.stdout
+        try:
+            return json.loads(result.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 
 def save(path, value):
@@ -79,10 +93,10 @@ def new_task(task) -> dict:
 def load_task(path) -> dict:
     """Factory owns migration of its gate store; unknown formats cannot launch."""
     try:
-        record = json.loads(path.read_text())
+        record = json.loads(path.read_text(), object_pairs_hook=unique_object)
     except FileNotFoundError:
         raise FactoryError(f"Unknown task {path.stem!r}; correct its ID or create it with admit/start") from None
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError):
         raise FactoryError(f"Cannot decode task {path.stem!r}; restore the original task record before continuing") from None
     except OSError:
         raise FactoryError(f"Cannot read task {path.stem!r}; restore access to its original state file") from None
@@ -137,7 +151,7 @@ def load_task(path) -> dict:
         if (not isinstance(limits, dict) or set(limits) != {"correction", "investigation"}
                 or any(type(limit) is not int or limit < 0 for limit in limits.values())):
             raise FactoryError("Invalid task limits; restore the original state before continuing")
-    earlier = set()
+    earlier, labels, window_ids, block_ids = set(), set(), set(), set()
     for assignment_id, assignment in record["assignments"].items():
         if (not isinstance(assignment, dict) or not isinstance(assignment.get("request"), dict)
                 or assignment.get("state") not in ("launching", "launched")
@@ -172,6 +186,15 @@ def load_task(path) -> dict:
                 or any(not isinstance(assignment.get(key), str) or not assignment[key]
                        for key in ("window_id", "block_id"))):
             raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
+        if assignment["state"] == "launching" and any(key in assignment for key in ("window_id", "block_id")):
+            raise FactoryError("Pending launch has pane IDs; restore the original task record before reconciliation")
+        if assignment["window_label"] in labels or (assignment["state"] == "launched" and (
+                assignment["window_id"] in window_ids or assignment["block_id"] in block_ids)):
+            raise FactoryError("Duplicate assignment pane identity; restore the original task record")
+        labels.add(assignment["window_label"])
+        if assignment["state"] == "launched":
+            window_ids.add(assignment["window_id"])
+            block_ids.add(assignment["block_id"])
         earlier.add(assignment_id)
     if version < 2:
         record["inputs"] = (dict(candidate=admission["initial_candidate"],
@@ -350,7 +373,7 @@ def connect(record, binary=None, server=None):
     if server and server != connection["server"]:
         raise FactoryError("Task is pinned to another Rex endpoint")
     rex = Rex(connection["binary"], connection["server"])
-    who = rex.call("whoami", "--json")
+    who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
     if who["host_id"] != connection["host_id"]:
         raise FactoryError("Connected Rex host differs from the recorded task host")
     if record["session_id"] is not None:
@@ -364,10 +387,39 @@ def connect(record, binary=None, server=None):
 
 
 def check_session(rex, record, session_id):
-    view = rex.call("session", "inspect", session_id, "--json")
+    view = rex_object(rex.call("session", "inspect", session_id, "--json"),
+                      strings=("session_id", "label"), lists=("windows",))
+    if view["session_id"] != session_id:
+        raise FactoryError("Rex session ID differs; inspect the pinned session before continuing")
     if view.get("label") != record["session_label"]:
         raise FactoryError("Rex session identity differs from the task; inspect the original session before continuing")
+    labels, ids, blocks = set(), set(), set()
+    for window in view["windows"]:
+        rex_object(window, strings=("window_id", "label"), lists=("layers",))
+        if window["label"] in labels or window["window_id"] in ids:
+            raise FactoryError("Duplicate Rex window identity; inspect the original session before continuing")
+        labels.add(window["label"])
+        ids.add(window["window_id"])
+        for layer in window["layers"]:
+            rex_object(layer, lists=("blocks",))
+            for block in layer["blocks"]:
+                rex_object(block, strings=("block_id",))
+                if block["block_id"] in blocks:
+                    raise FactoryError("Duplicate Rex block identity; inspect the original session before continuing")
+                blocks.add(block["block_id"])
+    expected = {item["window_label"] for item in record["assignments"].values()}
+    required = {item["window_label"] for item in record["assignments"].values() if item["state"] == "launched"}
+    if not required <= labels <= expected:
+        raise FactoryError("Rex assignment windows differ from saved history; restore the original task record before continuing")
     return view
+
+
+def rex_object(value, *, strings=(), lists=()):
+    if (not isinstance(value, dict)
+            or any(not isinstance(value.get(key), str) or not value[key] for key in strings)
+            or any(not isinstance(value.get(key), list) for key in lists)):
+        raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+    return value
 
 
 def assignment_pane(view, assignment):
@@ -387,7 +439,9 @@ def reconcile(rex, record, assignment):
     """Read back a uniquely labeled pending launch; never relaunch an unknown one."""
     session_id = record.get("session_id")
     if not session_id:
-        sessions = rex.call("ls", "--json")["sessions"]
+        sessions = rex_object(rex.call("ls", "--json"), lists=("sessions",))["sessions"]
+        for item in sessions:
+            rex_object(item, strings=("session_id",))
         matches = [item for item in sessions if item.get("label") == record["session_label"]]
         if len(matches) != 1:
             raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
@@ -442,7 +496,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if existing["request"] != request:
             raise FactoryError("Assignment ID already has different inputs; use a new explicit ID")
         rex = connect(record, binary, server)
-        if not existing.get("block_id"):
+        if existing["state"] == "launching":
             reconcile(rex, record, existing)
             save(path, record)
         return record, existing
@@ -470,7 +524,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                 or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
             raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
         rex = Rex(str(Path(binary).resolve()), server)
-        who = rex.call("whoami", "--json")
+        who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
     brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
@@ -488,8 +542,14 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         else:
             created_session = rex.call("new", record["session_label"], "--window",
                                        assignment["window_label"], *options)
+            rex_object(created_session, strings=("session_id",), lists=("initial_windows",))
+            if len(created_session["initial_windows"]) != 1:
+                raise FactoryError("Malformed Rex initial windows; inspect the pinned binary/server API compatibility")
             record["session_id"] = created_session["session_id"]
             created = created_session["initial_windows"][0]
+        rex_object(created, strings=("window_id",), lists=("block_ids",))
+        if len(created["block_ids"]) != 1 or not isinstance(created["block_ids"][0], str) or not created["block_ids"][0]:
+            raise FactoryError("Malformed Rex created block IDs; inspect the pinned binary/server API compatibility")
         assignment.update(window_id=created["window_id"], block_id=created["block_ids"][0],
                           state="launched")
         save(path, record)
@@ -502,7 +562,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
 def status(rex, record, assignment):
     process = rex.call("block", "call", "-s", record["session_id"],
                        "-b", assignment["block_id"], "process")
+    rex_object(process)
     last_exit = process.get("last_exit")
+    if last_exit is not None and (not isinstance(last_exit, dict) or type(last_exit.get("exit_code")) is not int):
+        raise FactoryError("Malformed Rex exit status; inspect the pinned binary/server API compatibility")
     state = ("exited" if last_exit["exit_code"] == 0 else "failed") if last_exit else (
         "running" if process.get("child") or process.get("foreground") else "unknown")
     return dict(role=assignment["request"]["role"], state=state,
@@ -585,7 +648,7 @@ def main(argv=None):
                     raise FactoryError(f"Unknown assignment {args.id!r}; use show --task {args.task} to find its ID")
                 assignment = record["assignments"][args.id]
                 rex = connect(record, args.rex, args.server)
-                if not assignment.get("block_id"):
+                if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
             if args.action == "capture":
