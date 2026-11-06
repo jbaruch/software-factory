@@ -115,6 +115,10 @@ inventing a historical pin or accepting older receipts as new evidence. Execute
 the native child in the inherited, verified directory rather than reopening the
 saved pathname. Preserve final receipts when cleanup races with child exit, and
 name recovery for a CLI that disappears before process creation.
+Support native event lines up to 1 MiB and retain a failed attempt with actionable
+guidance for larger output. Keep native assignments as leaf workers, isolate new
+host workers from Python startup overrides and prevent wrapper/worker bytecode
+artifacts. Preserve historical command reconnection and receipt collection.
 
 ### Operator-approved runtime and review exceptions
 

@@ -946,7 +946,10 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         except OSError:
             raise FactoryError("Cannot access --codex; supply an existing executable native Codex path") from None
     prefix = path.parent / (task + "." + assignment_id + ".codex")
-    command = [sys.executable, str(ROOT / "codex_worker.py"), "--job", task + "/" + assignment_id,
+    worker = [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
+    if existing is not None and existing["request"]["command"][:2] == [sys.executable, str(ROOT / "codex_worker.py")]:
+        worker = [sys.executable, str(ROOT / "codex_worker.py")]  # Reconnect the original command unchanged.
+    command = worker + ["--job", task + "/" + assignment_id,
                "--codex", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds),
                "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
                "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
@@ -970,14 +973,18 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     from codex_worker import parse_events, parser, read_events
 
     command = assignment["request"]["command"]
-    if command[:2] != [sys.executable, str(ROOT / "codex_worker.py")]:
+    if command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
+        offset = 4
+    elif command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]:
+        offset = 2  # Historical assignments retain their original launch command.
+    else:
         raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
     if "--repo-identity" not in command:
         raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
     if "--worktree-git-dir" not in command:
         raise FactoryError("Native assignment predates worktree identity; inspect its retained artifacts without relaunching it")
     try:
-        args = parser().parse_args(command[2:])
+        args = parser().parse_args(command[offset:])
     except SystemExit:
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     observed = status(rex, record, assignment)

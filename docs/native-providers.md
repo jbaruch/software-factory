@@ -173,12 +173,20 @@ Invalid allowances refuse before task reads, locks or attempts. Expiry interrupt
 native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
+Owned workers disable both native multi-agent features for these leaf assignments.
+Host wrappers/workers disable bytecode writes, and the native child inherits
+`PYTHONDONTWRITEBYTECODE=1`. Other disposable outputs belong outside the checkout.
+New host worker commands ignore Python environment/startup overrides. Historical
+commands reconnect and collect without rewriting their arguments or receipts.
 
 `codex_worker.py` owns version-4 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
-to the worker. The stream reader accepts only version 1. Earlier unversioned raw streams
+to the worker. Native event lines support up to 1 MiB, including verbose command
+results. Larger lines fail the attempt with a recovery diagnostic; inspect the
+existing pane/retained stream before authorizing another attempt. The stream reader
+accepts only version 1. Earlier unversioned raw streams
 are legacy version 0 and remain available for inspection, but refuse collection;
 they are never rewritten or used as permission to rerun an existing effect.
 The observed native CLI can repeat `id` inside web-search telemetry items. The
