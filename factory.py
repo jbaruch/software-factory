@@ -16,6 +16,7 @@ from typing import Any
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 REPOSITORY_MARKER = "software-factory-repository.json"
 GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
@@ -41,6 +42,30 @@ def unique_object(pairs):
             raise ValueError("Duplicate JSON object key")
         result[key] = value
     return result
+
+
+def reject_json_constant(value):
+    raise ValueError("Nonstandard JSON numeric constant")
+
+
+def finite_json_float(value):
+    number = float(value)
+    if not -sys.float_info.max <= number <= sys.float_info.max:
+        raise ValueError("JSON number exceeds the supported finite range")
+    return number
+
+
+def finite_json_integer(value):
+    number = int(value)
+    if not -sys.float_info.max <= number <= sys.float_info.max:
+        raise ValueError("JSON number exceeds the supported finite range")
+    return number
+
+
+def decode_json(value, *, object_pairs_hook=unique_object):
+    return json.loads(value, object_pairs_hook=object_pairs_hook,
+                      parse_constant=reject_json_constant, parse_float=finite_json_float,
+                      parse_int=finite_json_integer)
 
 
 class Rex:
@@ -795,7 +820,13 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
     brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
-    replacements = {"{brief}": str(brief_path), "{instructions}": instructions}
+    replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
+                    "{brief_sha256}": request["instructions_sha256"], "{cwd}": cwd}
+    if record["admission"] is not None:
+        replacements.update({"{candidate}": request["inputs"]["candidate"],
+                             "{requirements}": request["inputs"]["requirements"],
+                             "{repository}": record["admission"]["repository"],
+                             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)})
     argv = [replacements.get(part, part) for part in command]
     if record["admission"] is not None:
         argv = [sys.executable, "-E", "-s", str(ROOT / "checkout_exec.py"), "--identity",
@@ -848,22 +879,127 @@ def status(rex, record, assignment):
                 block_id=assignment["block_id"], exit=last_exit)
 
 
+def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600):
+    """Generate one explicit worker invocation; no model/effort or permission fallback."""
+    if not model.strip() or not effort.strip():
+        raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
+    if not Path(codex).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS:
+        raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
+    binary = Path(codex).resolve()
+    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None:
+        try:
+            binary = Path(codex).resolve(strict=True)
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                raise FactoryError("Supply a regular executable native Codex file before creating an assignment")
+        except OSError:
+            raise FactoryError("Cannot access --codex; supply an existing executable native Codex path") from None
+    prefix = path.parent / (task + "." + assignment_id + ".codex")
+    command = [sys.executable, str(ROOT / "codex_worker.py"), "--job", task + "/" + assignment_id,
+               "--codex", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds),
+               "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
+               "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
+               "--requirements", "{requirements}", "--events", str(prefix) + ".jsonl",
+               "--receipt", str(prefix) + ".json"]
+    if existing is None or "--repo-identity" in existing["request"]["command"]:
+        command.extend(["--repo-identity", "{repository_identity}"])
+    if existing is None:
+        command.extend(["--worktree-git-dir", str(git_dir(cwd))])
+    elif "--worktree-git-dir" in existing["request"]["command"]:
+        saved = existing["request"]["command"]
+        position = saved.index("--worktree-git-dir") + 1
+        if position >= len(saved) or not Path(saved[position]).is_absolute():
+            raise FactoryError("Saved worktree argument is damaged; restore the original assignment before reconnecting")
+        command.extend(["--worktree-git-dir", saved[position]])
+    return command + (["--write"] if write else [])
+
+
+def collect_codex(path, assignment_id, rex, record, assignment):
+    """Register a finished native report; this never accepts the whole task."""
+    from codex_worker import parse_events, parser, read_events
+
+    command = assignment["request"]["command"]
+    if command[:2] != [sys.executable, str(ROOT / "codex_worker.py")]:
+        raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
+    if "--repo-identity" not in command:
+        raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
+    if "--worktree-git-dir" not in command:
+        raise FactoryError("Native assignment predates worktree identity; inspect its retained artifacts without relaunching it")
+    try:
+        args = parser().parse_args(command[2:])
+    except SystemExit:
+        raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
+    observed = status(rex, record, assignment)
+    if observed["state"] != "exited":
+        raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
+    try:
+        receipt = decode_json(args.receipt.read_text())
+    except FileNotFoundError:
+        raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
+    if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
+        raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 4
+            or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
+            or any(type(receipt.get(key)) not in (int, float)
+                   or not 0 <= receipt[key] <= sys.float_info.max
+                   for key in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"]
+            or "error" not in receipt or receipt["error"] is not None
+            or any(key not in receipt for key in ("thread_id", "report", "usage"))
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or receipt.get("job") != record["task"] + "/" + assignment_id
+            or not valid_inputs(receipt.get("inputs"))
+            or receipt.get("inputs") != assignment["request"].get("inputs")
+            or not valid_repository_identity(receipt.get("repository_identity"))
+            or receipt["repository_identity"] != record["admission"]["repository_identity"]
+            or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
+            or receipt.get("cwd") != assignment["request"]["cwd"]
+            or not args.worktree_git_dir.is_absolute()
+            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or receipt.get("binary") != str(args.codex) or not args.codex.is_absolute()
+            or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
+            or not isinstance(receipt.get("candidate"), str)
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
+            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
+            or receipt.get("events") != str(args.events)):
+        raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
+    native = parse_events(read_events(args.events))
+    if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
+        raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
+    artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
+    return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+                         requirements=receipt["inputs"]["requirements"],
+                         outcome=native["report"]["outcome"], artifacts=artifacts)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".factory-state")
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
     parser.add_argument("--server", help="Explicit local unix:// Rex endpoint; pinned per task")
     sub = parser.add_subparsers(dest="action", required=True)
-    start = sub.add_parser("start", help="Launch an explicit command, or reuse the same assignment")
-    start.add_argument("--task", required=True)
-    start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
-    start.add_argument("--role", required=True)
-    start.add_argument("--goal", required=True)
-    start.add_argument("--cwd", required=True)
-    start.add_argument("--purpose", choices=("work", "correction", "investigation"),
-                       help="Required for admitted tasks; consumes the declared task allowance")
-    start.add_argument("--after", action="append", default=[], help="Earlier assignment that must have a current successful result")
-    start.add_argument("command", nargs=argparse.REMAINDER)
+    for action in ("start", "codex-start"):
+        start = sub.add_parser(action, help="Launch or reconnect to an explicit assignment")
+        start.add_argument("--task", required=True)
+        start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
+        start.add_argument("--role", required=True)
+        start.add_argument("--goal", required=True)
+        start.add_argument("--cwd", required=True)
+        start.add_argument("--purpose", choices=("work", "correction", "investigation"),
+                           help="Required for admitted tasks; consumes the declared task allowance")
+        start.add_argument("--after", action="append", default=[], help="Earlier assignment requiring a current successful result")
+        if action == "start":
+            start.add_argument("command", nargs=argparse.REMAINDER)
+        else:
+            start.add_argument("--codex", required=True)
+            start.add_argument("--model", required=True)
+            start.add_argument("--effort", required=True)
+            start.add_argument("--write", action="store_true")
+            start.add_argument("--seconds", type=int, default=600)
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -887,12 +1023,16 @@ def main(argv=None):
         command.add_argument("--task", required=True)
         if action == "pause":
             command.add_argument("--reason", required=True)
-    for action in ("status", "capture"):
+    for action in ("status", "capture", "codex-collect"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
+            raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
+        if args.action == "codex-start" and (not Path(args.codex).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
+            raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
         with task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
@@ -911,8 +1051,15 @@ def main(argv=None):
                     record = hold_task(path, args.reason if args.action == "pause" else None)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
-            if args.action == "start":
-                argv = args.command[1:] if args.command[:1] == ["--"] else args.command
+            if args.action in {"start", "codex-start"}:
+                if args.action == "codex-start":
+                    if load_task(path)["admission"] is None:
+                        raise FactoryError("Admit a task before starting a native Codex assignment")
+                    argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
+                                         model=args.model, effort=args.effort, cwd=args.cwd,
+                                         write=args.write, seconds=args.seconds)
+                else:
+                    argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
                     role=args.role, goal=args.goal, cwd=args.cwd, command=argv,
                     binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after)
@@ -926,7 +1073,9 @@ def main(argv=None):
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
-            if args.action == "capture":
+            if args.action == "codex-collect":
+                print(json.dumps(task_view(collect_codex(path, args.id, rex, record, assignment)), indent=2))
+            elif args.action == "capture":
                 print(rex.call("capture", "-s", record["session_id"], "-b",
                                assignment["block_id"], "--trim", "--unwrap", raw=True), end="")
             else:

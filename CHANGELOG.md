@@ -2,6 +2,82 @@
 
 ## 0.1.0 — 2026-11-05
 
+### Adapter input and evidence validation
+
+Bound native execution allowances before state reads or attempts, reject oversized
+integers throughout provider/event decoding and require numeric protocol response
+identities. Preserve actionable recovery without consuming attempts on bad input.
+
+Reject blank native selections before reserving attempts, damaged saved worker
+arguments and incomplete completed receipts before collection. Validate finite
+question catalogs, option criteria and native model identities before use, and
+retain actionable process/stream I/O recovery diagnostics in failed receipts.
+Validate selections at the public CLI before legacy state upgrades, enforce
+ordered native thread/turn/report events, and reject ambiguous provider JSON or
+blank model identities before recording discovery or shadow evidence.
+Reject stateless path/allowance errors before legacy state reads. Freeze native
+worktree identity in commands and version-4 receipts; older receipts retain their
+history for inspection. Reject nonstandard/non-finite numbers throughout provider
+and event decoding with the existing recovery diagnostics.
+
+### Jev shadow adapter
+
+Compile factory Choice questions into the TypeSafe HTTP contract, expand actual
+candidate IDs, discover account models and perform explicit shadow evaluation.
+Preserve question/evidence binding, uncertainty, model identity and observed usage.
+Service failures retain actionable diagnostics without automatic retry or exposed
+credentials. Live routing, calibration, durable queues and caching remain separate.
+Reject Choice answers that contradict their distributions and distinguish request
+repair from account/service recovery in HTTP diagnostics.
+Read runtime credentials from the environment, and identify damaged state/candidate
+input files with repair guidance before making any network request.
+Validate input shapes and refuse non-standard numbers or ambiguous duplicate keys.
+Name question-catalog access, encoding and shape repairs before provider access.
+
+### Native model catalogs
+
+Expose native Grok and Antigravity model IDs through metadata-only CLI probes.
+Preserve observation time, CLI identity and source output while leaving worker
+readiness, quota sharing and supported effort unverified. Refuse changed catalog
+formats, duplicate IDs and command failures without automatic retries.
+
+### Native Codex metadata
+
+Read the signed-in native account, metered quota buckets and model/effort catalog
+through an owned stdio app-server process. Preserve unknown fields and duplicate
+quota views without treating discovery as model access or lifecycle verification.
+Malformed protocol input gives inspection/update guidance and stops the owned probe.
+Missing native binaries identify the executable path recovery before starting a child.
+Handle closed metadata pipes and exit-before-kill races with recovery guidance
+and observed child exit status.
+Translate metadata-process startup failures into executable/resource recovery guidance.
+
+### Native Codex results
+
+Add explicit model/effort assignments through Rex with private native events,
+before-start receipts and compact revision-bound result collection. Reject
+altered briefs, unsuccessful or incomplete native runs and conflicting evidence.
+Retain uncertain attempts, observed thread identity and child exit status for
+inspection instead of rerunning them. Offline
+tests cover completion, timeout and collection; live execution remains unverified.
+Version local event records while preserving original native lines. Check the
+native executable before reserving a new attempt, preserving reconnect behavior.
+Reject damaged or mistyped receipts with actionable recovery diagnostics before
+registering any result.
+Freeze the resolved native CLI, require the owned worker/interpreter during
+collection, and preserve malformed native bytes with inspection/update guidance.
+Identify damaged preflight inputs and reject duplicate receipt/event keys before
+registering results.
+Retain observed web-search telemetry with repeated item IDs while discarding the
+ambiguous IDs from derived observations. Keep result, lifecycle and local-envelope
+fields strict; failed attempts remain failed and their original streams unchanged.
+Carry the admitted repository identity into worker preflight/postflight checks and
+version-3 receipts using the Git-local marker. Preserve legacy command reconnection and inspection without
+inventing a historical pin or accepting older receipts as new evidence. Execute
+the native child in the inherited, verified directory rather than reopening the
+saved pathname. Preserve final receipts when cleanup races with child exit, and
+name recovery for a CLI that disappears before process creation.
+
 ### Operator-approved runtime and review exceptions
 
 Authorize native provider assignments through the factory's Rex adapter for
