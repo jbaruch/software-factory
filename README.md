@@ -2,13 +2,14 @@
 
 A specialist engineering team coordinated by scripts and Jev, with Rex as its execution surface. Product, design, engineering, security, QA and operations retain their own responsibilities. The foreman handles priorities and exceptional planning decisions; routine delivery does not depend on a foreman turn.
 
-This repository is the **design and executable-contract milestone**. It contains the agreed design, a specialist role catalog, configuration catalogs and deterministic acceptance scenarios. It does not launch workers, call Jev, inspect subscription accounts, merge changes or serve a dashboard yet.
+This repository contains the agreed design, a specialist role catalog, configuration catalogs, deterministic acceptance scenarios and a **small native Rex launcher**. The launcher runs explicitly supplied commands in specialist panes and reconnects without blindly repeating uncertain launches. It does not yet select models, call Jev, schedule subscription allowances, merge changes or serve a dashboard.
 
 ## Read and run
 
 - [Design](docs/design.md): responsibilities, execution, escalation, learning and operational boundaries.
 - [Dashboard contract](docs/dashboard.md): delivery, capacity, utilization and overhead definitions.
 - [Implementation sequence](docs/implementation.md): the slices required to turn the contracts into a live factory.
+- [Native Rex launcher](docs/native-rex.md): explicit specialist launches, inspection and limited restart reconciliation.
 - `skills/factory/references/roles.json`: the specialist catalog, focused prompts and decision authority.
 - `config/providers.json`: the five requested subscription routes, with unknown capabilities and quota sharing preserved explicitly.
 - `config/coordination.json`: bounded Jev judgments and execution policies.
@@ -22,7 +23,7 @@ python3 scripts/check_design.py
 acr validate . --json
 ```
 
-The Python checks use the standard library. `acr` is a separate prerequisite for package validation. The reference model in `contracts.py` expresses intended observable behavior; passing these scenarios is not evidence that live provider integrations work or that Jev's judgments are accurate.
+The Python checks use the standard library. `acr` is a separate prerequisite for package validation. The reference model in `contracts.py` expresses intended observable behavior. Launcher tests use a fake server; the opt-in live smoke check is separate. Passing these checks does not establish complete provider integration or Jev judgment accuracy.
 
 ## Distribution
 

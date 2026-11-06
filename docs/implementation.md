@@ -2,7 +2,7 @@
 
 ## This milestone
 
-Implemented: source design, dashboard requirements, a single factory ACR skill and specialist role catalog, provider/role/coordination catalogs, small pure reference decisions and credential-free replay scenarios. The catalog checker verifies distribution mappings and explicit uncertainty outcomes. No live worker, hook, Jev request, quota probe, merge, release or dashboard server is started.
+Implemented: source design, dashboard requirements, one factory ACR skill and specialist role catalog, configuration, pure reference decisions and credential-free replay scenarios. The native Rex launcher now starts explicit specialist commands, records identity, inspects/captures processes and reconciles a limited class of interrupted launches. It uses a per-task JSON file and lock, not a scheduler framework. See [native execution](native-rex.md). No automatic Jev routing, hooks, quota scheduling, merge/release execution or dashboard server is implemented.
 
 ## Next slices
 
