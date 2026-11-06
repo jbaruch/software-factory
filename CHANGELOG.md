@@ -88,6 +88,11 @@ review and CI remain required; restore the Claude gate on capacity recovery.
 
 ### Task admission
 
+Refuse linked/non-regular task records and require owner-private, single-link
+repository markers. Resolve verifier Git outside the inherited executable path
+and disable Python environment/user-site startup in the exec guard, keeping
+unverified checkout bytes from running before source checks.
+
 Add task scope, acceptance references and an initial Git revision to the native
 launcher. Admitted tasks enforce declared cumulative correction and investigation
 limits from persisted launch intents. Add pause/resume, offline state inspection
