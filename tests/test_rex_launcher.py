@@ -1,5 +1,8 @@
 """Failure/restart tests use a fake server; no live sessions or providers."""
 import json
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -158,6 +161,180 @@ class NativeLauncher(unittest.TestCase):
             result = factory.status(rex, record, assignment)
         self.assertEqual(result["state"], "exited")
         self.assertNotIn("accepted", result)
+
+
+class TaskAdmission(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.path = self.state / "task.json"
+        self.repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        self.commit("Fixture")
+        FakeRex.sessions, FakeRex.calls = [], []
+        FakeRex.fail_after_create, FakeRex.host = False, "test-host"
+        self.patcher = patch.object(factory, "Rex", FakeRex)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def commit(self, message):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=Fixture",
+                        "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                        "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--allow-empty", "-m", message],
+                       check=True, env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+                                        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+
+    def admit(self, **changes):
+        arguments = dict(task="task", goal="Verify the example", repository=str(self.repo),
+                         acceptance=["docs/example.md#acceptance"], corrections=1, investigations=1)
+        return factory.admit(self.path, **{**arguments, **changes})
+
+    def start(self, **changes):
+        arguments = dict(task="task", assignment_id="qa", role="qa", goal="Inspect only",
+                         cwd=str(self.repo), command=[sys.executable, "{instructions}"],
+                         binary=sys.executable, server="unix:///test.sock", purpose="work")
+        return factory.launch(self.path, **{**arguments, **changes})
+
+    def cli(self, *arguments):
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = factory.main(["--state-dir", str(self.state), *arguments])
+        return result, output.getvalue(), errors.getvalue()
+
+    def test_admission_is_idempotent_and_inspection_is_offline(self):
+        first = self.admit()
+        self.assertEqual(self.admit(), first)
+        result, output, errors = self.cli("show", "--task", "task")
+        self.assertEqual((result, errors), (0, ""))
+        view = json.loads(output)
+        self.assertEqual(view["admission"]["goal"], "Verify the example")
+        self.assertEqual(view["admission"]["acceptance"], ["docs/example.md#acceptance"])
+        expected_head = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        self.assertEqual(view["admission"]["initial_candidate"], expected_head)
+        self.assertEqual(view["allowances"]["correction"], dict(limit=1, used=0, remaining=1))
+        self.assertIsNone(view["rex"])
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_invalid_admission_and_changed_limits_cannot_reset_task(self):
+        for changes in ({"goal": " "}, {"acceptance": []}, {"acceptance": [""]}, {"corrections": -1}):
+            with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
+                self.admit(**changes)
+        self.assertFalse(self.path.exists())
+        self.admit()
+        self.start(purpose="correction")
+        before = self.path.read_bytes()
+        self.commit("Implementation advanced the head")
+        with self.assertRaisesRegex(factory.FactoryError, "different admission inputs"):
+            self.admit(corrections=10)
+        self.admit()
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_allowance_survives_new_worker_id_and_controller_restart(self):
+        self.admit()
+        self.start(purpose="correction")
+        FakeRex.calls.clear()
+        with self.assertRaisesRegex(factory.FactoryError, "exhausted; route to investigator"):
+            self.start(assignment_id="security", role="security", purpose="correction")
+        view = factory.task_view(factory.load_task(self.path))
+        self.assertEqual(view["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_unknown_launch_reserves_once_and_reconnect_does_not_charge_again(self):
+        self.admit()
+        FakeRex.fail_after_create = True
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start(purpose="correction")
+        view = factory.task_view(factory.load_task(self.path))
+        self.assertEqual(view["allowances"]["correction"]["remaining"], 0)
+        FakeRex.fail_after_create = False
+        record, assignment = self.start(purpose="correction")
+        self.assertEqual(assignment["block_id"], "block-1")
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"]["used"], 1)
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 1)
+
+    def test_pause_blocks_new_effects_but_allows_reconciliation(self):
+        self.admit()
+        FakeRex.fail_after_create = True
+        with self.assertRaises(factory.FactoryError):
+            self.start(purpose="correction")
+        factory.hold_task(self.path, "Operator hold")
+        FakeRex.calls.clear()
+        with self.assertRaisesRegex(factory.FactoryError, "Task is paused"):
+            self.start(assignment_id="security", role="security")
+        self.assertEqual(FakeRex.calls, [])
+        FakeRex.fail_after_create = False
+        _, assignment = self.start(purpose="correction")
+        self.assertEqual(assignment["block_id"], "block-1")
+        factory.hold_task(self.path, None)
+        with self.assertRaisesRegex(factory.FactoryError, "allowance exhausted"):
+            self.start(assignment_id="correction-two", purpose="correction")
+        _, independent = self.start(assignment_id="security", role="security")
+        self.assertEqual(independent["block_id"], "block-2")
+
+    def test_investigation_is_bounded_and_requires_investigator(self):
+        self.admit(corrections=0)
+        with self.assertRaisesRegex(factory.FactoryError, "allowance exhausted"):
+            self.start(purpose="correction")
+        for changes in ({"purpose": None}, {"role": "investigator"}, {"purpose": "investigation"}):
+            with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
+                self.start(**changes)
+        self.assertEqual(FakeRex.calls, [])
+        self.start(role="investigator", purpose="investigation")
+        with self.assertRaisesRegex(factory.FactoryError, "exhausted; route to operator"):
+            self.start(assignment_id="another-investigator", role="investigator", purpose="investigation")
+
+    def test_legacy_record_migrates_without_relaunch_or_inferred_allowances(self):
+        _, original = self.start(purpose=None)
+        record = json.loads(self.path.read_text())
+        for key in ("schema_version", "admission", "hold"):
+            del record[key]
+        self.path.write_text(json.dumps(record))
+        migrated = factory.load_task(self.path)
+        self.assertEqual(migrated["schema_version"], 1)
+        self.assertIsNone(factory.task_view(migrated)["allowances"])
+        self.assertEqual(migrated["assignments"], record["assignments"])
+        _, reconnected = self.start(purpose=None)
+        self.assertEqual(reconnected["block_id"], original["block_id"])
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 1)
+        with self.assertRaisesRegex(factory.FactoryError, "unclassified attempts"):
+            self.admit()
+
+    def test_unknown_or_damaged_schema_refuses_without_rex_or_state_changes(self):
+        original = self.admit()
+        variants = [{**original, "schema_version": 99},
+                    {**original, "admission": {"limits": {"correction": -1, "investigation": 1}}},
+                    {key: value for key, value in original.items() if key != "schema_version"}]
+        for variant in variants:
+            self.path.write_text(json.dumps(variant))
+            before = self.path.read_bytes()
+            with self.subTest(variant=variant), self.assertRaises(factory.FactoryError):
+                self.start()
+            self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_cli_admit_pause_resume_and_missing_task(self):
+        result, output, errors = self.cli("admit", "--task", "task", "--goal", "Inspect",
+                                          "--repo", str(self.repo), "--acceptance", "criteria.md")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertEqual(json.loads(output)["allowances"]["correction"]["limit"], 2)
+        result, output, errors = self.cli("pause", "--task", "task", "--reason", "Operator hold")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertEqual(json.loads(output)["hold"], "Operator hold")
+        result, output, errors = self.cli("resume", "--task", "task")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertIsNone(json.loads(output)["hold"])
+        result, output, errors = self.cli("pause", "--task", "task", "--reason", " ")
+        self.assertEqual((result, output), (1, ""))
+        self.assertIn("nonempty pause reason", errors)
+        result, output, errors = self.cli("show", "--task", "missing")
+        self.assertEqual((result, output), (1, ""))
+        self.assertIn("factory:", errors)
+        self.assertFalse((self.state / "missing.json").exists())
+        self.assertEqual(FakeRex.calls, [])
 
 
 if __name__ == "__main__":
