@@ -59,11 +59,11 @@ def compile_questions(specs, candidates=None):
 
 
 def probability(value):
-    return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+    return type(value) in (int, float) and 0 <= value <= 1
 
 
 def validate_response(response, questions):
-    if not isinstance(response, dict) or not isinstance(response.get("model"), str) or not response["model"]:
+    if not isinstance(response, dict) or not isinstance(response.get("model"), str) or not response["model"].strip():
         raise JevError("TypeSafe returned no model identity; retain the evidence and use standby reasoning")
     answers = response.get("answers")
     if not isinstance(answers, dict) or set(answers) != set(questions):
@@ -102,7 +102,7 @@ class Jev:
             "Authorization": "Bearer " + self.api_key, "Content-Type": "application/json"})
         try:
             with self.opener.open(request, timeout=20) as response:
-                return json.load(response)
+                return json.load(response, object_pairs_hook=unique_object)
         except urllib.error.HTTPError as exc:
             # API bodies and exception strings may echo credentials or private state.
             status = exc.code
@@ -120,14 +120,14 @@ class Jev:
             raise JevError(f"TypeSafe HTTP {status}; {action}") from None
         except (OSError, http.client.HTTPException):
             raise JevError("TypeSafe transport unavailable; retain pending work instead of retrying into a decision") from None
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError):
             raise JevError("TypeSafe returned invalid JSON; retain the evidence and use standby reasoning") from None
 
     def models(self):
         response = self.request("models")
         models = response.get("models") if isinstance(response, dict) else None
         if not isinstance(models, list) or any(not isinstance(item, dict)
-                or not isinstance(item.get("name"), str) or not item["name"] for item in models):
+                or not isinstance(item.get("name"), str) or not item["name"].strip() for item in models):
             raise JevError("TypeSafe model discovery failed; do not invent a model fallback")
         return models
 

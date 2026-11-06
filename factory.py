@@ -925,6 +925,8 @@ def main(argv=None):
         command.add_argument("--id", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
+            raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
         with task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":

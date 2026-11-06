@@ -8,6 +8,9 @@ Reject blank native selections before reserving attempts, damaged saved worker
 arguments and incomplete completed receipts before collection. Validate finite
 question catalogs, option criteria and native model identities before use, and
 retain actionable process/stream I/O recovery diagnostics in failed receipts.
+Validate selections at the public CLI before legacy state upgrades, enforce
+ordered native thread/turn/report events, and reject ambiguous provider JSON or
+blank model identities before recording discovery or shadow evidence.
 
 ### Jev shadow adapter
 

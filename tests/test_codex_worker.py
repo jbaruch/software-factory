@@ -374,6 +374,49 @@ class NativeResults(unittest.TestCase):
             factory.collect_codex(self.path, "qa", self.rex, record, assignment)
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_public_cli_blank_selection_does_not_upgrade_legacy_task(self):
+        path = self.root / "task.json"
+        record = factory.admit(path, task="task", goal="Verify the change", repository=str(self.repo),
+                               acceptance=["docs/acceptance.md"], corrections=1, investigations=1)
+        record["schema_version"] = 3
+        record["admission"]["repository_identity"] = dict(
+            common_dir=str(self.repo / ".git"), device=1, inode=2)
+        factory.save(path, record)
+        before = path.read_bytes()
+        for model, effort in ((" ", "high"), ("fixture-model", "\t")):
+            errors = StringIO()
+            with self.subTest(model=model, effort=effort), redirect_stderr(errors), redirect_stdout(StringIO()):
+                code = factory.main(["--state-dir", str(self.root), "codex-start", "--task", "task",
+                    "--id", "qa", "--role", "qa", "--goal", "Inspect only", "--cwd", str(self.repo),
+                    "--codex", sys.executable, "--model", model, "--effort", effort, "--purpose", "correction"])
+            self.assertEqual(code, 1)
+            self.assertIn("discovered native model and supported effort", errors.getvalue())
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(path.with_suffix(".lock").exists())
+
+    def test_reordered_native_lifecycle_cannot_register_a_result(self):
+        record, assignment = self.launch_assignment()
+        original = events()
+        orders = ((0, 4, 3, 1), (0, 3, 1, 4), (0, 1, 4, 3), (1, 0, 3, 4),
+                  (0, 1, 3, 4, 1), (0, 1, 3, 4, 3), (0, 1, 1, 3, 4), (0, 1, 3, 4, 4))
+        before = self.path.read_bytes()
+        for order in orders:
+            stream = [original[index] for index in order]
+            self.args.events.write_text("".join(json.dumps(dict(schema_version=1, kind="codex-event-line",
+                data=json.dumps(event) + "\n")) + "\n" for event in stream))
+            with self.subTest(order=order), patch.object(self.rex, "call", return_value={"last_exit": dict(exit_code=0)}):
+                with self.assertRaises(worker.WorkerError):
+                    factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_nonfatal_startup_diagnostics_do_not_supply_lifecycle_evidence(self):
+        stream = events()
+        diagnostic = dict(type="item.completed", item=dict(type="error", message="Fixture startup diagnostic"))
+        stream.insert(1, diagnostic)
+        self.assertEqual(worker.parse_events(stream)["report"]["outcome"], "approved")
+        with self.assertRaises(worker.WorkerError):
+            worker.parse_events([stream[0], diagnostic, stream[-1], stream[-2], stream[2]])
+
     def test_legacy_command_reconnects_without_retrofitted_scope_but_refuses_collection(self):
         record, assignment = self.launch_assignment()
         command = assignment["request"]["command"]

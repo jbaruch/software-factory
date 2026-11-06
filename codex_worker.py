@@ -33,29 +33,41 @@ def outcome_schema():
 
 def parse_events(events) -> dict:
     """A native completion is a carrier for a specialist report, never task acceptance."""
-    thread, turns, completed, message, usage = None, 0, 0, None, None
+    thread, phase, message, usage = None, "before-thread", None, None
     for event in events:
         if not isinstance(event, dict):
             raise WorkerError("Native output is not an event object; inspect the retained stream")
         kind = event.get("type")
         if kind == "thread.started":
-            if thread is not None or not isinstance(event.get("thread_id"), str) or not event["thread_id"]:
+            if phase != "before-thread" or not isinstance(event.get("thread_id"), str) or not event["thread_id"]:
                 raise WorkerError("Native worker returned an ambiguous thread; inspect its original events")
             thread = event["thread_id"]
+            phase = "before-turn"
         elif kind == "turn.started":
-            turns += 1
+            if phase != "before-turn":
+                raise WorkerError("Native lifecycle is out of order; reconcile the existing attempt")
+            phase = "active"
         elif kind in {"turn.failed", "error"}:
             raise WorkerError("Native worker failed; inspect its original events before another attempt")
-        elif kind == "item.completed":
+        elif isinstance(kind, str) and kind.startswith("item."):
             item = event.get("item")
-            if not isinstance(item, dict):
-                raise WorkerError("Native item is malformed; inspect the retained stream")
-            if item.get("type") == "agent_message":
-                message = item.get("text")
+            # The native CLI emits nonfatal startup diagnostics after thread start.
+            # They carry no report, turn or completion evidence.
+            if phase == "before-turn" and kind == "item.completed" and isinstance(item, dict) and item.get("type") == "error":
+                continue
+            if phase != "active":
+                raise WorkerError("Native lifecycle is out of order; reconcile the existing attempt")
+            if kind == "item.completed":
+                if not isinstance(item, dict):
+                    raise WorkerError("Native item is malformed; inspect the retained stream")
+                if item.get("type") == "agent_message":
+                    message = item.get("text")
         elif kind == "turn.completed":
-            completed += 1
+            if phase != "active":
+                raise WorkerError("Native lifecycle is out of order; reconcile the existing attempt")
+            phase = "finished"
             usage = event.get("usage")
-    if thread is None or turns != 1 or completed != 1:
+    if phase != "finished":
         raise WorkerError("Native completion is missing or ambiguous; reconcile the existing attempt")
     if not isinstance(message, str):
         raise WorkerError("Native final message is missing; inspect its original events")
