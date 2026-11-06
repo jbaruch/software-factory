@@ -77,6 +77,7 @@ class OperatorView(unittest.TestCase):
     def test_unreconciled_launch_is_not_guessed_or_relaunched(self):
         self.record["assignments"]["backend"].update(state="launching", result=None)
         del self.record["assignments"]["backend"]["block_id"]
+        del self.record["assignments"]["backend"]["window_id"]
         factory.save(self.path, self.record)
         rex = Mock()
         assignment = self.snapshot(live=True, connect=lambda record: rex)["tasks"][0]["assignments"][0]

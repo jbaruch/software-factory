@@ -36,17 +36,16 @@ version, native payload and observation time. Revalidate observations before
 using them to schedule work. No local model list establishes cross-route quota
 sharing, supported tools or subscription eligibility for other harnesses.
 
-Claude, Grok and Antigravity need their own account, catalog, allowance and native
-lifecycle adapters. Do not substitute API-key billing for their subscription
-routes. The static provider catalog remains explicitly unverified.
+Do not substitute API-key billing for subscription routes. See the
+[implementation inventory](implementation.md) for provider coverage.
 
 ## Explicit Codex assignments
 
 `factory.py codex-start` builds one native `codex exec` invocation in an admitted
 task's Rex pane. Select an actual model and supported effort from fresh native
 observations. Existing project policy and operator authority must permit native
-delegation before execution. This adapter has offline conformance coverage;
-live specialist execution and eligibility remain unverified.
+delegation before execution. The [implementation inventory](implementation.md)
+records execution evidence and eligibility limits.
 
 ```sh
 python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
@@ -96,8 +95,5 @@ collection reuses the same immutable result. Changing task inputs leaves an
 older result visible but stale. A native exit or specialist approval does not
 accept the task, establish independent verification or satisfy release gates.
 
-The complete CLI → Rex → receipt → collection path has also been exercised
-against a harmless local event fixture on Rex API revision 11. Reconnection
-reused the same block. A timed-out fixture was interrupted and refused
-collection. These are mechanical integration observations; no native model turn
-or specialist judgment was performed by that check.
+See the [implementation inventory](implementation.md) for mechanical integration
+observations and the remaining live specialist verification.

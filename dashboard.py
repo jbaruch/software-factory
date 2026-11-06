@@ -50,7 +50,7 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
                 if live:
                     if observation_error:
                         process = dict(state="unavailable", error=observation_error)
-                    elif not assignment.get("block_id"):
+                    elif assignment["state"] == "launching":
                         process = dict(state="unreconciled", error="Use factory status to reconcile the existing launch")
                     elif rex is not None:
                         try:
