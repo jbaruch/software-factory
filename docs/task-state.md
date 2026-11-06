@@ -180,6 +180,8 @@ submodules; recursive submodule input validation is not implemented.
 Tracked file bytes and executable/symlink modes must match the raw candidate tree;
 index timestamps are only hints. Working-tree filters that change those bytes
 require a clean checkout without those transformations for this runtime.
+Verification disables replacement objects and the untracked cache, so neither
+can substitute the selected source or hide an added input.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must
 change the identifier when the relevant requirements change. Admission defaults
