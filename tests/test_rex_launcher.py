@@ -221,8 +221,30 @@ class NativeLauncher(unittest.TestCase):
             record = copy.deepcopy(original)
             record["assignments"]["security"][key] = record["assignments"]["qa"][key]
             factory.save(self.path, record)
-            with self.subTest(key=key), self.assertRaisesRegex(factory.FactoryError, "Duplicate assignment pane"):
+            with self.subTest(key=key), self.assertRaisesRegex(factory.FactoryError,
+                    "Duplicate assignment pane|window marker differs"):
                 factory.load_task(self.path)
+
+    def test_complete_pane_tuple_swaps_and_cross_task_session_identity_refuse_before_rex(self):
+        self.start()
+        original, _ = self.start(assignment_id="security", role="security")
+        swapped = copy.deepcopy(original)
+        keys = ("window_label", "window_id", "block_id")
+        for key in keys:
+            swapped["assignments"]["qa"][key], swapped["assignments"]["security"][key] = (
+                swapped["assignments"]["security"][key], swapped["assignments"]["qa"][key])
+        other, _ = factory.launch(self.root / "other.json", **{**self.arguments, "task": "other"})
+        crossed = copy.deepcopy(original)
+        for key in ("rex", "session_label", "session_id"):
+            crossed[key] = other[key]
+        for record in (swapped, crossed):
+            factory.save(self.path, record)
+            before = self.path.read_bytes()
+            FakeRex.calls.clear()
+            with self.assertRaises(factory.FactoryError):
+                self.start()
+            self.assertEqual(FakeRex.calls, [])
+            self.assertEqual(self.path.read_bytes(), before)
 
     def test_lost_assignment_history_refuses_another_live_launch(self):
         self.start()
@@ -343,6 +365,30 @@ class TaskAdmission(unittest.TestCase):
             self.admit(corrections=10)
         self.admit()
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_explicit_limits_work_without_defaults_and_bad_defaults_explain_recovery(self):
+        config_root = self.root / "config-fixture"
+        (config_root / "config").mkdir(parents=True)
+        config = config_root / "config/coordination.json"
+        for data in (None, b'{"broken":', b'\xff', b'[]', b'{}', b'{"policies": {}}',
+                     b'{"policies": {"max_investigations": true}}'):
+            self.path.unlink(missing_ok=True)
+            if data is None:
+                config.unlink(missing_ok=True)
+            else:
+                config.write_bytes(data)
+            with patch.object(factory, "ROOT", config_root):
+                with self.subTest(data=data), self.assertRaisesRegex(factory.FactoryError,
+                        "repair its policies or supply both --corrections and --investigations"):
+                    self.admit(corrections=1, investigations=None)
+                self.assertFalse(self.path.exists())
+                record = self.admit(corrections=1, investigations=2)
+                self.assertEqual(record["admission"]["limits"], dict(correction=1, investigation=2))
+        self.path.unlink()
+        config.write_text('{"policies": {"max_investigations": 3}}')
+        with patch.object(factory, "ROOT", config_root):
+            record = self.admit(corrections=1, investigations=None)
+        self.assertEqual(record["admission"]["limits"], dict(correction=1, investigation=3))
 
     def test_allowance_survives_new_worker_id_and_controller_restart(self):
         self.admit()
