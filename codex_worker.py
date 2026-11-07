@@ -21,6 +21,17 @@ sys.dont_write_bytecode = True
 import factory
 
 NATIVE_LINE_LIMIT = 1024 * 1024
+
+
+def native_environment():
+    """Keep native subscription configuration without host credentials."""
+    allowed = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+               "TMPDIR", "TMP", "TEMP", "TERM", "COLORTERM", "CODEX_HOME", "XDG_CONFIG_HOME",
+               "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+    return {**{key: value for key, value in os.environ.items() if key in allowed},
+            "PYTHONDONTWRITEBYTECODE": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+
+
 GIT_ENV_LAUNCHER = """import hashlib,json,os,sys
 environment = {key: os.environ[key] for key in json.loads(sys.argv[2]) if key in os.environ}
 environment.update(json.loads(sys.argv[1]))
@@ -205,6 +216,14 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     root = Path(factory.git_worktree("."))
     python = str(getattr(args, "_git_python", None) or trusted_git_runtime(args))
     home = Path.home()
+    protected = (home.resolve(), root, factory.git_common_dir("."), args.worktree_git_dir,
+                 Path(tempfile.gettempdir()).resolve())
+    def callback_path(path):
+        path = path.resolve()
+        if (any(value.is_relative_to(path) for value in protected)
+                or any(path.is_relative_to(value) for value in protected[1:4])):
+            raise factory.FactoryError("Unsupported pre-commit access: use dedicated tool/cache paths outside broad host roots, source and Git metadata")
+        return path
     inherited = factory.command_environment()
     environment = {key: value for key, value in inherited.items()
                    if key in {"PATH", "HOME", "LANG"}
@@ -224,7 +243,8 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         files[str(factory.git_common_dir(".") / "objects")] = "read"
     if (root / ".git").is_file() or (root / ".git").is_symlink():
         files[str(root / ".git")] = "read"
-    files.setdefault(str(Path(sys.base_prefix).resolve()), "read")
+    base = callback_path(Path(sys.base_prefix))
+    files.setdefault(str(base), "read")
     native = args.codex.resolve()
     files.setdefault(str(native), "read")
     package = native.parent.parent / "package.json"
@@ -244,7 +264,7 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     for name in ("bin", "Cellar", "opt", "lib"):
         runtime = Path("/opt/homebrew") / name
         if runtime.is_dir():
-            files[str(runtime)] = "read"
+            files[str(callback_path(runtime))] = "read"
     for path in [home / ".gitconfig", *(home / ".config/git" / name for name in ("config", "ignore", "attributes")),
                  *(Path(inherited[key]) for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM") if key in inherited)]:
         files[str(path.resolve())] = "deny" if read_only else "read"
@@ -255,14 +275,27 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     # The configured local hook tool may use its already-installed offline cache.
     precommit = shutil.which("pre-commit")
     if precommit:
-        tool = Path(precommit).resolve().parent.parent
+        tool = callback_path(Path(precommit).resolve().parent.parent)
+        if tool != base and not (tool / "pyvenv.cfg").is_file():
+            raise factory.FactoryError("Unsupported pre-commit installation: use a dedicated virtual environment or the factory Python installation")
         files.setdefault(str(tool), "read")
         interpreter = tool / "bin/python"
         if interpreter.is_file():
-            files.setdefault(str(interpreter.resolve().parent.parent), "read")
+            executable = callback_path(interpreter)
+            runtime = callback_path(executable.parent.parent)
+            files.setdefault(str(executable), "read")
+            if runtime != base:
+                libraries = [path.parent for path in (runtime / "lib").glob("python*/os.py")]
+                if not libraries:
+                    raise factory.FactoryError("Unsupported pre-commit Python runtime; restore a dedicated Python installation")
+                for path in [*libraries, *(runtime / "lib").glob("libpython*")]:
+                    files.setdefault(str(callback_path(path)), "read")
         cache = Path(inherited.get("PRE_COMMIT_HOME", str(Path(inherited.get("XDG_CACHE_HOME", str(home / ".cache"))) / "pre-commit")))
-        files[str(cache.resolve())] = "read"
-        environment["PRE_COMMIT_HOME"] = str(cache.resolve())
+        cache = callback_path(cache)
+        if cache.name != "pre-commit":
+            raise factory.FactoryError("Unsupported pre-commit cache: use a dedicated directory named pre-commit")
+        files[str(cache)] = "read"
+        environment["PRE_COMMIT_HOME"] = str(cache)
     selected = factory.git_run(".", "config", "--get", "user.signingkey", environment=inherited)
     enabled = factory.git_run(".", "config", "--bool", "--get", "commit.gpgsign", environment=inherited)
     method = factory.git_run(".", "config", "--get", "gpg.format", environment=inherited)
@@ -558,6 +591,8 @@ def check_commit_receipt(receipt, args, repository):
     tree = factory.git_run(repository, "rev-parse", "--verify", commit["candidate"] + "^{tree}")
     if tree.returncode or tree.stdout.strip() != commit["staged_tree"]:
         raise factory.FactoryError("Factory commit staged tree differs from the candidate; inspect the original receipt and Git tree before collection")
+    if factory.git_commit(str(args.cwd), "HEAD") != commit["candidate"]:
+        raise factory.FactoryError("Factory commit differs from the assigned worktree HEAD; inspect its retained checkout before collection")
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
@@ -635,7 +670,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                       "--sandbox", "workspace-write" if args.write else "read-only",
                                       "-c", "model_reasoning_effort=" + json.dumps(args.effort),
                                       "--cd", ".", instructions,
-                                      env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                                      env=native_environment(),
                                       limit=NATIVE_LINE_LIMIT,
                                       stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
             except OSError:

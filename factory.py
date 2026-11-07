@@ -1080,6 +1080,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     native = parse_events(read_events(args.events))
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
+    args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
     check_commit_receipt(receipt, args, record["admission"]["repository"])
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
     return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
