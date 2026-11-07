@@ -150,8 +150,9 @@ Newer schemas require an updated runtime. Keep existing state for recovery;
 deleting it is not reconciliation. Missing records allow first launch or admission;
 inspection and pause/resume of a missing task fail.
 
-Resource reservations, automatic dependency scheduling and cross-task capacity
-enforcement remain future work. No acceptance or release is implied by admission,
+The [ready-work runner](ready-runner.md) uses these existing intents/results and
+serializes launch decisions with the owner's `.execution.lock`. It adds no task
+fields or migrations. No acceptance or release is implied by admission,
 a saved intent, a reported result or process exit.
 
 ## Repository marker

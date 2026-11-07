@@ -1,6 +1,6 @@
 """Explicit native Rex launches. No scheduler, provider broker or model routing."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
 import json
@@ -117,6 +117,21 @@ def save(path, value, *, exclusive=False):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+@contextmanager
+def execution_lock(directory):
+    """Serialize controller/CLI launch decisions within one factory instance."""
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(directory / ".execution.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise FactoryError("Another launcher or ready-work controller owns execution; wait for it to finish before starting more work") from None
+        yield
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -1094,7 +1109,7 @@ def main(argv=None):
             raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
         if args.action == "codex-start" and (not Path(args.codex).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
-        with task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,

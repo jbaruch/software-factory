@@ -1,0 +1,129 @@
+# Explicit ready-work runner
+
+`ready_runner.py` executes an operator-selected Codex plan. It observes existing
+Rex jobs, collects successful native receipts, then launches ready assignments.
+It uses the existing task store and its cumulative attempt limits. It does not
+select models, interpret findings, accept tasks or release changes.
+
+Admit tasks and select their exact candidate/requirements through
+[the task owner](task-state.md). Keep one state directory per factory instance;
+the runner counts every recorded assignment in that directory, including jobs
+outside the supplied plan. Other instances and native CLI use outside this
+factory are not part of its work limits.
+
+```sh
+python3 ready_runner.py --state-dir '/absolute/path/to/state' \
+  --plan '/absolute/path/to/plan.json' \
+  --codex '/absolute/path/to/codex' \
+  --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  --seconds 600
+```
+
+`--once` performs one observation/dispatch cycle. Otherwise the runner polls
+every five seconds until all planned reports succeed, a settled plan needs
+action, or the orchestration budget expires. A budget return leaves workers
+running; invoke the same plan again to observe/reconcile their existing IDs.
+Individual Rex/Git calls retain their own bounded deadlines. The loop budget is
+checked between cycles and does not interrupt a call or worker.
+
+## Input and output contracts
+
+`ready_runner.py` owns ready-plan schema 1 and generated result schema 1. Plans
+are declarative operator input, not mutable queue history. No migration or
+rewriting occurs. Unknown versions, unknown fields, duplicate JSON keys,
+non-finite values and invalid job graphs refuse before execution. Keep plans
+private when goals or paths are sensitive; never include credentials.
+
+Every job supplies all fields shown here. Replace the candidate and model with
+the actual selected commit and discovered eligible model ID:
+
+```json
+{
+  "schema_version": 1,
+  "limits": {
+    "workers": 2,
+    "tasks": 4,
+    "reserve_workers": 1,
+    "minimum_remaining_percent": 15
+  },
+  "jobs": [
+    {
+      "task": "example",
+      "id": "qa",
+      "role": "qa",
+      "goal": "Verify the selected candidate against the admitted acceptance references",
+      "cwd": "/absolute/path/to/clean/worktree",
+      "candidate": "<full-commit-sha>",
+      "requirements": "requirements-v1",
+      "model": "<discovered-eligible-model-id>",
+      "effort": "high",
+      "seconds": 180,
+      "purpose": "work",
+      "write": false,
+      "after": []
+    }
+  ]
+}
+```
+
+Jobs have distinct `(task, id)` pairs. `after` names earlier jobs in this plan or
+existing assignments in the same task. A dependency needs a successful current
+report and an observed successful process exit. Findings, failures, stale reports
+and changed requests do not advance it. One plan uses one candidate/requirements
+pair per task. A later phase can depend on an existing implementation's produced
+commit after explicit input selection, without relabeling the original request.
+
+The owner store retains launch intent before Rex effects. A lost reply reconciles
+the original pane; failed or missing/unknown effects never acquire a new attempt
+automatically. A preflight failure with no intent is blocked for the invocation;
+repair it before explicitly restarting. Holds and limits remain owner-controlled.
+Collection continues during holds. Plans never reset budgets or mutate holds.
+
+Generated results contain `result`, per-job `state`/optional `reason`, current
+`active_workers`, state `issues`, safe `capacity`/`capacity_error`, measured
+`elapsed_seconds` and `metrics` (polls, quota probes, launches and collections).
+`complete` means only that every planned assignment has a current successful
+report and successful process observation. It is not task acceptance. Other
+results are `needs_action`, `pending` for a one-cycle observation, and
+`pending_at_budget`. The CLI returns zero only for `complete`.
+
+## Limits and reservations
+
+Worker slots and active task slots are reserved from observed processes, including
+unknown and unconfirmed launches. A terminal process releases its slot even if
+its report is unusable; that report still needs action. New tasks share initial
+starts by existing assignment count, with plan order breaking ties. This is a
+simple finite-plan fairness rule, not a learned priority model.
+
+Correction/investigation attempts and read-only QA, code-review, investigator,
+judge and standby-reasoner roles can use the reserved worker slots. Ordinary work
+cannot consume that reserve. Active readers and writers never share a checkout
+with a new writer; unknown command adapters are conservatively treated as writers.
+Writers still require isolated worktrees. Worktree creation and candidate
+handoff are explicit in this slice.
+
+The runner holds the owner's `.execution.lock` during its invocation. Other
+controllers and manual launch commands refuse while it owns execution. Status,
+capture, result collection, admission, input selection and pause/resume remain
+available under their task locks. After the controller exits, manual launches
+retain their explicit-launch behavior; a later runner counts them.
+
+Capacity is a separate admission gate. A ready launch needs a fresh native
+subscription observation, ordinary usage permission, the selected model/effort,
+known pool identity/primary headroom, clear spend-control status and headroom
+above the configured minimum in every reported window. Null secondary windows
+remain unknown, and are never converted to additional allowance. With no verified
+per-model pool mapping, every observed pool must clear the gate. Metadata alone
+is not an eligibility test; the operator still selects the eligible route/model.
+
+The safe snapshot is reused for at most 60 seconds and refreshed only when a new
+launch could fit. Each probe is bounded to 30 seconds. Transient probe failures
+use the coordination policy's `max_operational_retries`, spaced by the freshness
+interval; exhaustion retains pending work until an explicit restart after repair.
+Malformed capacity refuses further refresh in that invocation. Percent headroom
+and worker slots are configured reserves, not token reservations or a guarantee
+about unknown quotas or consumption outside this instance.
+
+Ordinary tests use fake Rex/native processes and fixed observations. Live
+conformance is invoked separately. The [implementation inventory](implementation.md)
+owns current verification status and the remaining full delivery work.
