@@ -2,20 +2,158 @@
 import argparse
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+from typing import NoReturn
 
 from codex_worker import native_environment
+from factory import decode_json, RESULT_OUTCOMES
 
 API_ENVIRONMENT = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "AGY_ADC_AUTH")
 
 
 class UsageError(Exception):
     pass
+
+
+class ExecutionError(Exception):
+    pass
+
+
+def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
+    """Decode original 1.5.3 JSON lines only; callers retain provenance and exit.
+
+    No I/O, execution admission, process success or acceptance is established.
+    The init model is an echo, not independently observed inference identity.
+    """
+    def refuse(reason) -> NoReturn:
+        raise ExecutionError(f"Antigravity {reason}; inspect the original stream and frozen inputs before collection")
+
+    if (not isinstance(expected_model, str) or not expected_model.strip()
+            or not isinstance(expected_cwd, str) or "\0" in expected_cwd
+            or not Path(expected_cwd).is_absolute()):
+        refuse("requires an explicit model and absolute cwd")
+    # This dedicated report shape supports the historical outcome subset too.
+    outcomes = (expected_schema.get("properties", {}).get("outcome", {}).get("enum")
+                if isinstance(expected_schema, dict)
+                and isinstance(expected_schema.get("properties"), dict)
+                and isinstance(expected_schema["properties"].get("outcome"), dict) else None)
+    if (not isinstance(outcomes, list) or not outcomes
+            or any(not isinstance(value, str) or value not in RESULT_OUTCOMES for value in outcomes)
+            or len(set(outcomes)) != len(outcomes)):
+        refuse("requires a supported frozen report schema")
+    schema = dict(type="object", additionalProperties=False,
+                  properties=dict(outcome=dict(type="string", enum=outcomes),
+                                  artifacts=dict(type="array", items=dict(type="string"))),
+                  required=["outcome", "artifacts"])
+    try:
+        if json.dumps(expected_schema, sort_keys=True, allow_nan=False) != json.dumps(schema, sort_keys=True):
+            refuse("requires the supported frozen report schema")
+    except (TypeError, ValueError):
+        refuse("has a malformed frozen report schema")
+
+    def observations(payload, where):
+        usage, duration = payload.get("usage"), payload.get("duration_seconds")
+        if usage is not None and (not isinstance(usage, dict)
+                or any(value is not None and (type(value) is not int or not 0 <= value <= sys.float_info.max)
+                       for value in usage.values())):
+            refuse(f"has malformed {where} token usage")
+        if duration is not None and (type(duration) not in (int, float)
+                or not 0 <= duration <= sys.float_info.max or not math.isfinite(duration)):
+            refuse(f"has malformed {where} duration_seconds")
+
+    conversation_id, final = None, None
+    step_index, step_state, step_type, user_turns = -1, None, None, 0
+    for line_number, line in enumerate(events, 1):
+        if final is not None:
+            refuse(f"has trailing data after result at line {line_number}")
+        if not isinstance(line, (str, bytes)):
+            refuse(f"requires original JSON lines at line {line_number}")
+        try:
+            event = decode_json(line)
+        except (ValueError, UnicodeError):
+            refuse(f"has malformed JSON at line {line_number}")
+        if not isinstance(event, dict) or event.get("event") not in ("init", "step_update", "result"):
+            refuse(f"has an unsupported event at line {line_number}")
+        kind = event["event"]
+        payload = event.get(kind)
+        if (not isinstance(payload, dict)
+                or any(key in event for key in {"init", "step_update", "result"} - {kind})):
+            refuse(f"has a malformed {kind} envelope at line {line_number}")
+        if conversation_id is None:
+            if kind != "init" or line_number != 1:
+                refuse("requires exactly one first init")
+            conversation_id = event.get("conversation_id")
+            if not isinstance(conversation_id, str) or not conversation_id.strip():
+                refuse("init has no conversation identity")
+            if (payload.get("model") != expected_model or payload.get("cwd") != expected_cwd
+                    or payload.get("json_schema") != schema):
+                refuse("init model/cwd/schema differs from frozen inputs")
+        elif kind == "init":
+            refuse("has a duplicate or out-of-order init")
+        for source in (event, payload):
+            if "conversation_id" in source and source["conversation_id"] != conversation_id:
+                refuse(f"has a mismatched conversation identity at line {line_number}")
+        if kind == "init":
+            # JSON comparison also distinguishes false from numeric zero.
+            if json.dumps(payload["json_schema"], sort_keys=True) != json.dumps(schema, sort_keys=True):
+                refuse("init schema differs from frozen inputs")
+            continue
+        if payload.get("conversation_id") != conversation_id:
+            refuse(f"{kind} has no matching conversation identity at line {line_number}")
+        observations(payload, kind)
+        if kind == "step_update":
+            index, state, category = payload.get("step_index"), payload.get("state"), payload.get("step_type")
+            if (type(index) is not int or index < 0 or state not in ("ACTIVE", "DONE")
+                    or category not in ("user_input", "agent_response", "tool", "finish")):
+                refuse(f"has malformed step_update at line {line_number}")
+            if index == step_index:
+                if (step_state != "ACTIVE" or state != "DONE"
+                        or category != step_type and (step_type, category) != ("tool", "finish")):
+                    refuse(f"has duplicate or out-of-order step_update at line {line_number}")
+            elif index != step_index + 1 or step_index >= 0 and step_state != "DONE" or step_type == "finish":
+                refuse(f"has out-of-order step_update at line {line_number}")
+            if category == "user_input":
+                if index != 0 or state != "DONE" or user_turns:
+                    refuse("requires exactly one first DONE user_input step")
+                user_turns += 1
+            elif not user_turns:
+                refuse("has telemetry before the supplied user turn")
+            step_index, step_state, step_type = index, state, category
+        else:
+            if (payload.get("status") != "SUCCESS" or type(payload.get("num_turns")) is not int
+                    or payload["num_turns"] != 1 or user_turns != 1
+                    or step_state != "DONE" or step_type != "finish"):
+                refuse("result requires SUCCESS, one completed supplied user turn and DONE finish")
+            if (payload.get("json_schema") != schema
+                    or json.dumps(payload["json_schema"], sort_keys=True) != json.dumps(schema, sort_keys=True)):
+                refuse("terminal schema differs from frozen inputs")
+            report = payload.get("structured_output")
+            if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
+                    or not isinstance(report["outcome"], str) or report["outcome"] not in outcomes
+                    or not isinstance(report["artifacts"], list)
+                    or any(not isinstance(value, str) or not value.strip() for value in report["artifacts"])):
+                refuse("result has no supported structured report")
+            if "response" in payload:
+                if not isinstance(payload["response"], str):
+                    refuse("result response is not JSON text")
+                try:
+                    response = decode_json(payload["response"])
+                except ValueError:
+                    refuse("result response is malformed JSON")
+                if response != report:
+                    refuse("result response disagrees with structured_output")
+            final = payload
+    if final is None:
+        refuse("requires exactly one first init and one last result")
+    return dict(report=final["structured_output"], conversation_id=conversation_id,
+                init_model=expected_model, cwd=expected_cwd, turns=final["num_turns"],
+                usage=final.get("usage"), duration_seconds=final.get("duration_seconds"))
 
 
 def parse_usage(output):
