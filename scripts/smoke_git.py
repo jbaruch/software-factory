@@ -146,6 +146,32 @@ def conformance(binary) -> dict:
                     raise factory.FactoryError("Fixture hook evidence is incomplete; inspect the selected sandbox")
                 candidate = factory.git_commit(".", "HEAD")
                 signed = "gpgsig -----BEGIN SSH SIGNATURE-----" in git(repo, "cat-file", "commit", candidate).stdout
+                external = root / "external-hooks"
+                external.mkdir()
+                effect = root / "external-hook-effect"
+                outside_hook = external / "pre-commit"
+                outside_hook.write_text("#!/bin/sh\nprintf called > " + shlex.quote(str(effect)) + "\n")
+                outside_hook.chmod(0o700)
+                git(repo, "config", "core.hooksPath", str(external))
+                outside_args = SimpleNamespace(**{**vars(args), "candidate": candidate,
+                    "receipt": root / "external-hook-receipt.json"})
+                outside_receipt = dict(repository_identity=identity, commit=dict(state="preparing", parent=candidate,
+                    message=args.commit_message, staged_tree=None, candidate=None))
+                factory.save(outside_args.receipt, outside_receipt)
+                index_before = (args.worktree_git_dir / "index").read_bytes()
+                try:
+                    with codex_worker.isolated_git(outside_args, identity):
+                        codex_worker.commit_changes(outside_args, outside_receipt)
+                    raise factory.FactoryError("External hook fixture unexpectedly proceeded")
+                except factory.FactoryError as exc:
+                    if "external hook paths" not in str(exc):
+                        raise
+                finally:
+                    git(repo, "config", "core.hooksPath", ".git/hooks")
+                facts["external_precommit_refused_before_staging"] = (not effect.exists()
+                    and outside_receipt["commit"]["state"] == "preparing"
+                    and (args.worktree_git_dir / "index").read_bytes() == index_before
+                    and factory.git_commit(".", "HEAD") == candidate)
                 factory.check_checkout(str(repo), str(repo), candidate, expected_identity=identity,
                                        expected_git_dir=args.worktree_git_dir)
                 facts.update(local_signed_commit_created=candidate != parent and signed,
