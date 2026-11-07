@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -174,6 +175,27 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
 
+    def test_native_environment_dump_cannot_commit_host_credentials(self):
+        self.writer()
+        selected = self.root / "native-configuration"
+        observed = {}
+        original_spawn = self.spawn
+        async def dump_environment(*command, **options):
+            observed.update(options["env"])
+            (self.repo / "debug.json").write_text(json.dumps(options["env"], sort_keys=True))
+            return await original_spawn(*command, **options)
+        self.spawn = dump_environment
+        with patch.dict(os.environ, GH_TOKEN="credential-sentinel-github", AWS_SECRET_ACCESS_KEY="credential-sentinel-cloud",
+                        UV_INDEX_URL="https://credential-sentinel-index@example.invalid", CODEX_HOME=str(selected)):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        output = factory.git_run(".", "show", receipt["candidate"] + ":debug.json").stdout
+        self.assertNotIn("credential-sentinel", output)
+        self.assertEqual(observed["CODEX_HOME"], str(selected))
+        self.assertEqual(observed["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertNotIn("GH_TOKEN", observed)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", observed)
+
     def test_alternate_python_cannot_give_a_readonly_role_writer_effects(self):
         self.writer()
         self.args.role = "qa"
@@ -317,6 +339,29 @@ class NativeResults(unittest.TestCase):
             files = tomllib.loads(prefix[prefix.index("-c") + 1])["permissions"][name]["filesystem"]
             self.assertEqual(files[str(self.args.codex.resolve())], "read")
             self.assertNotIn(str(self.root.resolve()), files)
+
+    def test_precommit_grants_refuse_host_roots_and_source_overlap(self):
+        tool = self.root / "precommit-venv"
+        (tool / "bin").mkdir(parents=True)
+        (tool / "pyvenv.cfg").write_text("Fixture environment\n")
+        (tool / "bin/python").symlink_to(Path(sys.executable).resolve())
+        which = shutil.which
+        def selected(name, *args, **kwargs):
+            return str(tool / "bin/pre-commit") if name == "pre-commit" else which(name, *args, **kwargs)
+        with patch.object(worker.shutil, "which", side_effect=selected):
+            for path in (Path("/"), Path.home(), self.repo, factory.git_dir("."), Path(tempfile.gettempdir())):
+                with self.subTest(cache=str(path)), patch.dict(os.environ, PRE_COMMIT_HOME=str(path)):
+                    with self.assertRaisesRegex(factory.FactoryError, "dedicated tool/cache"):
+                        with worker.isolated_git(self.args, self.identity):
+                            self.fail("Broad callback grant was accepted")
+        def home_launcher(name, *args, **kwargs):
+            return str(self.root / "bin/pre-commit") if name == "pre-commit" else which(name, *args, **kwargs)
+        with patch.object(worker.Path, "home", return_value=self.root), \
+                patch.object(worker.shutil, "which", side_effect=home_launcher):
+            with self.assertRaisesRegex(factory.FactoryError, "dedicated tool/cache"):
+                with worker.isolated_git(self.args, self.identity):
+                    self.fail("Home-wide tool grant was accepted")
+        self.assertIsNone(factory.GIT_EXECUTION.get())
 
     def test_native_sandbox_cannot_rewrite_configured_git_policy(self):
         self.writer()
@@ -525,6 +570,18 @@ class NativeResults(unittest.TestCase):
             damaged["commit"]["state"] = state
             with self.subTest(state=state), self.assertRaisesRegex(factory.FactoryError, "staged tree differs"):
                 worker.check_commit_receipt(damaged, self.args, str(self.repo))
+        worker.check_commit_receipt(receipt, self.args, str(self.repo))
+
+    def test_same_tree_sibling_cannot_replace_the_produced_commit(self):
+        self.writer()
+        receipt = self.execute()
+        sibling = factory.git_run(".", "commit-tree", receipt["commit"]["staged_tree"],
+                                  "-p", self.candidate, "-m", "Different sibling metadata")
+        self.assertEqual(sibling.returncode, 0, sibling.stderr)
+        damaged = json.loads(json.dumps(receipt))
+        damaged["candidate"] = damaged["commit"]["candidate"] = sibling.stdout.strip()
+        with self.assertRaisesRegex(factory.FactoryError, "assigned worktree HEAD"):
+            worker.check_commit_receipt(damaged, self.args, str(self.repo))
         worker.check_commit_receipt(receipt, self.args, str(self.repo))
 
     def test_external_precommit_is_explicitly_unsupported_before_staging(self):
