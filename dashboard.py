@@ -8,6 +8,7 @@ from html import escape
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -191,13 +192,20 @@ def inbox_source_identity(directory, *, tasks=False):
     info = directory.stat()
     files = []
     for path in paths:
-        before = path.stat()
-        content = hashlib.sha256(path.read_bytes()).hexdigest()
-        after = path.stat()
+        # Match the owner's regular-file boundary before reading any bytes.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise OSError("Source must be a regular file")
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(64 * 1024), b""):
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
         identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
-        if identity(before) != identity(after):
+        if identity(before) != identity(after) or identity(after) != identity(path.lstat()):
             raise OSError("Source changed during collection")
-        files.append((path.name, identity(after), content))
+        files.append((path.name, identity(after), digest.hexdigest()))
     return (info.st_dev, info.st_ino, files)
 
 
@@ -210,7 +218,7 @@ def decision_inbox(state_dir, decision_store, tasks):
         sources_before = (inbox_source_identity(decision_store), inbox_source_identity(state_dir, tasks=True))
         original = jev.pending_decisions(decision_store)
     except (jev.JevError, OSError, ValueError):
-        inbox.update(status="unavailable", error="Decision evidence unavailable. Restore the selected private Jev store; refresh does not retry requests.")
+        inbox.update(status="unavailable", error="Decision or task evidence unavailable. Restore the selected private Jev store and original task records; refresh does not retry requests.")
         return inbox
     inbox["status"] = "available"
     try:

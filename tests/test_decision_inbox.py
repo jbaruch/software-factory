@@ -3,7 +3,9 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+import hashlib
 import json
+import os
 from pathlib import Path
 import threading
 import unittest
@@ -85,6 +87,111 @@ class Inbox(unittest.TestCase):
         self.assertNotIn('href="https://evil/', page)
         self.assertEqual((self.store / (decision["id"] + ".json")).read_bytes(), before)
         self.assertEqual(self.view()["decision_inbox"], self.view()["decision_inbox"])
+
+    def test_special_sources_refuse_before_jev_reader_and_render_unavailable(self):
+        self.store.mkdir()
+        target = self.root / "target"
+        target.write_text("private target contents")
+        fifo = self.root / "pipe"
+        os.mkfifo(fifo)
+        for directory in (self.root, self.store):
+            for kind in ("fifo", "symlink-file", "symlink-fifo", "directory"):
+                with self.subTest(source=directory.name, kind=kind):
+                    source = directory / "damaged.json"
+                    if kind == "fifo":
+                        os.mkfifo(source)
+                    elif kind.startswith("symlink"):
+                        source.symlink_to(target if kind == "symlink-file" else fifo)
+                    else:
+                        source.mkdir()
+                    open_file = os.open
+                    def checked_open(path, flags, *args, **kwargs):
+                        if path == source:
+                            self.assertTrue(flags & os.O_NONBLOCK)
+                            self.assertTrue(flags & os.O_NOFOLLOW)
+                        return open_file(path, flags, *args, **kwargs)
+                    try:
+                        with patch.object(os, "open", side_effect=checked_open), \
+                             patch.object(Path, "read_bytes", side_effect=AssertionError("No path byte reader")), \
+                             patch.object(jev, "read_decision", side_effect=AssertionError("Reject before Jev reader")):
+                            view = self.view()
+                        inbox = view["decision_inbox"]
+                        self.assertEqual(inbox["status"], "unavailable")
+                        self.assertEqual(inbox["items"], [])
+                        self.assertEqual(inbox["resolutions"], [])
+                        page = dashboard.render(view)
+                        self.assertIn("not an empty or resolved inbox", page)
+                        self.assertNotIn("private target contents", page)
+                        if directory == self.root:
+                            self.assertIn("task_unavailable", [item["condition"] for item in inbox["conditions"]])
+                        else:
+                            self.assertIn("Restore the selected private Jev store", page)
+                    finally:
+                        source.rmdir() if kind == "directory" else source.unlink()
+
+    def test_fingerprint_valid_descriptor_bytes_and_missing_first_use(self):
+        decision = self.evaluate()
+        source = self.store / (decision["id"] + ".json")
+        before = source.read_bytes()
+        with patch.object(os, "open", wraps=os.open) as opened, \
+             patch.object(Path, "read_bytes", side_effect=AssertionError("No reopening by pathname")):
+            identity = dashboard.inbox_source_identity(self.store)
+        self.assertEqual(opened.call_count, 1)
+        assert identity is not None
+        self.assertEqual(identity[2][0][0], source.name)
+        self.assertEqual(identity[2][0][2], hashlib.sha256(before).hexdigest())
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(self.view()["decision_inbox"]["status"], "available")
+        absent = self.root / "absent"
+        self.assertIsNone(dashboard.inbox_source_identity(absent, tasks=True))
+        view = dashboard.snapshot(absent, decision_store=absent / "decisions")
+        self.assertEqual(view["decision_inbox"]["status"], "available")
+        self.assertEqual(view["tasks"], [])
+        self.assertFalse(absent.exists())
+        self.assertIn("Decision inbox", dashboard.render(view))
+
+    def test_fingerprint_detects_in_place_changes_replacement_removal_and_link_races(self):
+        self.store.mkdir()
+        source = self.store / "evidence.json"
+        for change in ("in-place", "replace", "remove", "symlink"):
+            with self.subTest(change=change):
+                source.write_bytes(b"original")
+                replacement = self.root / "replacement"
+                replacement.write_bytes(b"original")
+                fstat = os.fstat
+                calls = []
+                def changing(descriptor):
+                    info = fstat(descriptor)
+                    calls.append(info)
+                    if len(calls) == 1:
+                        if change == "in-place":
+                            source.write_bytes(b"changed content")
+                        elif change == "replace":
+                            replacement.replace(source)
+                        else:
+                            source.unlink()
+                            if change == "symlink":
+                                source.symlink_to(replacement)
+                    return info
+                with patch.object(os, "fstat", side_effect=changing):
+                    with self.assertRaises(OSError):
+                        dashboard.inbox_source_identity(self.store)
+                source.unlink(missing_ok=True)
+
+    def test_fingerprint_detects_path_replacement_after_descriptor_read(self):
+        self.store.mkdir()
+        source = self.store / "evidence.json"
+        source.write_bytes(b"original")
+        replacement = self.root / "replacement"
+        replacement.write_bytes(b"original")
+        lstat = Path.lstat
+        def replacing(path):
+            if path == source:
+                replacement.replace(source)
+            return lstat(path)
+        with patch.object(Path, "lstat", replacing):
+            with self.assertRaisesRegex(OSError, "Source changed"):
+                dashboard.inbox_source_identity(self.store)
 
     def test_failed_pending_damaged_and_unsupported_records_never_look_resolved(self):
         original = self.evaluate()
@@ -297,15 +404,15 @@ class Inbox(unittest.TestCase):
     def test_source_becoming_unreadable_during_collection_is_unavailable(self):
         decision = self.evaluate()
         source = self.store / (decision["id"] + ".json")
-        read = Path.read_bytes
+        open_file = os.open
         reads = []
-        def unreadable(path):
+        def unreadable(path, flags, *args, **kwargs):
             if path == source:
                 reads.append(path)
                 if len(reads) > 1:
                     raise PermissionError("private source error")
-            return read(path)
-        with patch.object(Path, "read_bytes", unreadable):
+            return open_file(path, flags, *args, **kwargs)
+        with patch.object(os, "open", unreadable):
             inbox = self.view()["decision_inbox"]
         self.assertEqual(inbox["status"], "unavailable")
         self.assertNotIn("private source error", json.dumps(inbox))
