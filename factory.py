@@ -516,12 +516,13 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None, expect
         raise FactoryError("Assignment index hides tracked inputs; clear assume-unchanged/skip-worktree/fsmonitor-valid flags or use a clean full checkout")
     if any(entry[2:].startswith("160000 ") for entry in flags.stdout.split("\0") if entry):
         raise FactoryError("Assignment contains submodules; this runtime requires a checkout without submodules before launching")
-    changed = git_run(cwd, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                      "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
-                      "--ignore-submodules=none")
-    if changed.returncode:
+    # Compare only the index here: worktree status can execute clean filters.
+    # Raw source validation below checks files, modes and untracked directories.
+    changed = git_run(cwd, "-c", "core.fsmonitor=false", "diff-index", "--cached", "--quiet",
+                      "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", candidate, "--")
+    if changed.returncode not in (0, 1):
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
-    if changed.stdout:
+    if changed.returncode:
         raise FactoryError("Assignment checkout has uncommitted inputs (including ignored files); use a clean worktree and keep runtime state/output outside it")
     check_tracked_bytes(cwd, candidate)
     configured = git_run(cwd, "config", "--path", "--get", "core.worktree")
