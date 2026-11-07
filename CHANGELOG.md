@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (unpublished)
+## 0.10.0 — 2026-11-07 (unpublished)
 
 ### Team view and owned Rex pane reads
 
@@ -13,7 +13,7 @@ terminal text and explicit partial-output markers. Preserve pause/resume and
 task schema 7; transient dashboard facts advance to version 3 while older static
 render callers remain compatible. Fake records/transports and socket-free
 handler tests cover the addition; host/browser/live acceptance remains separate.
-Release version/base reconciliation remains with the foreman.
+The application and package version advance together; no publication channel is configured.
 
 Pane observations release the task lock before Rex waits, preserving concurrent
 operator controls and their saved history without retargeting an in-progress read.
