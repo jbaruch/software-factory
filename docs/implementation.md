@@ -11,7 +11,7 @@ the command guides describe operation rather than maintain separate status lists
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
 | Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots and fresh quota gating | Fixed fake-process tests and the bounded live controller evidence below. Candidate handoff/worktree provisioning and complete delivery remain incomplete |
-| Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
+| Jev adapter | Choice compilation, dynamic candidates, model discovery, shadow evaluation, exact-input decision reuse and a durable derived uncertainty inbox | Recorded HTTP/restart/concurrency tests plus earlier live two-question evaluation on jev-1.14.0. Pending/failed requests do not repeat automatically; proposed standby/judge owners do not dispatch workers. Calibration, consequential routing and queue resolution remain incomplete |
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, revision-bound collection/reconnect and scoped source approvals; writer/Git qualification is described below. Broader automatic delivery and judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Native catalog commands establish model lists. Separate rows cover subsequent quota and lifecycle observations |
@@ -83,6 +83,17 @@ stale-decision refusal and unchanged holds. No live task received an addition as
 part of that verification; the schema-6 provisioning prototype remains unsupported
 by this reader.
 
+On 2026-11-07, the optional Jev decision store evaluated the actual pending
+provisioning exception in shadow mode. Native discovery exposed only aliases;
+the request used `jev-latest` with expected resolved version `jev-1.14.0`, which
+the response confirmed. The two answers were `demanding` and `operator`, with
+789 input/110 output tokens and a 0.115-second evaluation request. Exact replay
+created no provider client and left both the decision and original task bytes
+unchanged. No worker, grant or acceptance effect followed. This verifies one
+stored evaluation/replay, not representative routing quality, live uncertainty
+resolution or total coordination overhead; catalog probes and local work are
+additional overhead.
+
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
 Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`
 reported a native subscription sign-in; `grok models` reported a grok.com sign-in
@@ -97,7 +108,7 @@ Gemini and Claude families, without a model turn.
 ## Next slices
 
 1. **Operational store and scripted execution.** Qualify live ready-work execution and add worktree provisioning, candidate handoff and finer provider reservations. Add task acceptance and integration/merge recovery using the existing general coding/release policy.
-2. **Jev routing evaluation.** Verify live evaluation, cache independent judgments and route explicit uncertainty through a durable bounded standby queue. Build representative labeled and held-out evaluations before enabling consequential routing. Use recorded responses for replay, never fabricated live-success receipts.
+2. **Jev routing evaluation.** Qualify live stored evaluation/replay, resolve retained uncertainty through bounded standby/judge assignments, and add approved recovery for failed requests. Build representative labeled and held-out evaluations before enabling consequential routing. Use recorded responses for replay, never fabricated live-success receipts.
 3. **Rex and provider conformance.** Pin the discovered Rex binary/server identity and verify process launch, working directory, native session identity, input delivery, readiness and recovery for Claude, Codex, Grok and both Antigravity model families. Discover actual account eligibility, tools, supported thinking levels, model catalogs and shared allowance boundaries. Native subscription sign-in is not interchangeable with an API key.
 4. **First live specialist loop.** Deliver an authorized repository task with the appropriate developer, independent verifier and domain specialists. Route findings directly; prove that investigator -> Jev can avoid a judge invocation. Exercise changed-input invalidation, one real exception and controller restart without duplicate effects.
 5. **Dashboard and capacity scheduling.** Complete all seven views, controls and measurements in [the dashboard contract](dashboard.md) against operational facts/events. Show real work, resource freshness, subscription pools, decision inbox and efficiency drilldowns. Respect existing user authority for actions; do not ask workers for status prose.

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 — 2026-11-07
+
+### Retained Jev decisions
+
+Add optional private decision storage to shadow evaluations. Bind reuse to the
+endpoint, versioned model, evidence revision, question versions and exact compiled
+payload. Save intent before HTTP and retain original usage/timing; interrupted,
+failed or malformed attempts never become implicit retries. Derive an offline
+uncertainty inbox from those records, proposing standby reasoning for generic
+uncertainty and judging after unresolved investigation. Keep consequential
+routing, reasoner dispatch, recovery authorization and task acceptance separate.
+
 ## 0.6.0 — 2026-11-07
 
 ### Explicit read-only Grok execution
