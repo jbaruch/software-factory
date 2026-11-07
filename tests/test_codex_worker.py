@@ -1614,6 +1614,7 @@ class NativeResults(unittest.TestCase):
         del command[index:index + 2]
         record["schema_version"] = 2
         del record["control_events"]
+        del record["allowance_events"]
         del record["admission"]["repository_identity"]
         factory.save(self.path, record)
         frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,

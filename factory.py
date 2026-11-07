@@ -153,7 +153,7 @@ def task_lock(directory, task):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=5, task=task, admission=None, inputs=None, hold=None, control_events=[], rex=None,
+    return dict(schema_version=7, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -182,8 +182,11 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5):
+    # Schema 6 belongs to the retained provisioning prototype, not this reader.
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 7):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if version < 7 and "allowance_events" in record:
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 5 and "control_events" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if (record.get("task") != path.stem or not isinstance(record.get("assignments"), dict)
@@ -331,7 +334,10 @@ def load_task(path) -> dict:
     if version < 5:
         record.update(schema_version=5, control_events=[])
     validate_control_events(record)
-    if version < 5:
+    if version < 7:
+        record.update(schema_version=7, allowance_events=[])
+    allowance_limits(record)
+    if version < 7:
         save(path, record)
     return record
 
@@ -362,6 +368,28 @@ def valid_inputs(value):
     return isinstance(value, dict) and all(isinstance(value.get(key), str) and value[key].strip()
                                          for key in ("candidate", "requirements")) and bool(
         re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value["candidate"]))
+
+
+def allowance_limits(record):
+    """Validate the operator's adjustment chain and derive effective limits."""
+    limits = None if record["admission"] is None else dict(record["admission"]["limits"])
+    events = record.get("allowance_events")
+    if not isinstance(events, list) or (limits is None and events):
+        raise FactoryError("Invalid allowance history; restore the original task record before continuing")
+    seen = set()
+    for event in events:
+        if (not isinstance(event, dict) or set(event) != {"id", "purpose", "previous_limit", "additional", "reason", "at"}
+                or not isinstance(event["id"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", event["id"])
+                or event["id"] in seen or not isinstance(event["purpose"], str)
+                or limits is None or event["purpose"] not in limits
+                or type(event["previous_limit"]) is not int or event["previous_limit"] != limits[event["purpose"]]
+                or type(event["additional"]) is not int or event["additional"] <= 0
+                or not isinstance(event["reason"], str) or not event["reason"].strip()
+                or type(event["at"]) not in (int, float) or not 0 <= event["at"] <= 253402300799):
+            raise FactoryError("Invalid allowance history; restore its original ordered adjustments before continuing")
+        seen.add(event["id"])
+        limits[event["purpose"]] += event["additional"]
+    return limits
 
 
 def valid_repository_identity(value):
@@ -654,9 +682,10 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
 def task_view(record):
     """An offline snapshot, never a live process or task-acceptance verdict."""
     allowances = None
-    if record["admission"] is not None:
+    limits = allowance_limits(record)
+    if limits is not None:
         allowances = {}
-        for purpose, limit in record["admission"]["limits"].items():
+        for purpose, limit in limits.items():
             used = sum(item["request"].get("purpose") == purpose
                        for item in record["assignments"].values())
             allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
@@ -731,6 +760,33 @@ def hold_task(path, reason, *, request_id=None, expected_revision=None, clock=ti
     events.append(dict(id=request_id or uuid.uuid4().hex, expected_revision=expected_revision,
                        previous_hold=record["hold"], hold=reason, at=occurred))
     record["hold"] = reason
+    save(path, record)
+    return record
+
+
+def extend_allowance(path, *, purpose, additional, expected_limit, request_id, reason, clock=time.time):
+    """Record one explicit operator addition without resetting past attempts."""
+    if (not isinstance(purpose, str) or purpose not in {"correction", "investigation"} or type(additional) is not int or additional <= 0
+            or type(expected_limit) is not int or expected_limit < 0
+            or not isinstance(request_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", request_id)
+            or not isinstance(reason, str) or not reason.strip()):
+        raise FactoryError("Supply a correction/investigation purpose, positive --additional, nonnegative --expected-limit, request ID and approval reason")
+    record = load_task(path)
+    limits = allowance_limits(record)
+    if limits is None:
+        raise FactoryError("Admit the task before adjusting its allowance")
+    previous = next((event for event in record["allowance_events"] if event["id"] == request_id), None)
+    request = dict(id=request_id, purpose=purpose, previous_limit=expected_limit, additional=additional, reason=reason)
+    if previous is not None:
+        if {key: previous[key] for key in request} != request:
+            raise ControlConflict("Allowance request ID already has different inputs; inspect its original decision or use a new ID")
+        return record
+    if limits[purpose] != expected_limit:
+        raise ControlConflict("Task allowance changed; refresh the task and obtain a decision for its current limit")
+    occurred = clock()
+    if type(occurred) not in (int, float) or not 0 <= occurred <= 253402300799:
+        raise FactoryError("Cannot timestamp the allowance adjustment; restore the system clock before submitting")
+    record["allowance_events"].append({**request, "at": occurred})
     save(path, record)
     return record
 
@@ -1144,6 +1200,13 @@ def main(argv=None):
     admission.add_argument("--acceptance", action="append", required=True, help="Original evidence reference")
     admission.add_argument("--corrections", type=int)
     admission.add_argument("--investigations", type=int)
+    extension = sub.add_parser("extend-allowance", help="Record an operator-approved addition without resetting history")
+    extension.add_argument("--task", required=True)
+    extension.add_argument("--purpose", choices=("correction", "investigation"), required=True)
+    extension.add_argument("--additional", type=int, required=True)
+    extension.add_argument("--expected-limit", type=int, required=True)
+    extension.add_argument("--request-id", required=True)
+    extension.add_argument("--reason", required=True)
     inputs = sub.add_parser("inputs", help="Select the task's candidate and requirements revision")
     inputs.add_argument("--task", required=True)
     inputs.add_argument("--candidate", required=True)
@@ -1176,13 +1239,16 @@ def main(argv=None):
         if args.action == "codex-start":
             check_commit_message(args.commit_message, write=args.write)
         with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
-            if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
+            if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
                                    acceptance=args.acceptance, corrections=args.corrections,
                                    investigations=args.investigations)
                 elif args.action == "show":
                     record = load_task(path)
+                elif args.action == "extend-allowance":
+                    record = extend_allowance(path, purpose=args.purpose, additional=args.additional,
+                        expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason)
                 elif args.action == "inputs":
                     record = set_inputs(path, candidate=args.candidate, requirements=args.requirements)
                 elif args.action == "result":

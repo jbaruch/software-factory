@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 — 2026-11-07
+
+### Operator allowance additions
+
+Add `extend-allowance` for explicitly approved correction/investigation additions.
+Keep original admission limits and assignment history unchanged; derive effective
+limits from ordered, reasoned additions in the task record. Require a request ID
+and expected current limit. Replaying a saved decision grants nothing twice and
+preserves subsequent decisions. Task schema 7 migrates supported earlier records
+with no invented grants; schema 6 provisioning-prototype records remain held for
+their compatible owner. Holds, task acceptance and execution are unchanged.
+
 ## 0.4.0 — 2026-11-07
 
 ### Native Antigravity quota observations
