@@ -174,7 +174,14 @@ This slice is read-only. It disables native subagents, web search and automatic
 updates, preserves native subscription configuration and excludes host credential
 environment variables. API-key overrides, including empty ones, refuse. Metadata
 preflight requires cached OIDC sign-in, a reported subscription, no access gate,
-and the requested model/effort in the actual catalog. Unknown quota stays unknown;
+and the requested model/effort in the actual catalog. Before a model turn,
+`grok inspect --json` identifies native configuration layers. The worker reads
+those TOML layers and refuses authentication, model, endpoint, experiment,
+campaign and version overrides rather than reproducing native precedence.
+Opaque/unreadable layers and API, endpoint, auth-provider or configuration-overlay
+environment overrides also refuse. `GROK_HOME` reaches both native children;
+the recorded configuration includes its resolved root and layer paths/hashes,
+without configuration contents or credentials. Unknown quota stays unknown;
 these explicit commands do not add automatic Grok scheduling to the ready runner.
 
 `--seconds` accepts 1–86400 and `--turns` accepts 1–1000. Invalid bounds refuse
@@ -183,29 +190,32 @@ does not prove a provider request was cancelled. Inspect the original native
 session, receipt and stream before authorizing a new attempt after an unknown
 outcome. The native CLI installation must remain outside the checkout/Git metadata.
 
-`grok_worker.py` owns version-1 `*.grok.json` receipts and `*.grok.jsonl` streams.
+`grok_worker.py` owns version-2 `*.grok.json` receipts and version-1 `*.grok.jsonl` streams.
 Every stream record has `schema_version: 1`, `kind: grok-event-line` and `data`,
 the unchanged native line including its newline. Invalid bytes stay escaped
 inspection evidence and refuse collection. Native lines are limited to 1 MiB.
-The reader accepts only version 1; unversioned captures and unsupported versions
+The event reader accepts only version 1; unversioned captures and unsupported versions
 remain inspection-only. Neither reader migrates or rewrites old evidence.
 
 The exclusively claimed receipt records job/input revisions, repository marker,
 worktree Git directory, cwd, role/brief digest, resolved binary, requested model/
 effort, native session, declared seconds/turn bound, preflight discovery snapshot,
+version-1 subscription-configuration observation and its probe duration,
 timestamps/duration, exit code, final report/request identity, native usage/model
 usage, actual turn count, candidate, stream path and error. Before completion,
 result/timing/exit fields are null. State is `starting`, `completed` or `failed`.
 The discovery retains its own native metadata schema version and probe duration.
 No quota or monetary spend is inferred from native token/cost telemetry.
 
-Collection requires successful owned worker exit, a completed version-1 receipt
+Collection requires successful owned worker exit, a completed version-2 receipt
 with finite nonnegative timing and null error, exact frozen command/input/role
 bindings, and agreement with the original final event. It revalidates repository
 marker and worktree Git directory; replaced linked checkouts refuse. Reports stay
 bound to their assessed candidate when current task inputs change. Repeated
 collection reuses the immutable result. Task records keep their existing schema;
 generic historical Grok commands are not adopted as managed worker evidence.
+Version-1 execution receipts predate configuration checks and stay unchanged and
+inspection-only; they are never upgraded into subscription-configuration evidence.
 
 ## Explicit Codex assignments
 

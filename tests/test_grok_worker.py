@@ -93,9 +93,15 @@ class GrokWorker(unittest.TestCase):
                     authentication=dict(auth_mode="Oidc", subscription_tier="Fixture", gate=None),
                     models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value="high")]))])
 
+    async def configuration(self, binary, cwd):
+        return dict(schema_version=1, kind="grok-subscription-configuration", cwd=str(self.repo),
+                    grok_home=str(self.root / "grok-profile"), cli_version="fixture", layers=[],
+                    observed_at=1000, probe_seconds=0.1, route="cached-session-without-routing-overrides")
+
     def execute(self):
         with redirect_stdout(StringIO()):
-            return asyncio.run(grok_worker.execute(self.args, spawn=self.spawn, probe=self.probe, clock=lambda: 1000, timer=lambda: 10))
+            return asyncio.run(grok_worker.execute(self.args, spawn=self.spawn, probe=self.probe,
+                configuration=self.configuration, clock=lambda: 1000, timer=lambda: 10))
 
     def collect(self):
         with patch.object(factory, "status", return_value=dict(state="exited")):
@@ -208,7 +214,7 @@ class GrokWorker(unittest.TestCase):
         original = self.execute()
         self.assertEqual(original["state"], "completed")
         before = self.path.read_bytes()
-        for change in (dict(native_session="other"), dict(schema_version=2), dict(created_at=True),
+        for change in (dict(native_session="other"), dict(schema_version=3), dict(created_at=True),
                        dict(report=dict(outcome="completed", artifacts=[])),
                        dict(usage=dict(input_tokens=True, output_tokens=2))):
             damaged = copy.deepcopy(original)
@@ -257,6 +263,32 @@ class GrokWorker(unittest.TestCase):
             self.execute()
         self.assertEqual(self.spawns, [])
         self.assertFalse(self.args.events.exists())
+
+    def test_selected_native_profile_reaches_the_model_without_host_credentials(self):
+        with patch.dict(os.environ, {"GROK_HOME": str(self.root / "selected-profile"), "GH_TOKEN": "fixture-private-token"}):
+            self.assertEqual(self.execute()["state"], "completed")
+        self.assertEqual(self.spawns[0][1]["env"]["GROK_HOME"], str(self.root / "selected-profile"))
+        self.assertNotIn("GH_TOKEN", self.spawns[0][1]["env"])
+
+    def test_model_override_refuses_before_metadata_and_model_start(self):
+        async def overridden(binary, cwd):
+            raise grok_worker.native_grok.GrokProbeError("Grok authentication/model overrides are unsupported")
+        self.configuration = overridden
+        with self.assertRaisesRegex(factory.FactoryError, "overrides are unsupported"):
+            self.execute()
+        self.assertEqual(self.probes, [])
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.receipt.exists())
+
+    def test_older_receipt_without_subscription_configuration_stays_inspection_only(self):
+        receipt = self.execute()
+        receipt["schema_version"] = 1
+        del receipt["configuration"]
+        self.args.receipt.write_text(json.dumps(receipt))
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "frozen completed assignment"):
+            self.collect()
+        self.assertEqual(self.path.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,10 @@ the final structured report, preserving native usage and model labels separately
 from quota and spend. Collection verifies original events and current repository/
 worktree identity without accepting a task. Existing effects reconnect unchanged;
 failed or uncertain attempts never retry themselves. Automatic Grok quota-aware
-scheduling and writer mode remain incomplete.
+scheduling and writer mode remain incomplete. Preserve the selected `GROK_HOME`
+profile and refuse native authentication/model/endpoint overrides before a model
+turn. Retain only inspected configuration paths/hashes in version-2 execution
+receipts; earlier execution receipts remain unchanged and inspection-only.
 
 ## 0.3.0 — 2026-11-06
 

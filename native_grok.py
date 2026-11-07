@@ -1,21 +1,81 @@
 """Native Grok metadata discovery and final-event decoding."""
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import sys
 import time
+import tomllib
 
 from factory import decode_json, RESULT_OUTCOMES
-from codex_worker import native_environment
+from codex_worker import native_environment, stop_child
 
 API_KEY_ENVIRONMENT = ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
 
 
 class GrokProbeError(Exception):
     pass
+
+
+def environment():
+    """Keep the selected native profile without forwarding host credentials."""
+    result = {**native_environment(), "GROK_WORKTREE_AUTO_GC": "0"}
+    if "GROK_HOME" in os.environ:
+        result["GROK_HOME"] = os.environ["GROK_HOME"]
+    return result
+
+
+async def subscription_configuration(binary, cwd, *, spawn=asyncio.create_subprocess_exec):
+    """Refuse routing overrides rather than reproduce Grok's config merge."""
+    if any(key in os.environ for key in (*API_KEY_ENVIRONMENT, "GROK_AUTH", "GROK_CONFIG", "GROK_CONFIG_PATH",
+            "GROK_MODELS_BASE_URL", "GROK_MODELS_LIST_URL", "GROK_AUTH_PROVIDER_COMMAND")):
+        raise GrokProbeError("Unset Grok API, endpoint, auth-provider and config-overlay environment overrides before subscription execution")
+    process, started = None, time.monotonic()
+    try:
+        process = await spawn(str(binary), "--no-auto-update", "inspect", "--json", cwd=str(cwd), env=environment(),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+        if process.returncode or stderr:
+            raise GrokProbeError("Cannot inspect native Grok configuration; inspect the selected profile and native inspect command before execution")
+        result = parse_configuration(decode_json(stdout), cwd)
+        return {**result, "observed_at": time.time(), "probe_seconds": time.monotonic() - started}
+    except (OSError, ValueError, UnicodeError, TimeoutError):
+        raise GrokProbeError("Cannot establish Grok subscription configuration; inspect its native configuration layers before execution") from None
+    finally:
+        if process is not None:
+            await stop_child(process)
+
+
+def parse_configuration(report, cwd) -> dict:
+    if (not isinstance(report, dict) or report.get("cwd") != str(Path(cwd).resolve())
+            or not isinstance(report.get("grokVersion"), str) or not report["grokVersion"].strip()
+            or not isinstance(report.get("configSources"), dict)
+            or not isinstance(report["configSources"].get("layers"), list)
+            or report.get("experiments") != []):
+        raise GrokProbeError("Native Grok configuration discovery is unsupported or experimental; inspect its effective routing before execution")
+    layers = []
+    for layer in report["configSources"]["layers"]:
+        if (not isinstance(layer, dict) or not isinstance(layer.get("path"), str)
+                or not Path(layer["path"]).is_absolute() or not isinstance(layer.get("role"), str)):
+            raise GrokProbeError("Native Grok configuration layer is opaque; inspect its effective authentication and model routing before execution")
+        try:
+            raw = Path(layer["path"]).read_bytes()
+            config = tomllib.loads(raw.decode("utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            raise GrokProbeError("Cannot inspect a native Grok configuration layer; restore readable TOML before subscription execution") from None
+        if any(key in config for key in ("model", "endpoints", "auth_provider", "auth", "grok_com_config",
+                "experiments", "campaigns", "version_overrides")):
+            raise GrokProbeError("Grok authentication/model overrides are unsupported for subscription execution; select an unmodified native subscription profile")
+        layers.append(dict(path=layer["path"], role=layer["role"], sha256=hashlib.sha256(raw).hexdigest()))
+    home = Path(os.environ.get("GROK_HOME", str(Path.home() / ".grok"))).expanduser()
+    if not home.is_absolute():
+        home = Path(cwd) / home
+    return dict(schema_version=1, kind="grok-subscription-configuration", cwd=str(Path(cwd).resolve()),
+                grok_home=str(home.resolve()), cli_version=report["grokVersion"], layers=layers,
+                route="cached-session-without-routing-overrides")
 
 
 def parse_execution(events, *, session_id, cwd, max_turns):
@@ -155,7 +215,7 @@ async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec, clock=time
     try:
         process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
             "--sandbox", "read-only", "agent", "--no-leader", "stdio", cwd=str(cwd),
-            env={**native_environment(), "GROK_WORKTREE_AUTO_GC": "0"}, stdin=asyncio.subprocess.PIPE,
+            env=environment(), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     except OSError:
         raise GrokProbeError("Cannot start native Grok metadata; restore executable access and local process resources") from None

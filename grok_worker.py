@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 
 import factory
 import native_grok
-from codex_worker import NATIVE_LINE_LIMIT, native_environment, outcome_schema, stop_child
+from codex_worker import NATIVE_LINE_LIMIT, outcome_schema, stop_child
 
 
 def read_events(path):
@@ -33,7 +33,8 @@ def read_events(path):
         raise native_grok.GrokProbeError("Cannot decode retained Grok events; restore or inspect the original stream without relaunching") from None
 
 
-async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_grok.probe, clock=time.time, timer=time.monotonic):
+async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_grok.probe,
+                  configuration=native_grok.subscription_configuration, clock=time.time, timer=time.monotonic):
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Grok attempt already has artifacts; inspect or collect it without relaunching")
     if any(name in os.environ for name in native_grok.API_KEY_ENVIRONMENT):
@@ -64,6 +65,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Grok installation outside the assigned checkout and Git metadata")
     try:
+        config = await configuration(binary, Path("."))
         observation = await probe(binary, Path("."))
     except native_grok.GrokProbeError as exc:
         raise factory.FactoryError(str(exc)) from None
@@ -73,11 +75,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or authentication["gate"] is not None or model is None
             or args.effort not in {item["value"] for item in model.get("_meta", {}).get("reasoningEfforts", [])}):
         raise factory.FactoryError("Grok subscription eligibility or model/effort is unavailable; refresh native metadata and select an eligible route before another attempt")
-    receipt = dict(schema_version=1, kind="grok-execution", state="starting", job=args.job,
+    receipt = dict(schema_version=2, kind="grok-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
-        discovery=observation,
+        discovery=observation, configuration=config,
         native_session=args.native_session, seconds=args.seconds, max_turns=args.turns,
         created_at=clock(), finished_at=None, elapsed_seconds=None, exit_code=None,
         report=None, request_id=None, usage=None, model_usage=None, turns=None,
@@ -91,7 +93,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
     started, process, events = timer(), None, []
     try:
         with os.fdopen(fd, "w") as stream:
-            environment = {**native_environment(), "GROK_WORKTREE_AUTO_GC": "0"}
+            environment = native_grok.environment()
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
                 "--permission-mode", "dontAsk", "--sandbox", "read-only", "--max-turns", str(args.turns),
                 "--model", args.model, "--reasoning-effort", args.effort, "--session-id", args.native_session,

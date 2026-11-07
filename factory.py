@@ -1170,7 +1170,7 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     request = assignment["request"]
     keys = ("report", "request_id", "usage", "model_usage", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != 1 or receipt.get("kind") != "grok-execution"
+            or receipt["schema_version"] != 2 or receipt.get("kind") != "grok-execution"
             or receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or any(type(receipt.get(key)) not in (int, float) or not 0 <= receipt[key] <= sys.float_info.max
@@ -1187,6 +1187,15 @@ def collect_grok(path, assignment_id, rex, record, assignment):
             or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
             or not args.grok.is_absolute() or receipt.get("binary") != str(args.grok)
             or receipt.get("native_session") != args.native_session
+            or not isinstance(receipt.get("configuration"), dict)
+            or type(receipt["configuration"].get("schema_version")) is not int
+            or receipt["configuration"]["schema_version"] != 1
+            or receipt["configuration"].get("kind") != "grok-subscription-configuration"
+            or receipt["configuration"].get("cwd") != request["cwd"]
+            or receipt["configuration"].get("route") != "cached-session-without-routing-overrides"
+            or not isinstance(receipt["configuration"].get("grok_home"), str)
+            or not Path(receipt["configuration"]["grok_home"]).is_absolute()
+            or not isinstance(receipt["configuration"].get("layers"), list)
             or not isinstance(receipt.get("discovery"), dict)
             or type(receipt["discovery"].get("schema_version")) is not int
             or receipt["discovery"]["schema_version"] != 1
