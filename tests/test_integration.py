@@ -1,6 +1,6 @@
 """Fixed GitHub/process transports and temporary Git only; no external services."""
 import copy
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -40,6 +41,18 @@ class GitHub:
             merge_state=dict(status="CLEAN", mergeable="MERGEABLE"))
         self.merge_sha = merge
         self.workflow = dict(id=51, path=".github/workflows/checks.yml", state="active")
+        self.protection: dict | None = dict(required_status_checks=dict(strict=True,
+            contexts=["verify"], checks=[dict(context="verify", app_id=15368)]),
+            enforce_admins=dict(enabled=True), allow_force_pushes=dict(enabled=False), allow_deletions=dict(enabled=False))
+        self.pr_run = dict(id=61, workflow_id=51, path=self.workflow["path"], head_sha=head, event="pull_request",
+            head_branch="candidate", run_number=7, run_attempt=1, repository=dict(id=11, full_name="fixture/project"),
+            status="completed", conclusion="success")
+        self.job = dict(id=71, name="verify", run_id=61, head_sha=head, status="completed", conclusion="success",
+            check_run_url="https://api.github.com/repos/fixture/project/check-runs/91")
+        self.check = dict(id=91, name="verify", head_sha=head, status="completed", conclusion="success",
+            app=dict(id=15368, slug="github-actions"))
+        self.server_base = base
+        self.on_merge = lambda: None
         self.run: dict = dict(id=81, workflow_id=51, path=self.workflow["path"], head_sha=merge, event="push", head_branch="main",
             run_number=8, run_attempt=1, repository=dict(id=11, full_name="fixture/project"), status="completed", conclusion="success")
         self.runs = [self.run]
@@ -62,16 +75,21 @@ class GitHub:
         if self.unavailable:
             raise factory.FactoryError("Observation unavailable")
         root = "repos/fixture/project/"
+        if endpoint == root[:-1]:
+            return dict(id=11, full_name="fixture/project", owner=dict(type="User"))
         values = {"pulls/7": self.pr, "commits/" + self.merge_sha: dict(sha=self.merge_sha, parents=[dict(sha=p) for p in self.parents]),
             "git/ref/heads/main": dict(object=dict(sha=self.merge_sha)),
             "compare/" + self.merge_sha + "..." + self.merge_sha: self.compare,
-            "actions/workflows/checks.yml": self.workflow, "actions/runs/81": self.run}
+            "actions/workflows/checks.yml": self.workflow, "actions/runs/81": self.run,
+            "branches/main/protection": self.protection, "actions/runs/61": self.pr_run, "check-runs/91": self.check}
         if not endpoint.startswith(root) or endpoint[len(root):] not in values:
             raise AssertionError("Unexpected API call: " + endpoint)
         return copy.deepcopy(values[endpoint[len(root):]])
 
     def pages(self, endpoint):
         self.calls.append(endpoint)
+        if endpoint == f"repos/fixture/project/actions/runs/61/attempts/{self.pr_run['run_attempt']}/jobs?per_page=100":
+            return copy.deepcopy([dict(total_count=1, jobs=[self.job])])
         if endpoint != f"repos/fixture/project/actions/workflows/51/runs?head_sha={self.merge_sha}&event=push&per_page=100":
             raise AssertionError(endpoint)
         return copy.deepcopy([dict(total_count=len(self.runs), workflow_runs=self.runs)])
@@ -96,6 +114,10 @@ class GitHub:
     def merge(self, identity):
         self.merges.append(copy.deepcopy(identity))
         assert identity == self.identity
+        self.on_merge()
+        if (self.protection and self.protection["required_status_checks"]["strict"]
+                and self.protection["enforce_admins"]["enabled"] and self.server_base != identity["base"]):
+            return dict(merged=False, message="Strict required CI: branch is behind base")
         if self.rejected:
             return dict(merged=False, message="Rejected")
         if self.merge_lands:
@@ -160,11 +182,12 @@ class Integration(unittest.TestCase):
         self.review("qa", "qa", frozen=False)
         self.review("release", "release")
 
-    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False):
+    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None):
         command = factory.codex_command(self.path, task="deliver", assignment_id=key, codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(self.repo), role=role, write=writer,
+            commit_message="fix(fixture): Apply correction\n\nExercise sequential writer provenance." if change else None,
             release_evidence=self.frozen if frozen and delivery is None else None,
-            delivery_evidence=release_evidence.delivery(factory.load_task(self.path), delivery) if delivery else None)
+            delivery_evidence=release_evidence.capture_delivery(factory.load_task(self.path), delivery, self.transport) if delivery else None)
         with patch.object(factory, "Rex", FakeRex):
             record, assignment = factory.launch(self.path, task="deliver", assignment_id=key, role=role,
                 goal="Judge the original complete evidence", cwd=str(self.repo), command=command, purpose=purpose,
@@ -176,7 +199,13 @@ class Integration(unittest.TestCase):
         events = fixtures.events(outcome)
         events[0]["thread_id"] = context or ("context-" + key)
         self.native.process = fixtures.FakeProcess(events[:2] if failed else events, timeout=failed, exit_code=-2 if failed else 0)
-        receipt = self.native.execute()
+        spawn = self.native.spawn
+        async def edit(*args, **kwargs):
+            if change is not None:
+                (self.repo / "feature.txt").write_text(change)
+            return await spawn(*args, **kwargs)
+        with patch.object(self.native, "spawn", side_effect=edit):
+            receipt = self.native.execute()
         if failed:
             self.assertEqual(receipt["state"], "failed")
             factory.record_result(self.path, assignment_id=key, candidate=self.head,
@@ -311,6 +340,89 @@ class Integration(unittest.TestCase):
         self.assertEqual([path.read_bytes() for path in paths], originals)
         self.assertEqual(json.loads(paths[0].read_text())["state"], "failed")
 
+    def test_two_successful_sequential_writers_preserve_collected_provenance(self):
+        for key, value in (("commit.gpgsign", "false"), ("core.hooksPath", "/dev/null")):
+            factory.git_run(str(self.repo), "config", key, value)
+        first = self.review("writer", "backend", frozen=False, writer=True, outcome="completed", change="first\n")
+        first_receipt = Path(first["result"]["artifacts"][0])
+        original_bytes = first_receipt.read_bytes()
+        self.head = first["result"]["candidate"]
+        factory.set_inputs(self.path, candidate=self.head, requirements=self.record["inputs"]["requirements"])
+        second = self.review("correction", "backend", frozen=False, writer=True, outcome="completed",
+            change="corrected\n", purpose="correction")
+        self.head = second["result"]["candidate"]
+        self.assertNotEqual(first["result"]["candidate"], self.head)
+        factory.set_inputs(self.path, candidate=self.head, requirements=self.record["inputs"]["requirements"])
+        tree = factory.git_run(str(self.repo), "rev-parse", "HEAD^{tree}").stdout.strip()
+        merge = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "commit-tree", tree,
+            "-p", self.base, "-p", self.head, "-m", "Corrected merge").stdout.strip()
+        self.transport = GitHub(self.base, self.head, merge)
+        record = factory.load_task(self.path)
+        self.frozen = release_evidence.capture(record, self.transport.identity["url"], self.transport)
+        self.review("qa-new", "qa", frozen=False)
+        self.review("release-new", "release")
+        record = factory.load_task(self.path)
+        self.assertEqual(integration.contributor_context("writer", record, first), "context-writer")
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            with self.assertRaisesRegex(factory.FactoryError, "worktree HEAD"):
+                factory.collect_codex(self.path, "writer", None, record, first)
+        self.assertEqual(self.integrate(review="release-new", required=["qa-new"])["state"], "delivered")
+        self.assertEqual(first_receipt.read_bytes(), original_bytes)
+        self.assertEqual(factory.load_task(self.path)["assignments"]["writer"], first)
+        self.assertEqual(factory.task_view(factory.load_task(self.path))["allowances"]["correction"]["used"], 1)
+        damaged = copy.deepcopy(first)
+        damaged["result"]["artifacts"].append("invented")
+        with self.assertRaisesRegex(factory.FactoryError, "complete original"):
+            integration.contributor_context("writer", factory.load_task(self.path), damaged)
+
+    def native_cli(self, key, *, delivery=None):
+        return ["--state-dir", str(self.tasks), "codex-start", "--task", "deliver", "--id", key,
+            "--role", "release", "--goal", "Judge delivery", "--cwd", str(self.repo),
+            "--codex", sys.executable, "--model", "fixture-model", "--effort", "high", "--purpose", "work",
+            *(["--delivery", delivery] if delivery else ["--release-pr", self.transport.identity["url"],
+                "--gh", "/installed/gh", "--release-scripts", "/installed/acr__jbaruch__coding-policy__release"])]
+
+    def test_capture_stall_leaves_controls_and_unrelated_launches_available(self):
+        for delivered in (False, True):
+            if delivered:
+                self.assertEqual(self.integrate()["state"], "delivered")
+            entered, resume = threading.Event(), threading.Event()
+            original = self.transport.watch_run if delivered else self.transport.snapshot
+            def stall(*args, **kwargs):
+                entered.set()
+                if not resume.wait(10):
+                    raise AssertionError("Test controller did not release capture")
+                return original(*args, **kwargs)
+            output, errors, result = StringIO(), StringIO(), []
+            method = "watch_run" if delivered else "snapshot"
+            with patch.object(release_evidence, "GitHub", return_value=self.transport), patch.object(self.transport, method, side_effect=stall):
+                def capture():
+                    with redirect_stdout(output), redirect_stderr(errors):
+                        result.append(factory.main(self.native_cli("stalled-" + str(delivered).lower(), delivery="merge" if delivered else None)))
+                thread = threading.Thread(target=capture)
+                thread.start()
+                try:
+                    self.assertTrue(entered.wait(10))
+                    with factory.execution_lock(self.tasks), factory.task_lock(self.tasks, "unrelated") as other:
+                        with patch.object(factory, "Rex", FakeRex):
+                            factory.launch(other, task="unrelated", assignment_id="work", role="backend", goal="Other work",
+                                cwd=str(self.repo), command=[sys.executable, "-c", "pass"], binary=sys.executable,
+                                server="unix:///fixture.sock")
+                    with factory.task_lock(self.tasks, "deliver"):
+                        factory.hold_task(self.path, "Paused during capture")
+                        factory.set_inputs(self.path, candidate=self.head, requirements="changed-during-capture")
+                finally:
+                    resume.set()
+                    thread.join(10)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [1], errors.getvalue())
+            self.assertIn("Task changed during evidence capture", errors.getvalue())
+            record = factory.load_task(self.path)
+            self.assertNotIn("stalled-" + str(delivered).lower(), record["assignments"])
+            with factory.task_lock(self.tasks, "deliver"):
+                factory.hold_task(self.path, None)
+                factory.set_inputs(self.path, candidate=self.head, requirements=self.frozen["inputs"]["requirements"])
+
     def test_failed_writer_recovers_thread_from_supported_original_partial_events(self):
         failed = self.review("failed-writer", "backend", writer=True, frozen=False, failed=True)
         command = failed["request"]["command"]
@@ -327,6 +439,24 @@ class Integration(unittest.TestCase):
         self.transport.binding = lambda: {str(self.repo / "watch-pr-reviews.sh"): "writer-source"}
         with self.assertRaisesRegex(factory.FactoryError, "assignment checkout"):
             self.integrate()
+        self.assertEqual(self.transport.merges, [])
+
+    def test_sibling_worktree_and_new_selected_cwd_helpers_refuse_before_capture(self):
+        sibling = self.root / "sibling"
+        worktree = factory.git_run(str(self.repo), "worktree", "add", "--quiet", "-b", "helper-fixture", str(sibling), self.head)
+        self.assertEqual(worktree.returncode, 0, worktree.stderr)
+        gh = self.root / "gh"
+        gh.write_text("#!/bin/sh\nexit 99\n")
+        gh.chmod(0o700)
+        for cwd in (sibling, self.root / "new-checkout"):
+            scripts = cwd / "acr__jbaruch__coding-policy__release"
+            scripts.mkdir(parents=True)
+            for name in ("watch-pr-reviews.sh", "poll-pr-reviews.sh", "review-lanes.sh", "check-closing-issues.py"):
+                (scripts / name).write_text("untrusted source")
+            with patch.object(release_evidence.GitHub, "run", side_effect=AssertionError("Untrusted helper executed")):
+                with self.assertRaisesRegex(factory.FactoryError, "outside source|assignment checkout"):
+                    transport = release_evidence.GitHub(gh, scripts, self.repo)
+                    release_evidence.capture(factory.load_task(self.path), self.transport.identity["url"], transport, cwd=str(cwd))
         self.assertEqual(self.transport.merges, [])
 
     def test_failed_writer_cannot_review_itself_and_unknown_identity_refuses(self):
@@ -371,8 +501,9 @@ class Integration(unittest.TestCase):
         for version in (None, 0, 2, True, "1"):
             with self.assertRaises(factory.FactoryError):
                 release_evidence.validate({**self.frozen, "schema_version": version}, record)
-            with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
-                release_evidence.render_delivery({"schema_version": version})
+            if version != 2:
+                with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
+                    release_evidence.render_delivery({"schema_version": version})
             with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
                 release_evidence.render({**self.frozen, "schema_version": version})
         self.launch_integration()
@@ -583,12 +714,67 @@ class Integration(unittest.TestCase):
         self.transport.run["run_attempt"] += 1
         with self.assertRaisesRegex(factory.FactoryError, "changed"):
             integration.accepted(record, "merge", "accept", self.transport)
+        delivered = record["assignments"]["merge"]
+        receipt_path = Path(delivered["result"]["artifacts"][0])
+        original_receipt = receipt_path.read_bytes()
+        original_acceptance = copy.deepcopy(record["assignments"]["accept"])
+        self.review("accept-rerun", "release", delivery="merge")
+        record = factory.load_task(self.path)
+        frozen = release_evidence.from_delivery_assignment(record, record["assignments"]["accept-rerun"])
+        self.assertEqual(frozen["schema_version"], 2)
+        self.assertEqual(frozen["receipt"]["delivery"]["ci"]["run_attempt"], 1)
+        self.assertEqual(frozen["observation"]["ci"]["run_attempt"], 2)
+        self.assertEqual(integration.accepted(record, "merge", "accept-rerun", self.transport)["outcome"], "approved")
+        self.assertEqual(record["assignments"]["merge"], delivered)
+        self.assertEqual(record["assignments"]["accept"], original_acceptance)
+        self.assertEqual(receipt_path.read_bytes(), original_receipt)
+        self.assertEqual(len(self.transport.merges), 1)
 
     def test_pending_delivery_cannot_become_final_acceptance(self):
         self.transport.lost, self.transport.merge_lands = True, False
         self.integrate()
         with self.assertRaisesRegex(factory.FactoryError, "current original delivered"):
             release_evidence.delivery(factory.load_task(self.path), "merge")
+
+    def test_legacy_delivery_brief_stays_immutable_and_new_packets_validate(self):
+        self.assertEqual(self.integrate()["state"], "delivered")
+        record = factory.load_task(self.path)
+        legacy = release_evidence.delivery(record, "merge")
+        with patch.object(release_evidence, "capture_delivery", return_value=legacy):
+            assignment = self.review("legacy-acceptance", "release", delivery="merge")
+        record = factory.load_task(self.path)
+        self.assertEqual(release_evidence.from_delivery_assignment(record, assignment), legacy)
+        self.assertEqual(integration.accepted(record, "merge", "legacy-acceptance", self.transport)["outcome"], "approved")
+        fresh = release_evidence.capture_delivery(record, "merge", self.transport)
+        for damaged in ({**fresh, "schema_version": 3}, {key: value for key, value in fresh.items() if key != "observation"},
+                        {**fresh, "observation": {**fresh["observation"], "publication": "invented"}},
+                        {**fresh, "observation": {**fresh["observation"], "head": self.base}}):
+            with self.assertRaises(factory.FactoryError):
+                release_evidence.validate_delivery(damaged, record)
+
+    def test_unreadable_or_changing_server_guard_refuses(self):
+        required = self.transport.snapshot_value["ci"]["actions"]["runs"][0]
+        api = self.transport.api
+        def unavailable(endpoint):
+            if endpoint.endswith("/protection"):
+                raise factory.FactoryError("HTTP 404 or missing administration read permission")
+            return api(endpoint)
+        with patch.object(self.transport, "api", side_effect=unavailable):
+            with self.assertRaisesRegex(factory.FactoryError, "configure/verify.*read access"):
+                release_evidence.server_guard(self.transport, self.transport.identity, required)
+        reads = []
+        def changed(endpoint):
+            result: dict = api(endpoint)
+            if endpoint.endswith("/protection"):
+                assert isinstance(result, dict) and isinstance(result["enforce_admins"], dict)
+                reads.append(endpoint)
+                if len(reads) > 1:
+                    result["enforce_admins"]["enabled"] = False
+            return result
+        with patch.object(self.transport, "api", side_effect=changed):
+            with self.assertRaises(factory.FactoryError):
+                release_evidence.server_guard(self.transport, self.transport.identity, required)
+        self.assertEqual(self.transport.merges, [])
 
     def test_missing_required_ci_and_actual_review_requirement_hold(self):
         self.transport.snapshot_value["ci"]["actions"]["runs"] = []
@@ -658,8 +844,55 @@ class Integration(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.integrate()
         self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["state"], "launched")
+        receipt_path = self.tasks / "deliver.merge.integration.json"
+        original_receipt = receipt_path.read_bytes()
+        self.transport.run.update(run_attempt=2, conclusion="failure")
+        with self.assertRaisesRegex(factory.FactoryError, "terminal success"):
+            self.integrate()
+        self.assertIsNone(factory.load_task(self.path)["assignments"]["merge"]["result"])
+        self.transport.run["conclusion"] = "success"
         self.assertEqual(self.integrate()["state"], "delivered")
         self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["result"]["outcome"], "completed")
+        self.assertEqual(len(self.transport.merges), 1)
+        self.assertEqual(receipt_path.read_bytes(), original_receipt)
+        self.review("recovered-acceptance", "release", delivery="merge")
+        self.assertEqual(integration.accepted(factory.load_task(self.path), "merge", "recovered-acceptance", self.transport)["outcome"], "approved")
+
+    def test_absent_loose_bypassable_and_untrusted_server_guards_hold(self):
+        protected = copy.deepcopy(self.transport.protection)
+        assert isinstance(protected, dict)
+        unsafe = [None, {}, {**protected, "required_status_checks": dict(strict=False, checks=[dict(context="verify", app_id=15368)])},
+            {**protected, "enforce_admins": dict(enabled=False)},
+            {**protected, "allow_force_pushes": dict(enabled=True)},
+            {**protected, "required_status_checks": dict(strict=True, checks=[dict(context="verify", app_id=-1)])},
+            {**protected, "required_status_checks": dict(strict=True, contexts=["verify"])},
+            {**protected, "required_pull_request_reviews": dict(bypass_pull_request_allowances=dict(users=[dict(login="owner")]))}]
+        for index, guard in enumerate(unsafe):
+            with self.subTest(guard=guard):
+                self.transport.protection = guard
+                receipt = self.integrate(assignment_id="unsafe-" + str(index))
+                self.assertEqual(receipt["state"], "held")
+                self.assertIn("repository owner configure/verify", receipt["reason"])
+                self.assertEqual(self.transport.merges, [])
+        self.transport.protection = protected
+        for key, wrong in (("app", dict(id=7, slug="untrusted")), ("head_sha", self.base), ("conclusion", "skipped")):
+            saved = self.transport.check[key]
+            self.transport.check[key] = wrong
+            self.assertEqual(self.integrate(assignment_id="untrusted-" + key.replace("_", "-"))["state"], "held")
+            self.transport.check[key] = saved
+        self.transport.job["name"] = "trigger"
+        self.assertEqual(self.integrate(assignment_id="wrong-job")["state"], "held")
+        self.assertEqual(self.transport.merges, [])
+
+    def test_strict_server_rejects_base_advance_between_last_read_and_merge(self):
+        self.transport.on_merge = lambda: setattr(self.transport, "server_base", "f" * 40)
+        receipt = self.integrate()
+        self.assertEqual(receipt["state"], "rejected")
+        self.assertIn("server_guard", receipt["gates"])
+        self.assertFalse(self.transport.pr["merged"])
+        self.assertEqual(self.transport.pr["state"], "open")
+        self.assertEqual(len(self.transport.merges), 1)
+        self.assertEqual(self.integrate()["state"], "rejected")
         self.assertEqual(len(self.transport.merges), 1)
 
     def test_final_acceptance_option_cannot_start_an_external_effect(self):
@@ -706,6 +939,53 @@ class Integration(unittest.TestCase):
 
 
 class CommandAuthority(unittest.TestCase):
+    def installed_transport(self, root):
+        repo = root / "repo"
+        repo.mkdir()
+        gh = root / "gh"
+        gh.write_text("#!/bin/sh\nprintf '%s\\n' pinned-gh\n")
+        gh.chmod(0o700)
+        scripts = root / "acr__jbaruch__coding-policy__release"
+        scripts.mkdir()
+        for name in ("poll-pr-reviews.sh", "watch-pr-reviews.sh", "review-lanes.sh", "check-closing-issues.py"):
+            (scripts / name).write_text("fixture installed helper")
+        return release_evidence.GitHub(gh, scripts, repo)
+
+    def test_exported_bash_functions_cannot_override_fixed_commands(self):
+        with tempfile.TemporaryDirectory() as folder:
+            transport = self.installed_transport(Path(folder).resolve())
+            functions = {"BASH_FUNC_" + name + "%%": "() { printf '%s\\n' inherited-function-ran; }"
+                for name in ("gh", "bash", "jq", "poll-pr-reviews.sh")}
+            with patch.dict(os.environ, functions):
+                environment = transport.environment()
+            self.assertFalse(any(key.startswith("BASH_FUNC_") for key in environment))
+            observed = subprocess.run([transport.bash, "-c", "gh"], env=environment,
+                capture_output=True, text=True, check=True)
+            self.assertEqual(observed.stdout, "pinned-gh\n")
+
+    def test_package_manager_git_installation_is_not_a_writer_checkout(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            transport = self.installed_transport(root)
+            self.assertEqual(len(transport.binding()), 7)
+
+    def test_spawn_and_timeout_diagnostics_require_same_id_reconciliation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            transport = self.installed_transport(Path(folder).resolve())
+            for failure in (FileNotFoundError("removed helper"), subprocess.TimeoutExpired("gh", 60)):
+                for action in (lambda: transport.api("repos/fixture/project"),
+                               lambda: transport.watch_run("fixture/project", 81)):
+                    with self.subTest(failure=type(failure).__name__), patch.object(release_evidence.subprocess, "run", side_effect=failure):
+                        with self.assertRaises(factory.FactoryError) as caught:
+                            action()
+                        self.assertIn("restore the installed command", str(caught.exception))
+                        self.assertIn("reconcile the same integration ID", str(caught.exception))
+                        self.assertIn("never resend", str(caught.exception))
+            Path(transport.poll).unlink()
+            with self.assertRaisesRegex(factory.FactoryError, "restore.*reconcile the same integration ID"):
+                transport.api("repos/fixture/project")
+
     def test_fixed_transport_has_one_conditional_merge_no_admin_or_shell(self):
         transport = object.__new__(release_evidence.GitHub)
         transport.gh = "/installed/gh"

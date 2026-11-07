@@ -113,7 +113,12 @@ def approvals(record, review, required):
     return selected
 
 
-def command_binding(record, transport):
+def command_binding(record, transport, *, cwd=None):
+    checkouts = [item["request"]["cwd"] for item in record["assignments"].values()]
+    if cwd is not None:
+        checkouts.append(cwd)
+    if hasattr(transport, "checkouts"):
+        transport.checkouts = tuple(checkouts)
     binding = transport.binding()
     managed = Path(record["admission"]["repository"]) / ".codex" / "skills" / "acr__jbaruch__coding-policy__release"
     for filename in binding:
@@ -122,7 +127,7 @@ def command_binding(record, transport):
             continue  # Offline transports use symbolic command identities.
         if path.parent == managed:
             continue  # GitHub.binding validates this protected installed directory.
-        if any(path.is_relative_to(Path(item["request"]["cwd"])) for item in record["assignments"].values()):
+        if any(path.resolve().is_relative_to(Path(root).resolve()) for root in checkouts):
             raise factory.FactoryError("Installed release commands cannot come from an assignment checkout")
     return binding
 
@@ -161,6 +166,7 @@ def verify(record, intent, transport, *, watch=False, reload=None):
         current = verify(reload() if reload else record, intent, transport)
         if any(current["snapshot"].get(key) != snapshot.get(key) for key in ("ci", "merge_state")):
             raise factory.FactoryError("CI or merge state changed after canonical readiness; recheck with a new intent")
+        guard = evidence.server_guard(transport, intent["pr"], required_ci[0])
         rules = transport.requirements(intent["pr"])
         if (not isinstance(rules, dict) or "reviewDecision" not in rules
                 or rules["reviewDecision"] not in {None, "", "APPROVED"}
@@ -171,7 +177,7 @@ def verify(record, intent, transport, *, watch=False, reload=None):
         if (evidence.pr_identity(pr, intent["pr"]["url"]) != intent["pr"]
                 or pr.get("mergeable") is not True or pr.get("mergeable_state") != "clean"):
             raise factory.FactoryError("Actual repository review/merge requirements or source binding are not ready")
-        current.update(watch=snapshot, actual_review=rules)
+        current.update(watch=snapshot, actual_review=rules, server_guard=guard)
     return current
 
 
@@ -424,9 +430,7 @@ def execute(path, intent, *, transport=None, start=False) -> dict:
         if receipt["state"] in {"delivered", "rejected", "held"}:
             if assignment["result"] is None and receipt["state"] == "delivered":
                 current = postmerge(intent, transport)
-                confirmed = receipt["delivery"]
-                if (current["merge_commit"] != confirmed.get("merge_commit")
-                        or any(current["ci"][key] != confirmed["ci"].get(key) for key in ("id", "run_attempt"))):
+                if not evidence.same_delivery(current, receipt["delivery"], rerun=True):
                     raise factory.FactoryError("Crash-surviving delivery evidence is missing or changed")
             finish(path, intent, receipt_path, receipt)
             return receipt
@@ -492,7 +496,8 @@ def accepted(record, integration_id, acceptance_id, transport):
     args, receipt, native = collected_native(acceptance_id, record, assignment)
     if args.role != "release" or args.write or native["report"]["outcome"] != "approved":
         raise factory.FactoryError("Final acceptance requires an approved current native release judgment")
-    if evidence.from_delivery_assignment(record, assignment) != original:
+    assessed = evidence.from_delivery_assignment(record, assignment)
+    if assessed["assignment"] != original["assignment"]:
         raise factory.FactoryError("Final acceptance assessed different delivered evidence")
     intent = original["receipt"]["intent"]
     if command_binding(record, transport) != intent["commands"]:
@@ -505,15 +510,15 @@ def accepted(record, integration_id, acceptance_id, transport):
             if receipt["thread_id"] == contributor_context(key, record, item):
                 raise factory.FactoryError("A contributor cannot judge final acceptance")
     current = postmerge(intent, transport)
-    confirmed = original["receipt"]["delivery"]
-    if (current["merge_commit"] != confirmed["merge_commit"] or current["issues"] != confirmed["issues"]
-            or any(current["ci"][key] != confirmed["ci"][key] for key in ("id", "run_attempt"))):
+    confirmed = assessed.get("observation", assessed["receipt"]["delivery"])
+    if not evidence.same_delivery(current, confirmed) or current["issues"] != confirmed["issues"]:
         raise factory.FactoryError("Delivery evidence changed; obtain a current final native reassessment")
     current_owner = read_owner(Path(intent["state_dir"]) / (intent["task"] + ".json"))
     if current_owner != record:
         raise factory.FactoryError("Task changed during final acceptance observation; reload current controls/inputs")
     return dict(outcome="approved", assignment=acceptance_id, integration=integration_id,
-                native_receipt=str(args.receipt), delivery_receipt_digest=original["receipt_digest"])
+                native_receipt=str(args.receipt), delivery_receipt_digest=original["receipt_digest"],
+                assessed_delivery_digest=evidence.digest(assessed))
 
 
 def main(argv=None):

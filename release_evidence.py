@@ -19,12 +19,22 @@ def digest(value):
                                      allow_nan=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def executable(value, name, repository, *, runnable=True):
+def executable(value, name, repository, *, runnable=True, checkouts=()):
     path, repo = Path(value), Path(repository).resolve()
     if (not path.is_absolute() or not path.is_file()
             or (runnable and not os.access(path, os.X_OK)) or path.name != name):
-        raise factory.FactoryError("Supply an explicit installed " + name)
-    if path.resolve().is_relative_to(repo) or path.is_relative_to(repo):
+        raise factory.FactoryError("Supply/restore an explicit installed " + name
+            + "; reconcile the same integration ID before any new effect, never resend a merge")
+    source_roots = [repo, *(Path(item).resolve() for item in checkouts)]
+    # Include sibling worktrees before they acquire an assignment. Do not confuse
+    # a protected package-manager Git installation with a candidate checkout.
+    if (repo / ".git").exists():
+        inventory = factory.git_run(str(repo), "worktree", "list", "--porcelain", "-z")
+        roots = [field[len("worktree "):] for field in inventory.stdout.split("\0") if field.startswith("worktree ")]
+        if inventory.returncode or not roots or any(not Path(root).is_absolute() for root in roots):
+            raise factory.FactoryError("Restore the admitted Git worktree inventory before selecting installed release helpers")
+        source_roots.extend(Path(root).resolve() for root in roots)
+    if any(path.resolve().is_relative_to(root) or path.is_relative_to(root) for root in source_roots):
         managed = repo / ".codex" / "skills" / "acr__jbaruch__coding-policy__release"
         relative = path.relative_to(repo) if path.is_relative_to(repo) else None
         if (runnable or path.parent != managed or path.resolve() != path
@@ -54,22 +64,27 @@ class GitHub:
         self.lanes = executable(root / "review-lanes.sh", "review-lanes.sh", repository, runnable=False)
         self.issue_helper = executable(root / "check-closing-issues.py", "check-closing-issues.py", repository, runnable=False)
         self.repository = repository
+        self.checkouts = ()
 
     def binding(self):
         # Installed helpers remain the policy authority. Pin their bytes, never
         # copy them into this package or silently change policy under an intent.
-        for name, runnable in ((self.gh, True), (self.bash, True), (self.issue_helper, False),
-                               (self.poll, False), (self.watch, False), (self.lanes, False)):
-            executable(name, Path(name).name, self.repository, runnable=runnable)
-        return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                for path in map(Path, (self.gh, self.bash, sys.executable, self.issue_helper, self.poll, self.watch, self.lanes))}
+        try:
+            for name, runnable in ((self.gh, True), (self.bash, True), (self.issue_helper, False),
+                                   (self.poll, False), (self.watch, False), (self.lanes, False)):
+                executable(name, Path(name).name, self.repository, runnable=runnable, checkouts=self.checkouts)
+            executable(sys.executable, Path(sys.executable).name, self.repository, checkouts=self.checkouts)
+            return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in map(Path, (self.gh, self.bash, sys.executable, self.issue_helper, self.poll, self.watch, self.lanes))}
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise command_failure("installed release helper validation", exc) from None
 
     def environment(self):
         environment = factory.command_environment()
         # gh, jq and bash used by the installed scripts must not resolve from the checkout.
         environment["PATH"] = os.pathsep.join([str(Path(self.gh).parent), "/opt/homebrew/bin", "/usr/local/bin", os.defpath])
         for key in list(environment):
-            if key.startswith(("WATCH_PR_REVIEWS_", "GH_")) and key not in {"GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR"}:
+            if key.startswith(("WATCH_PR_REVIEWS_", "GH_", "BASH_FUNC_")) and key not in {"GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR"}:
                 del environment[key]
         for key in ("GITHUB_API_URL", "BASH_ENV", "ENV"):
             environment.pop(key, None)
@@ -77,11 +92,16 @@ class GitHub:
         return environment
 
     def run(self, argv, *, watch=False, accepted=(0,)):
+        self.binding()  # Recheck protected paths before every helper/process execution.
         environment = self.environment()
-        result = subprocess.run(argv, cwd=self.repository, env=environment, capture_output=True,
-                                text=True, check=False, timeout=None if watch else 60)
+        try:
+            result = subprocess.run(argv, cwd=self.repository, env=environment, capture_output=True,
+                                    text=True, check=False, timeout=None if watch else 60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise command_failure(argv[0], exc) from None
         if result.returncode not in accepted:
-            raise factory.FactoryError("GitHub/release command failed: " + result.stderr)
+            raise factory.FactoryError("GitHub/release command failed: " + result.stderr
+                + "; restore command access/connectivity and reconcile the same integration ID; never resend a merge")
         return factory.decode_json(result.stdout)
 
     def api(self, endpoint):
@@ -112,9 +132,93 @@ class GitHub:
 
     def watch_run(self, repository, run_id):
         # gh owns waiting; a nonzero exit still needs the native terminal observation.
-        subprocess.run([self.gh, "run", "watch", str(run_id), "--repo", repository, "--exit-status"],
-                       cwd=self.repository, env=self.environment(),
-                       capture_output=True, text=True, check=False)
+        self.binding()
+        try:
+            subprocess.run([self.gh, "run", "watch", str(run_id), "--repo", repository, "--exit-status"],
+                           cwd=self.repository, env=self.environment(),
+                           capture_output=True, text=True, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise command_failure(self.gh, exc) from None
+
+
+def command_failure(command, exc):
+    failure = (f"timed out after {exc.timeout} seconds" if isinstance(exc, subprocess.TimeoutExpired)
+               else f"could not start ({exc.strerror or str(exc)})")
+    return factory.FactoryError(f"Release command {command!r} {failure}; restore the installed command, "
+        "working directory and connectivity, then reconcile the same integration ID; never resend a merge")
+
+
+def server_guard(transport, identity, required_run):
+    """Verify classic protection for this personal-repository adapter, read-only.
+
+    GitHub's strict status checks require an up-to-date base at merge processing;
+    enforce_admins applies protection to administrators too. Expected head alone
+    has no expected-base contract. See docs/integration.md for primary references.
+    Ruleset-only/unknown configurations deliberately require operator preparation.
+    """
+    from urllib.parse import quote
+    root = "repos/" + identity["repository"]
+    prerequisite = ("Integration requires server-enforced strict up-to-date branch protection on "
+        + identity["target"] + " with enforce_admins enabled and required verify from GitHub Actions app 15368. "
+        "Have the repository owner configure/verify that protection and read access, then reconcile the same "
+        "integration ID; a held original requires reassessment before a new intent. Never bypass protection.")
+    try:
+        repository = transport.api(root)
+        protection = transport.api(root + "/branches/" + quote(identity["target"], safe="") + "/protection")
+        checks = protection.get("required_status_checks") if isinstance(protection, dict) else None
+        if (not isinstance(repository, dict) or repository.get("id") != identity["repository_id"]
+                or repository.get("full_name") != identity["repository"]
+                or repository.get("owner", {}).get("type") != "User"
+                or not isinstance(checks, dict) or checks.get("strict") is not True
+                or protection.get("enforce_admins", {}).get("enabled") is not True
+                or protection.get("allow_force_pushes", {}).get("enabled") is not False
+                or protection.get("allow_deletions", {}).get("enabled") is not False
+                or not isinstance(checks.get("checks"), list)
+                or [item for item in checks["checks"] if isinstance(item, dict) and item.get("context") == "verify"]
+                    != [dict(context="verify", app_id=15368)]):
+            raise factory.FactoryError(prerequisite)
+        reviews = protection.get("required_pull_request_reviews") or {}
+        allowances = reviews.get("bypass_pull_request_allowances", {})
+        if not isinstance(allowances, dict) or any(allowances.values()):
+            raise factory.FactoryError(prerequisite)
+        # A context name/app alone could identify a different workflow. Resolve
+        # the canonical current run's verify job and its native check identity.
+        workflow = transport.api(root + "/actions/workflows/checks.yml")
+        run = transport.api(root + f"/actions/runs/{required_run['id']}")
+        if (workflow.get("path") != ".github/workflows/checks.yml" or workflow.get("state") != "active"
+                or run.get("workflow_id") != workflow.get("id") or run.get("path") != workflow["path"]
+                or any(run.get(key) != required_run.get(key) for key in ("id", "workflow_id", "run_number", "run_attempt"))
+                or run.get("head_sha") != identity["head"] or run.get("event") != "pull_request"
+                or run.get("head_branch") != identity["head_ref"]
+                or run.get("repository", {}).get("id") != identity["repository_id"]
+                or run.get("repository", {}).get("full_name") != identity["repository"]
+                or run.get("status") != "completed" or run.get("conclusion") != "success"):
+            raise factory.FactoryError(prerequisite + " Restore a successful current-head checks.yml pull-request run.")
+        pages = transport.pages(root + f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+        jobs = [job for page in pages for job in page["jobs"]]
+        if any(page.get("total_count") != len(jobs) for page in pages):
+            raise factory.FactoryError(prerequisite + " Restore complete current-attempt job evidence.")
+        selected = [job for job in jobs if job.get("name") == "verify"]
+        if len(selected) != 1:
+            raise factory.FactoryError(prerequisite + " Require an unambiguous verify job in checks.yml.")
+        job = selected[0]
+        check_url = job.get("check_run_url", "")
+        match = re.fullmatch(re.escape("https://api.github.com/" + root + "/check-runs/") + r"([1-9][0-9]*)", check_url)
+        if (not match or job.get("run_id") != run["id"] or job.get("head_sha") != identity["head"]
+                or job.get("status") != "completed" or job.get("conclusion") != "success"):
+            raise factory.FactoryError(prerequisite + " Restore source-bound successful verify job evidence.")
+        check = transport.api(root + "/check-runs/" + match[1])
+        if (check.get("id") != int(match[1]) or check.get("name") != "verify"
+                or check.get("head_sha") != identity["head"]
+                or check.get("app", {}).get("id") != 15368 or check.get("app", {}).get("slug") != "github-actions"
+                or check.get("status") != "completed" or check.get("conclusion") != "success"
+                or transport.api(root + f"/actions/runs/{run['id']}") != run
+                or transport.api(root + "/branches/" + quote(identity["target"], safe="") + "/protection") != protection):
+            raise factory.FactoryError(prerequisite + " Verify the trusted app and unchanged current CI attempt.")
+    except (factory.FactoryError, OSError, subprocess.TimeoutExpired, KeyError, TypeError, AttributeError) as exc:
+        reason = str(exc)
+        raise factory.FactoryError(reason if reason.startswith(prerequisite) else prerequisite + " Observation: " + reason) from None
+    return dict(protection=protection, workflow=workflow, run=run, job=job, check=check)
 
 
 def pr_url(url):
@@ -176,7 +280,9 @@ def feedback(snapshot, identity):
     return {key: snapshot[key] for key in ("review_bodies", "inline_comment_bodies", "reviews")}
 
 
-def capture(record, url, transport) -> dict:
+def capture(record, url, transport, *, cwd=None) -> dict:
+    import integration
+    integration.command_binding(record, transport, cwd=cwd)
     factory.check_repository(record["admission"])
     repository, number = pr_url(url)
     # Local admission must name the same origin, not an arbitrary supplied PR.
@@ -271,7 +377,8 @@ def delivery(record, assignment_id) -> dict:
 
 
 def render_delivery(value):
-    check_version(value)
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] not in (1, 2):
+        raise factory.FactoryError("Unsupported frozen delivery version; preserve the original and update its owner")
     return (DELIVERY_MARKER + "Judge final acceptance against the original admission and confirmed delivery below. "
             "Mechanical delivery does not establish acceptance or publication. Use the ordinary native report.\n"
             + json.dumps(value, ensure_ascii=True) + "\n")
@@ -283,11 +390,63 @@ def from_delivery_assignment(record, assignment):
         value = factory.decode_json(command[command.index("--delivery-evidence") + 1])
         instructions = Path(assignment["brief"]).read_text()
         if (digest_text(instructions) != assignment["request"]["instructions_sha256"]
-                or not instructions.endswith(render_delivery(value)) or delivery(record, value["assignment"]) != value):
+                or not instructions.endswith(render_delivery(value))):
             raise ValueError()
     except (ValueError, IndexError, KeyError, OSError, UnicodeError):
         raise factory.FactoryError("Final native acceptance lacks the exact original frozen delivery evidence") from None
+    return validate_delivery(value, record)
+
+
+def same_delivery(current, prior, *, rerun=False):
+    """A rerun may advance the same source-bound native run, never replace it."""
+    return (all(current.get(key) == prior.get(key) for key in ("pr", "head", "merge_commit"))
+        and all(current["ci"].get(key) == prior["ci"].get(key)
+                for key in ("id", "workflow_id", "path", "head_sha", "event", "head_branch", "run_number", "repository"))
+        and (current["ci"]["run_attempt"] >= prior["ci"]["run_attempt"] if rerun
+             else current["ci"]["run_attempt"] == prior["ci"]["run_attempt"]))
+
+
+def validate_delivery(value, record):
+    render_delivery(value)  # Version check; old frozen briefs remain read-only.
+    keys = {"schema_version", "assignment", "result", "receipt", "receipt_digest"}
+    if value["schema_version"] == 2:
+        keys.add("observation")
+    if set(value) != keys or not isinstance(value["assignment"], str):
+        raise factory.FactoryError("Restore the complete original frozen delivery payload before reassessment")
+    original = delivery(record, value["assignment"])
+    if value["schema_version"] == 1:
+        valid = value == original
+    else:
+        valid = {key: item for key, item in value.items() if key not in {"schema_version", "observation"}} == {
+            key: item for key, item in original.items() if key != "schema_version"}
+        observed = value.get("observation")
+        if not isinstance(observed, dict) or not isinstance(observed.get("ci"), dict):
+            raise factory.FactoryError("Restore the original frozen delivery observation")
+        intent = original["receipt"]["intent"]
+        import integration
+        integration.check_run(observed["ci"], dict(id=original["receipt"]["delivery"]["ci"]["workflow_id"],
+            path=".github/workflows/checks.yml"), intent, original["receipt"]["delivery"]["merge_commit"])
+        issue_evidence(observed.get("issues"), intent["pr"], merged=True)
+        valid = (valid and same_delivery(observed, original["receipt"]["delivery"], rerun=True)
+            and observed["ci"].get("status") == "completed" and observed["ci"].get("conclusion") == "success"
+            and isinstance(observed.get("target"), str) and re.fullmatch(SHA, observed["target"]) is not None
+            and observed.get("publication") == "inapplicable" and observed.get("acceptance") == "pending_native_judgment"
+            and observed.get("cleanup_owner") == "release")
+    if not valid:
+        raise factory.FactoryError("Final release evidence differs from original confirmed delivery")
     return value
+
+
+def capture_delivery(record, assignment_id, transport, *, cwd=None):
+    import integration
+    original = delivery(record, assignment_id)
+    intent = original["receipt"]["intent"]
+    if integration.command_binding(record, transport, cwd=cwd) != intent["commands"]:
+        raise factory.FactoryError("Restore original installed helpers before delivery reassessment")
+    # This observation lives only in the next native command/brief. Never rewrite
+    # the original mechanical receipt/result or create a mutable refresh ledger.
+    value = dict(original, schema_version=2, observation=integration.postmerge(intent, transport))
+    return validate_delivery(value, record)
 
 
 def issue_evidence(value, identity, *, merged=False):

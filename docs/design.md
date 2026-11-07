@@ -33,7 +33,7 @@ The plugin starts without global always-loaded rules and without unimplemented h
 3. Create isolated writer worktrees and explicit interface/dependency ownership. Review and testing get the exact candidate commit and relevant requirements. Concurrent writers never share one checkout.
 4. Start eligible ready assignments within work-in-progress, provider and integration capacity. Reserve resources for verification, urgent work and recovery. Idle capacity without ready useful work stays idle.
 5. Route specialist findings to implementation directly. Within-scope routine corrections consume the task's cumulative allowance; changing worker identity does not reset it. Verify the changed candidate independently.
-6. Integrate through a merge queue and satisfy the project's actual review, test, publication and acceptance requirements. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
+6. Integrate through a merge queue, or a verified server-enforced strict up-to-date required-CI guard where a native queue is unavailable, and satisfy the project's actual review, test, publication and acceptance requirements. The guard must apply to administrators without bypass. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
 
 No foreman turn is required to recognize that a dependency completed or to launch an already authorized next assignment. Dynamic scope decisions and unresolved technical conflicts still require reasoning.
 
@@ -88,6 +88,8 @@ The release judgment alone consumes the complete frozen external-review packet;
 ordinary exact-input specialist approvals remain valid when only review prose changes.
 Failed native writers retain their original contributor identity for independence,
 without promoting failed execution or blocked results into successful evidence.
+Collected successful writers also retain their original provenance when a later
+correction advances the same checkout; initial collection still checks its HEAD.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
@@ -98,6 +100,10 @@ repeats and cold recovery reconcile existing effects read-only. A repository-sco
 mutex serializes integration without occupying unrelated ready-work capacity. Task
 locks never span canonical watcher/network waits; controls and selected inputs are
 reloaded immediately before effects and current owner state before result collection.
+Release and delivery capture also run outside execution/task locks and revalidate
+the owner before submission. Successful reruns of the same delivery CI run can be
+recollected read-only. Fresh delivery observations freeze in a new final native
+brief, preserving original receipts/results and requiring a new semantic judgment.
 
 ## Measurement and self-improvement
 

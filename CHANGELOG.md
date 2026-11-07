@@ -22,6 +22,16 @@ judgment. Keep PR preparation and cleanup with release, add no automatic quality
 waiver or publication claim. Fixed offline transports and temporary Git cover
 refusals, lost replies and recovery; live delivery and judgment remain unqualified.
 
+Preserve collected successful writer provenance across subsequent corrections.
+Move release/delivery capture outside execution/task locks and revalidate the owner
+before submission. Freeze fresh successful CI rerun observations into version-2
+native delivery briefs while retaining original receipts/results. Reject helpers
+from sibling worktrees and newly selected checkouts before execution, remove
+exported Bash functions, and make process failures actionable. Require verified
+strict required `verify` CI protection with administrator enforcement before the
+head-conditional merge; unsafe/unknown server guards hold without mutation. Offline
+race and recovery fixtures do not establish live enforcement or release readiness.
+
 ## 0.9.0 — 2026-11-07 (unpublished)
 
 ### Opt-in writer candidate handoff

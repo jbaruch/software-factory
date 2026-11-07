@@ -49,6 +49,10 @@ job, repository, worktree, input and brief bindings and a terminal Rex observati
 A unique original `thread.started` event must agree with any recorded thread ID.
 A failure, partial report or blocked owner result never becomes successful evidence;
 unknown/ambiguous contributor identity refuses. Original artifacts stay unchanged.
+Collected successful writers retain receipt/event/result and commit-tree/parent
+validation after their checkout advances. Only historical collected provenance
+omits HEAD occupancy; initial collection still requires the produced candidate at
+the original checkout HEAD.
 
 The CLI prepares evidence outside task locks, then uses the ordinary execution/task
 locks only for brief submission and `factory.launch`. The worker runs in the release
@@ -77,12 +81,36 @@ Canonical shell helpers run through installed `bash`, without requiring helper
 executable mode. Explicit helper paths/hashes are frozen. The admitted root's ignored,
 untracked `.codex/skills/acr__jbaruch__coding-policy__release` installation is allowed
 with owner-controlled directories and independent regular files; symlink, hard-link,
-tracked-source and writable replacements refuse. Other assignment checkouts cannot
-supply installed commands. The managed installation remains protected by the native
+tracked-source and writable replacements refuse. Other assignment checkouts,
+sibling Git worktrees and the explicitly selected new cwd cannot supply commands,
+including during pre-review capture. Every process boundary rechecks these paths.
+Inherited exported Bash functions and shell startup overrides are removed before
+helpers run. The managed installation remains protected by the native
 writer sandbox; the mechanical worker uses a clean checkout, not those ignored files
 as candidate source. Installed policy is neither copied nor modified.
 
-The adapter sends one non-admin merge request with the exact head condition.
+The adapter sends one non-admin merge request with the exact head condition, only
+after verifying an enforceable server guard. This scoped personal-repository path
+requires classic branch protection: strict required status checks, administrator
+enforcement, no force pushes/deletion, no bypass allowances, and required `verify`
+bound to GitHub Actions app ID `15368`. It resolves `verify` through the current
+successful `checks.yml` pull-request run's exact attempt/job/check identity. Unknown,
+absent, loose, bypassable, ruleset-only or untrusted configurations hold with an
+operator prerequisite; the adapter never changes repository settings.
+
+[GitHub's protected-branch contract](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
+requires an up-to-date base for strict checks and applies protection to admins when
+enforcement is enabled. The [branch protection API](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection)
+exposes strict checks, expected app IDs and administrator enforcement. This is the
+server's up-to-date-CI guarantee, not an invented atomic expected-base comparison:
+[the merge input](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
+conditions only the head. If the base advances after our final read, the server
+must reject a now-outdated branch before it lands. Frozen source/base checks and
+post-merge parent verification remain. A client mutex cannot supply this guarantee.
+[Native merge queue availability](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/merging-a-pull-request-with-a-merge-queue)
+does not cover this personal repository. The foreman must separately configure and
+verify protection; source tests do not establish actual repository enforcement.
+
 The saved adapter command starts in its running original pane only when no execution
 receipt exists. It exclusively creates that receipt before watching; a crash at any
 later point permits only read-only reconciliation. The saved command also supports
@@ -107,12 +135,21 @@ Partial issue references and cleanup stay with the release owner. Publication is
 inapplicable for this scoped path, never fabricated as successful.
 
 For final native acceptance, launch a new read-only `release` assignment with the
-usual arguments plus `--delivery INTEGRATION`, then collect it. Its original brief
-freezes the confirmed delivery receipt and digest. Repeat the original `integrate`
+usual arguments plus `--delivery INTEGRATION`, then collect it. Capture reads the
+original integration's installed helper paths. Its brief freezes the original
+delivery receipt/result/digest plus a fresh source-bound delivery observation.
+Capture waits outside task/execution locks and refuses submission if the owner
+changed meanwhile. Repeat the original `integrate`
 command with `--acceptance FINAL_RELEASE_ASSIGNMENT` to generate an acceptance
 view: it requires that approved native exact-delivery judgment, current inputs,
 independence, no hold and fresh read-only delivery/CI confirmation. Delivery alone
 reports `pending_native_judgment`. The view creates no acceptance ledger.
+After a successful CI rerun, capture a new final native assignment; old judgments
+remain bound to their original attempt. Crash-before-collection recovery may
+confirm a later successful attempt of the same native run, then collect the
+unchanged original receipt. Neither path resends a merge or rewrites prior results.
+Launch failures/timeouts name restoration steps and require reconciliation of the
+same integration ID; an unknown outcome never authorizes a new merge attempt.
 
 ## Frozen payload and receipt contracts
 
@@ -120,8 +157,14 @@ reports `pending_native_judgment`. The view creates no acceptance ledger.
 `inputs`, `admission`, `pr`, `snapshot`, `issues`, `review_digest`). `capture` writes;
 `validate`/`from_assignment`, native launch/brief validation and integration read.
 These preserve complete canonical bodies and digest their feedback. The same owner
-writes version-1 frozen delivery payloads (`assignment`, `result`, `receipt`,
-`receipt_digest`); native release briefs and `from_delivery_assignment` read them.
+writes version-2 frozen delivery payloads (`assignment`, `result`, `receipt`,
+`receipt_digest`, `observation`); native release briefs and
+`validate_delivery`/`from_delivery_assignment` read them. Version-1 delivery briefs
+remain readable unchanged and assess only their original receipt's delivery. New
+captures use version 2; no migration, mutable refresh store or replacement of old
+briefs/receipts/results occurs. Both versions require the exact original mechanical
+result and receipt; version 2 also requires a successful observation of the same
+source and native run at an equal or later attempt.
 Neither payload grants approval by itself.
 
 `integration.py` owns the version-1 immutable command intent (`schema_version`, task,

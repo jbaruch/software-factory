@@ -670,13 +670,15 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     return hooked
 
 
-def check_commit_receipt(receipt, args, repository):
+def check_commit_receipt(receipt, args, repository, *, historical=False):
     """Version 4 has no factory commit; version 5 declares its nullable intent."""
     if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
             or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
         raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
-    if args.write and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
+    if args.write and not historical and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
         raise factory.FactoryError("Writer candidate differs from the assigned worktree HEAD; inspect its retained checkout before collection")
+    if factory.git_commit(repository, receipt["candidate"]) != receipt["candidate"]:
+        raise factory.FactoryError("Restore the original writer candidate objects before validating historical provenance")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:

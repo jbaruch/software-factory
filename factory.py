@@ -980,8 +980,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if native_args.write or native_args.role != "release" or role != "release" or "--release-evidence" in command:
             raise FactoryError("Final acceptance evidence needs a distinct read-only release assignment")
         frozen = decode_json(native_args.delivery_evidence)
-        if release_evidence.delivery(record, frozen["assignment"]) != frozen:
-            raise FactoryError("Final release evidence differs from original confirmed delivery")
+        release_evidence.validate_delivery(frozen, record)
         instructions += release_evidence.render_delivery(frozen)
     if not existing and "--release-evidence" in command:
         import codex_worker
@@ -1284,7 +1283,10 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
     if observe is not None or collected:
-        check_commit_receipt(receipt, args, record["admission"]["repository"])
+        # Only a fully collected historical result may outlive its checkout HEAD.
+        # Initial collection (including stale work) keeps the strict HEAD check.
+        check_commit_receipt(receipt, args, record["admission"]["repository"],
+                             historical=collected and not current)
     elif (coordination is None or args.write or receipt.get("commit") is not None
             or repository_identity(record["admission"]["repository"]) != receipt["repository_identity"]):
         raise FactoryError("Offline coordination needs collected read-only evidence from the original repository")
@@ -1548,7 +1550,39 @@ def main(argv=None):
                 receipt = {**receipt, "acceptance": integration.accepted(record, args.id, args.acceptance, transport)}
             print(json.dumps(receipt, indent=2))
             return 0 if receipt["state"] in {"launched", "delivered"} else 1
+        prepared = None
+        frozen_release = frozen_delivery = None
+        if args.action == "codex-start" and (args.release_pr is not None or args.delivery is not None):
+            import release_evidence
+            if args.release_pr is not None and args.delivery is not None:
+                raise FactoryError("Select pre-merge release review or final delivery judgment")
+            with task_lock(args.state_dir.resolve(), args.task) as path:
+                prepared = load_task(path)
+            if prepared["admission"] is None:
+                raise FactoryError("Admit a task before capturing native release evidence")
+            original = prepared["assignments"].get(args.id)
+            if args.delivery is not None:
+                if original is not None:
+                    frozen_delivery = release_evidence.from_delivery_assignment(prepared, original)
+                    if frozen_delivery["assignment"] != args.delivery:
+                        raise FactoryError("Original delivery differs; use a new final review assignment")
+                else:
+                    delivered = release_evidence.delivery(prepared, args.delivery)
+                    intent = delivered["receipt"]["intent"]
+                    transport = release_evidence.GitHub(intent["gh"], intent["scripts"], prepared["admission"]["repository"])
+                    frozen_delivery = release_evidence.capture_delivery(prepared, args.delivery, transport, cwd=args.cwd)
+            elif original is not None:
+                frozen_release = release_evidence.from_assignment(prepared, original)
+                if frozen_release["pr"]["url"] != args.release_pr:
+                    raise FactoryError("Original release PR differs; use a new review assignment")
+            else:
+                if args.gh is None or args.release_scripts is None:
+                    raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
+                transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
+                frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
         with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+            if prepared is not None and load_task(path) != prepared:
+                raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
@@ -1574,26 +1608,6 @@ def main(argv=None):
                 if args.action == "codex-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Codex assignment")
-                    frozen_delivery = None
-                    if args.delivery is not None:
-                        import release_evidence
-                        if args.release_pr is not None:
-                            raise FactoryError("Select pre-merge release review or final delivery judgment")
-                        frozen_delivery = release_evidence.delivery(load_task(path), args.delivery)
-                    frozen_release = None
-                    if args.release_pr is not None:
-                        import release_evidence
-                        selected_record = load_task(path)
-                        original = selected_record["assignments"].get(args.id)
-                        if original is not None:
-                            frozen_release = release_evidence.from_assignment(selected_record, original)
-                            if frozen_release["pr"]["url"] != args.release_pr:
-                                raise FactoryError("Original release PR differs; use a new review assignment")
-                        else:
-                            if args.gh is None or args.release_scripts is None:
-                                raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
-                            transport = release_evidence.GitHub(args.gh, args.release_scripts, selected_record["admission"]["repository"])
-                            frozen_release = release_evidence.capture(selected_record, args.release_pr, transport)
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
                                          write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role,
