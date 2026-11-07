@@ -135,51 +135,6 @@ async def stop_child(process):
         await process.wait()
 
 
-def check_hooks(root, candidate, environment):
-    """A writer cannot replace source-local hook code and have the host run it."""
-    configured = factory.git_run(".", "config", "--path", "--get", "core.hooksPath", environment=environment)
-    if configured.returncode == 1:
-        return  # Default hooks live in protected Git metadata.
-    if configured.returncode:
-        raise factory.FactoryError("Cannot identify configured Git hooks; inspect Git configuration before committing writer changes")
-    configured_path = Path(os.path.abspath(root / configured.stdout.removesuffix("\n")))
-    hooks = configured_path.resolve()
-    if configured_path.is_relative_to(root) and hooks != configured_path:
-        raise factory.FactoryError("Configured hooks contain linked source-local paths; inspect retained changes before committing. No host hook was run")
-    common = factory.git_common_dir(".")
-    if hooks.is_relative_to(common) or not hooks.is_relative_to(root):
-        return  # Protected Git metadata/outside-workspace hooks are operator-owned.
-    relative = hooks.relative_to(root)
-    original = factory.git_run(".", "ls-tree", "-r", "-z", candidate, "--", str(relative))
-    if original.returncode:
-        raise factory.FactoryError("Cannot inspect admitted Git hook sources; restore the original candidate before committing")
-    expected = {}
-    try:
-        for entry in original.stdout.split("\0"):
-            if entry:
-                metadata, name = entry.split("\t", 1)
-                mode, kind, identity = metadata.split()
-                if kind != "blob":
-                    raise ValueError("Unsupported hook source")
-                expected[name] = (mode, identity)
-    except ValueError:
-        raise factory.FactoryError("Cannot decode admitted hook sources; inspect Git compatibility before committing") from None
-    observed = {}
-    if hooks.exists():
-        for path in hooks.rglob("*"):
-            info = path.lstat()
-            if stat.S_ISDIR(info.st_mode):
-                continue
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise factory.FactoryError("Configured hooks contain linked/non-regular source; inspect the retained changes before committing")
-            hashed = factory.git_run(".", "hash-object", "--no-filters", "--", str(path))
-            if hashed.returncode:
-                raise factory.FactoryError("Cannot read configured hook sources; restore access before committing")
-            observed[str(path.relative_to(root))] = ("100755" if info.st_mode & 0o111 else "100644", hashed.stdout.strip())
-    if observed != expected:
-        raise factory.FactoryError("Writer changed configured Git hooks; independent review and an operator decision are required before committing those changes. No host hook was run")
-
-
 def commit_changes(args, receipt):
     """Commit an opted-in writer's finished work outside the native sandbox."""
     if factory.git_commit(".", "HEAD") != args.candidate:
@@ -188,14 +143,14 @@ def commit_changes(args, receipt):
         raise factory.FactoryError("Writer repository/worktree changed; restore the original checkout before inspecting its commit")
     root = Path(factory.git_worktree("."))
     environment = factory.command_environment()
-    check_hooks(root, args.candidate, environment)
-    check_hooks(root, args.candidate, factory.git_environment())  # Inspection Git strips inherited overrides.
-    status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
-    if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
-        raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
                              staged_tree=None, candidate=None)
     factory.save(args.receipt, receipt)
+    # Even status can execute configured clean filters; retain intent first.
+    status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
+    if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
+        raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
     paths = factory.git_run(".", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     if paths.returncode:
         raise factory.FactoryError("Cannot inspect writer source paths; restore Git access before staging changes")

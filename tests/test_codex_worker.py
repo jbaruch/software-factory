@@ -244,55 +244,65 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
         self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
 
-    def test_provider_written_hooks_cannot_run_during_host_status_or_commit(self):
+    def test_authorized_hook_imports_writer_edited_source_with_normal_host_access(self):
         self.writer()
+        helper = self.repo / "hook_helper.py"
+        helper.write_text("def effect():\n    pass\n")
         hooks = self.repo / ".githooks"
         hooks.mkdir()
-        original = hooks / "pre-commit"
-        original.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
-        original.chmod(0o700)
+        hook = hooks / "pre-commit"
+        hook.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path.cwd()))\nfrom hook_helper import effect\neffect()\n")
+        hook.chmod(0o700)
         self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
-        self.assertEqual(factory.git_run(".", "commit", "-m", "Add fixture hooks").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add authorized fixture hook").returncode, 0)
         self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
         subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", ".githooks"], check=True)
-        effect = self.root / "unauthorized-hook-effect"
-        unsafe = f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(effect)!r}).write_text('ran')\n"
-        for name in ("pre-commit", "post-index-change", "overridden-post-index-change", "linked-directory"):
-            self.args.events = self.root / (name + ".jsonl")
-            self.args.receipt = self.root / (name + ".json")
-            self.process = FakeProcess(events("completed"))
-            async def spawn(*command, **options):
-                if name == "linked-directory":
-                    hooks.rename(self.root / "original-hooks")
-                    replacement = self.root / "replacement-hooks"
-                    replacement.mkdir()
-                    hooks.symlink_to(replacement, target_is_directory=True)
-                    entry = hooks / "post-index-change"
-                else:
-                    entry = hooks / ("post-index-change" if name == "overridden-post-index-change" else name)
-                entry.write_text(unsafe)
-                entry.chmod(0o700)
-                (self.repo / "feature.py").write_text("answer = 42\n")
-                return self.process
-            self.spawn = spawn
-            if name == "overridden-post-index-change":
-                with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null"}):
-                    receipt = self.execute()
-            else:
-                receipt = self.execute()
-            self.assertEqual(receipt["state"], "failed")
-            self.assertIn("linked source-local" if name == "linked-directory" else "changed configured Git hooks", receipt["error"])
-            self.assertFalse(effect.exists())
-            self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
-            self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
-            (self.repo / "feature.py").unlink()
-            if name == "pre-commit":
-                original.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
-            elif name == "linked-directory":
-                hooks.unlink()
-                (self.root / "original-hooks").rename(hooks)
-            else:
-                (hooks / ("post-index-change" if name == "overridden-post-index-change" else name)).unlink()
+        effect = self.root / "authorized-hook-effect"
+        original_spawn = self.spawn
+        async def changed(*command, **options):
+            helper.write_text(f"from pathlib import Path\ndef effect():\n    Path({str(effect)!r}).write_text('writer-edited source')\n")
+            return await original_spawn(*command, **options)
+        self.spawn = changed
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(effect.read_text(), "writer-edited source")
+        self.assertEqual(receipt["commit"]["state"], "created")
+        self.assertNotEqual(receipt["candidate"], self.candidate)
+        self.assertIn("workspace-write", self.spawns[0])
+        self.assertFalse((self.repo / "__pycache__").exists())
+
+    def test_authorized_transitive_filter_observes_intent_before_host_status(self):
+        self.writer()
+        tools = self.repo / "tools"
+        tools.mkdir()
+        (self.repo / ".gitattributes").write_text("*.audit filter=audit\n")
+        (self.repo / "sample.audit").write_text("base\n")
+        helper = tools / "filter_helper.py"
+        helper.write_text("def clean(data):\n    return data\n")
+        program = tools / "filter.py"
+        program.write_text("import sys\nfrom filter_helper import clean\nsys.stdout.write(clean(sys.stdin.read()))\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add authorized filter fixture").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
+                        shlex.quote(sys.executable) + " -B tools/filter.py"], check=True)
+        effect = self.root / "authorized-filter-intents"
+        original_spawn = self.spawn
+        async def changed(*command, **options):
+            helper.write_text("import json\nfrom pathlib import Path\ndef clean(data):\n"
+                f"    receipt = json.loads(Path({str(self.args.receipt)!r}).read_text())\n"
+                f"    with Path({str(effect)!r}).open('a') as log: log.write(receipt['commit']['state'] + '\\n')\n"
+                "    return data\n")
+            (self.repo / "sample.audit").write_text("updated\n")
+            return await original_spawn(*command, **options)
+        self.spawn = changed
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        states = effect.read_text().splitlines()
+        self.assertEqual(states[0], "preparing")
+        self.assertTrue(all(state in {"preparing", "committing", "created"} for state in states))
+        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":sample.audit").stdout, "updated\n")
+        self.assertFalse((tools / "__pycache__").exists())
 
     def inherited_policy(self, kind, transport):
         self.writer()
@@ -626,18 +636,64 @@ class NativeResults(unittest.TestCase):
         self.assertTrue(factory.result_current(selected, produced))
         self.assertEqual(len(self.spawns), 1)
 
-    def test_version_four_receipt_remains_collectable_without_migration(self):
+    def test_historical_worker_command_reconnects_and_collects_unchanged(self):
         record, assignment = self.launch_assignment(legacy=True)
-        legacy = json.loads(self.args.receipt.read_text())
-        legacy["schema_version"] = 4
-        del legacy["commit"]
-        self.args.receipt.write_text(json.dumps(legacy))
+        frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
+                                        model="fixture-model", effort="high", cwd=str(self.repo))
+        self.assertEqual(frozen, assignment["request"]["command"])
         original = self.args.receipt.read_bytes()
         with patch.object(factory, "status", return_value=dict(state="exited")):
             result = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
         self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
         self.assertEqual(self.args.receipt.read_bytes(), original)
         self.assertEqual(len(self.spawns), 1)
+
+    def test_version_four_receipt_remains_collectable_without_migration(self):
+        # Independent old-format fixture: never obtain it from the current writer.
+        path = self.root / "task.json"
+        factory.admit(path, task="task", goal="Inspect legacy evidence", repository=str(self.repo),
+                      acceptance=["fixture/legacy-acceptance.md"])
+        factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
+        stream, receipt = self.root / "task.qa.codex.jsonl", self.root / "task.qa.codex.json"
+        binary, gitdir = str(Path(sys.executable).resolve()), str(factory.git_dir(str(self.repo)))
+        command = [sys.executable, str(factory.ROOT / "codex_worker.py"), "--job", "task/qa",
+            "--codex", binary, "--model", "fixture-model", "--effort", "high", "--seconds", "600",
+            "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
+            "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
+            "--requirements", "{requirements}", "--events", str(stream), "--receipt", str(receipt),
+            "--repo-identity", "{repository_identity}", "--worktree-git-dir", gitdir]
+        FakeRex.sessions, FakeRex.calls = [], []
+        FakeRex.fail_after_create, FakeRex.host = False, "test-host"
+        with patch.object(factory, "Rex", FakeRex):
+            record, assignment = factory.launch(path, task="task", assignment_id="qa", role="qa",
+                goal="Review legacy candidate", cwd=str(self.repo), command=command, purpose="work",
+                binary=sys.executable, server="unix:///test.sock")
+        report = {"outcome": "approved", "artifacts": ["fixture/legacy-qa.txt"]}
+        usage = {"input_tokens": 17, "output_tokens": 3}
+        native = [{"type": "thread.started", "thread_id": "legacy-thread"}, {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(report)}},
+            {"type": "turn.completed", "usage": usage}]
+        stream.write_text("".join(json.dumps({"schema_version": 1, "kind": "codex-event-line",
+            "data": json.dumps(event) + "\n"}) + "\n" for event in native))
+        legacy = {"schema_version": 4, "kind": "codex-execution", "job": "task/qa", "state": "completed",
+            "inputs": {"candidate": self.candidate, "requirements": "requirements-1"},
+            "repository_identity": self.identity, "worktree_git_dir": gitdir,
+            "brief_sha256": hashlib.sha256(Path(assignment["brief"]).read_bytes()).hexdigest(),
+            "cwd": str(self.repo.resolve()), "requested_model": "fixture-model", "requested_effort": "high",
+            "binary": binary, "writer": False, "created_at": 1000.0, "finished_at": 1001.0,
+            "elapsed_seconds": 1.0, "exit_code": 0, "thread_id": "legacy-thread", "report": report,
+            "usage": usage, "candidate": self.candidate, "events": str(stream), "error": None}
+        receipt.write_text(json.dumps(legacy))
+        original, original_stream = receipt.read_bytes(), stream.read_bytes()
+        frozen = factory.codex_command(path, task="task", assignment_id="qa", codex=binary,
+            model="fixture-model", effort="high", cwd=str(self.repo))
+        self.assertEqual(frozen, command)
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            result = factory.collect_codex(path, "qa", FakeRex(sys.executable, "unix:///test.sock"), record, assignment)
+        self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
+        self.assertEqual(receipt.read_bytes(), original)
+        self.assertEqual(stream.read_bytes(), original_stream)
+        self.assertEqual(self.spawns, [])
 
     def test_workspace_python_startup_code_cannot_run_in_the_host_worker(self):
         effect = self.root / "startup-effect"

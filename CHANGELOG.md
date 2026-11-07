@@ -4,18 +4,23 @@
 
 ### Factory-owned writer commits
 
-Let an explicit Codex writer leave Git staging/commit to the runtime through
-`--commit-message`. Retain before-effect intent and staged tree in version-5
-receipts, respect existing hooks/signing, and preserve failures without retries.
-Collect valid version-4 receipts unchanged. New commits remain implementation
-outputs requiring independent verification and the repository's release gates.
-Preserve inherited hook/signing policy, resolve writer paths from the worktree
-root, refuse modified source-local hooks before host execution, and isolate new
-host workers from workspace Python startup code while retaining legacy commands.
-Accept native event lines up to 1 MiB for verbose command results; retain a failed
-attempt with a recovery diagnostic when that bound is exceeded.
-Disable host wrapper/worker bytecode writes so offline subprocess fixtures do not
-leave ignored source artifacts that block a finished writer's commit.
+Let explicit `--write --commit-message` assignments leave Git staging/commit to
+the runtime. Retain before-effect intent and staged tree in version-5 receipts,
+respect configured hooks/filters/signing and preserve failures without retries.
+The operator-approved exception permits those helpers to run edited source with
+normal host access; native model sandbox permissions remain unchanged. Collect
+valid version-4 receipts without rewriting them. Produced commits still require
+independent verification and the repository's review/CI gates.
+
+### Safe Codex capacity snapshot
+
+Curate one native metadata probe into account type/plan, native allowance pools,
+overlapping quota windows and actual model/effort IDs. Preserve unknown values,
+deduplicate pool identities and refuse conflicting, ambiguous or malformed observations.
+Omit account identifiers, raw initialization and billing/credit data. This exposes
+metadata facts; it does not establish eligibility or automate scheduling.
+Preserve per-pool reached/spend-control status and refuse unsupported individual
+spending limits rather than presenting window headroom without its constraints.
 
 ### Native Grok metadata
 
@@ -47,12 +52,21 @@ Serve control history in dashboard snapshot version 2.
 
 ### Adapter input and evidence validation
 
-Validate native selections, paths and bounded execution allowances before state
-reads, upgrades or attempt reservations. Refuse damaged saved arguments and
-incomplete completed receipts during collection. Enforce ordered native lifecycle
-events, numeric protocol identities, finite question catalogs and nonblank model
-IDs. Provider/event decoding rejects duplicate keys, nonstandard numbers and
-oversized floats/integers, retaining actionable recovery diagnostics.
+Bound native execution allowances before state reads or attempts, reject oversized
+integers throughout provider/event decoding and require numeric protocol response
+identities. Preserve actionable recovery without consuming attempts on bad input.
+
+Reject blank native selections before reserving attempts, damaged saved worker
+arguments and incomplete completed receipts before collection. Validate finite
+question catalogs, option criteria and native model identities before use, and
+retain actionable process/stream I/O recovery diagnostics in failed receipts.
+Validate selections at the public CLI before legacy state upgrades, enforce
+ordered native thread/turn/report events, and reject ambiguous provider JSON or
+blank model identities before recording discovery or shadow evidence.
+Reject stateless path/allowance errors before legacy state reads. Freeze native
+worktree identity in commands and version-4 receipts; older receipts retain their
+history for inspection. Reject nonstandard/non-finite numbers throughout provider
+and event decoding with the existing recovery diagnostics.
 
 ### Jev shadow adapter
 
@@ -88,18 +102,33 @@ Translate metadata-process startup failures into executable/resource recovery gu
 
 ### Native Codex results
 
-Run explicit model/effort assignments through Rex with before-start receipts,
-private versioned native events and compact revision-bound results. Bind the
-original brief, resolved CLI, owned worker/interpreter, Git-local repository
-marker and individual worktree Git directory through preflight, execution,
-postflight and collection. Execute in the inherited verified directory rather
-than reopening its pathname. Retain uncertain/failed attempts and original
-streams without rerunning them. Preserve malformed bytes and web-search telemetry
-with repeated item IDs; discard ambiguous telemetry IDs from derived observations
-while keeping report, lifecycle and local-envelope fields strict. Preserve final
-receipts across child-exit races and name executable/I/O recovery. Legacy history
-reconnects without acquiring invented repository/worktree bindings. See the
-implementation inventory for the separate live conformance evidence.
+Add explicit model/effort assignments through Rex with private native events,
+before-start receipts and compact revision-bound result collection. Reject
+altered briefs, unsuccessful or incomplete native runs and conflicting evidence.
+Retain uncertain attempts, observed thread identity and child exit status for
+inspection instead of rerunning them. Offline
+tests cover completion, timeout and collection; live execution remains unverified.
+Version local event records while preserving original native lines. Check the
+native executable before reserving a new attempt, preserving reconnect behavior.
+Reject damaged or mistyped receipts with actionable recovery diagnostics before
+registering any result.
+Freeze the resolved native CLI, require the owned worker/interpreter during
+collection, and preserve malformed native bytes with inspection/update guidance.
+Identify damaged preflight inputs and reject duplicate receipt/event keys before
+registering results.
+Retain observed web-search telemetry with repeated item IDs while discarding the
+ambiguous IDs from derived observations. Keep result, lifecycle and local-envelope
+fields strict; failed attempts remain failed and their original streams unchanged.
+Carry the admitted repository identity into worker preflight/postflight checks and
+version-3 receipts using the Git-local marker. Preserve legacy command reconnection and inspection without
+inventing a historical pin or accepting older receipts as new evidence. Execute
+the native child in the inherited, verified directory rather than reopening the
+saved pathname. Preserve final receipts when cleanup races with child exit, and
+name recovery for a CLI that disappears before process creation.
+Support native event lines up to 1 MiB and retain a failed attempt with actionable
+guidance for larger output. Keep native assignments as leaf workers, isolate new
+host workers from Python startup overrides and prevent wrapper/worker bytecode
+artifacts. Preserve historical command reconnection and receipt collection.
 
 ### Operator-approved runtime and review exceptions
 

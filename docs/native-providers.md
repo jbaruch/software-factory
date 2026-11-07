@@ -41,6 +41,49 @@ lifecycle and subscription eligibility. Do not substitute API-key billing for
 subscription routes. See the [implementation inventory](implementation.md) for
 provider coverage.
 
+## Safe Codex capacity snapshot
+
+```sh
+python3 codex_capacity.py --codex '/absolute/path/to/codex'
+```
+
+`snapshot(binary)` calls `native_codex.probe` once, with no retry or local state.
+`curate(observation)` accepts an existing observation without provider access.
+Only native observation schema 1 is accepted; missing or unsupported versions
+refuse rather than interpreting a different format as capacity.
+The version-1 JSON allowlists `observed_at`, resolved `binary`, native `route`,
+account `type`/`plan`, `ordinaryUsageAllowed`, `pools` and actual `models`.
+Account IDs, email, tokens, raw initialization and credit/billing data are omitted.
+Plan comes from native `planType` metadata on the account response, account or
+rate-limit response/snapshots when supplied; conflicting plans refuse curation.
+
+Each pool retains its native `limit_id` and separate `primary`/`secondary`
+windows: `used_percent`, `remaining_percent` (100 minus observed use),
+`duration_minutes` and integer Unix `resets_at`. The windows overlap and cannot
+be added; each observed constraint applies to scheduling. Matching default
+`rateLimits` and `rateLimitsByLimitId` snapshots are deduplicated by native
+identity. Conflicting duplicates, map/identity mismatches and malformed known
+fields fail with inspection/update guidance and no partial CLI output.
+Duplicate comparison uses curated pool facts, so omitted/null unknowns and
+irrelevant private metadata do not create extra pools or false conflicts.
+An ID-less default alongside a nonempty ID-keyed view refuses curation; its
+relationship to those pools is unknown and cannot supply extra capacity.
+Pools also preserve nullable `rate_limit_reached_type` and boolean
+`spend_control_reached`. Positive window capacity and `ordinaryUsageAllowed`
+do not override these per-pool constraints. Their conflicts refuse duplicate
+curation; false remains distinct from unknown. Non-null `individualLimit`
+constraints are unsupported and refuse curation with update guidance rather
+than exposing spending amounts or dropping a constraint.
+
+Missing/null facts remain JSON null, including a null secondary window. Missing
+pools or model catalogs remain null, distinct from explicitly empty collections.
+Model entries retain the native `model`, optional picker `id`, supported
+`effort_ids` and `default_effort_id`; unknown effort choices remain null.
+Unknown usage is never unlimited. No credits become quota or dollars, and no
+metadata establishes model eligibility, execution readiness or observation
+freshness. Scheduling, reservations and views must validate observations for
+their own decisions. The implementation inventory owns verification status.
+
 ## Grok and Antigravity catalogs
 
 ```sh
@@ -136,16 +179,17 @@ For a factory-owned writer commit, supply `--write --commit-message` with the
 intended commit message. The specialist edits/tests within its workspace sandbox
 and leaves Git staging/commit to the runtime. Only a successful native run with a
 `completed` report can enter this step. The runtime retains an intent before
-staging, checks regular source files, records the staged tree, then runs one local
+status/staging can execute a configured filter, checks regular source files,
+records the staged tree, then runs one local
 Git commit with the repository's existing hooks, signing and author settings.
-Validated inherited Git configuration also applies to staging/commit. Before any
-index refresh, the runtime refuses source-local configured hooks that differ from
-the admitted candidate, retaining the edits for independent review and an operator
-decision. Operator-owned hooks outside the workspace remain active. Writers may
+Validated inherited Git configuration also applies to status/staging/commit.
+The operator-approved exception in `AGENTS.md` permits configured hooks, filters
+and signing helpers to run writer-edited source with normal host access. Native
+model commands retain their declared sandbox. Writers may
 start from an admitted subdirectory; source checks still use the worktree root.
 No changes produce no empty commit. Commit errors or lost responses preserve the
 intent and worktree for inspection; they never retry the native job or commit.
-The worker disables Python bytecode generation for its child. Other disposable
+The worker disables Python bytecode generation for its child and Git helpers. Other disposable
 test/build outputs belong outside the source checkout. This step never pushes,
 accepts the task or satisfies independent verification/release requirements.
 Host wrappers/workers disable bytecode writes; new worker commands also ignore
