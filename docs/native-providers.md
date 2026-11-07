@@ -195,7 +195,8 @@ and leaves Git staging/commit to the runtime. Only a successful native run with 
 `completed` report can enter this step. The runtime retains an intent before
 status/staging can execute a configured filter, copies shared regular outputs to
 independent files without changing their other links, rejects non-regular files,
-records the staged tree, scans its raw blobs with native Gitleaks, then runs one
+records the staged tree, scans its filenames, raw blobs and commit message with
+native Gitleaks, then runs one
 local Git commit with the repository's supported hooks, signing and author settings.
 Install Gitleaks outside the checkout, Git metadata and temporary directories.
 Use the version pinned in `.pre-commit-config.yaml`; refresh the native tool when
@@ -322,8 +323,9 @@ assessed by later verification. A completed receipt requires a terminal commit s
 its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
 for a new commit, the actual Git parent. Collection revalidates the retained
 assigned checkout's repository marker and frozen worktree Git directory for both
-receipt versions, and requires its exact HEAD to equal the candidate for writer
-commits. Keep that checkout until collection completes.
+receipt versions, and requires its exact HEAD to equal the candidate for every
+writer, including writers without a factory commit. Keep that checkout until
+collection completes.
 
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
