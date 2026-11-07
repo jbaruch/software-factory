@@ -289,6 +289,8 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
                 if not libraries:
                     raise factory.FactoryError("Unsupported pre-commit Python runtime; restore a dedicated Python installation")
                 for path in [*libraries, *(runtime / "lib").glob("libpython*")]:
+                    if not path.resolve().is_relative_to(runtime):
+                        raise factory.FactoryError("Unsupported pre-commit runtime library outside its Python installation")
                     files.setdefault(str(callback_path(path)), "read")
         cache = Path(inherited.get("PRE_COMMIT_HOME", str(Path(inherited.get("XDG_CACHE_HOME", str(home / ".cache"))) / "pre-commit")))
         cache = callback_path(cache)
