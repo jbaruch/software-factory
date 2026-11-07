@@ -111,6 +111,10 @@ Native usage follows [Grok's CLI reference](https://docs.x.ai/build/cli/referenc
 
 ## Grok authenticated metadata
 
+The metadata command applies the same native configuration/trust and executable-
+customization checks as the [inspection worker](#explicit-grok-inspection-assignments)
+before starting its ACP agent. Unsupported profiles remain held without a model turn.
+
 ```sh
 python3 native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
 ```
@@ -170,7 +174,10 @@ python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/sock
 python3 factory.py grok-collect --task example --id inspect
 ```
 
-This slice is read-only. It disables native subagents, web search and automatic
+This slice permits only the built-in `read_file` tool, with explicit write, edit,
+shell, MCP, web, workflow and subagent denies and the native `strict` sandbox.
+Source reads are explicitly allowed; model file reads of the default and selected
+Grok profile directories are denied. It disables native subagents, web search and automatic
 updates, preserves native subscription configuration and excludes host credential
 environment variables. API-key overrides, including empty ones, refuse. Metadata
 preflight requires cached OIDC sign-in, a reported subscription, no access gate,
@@ -179,9 +186,16 @@ and the requested model/effort in the actual catalog. Before a model turn,
 those TOML layers and refuses authentication, model, endpoint, experiment,
 campaign and version overrides rather than reproducing native precedence.
 Opaque/unreadable layers and API, endpoint, auth-provider or configuration-overlay
-environment overrides also refuse. `GROK_HOME` reaches both native children;
+environment overrides also refuse. All inherited `GROK_*` variables except
+`GROK_HOME` and the runtime-controlled worktree-GC setting refuse, including
+empty issuer/client/proxy overrides. `GROK_HOME` reaches both native children;
 the recorded configuration includes its resolved root and layer paths/hashes,
-without configuration contents or credentials. Unknown quota stays unknown;
+without configuration contents or credentials. Native discovery must report
+the assigned project trusted and no executable hooks, enabled plugins, MCP or
+LSP servers. This check precedes the metadata agent as well as the model child;
+project/compatibility discovery cannot silently add executable tools. The command
+holds unsupported profiles rather than changing the user's global configuration.
+Unknown quota stays unknown;
 these explicit commands do not add automatic Grok scheduling to the ready runner.
 
 `--seconds` accepts 1–86400 and `--turns` accepts 1–1000. Invalid bounds refuse
@@ -200,7 +214,7 @@ remain inspection-only. Neither reader migrates or rewrites old evidence.
 The exclusively claimed receipt records job/input revisions, repository marker,
 worktree Git directory, cwd, role/brief digest, resolved binary, requested model/
 effort, native session, declared seconds/turn bound, preflight discovery snapshot,
-version-1 subscription-configuration observation and its probe duration,
+version-2 subscription-configuration observation and its probe duration,
 timestamps/duration, exit code, final report/request identity, native usage/model
 usage, actual turn count, candidate, stream path and error. Before completion,
 result/timing/exit fields are null. State is `starting`, `completed` or `failed`.
@@ -214,8 +228,9 @@ marker and worktree Git directory; replaced linked checkouts refuse. Reports sta
 bound to their assessed candidate when current task inputs change. Repeated
 collection reuses the immutable result. Task records keep their existing schema;
 generic historical Grok commands are not adopted as managed worker evidence.
-Version-1 execution receipts predate configuration checks and stay unchanged and
-inspection-only; they are never upgraded into subscription-configuration evidence.
+Version-1 execution receipts and earlier version-2 receipts containing a version-1
+configuration observation predate these capability checks. They remain unchanged
+and inspection-only, without being upgraded into capability evidence.
 
 ## Explicit Codex assignments
 

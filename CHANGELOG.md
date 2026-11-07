@@ -17,6 +17,10 @@ scheduling and writer mode remain incomplete. Preserve the selected `GROK_HOME`
 profile and refuse native authentication/model/endpoint overrides before a model
 turn. Retain only inspected configuration paths/hashes in version-2 execution
 receipts; earlier execution receipts remain unchanged and inspection-only.
+Require native project trust and no executable customizations before metadata
+agents start. Restrict model tools to file reads with overriding denies and the
+strict sandbox; refuse inherited route/profile environment overrides. Earlier
+configuration-1 evidence remains inspection-only under the tightened reader.
 
 ## 0.3.0 — 2026-11-06
 

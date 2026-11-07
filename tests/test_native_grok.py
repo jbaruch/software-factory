@@ -6,6 +6,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import sys
 import tempfile
@@ -13,6 +14,13 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import native_grok
+
+
+async def plain_configuration(binary, cwd):
+    return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(Path(cwd).resolve()),
+                grok_home=str(Path(cwd).resolve()), cli_version="fixture", layers=[],
+                sandbox="strict", tools=["read_file"], no_executable_customizations=True,
+                route="cached-session-without-routing-overrides")
 
 
 def replies():
@@ -59,13 +67,18 @@ class NativeGrok(unittest.IsolatedAsyncioTestCase):
     async def run_probe(self, responses=None, process=None):
         process = process or Process(replies() if responses is None else responses)
         async def spawn(*args, **options):
-            self.assertEqual(args[1:], ("--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
-                "--sandbox", "read-only", "agent", "--no-leader", "stdio"))
+            self.assertEqual(args[1:8], ("--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
+                "--sandbox", "strict"))
+            self.assertEqual(args[-3:], ("agent", "--no-leader", "stdio"))
+            self.assertEqual(args[args.index("--tools") + 1], "read_file")
+            for denied in ("Write", "Edit", "Bash", "MCPTool(*)", "Task", "Workflow"):
+                self.assertIn(denied, args)
             self.assertEqual(options["env"]["GROK_WORKTREE_AUTO_GC"], "0")
             self.assertEqual(options["cwd"], str(self.cwd.resolve()))
             return process
         times = iter((10, 12))
-        result = await native_grok.probe(sys.executable, self.cwd, spawn=spawn, clock=lambda: 100, timer=lambda: next(times))
+        result = await native_grok.probe(sys.executable, self.cwd, spawn=spawn, configuration=plain_configuration,
+                                         clock=lambda: 100, timer=lambda: next(times))
         return result, process
 
     async def test_cached_auth_models_and_efforts_request_no_session_or_model_turn(self):
@@ -91,7 +104,7 @@ class NativeGrok(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("GH_TOKEN", options["env"])
             return process
         with patch.dict(os.environ, {"GROK_HOME": selected, "GH_TOKEN": "fixture-private-token"}):
-            await native_grok.probe(sys.executable, self.cwd, spawn=spawn)
+            await native_grok.probe(sys.executable, self.cwd, spawn=spawn, configuration=plain_configuration)
 
     async def test_empty_catalog_and_access_gate_preserve_unavailable_facts(self):
         response = replies()
@@ -213,7 +226,8 @@ class NativeGrok(unittest.IsolatedAsyncioTestCase):
                 await native_grok.probe(binary, cwd, spawn=spawn)
             spawn.assert_not_called()
         with self.assertRaisesRegex(native_grok.GrokProbeError, "restore executable access and local process resources"):
-            await native_grok.probe(sys.executable, self.cwd, spawn=AsyncMock(side_effect=OSError("private")))
+            await native_grok.probe(sys.executable, self.cwd, spawn=AsyncMock(side_effect=OSError("private")),
+                                    configuration=plain_configuration)
 
 
 class NativeGrokConfiguration(unittest.IsolatedAsyncioTestCase):
@@ -223,7 +237,8 @@ class NativeGrokConfiguration(unittest.IsolatedAsyncioTestCase):
         self.cwd = Path(temporary.name).resolve()
         self.config = self.cwd / "config.toml"
         self.config.write_text('[models]\ndefault = "grok-4.7"\n')
-        self.report = dict(grokVersion="1.0.77", cwd=str(self.cwd), experiments=[],
+        self.report = dict(grokVersion="1.0.77", cwd=str(self.cwd), projectTrusted=True, experiments=[],
+                           hooks=[], plugins=[], mcpServers=[], lspServers=[],
                            configSources=dict(layers=[dict(role="user", path=str(self.config))]))
         environment = {key: value for key, value in os.environ.items()
                        if key not in native_grok.API_KEY_ENVIRONMENT and not key.startswith("GROK_")}
@@ -258,7 +273,8 @@ class NativeGrokConfiguration(unittest.IsolatedAsyncioTestCase):
             with self.subTest(layer=layer), self.assertRaises(native_grok.GrokProbeError):
                 native_grok.parse_configuration(report, self.cwd)
         for report in ({**self.report, "experiments": [dict(name="fixture")]},
-                       {**self.report, "cwd": str(self.cwd / "other")}, {**self.report, "configSources": {}}):
+                       {**self.report, "cwd": str(self.cwd / "other")}, {**self.report, "configSources": {}},
+                       {**self.report, "projectTrusted": False}):
             with self.assertRaises(native_grok.GrokProbeError):
                 native_grok.parse_configuration(report, self.cwd)
         self.config.write_bytes(b'\xff')
@@ -270,19 +286,71 @@ class NativeGrokConfiguration(unittest.IsolatedAsyncioTestCase):
         spawn = AsyncMock(return_value=process)
         with patch.dict(os.environ, {"GROK_HOME": str(self.cwd), "GH_TOKEN": "fixture-private-token"}):
             result = await native_grok.subscription_configuration(sys.executable, self.cwd, spawn=spawn)
-        self.assertEqual(spawn.call_args.args[1:], ("--no-auto-update", "inspect", "--json"))
+        self.assertEqual(spawn.call_args.args[-2:], ("inspect", "--json"))
+        self.assertEqual(spawn.call_args.args[spawn.call_args.args.index("--tools") + 1], "read_file")
+        self.assertIn("MCPTool(*)", spawn.call_args.args)
         self.assertEqual(spawn.call_args.kwargs["env"]["GROK_HOME"], str(self.cwd))
         self.assertNotIn("GH_TOKEN", spawn.call_args.kwargs["env"])
         self.assertEqual(result["grok_home"], str(self.cwd))
         self.assertGreaterEqual(result["probe_seconds"], 0)
 
+    def test_read_options_keep_profile_credentials_outside_model_file_access(self):
+        selected = self.cwd / "selected-profile"
+        with patch.dict(os.environ, {"GROK_HOME": str(selected)}):
+            options = native_grok.read_options(self.cwd)
+        self.assertIn("Read(~/.grok/**)", options)
+        self.assertIn(f"Read({selected}/**)", options)
+        self.assertIn("Read(./**)", options)
+        with patch.dict(os.environ, {"GROK_HOME": str(self.cwd / "profile[ambiguous]")}), self.assertRaises(native_grok.GrokProbeError):
+            native_grok.read_options(self.cwd)
+
     async def test_routing_environment_overrides_refuse_before_inspection(self):
         for key in ("GROK_CONFIG", "GROK_CONFIG_PATH", "GROK_AUTH", "GROK_MODELS_BASE_URL",
-                    "GROK_MODELS_LIST_URL", "GROK_AUTH_PROVIDER_COMMAND"):
+                    "GROK_MODELS_LIST_URL", "GROK_AUTH_PROVIDER_COMMAND", "GROK_CLI_CHAT_PROXY_BASE_URL",
+                    "GROK_OIDC_ISSUER", "GROK_OIDC_CLIENT_ID", "GROK_UNKNOWN_ROUTE_OVERRIDE"):
             spawn = AsyncMock()
             with self.subTest(key=key), patch.dict(os.environ, {key: ""}), self.assertRaisesRegex(native_grok.GrokProbeError, "Unset"):
                 await native_grok.subscription_configuration(sys.executable, self.cwd, spawn=spawn)
             spawn.assert_not_called()
+
+    def test_enabled_executable_surfaces_and_unknown_discovery_refuse(self):
+        for key, value in (("hooks", [dict(event="session_start")]),
+                           ("mcpServers", [dict(name="fixture")]),
+                           ("lspServers", [dict(name="fixture")]),
+                           ("plugins", [dict(enabled=True)]), ("plugins", [dict(name="unknown")]),
+                           ("mcpServers", None)):
+            with self.subTest(key=key), self.assertRaisesRegex(native_grok.GrokProbeError, "executable"):
+                native_grok.parse_configuration({**self.report, key: value}, self.cwd)
+
+    async def test_committed_project_mcp_and_hook_commands_never_start_metadata_agent(self):
+        for name, content in ((".grok/config.toml", '[mcp_servers.fixture]\ncommand="touch"\nargs=["candidate-command-ran"]\n'),
+                              (".mcp.json", '{"mcpServers":{"fixture":{"command":"touch","args":["candidate-command-ran"]}}}\n'),
+                              (".claude/settings.json", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch candidate-command-ran"}]}]}}\n')):
+            with self.subTest(name=name):
+                directory = self.cwd / name.replace("/", "-")
+                directory.mkdir()
+                source = directory / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(content)
+                with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}):
+                    for command in (("init", "-q", "--initial-branch=main"), ("add", "--all"),
+                                    ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                     "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", "commit", "-qm", "Fixture")):
+                        subprocess.run(["git", "-C", str(directory), *command], check=True, capture_output=True)
+                report = {**self.report, "cwd": str(directory)}
+                origin = dict(type="project", path=str(source))
+                if name.endswith("settings.json"):
+                    report["hooks"] = [dict(event="session_start", hookType="command", source=origin)]
+                else:
+                    report["mcpServers"] = [dict(name="fixture", transport="stdio", source=origin)]
+                process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(json.dumps(report).encode(), b"")))
+                inspect_spawn, metadata_spawn = AsyncMock(return_value=process), AsyncMock()
+                async def inspect(binary, cwd):
+                    return await native_grok.subscription_configuration(binary, cwd, spawn=inspect_spawn)
+                with self.assertRaisesRegex(native_grok.GrokProbeError, "executable"):
+                    await native_grok.probe(sys.executable, directory, spawn=metadata_spawn, configuration=inspect)
+                metadata_spawn.assert_not_called()
+                self.assertFalse((directory / "candidate-command-ran").exists())
 
     async def test_inspection_failure_or_timeout_never_exposes_native_output(self):
         spawn = AsyncMock(side_effect=OSError("private-fixture"))

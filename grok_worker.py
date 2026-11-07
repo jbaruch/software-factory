@@ -65,8 +65,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Grok installation outside the assigned checkout and Git metadata")
     try:
-        config = await configuration(binary, Path("."))
-        observation = await probe(binary, Path("."))
+        observation = await probe(binary, Path("."), configuration=configuration)
+        config = observation["configuration"]
     except native_grok.GrokProbeError as exc:
         raise factory.FactoryError(str(exc)) from None
     authentication = observation["authentication"]
@@ -95,7 +95,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         with os.fdopen(fd, "w") as stream:
             environment = native_grok.environment()
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
-                "--permission-mode", "dontAsk", "--sandbox", "read-only", "--max-turns", str(args.turns),
+                "--permission-mode", "dontAsk", "--sandbox", "strict", *native_grok.read_options(args.cwd), "--max-turns", str(args.turns),
                 "--model", args.model, "--reasoning-effort", args.effort, "--session-id", args.native_session,
                 "--output-format", "streaming-json", "--json-schema", json.dumps(outcome_schema()),
                 "--single", instructions, cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,

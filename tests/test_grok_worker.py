@@ -86,17 +86,19 @@ class GrokWorker(unittest.TestCase):
         self.spawns.append((command, options))
         return self.process
 
-    async def probe(self, binary, cwd) -> dict[str, Any]:
+    async def probe(self, binary, cwd, *, configuration) -> dict[str, Any]:
+        config = await configuration(binary, cwd)
         self.probes.append((binary, cwd))
         return dict(schema_version=1, kind="grok-native-metadata", binary=str(binary), cwd=str(self.repo),
-                    observed_at=1000, probe_seconds=0.25,
+                    observed_at=1000, probe_seconds=0.25, configuration=config,
                     authentication=dict(auth_mode="Oidc", subscription_tier="Fixture", gate=None),
                     models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value="high")]))])
 
     async def configuration(self, binary, cwd):
-        return dict(schema_version=1, kind="grok-subscription-configuration", cwd=str(self.repo),
+        return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(self.repo),
                     grok_home=str(self.root / "grok-profile"), cli_version="fixture", layers=[],
-                    observed_at=1000, probe_seconds=0.1, route="cached-session-without-routing-overrides")
+                    observed_at=1000, probe_seconds=0.1, route="cached-session-without-routing-overrides",
+                    sandbox="strict", tools=["read_file"], no_executable_customizations=True)
 
     def execute(self):
         with redirect_stdout(StringIO()):
@@ -118,7 +120,10 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(grok_worker.read_events(self.args.events), self.events)
         command, options = self.spawns[0]
         self.assertIn("--no-subagents", command)
-        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertEqual(command[command.index("--sandbox") + 1], "strict")
+        self.assertEqual(command[command.index("--tools") + 1], "read_file")
+        self.assertIn("MCPTool(*)", command)
+        self.assertIn("Bash", command)
         self.assertNotIn("GH_TOKEN", options["env"])
         self.assertEqual(options["cwd"], ".")
         result = self.collect()
@@ -254,8 +259,8 @@ class GrokWorker(unittest.TestCase):
 
     def test_ineligible_subscription_or_effort_refuses_before_model_launch(self):
         original = self.probe
-        async def unavailable(binary, cwd):
-            result = await original(binary, cwd)
+        async def unavailable(binary, cwd, **options):
+            result = await original(binary, cwd, **options)
             result["authentication"]["gate"] = {"message": "Fixture capacity hold"}
             return result
         self.probe = unavailable
