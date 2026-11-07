@@ -513,10 +513,42 @@ class NativeResults(unittest.TestCase):
             self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
             (self.repo / "feature.py").unlink()
 
+    def test_receipt_candidate_must_have_the_recorded_staged_tree(self):
+        self.writer()
+        receipt = self.execute()
+        tree = factory.git_run(".", "rev-parse", self.candidate + "^{tree}").stdout.strip()
+        sibling = factory.git_run(".", "commit-tree", tree, "-p", self.candidate, "-m", "Sibling fixture")
+        self.assertEqual(sibling.returncode, 0, sibling.stderr)
+        for state, candidate in (("created", sibling.stdout.strip()), ("unchanged", self.candidate)):
+            damaged = json.loads(json.dumps(receipt))
+            damaged["candidate"] = damaged["commit"]["candidate"] = candidate
+            damaged["commit"]["state"] = state
+            with self.subTest(state=state), self.assertRaisesRegex(factory.FactoryError, "staged tree differs"):
+                worker.check_commit_receipt(damaged, self.args, str(self.repo))
+        worker.check_commit_receipt(receipt, self.args, str(self.repo))
+
+    def test_external_precommit_is_explicitly_unsupported_before_staging(self):
+        self.writer()
+        hooks = self.root / "external-hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        effect = self.root / "external-hook-effect"
+        hook.write_text(f"#!/bin/sh\nprintf called > {shlex.quote(str(effect))}\n")
+        hook.chmod(0o700)
+        self.assertEqual(factory.git_run(".", "config", "core.hooksPath", str(hooks)).returncode, 0)
+        before = (self.repo / ".git/index").read_bytes() if (self.repo / ".git/index").exists() else None
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("external hook paths", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "preparing")
+        after = (self.repo / ".git/index").read_bytes() if (self.repo / ".git/index").exists() else None
+        self.assertEqual(after, before)
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertFalse(effect.exists())
+
     def test_failed_commit_hook_retains_changes_and_never_retries(self):
         self.writer()
-        hooks = self.root / "hooks"
-        hooks.mkdir()
+        hooks = self.repo / ".git/hooks"
         log = self.root / "hook-calls"
         hook = hooks / "pre-commit"
         hook.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nwith Path({str(log)!r}).open('a') as f: f.write('called\\n')\nraise SystemExit(1)\n")
@@ -573,24 +605,30 @@ class NativeResults(unittest.TestCase):
         self.writer()
         helper = self.repo / "hook_helper.py"
         helper.write_text("def effect():\n    pass\n")
-        hooks = self.repo / ".githooks"
-        hooks.mkdir()
+        hooks = self.repo / ".git/hooks"
         hook = hooks / "pre-commit"
         hook.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path.cwd()))\nfrom hook_helper import effect\neffect()\n")
         hook.chmod(0o700)
         self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
         self.assertEqual(factory.git_run(".", "commit", "-m", "Add authorized fixture hook").returncode, 0)
         self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
-        subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", ".githooks"], check=True)
-        effect = self.root / "authorized-hook-effect"
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", ".git/hooks"], check=True)
+        output = []
+        original_git = factory.git_run
+        def observed(repository, *command, **options):
+            result = original_git(repository, *command, **options)
+            if "hook" in command:
+                output.append(result.stdout + result.stderr)
+            return result
         original_spawn = self.spawn
         async def changed(*command, **options):
-            helper.write_text(f"from pathlib import Path\ndef effect():\n    Path({str(effect)!r}).write_text('writer-edited source')\n")
+            helper.write_text("def effect():\n    print('writer-edited source')\n")
             return await original_spawn(*command, **options)
         self.spawn = changed
-        receipt = self.execute()
+        with patch.object(factory, "git_run", side_effect=observed):
+            receipt = self.execute()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual(effect.read_text(), "writer-edited source")
+        self.assertIn("writer-edited source", "".join(output))
         self.assertEqual(receipt["commit"]["state"], "created")
         self.assertNotEqual(receipt["candidate"], self.candidate)
         self.assertIn("workspace-write", self.spawns[0])
@@ -663,10 +701,7 @@ class NativeResults(unittest.TestCase):
             receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("configured hooks/signing", receipt["error"])
-        if kind == "hook":
-            self.assertEqual(log.read_text(), "called\n")
-        else:
-            self.assertFalse(log.exists())
+        self.assertFalse(log.exists())
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
         self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
 

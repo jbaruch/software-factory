@@ -198,8 +198,9 @@ Git commit with the repository's existing hooks, signing and author settings.
 Validated inherited Git configuration also applies to status/staging/commit.
 The operator-approved exception in `AGENTS.md` permits configured helpers to load
 writer-edited source. The initial automatic mode supports an optional pre-commit
-hook and unsigned commits or file-based SSH signing with the operating system's
-signer. Active clean/smudge/process filters, other executable hook types, custom
+hook in the common/worktree Git hooks directory, unsigned commits or file-based
+SSH signing with the operating system's signer. Active external hook directories,
+clean/smudge/process filters, other executable hook types, custom
 signing programs and partial clones refuse visibly; use an inspected explicit
 local commit for those configurations. Required checks/signatures are never
 silently disabled.
@@ -306,7 +307,8 @@ before staging and again before committing. Pre-commit runs against a disposable
 index; changes to that private index refuse the commit. The candidate stays bound
 to the factory-recorded staged tree, and the clean source check binds the output
 assessed by later verification. A completed receipt requires a terminal commit state matching
-its frozen assignment and, for a new commit, the actual Git parent.
+its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
+for a new commit, the actual Git parent.
 
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by

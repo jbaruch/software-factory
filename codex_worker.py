@@ -393,6 +393,8 @@ def commit_policy(args, environment):
     directory = Path(hooks.stdout.removesuffix("\n"))
     active = sorted(path.name for path in directory.iterdir() if path.is_file() and os.access(path, os.X_OK)
                     and not path.name.endswith(".sample")) if directory.is_dir() else []
+    if active and directory.resolve() not in {common / "hooks", args.worktree_git_dir / "hooks"}:
+        raise factory.FactoryError("Unsupported configured hooks/signing: external hook paths require an inspected explicit local commit")
     if any(name != "pre-commit" for name in active):
         raise factory.FactoryError("Unsupported configured hooks/signing: only the separately confined pre-commit hook is supported")
     enabled = factory.git_run(".", "config", "--bool", "--get", "commit.gpgsign", environment=environment)
@@ -550,6 +552,9 @@ def check_commit_receipt(receipt, args, repository):
         parent = factory.git_run(repository, "show", "-s", "--format=%P", commit["candidate"])
         if parent.returncode or parent.stdout.strip() != commit["parent"]:
             raise factory.FactoryError("Factory commit parent differs from the assignment; inspect its original Git history before collection")
+    tree = factory.git_run(repository, "rev-parse", "--verify", commit["candidate"] + "^{tree}")
+    if tree.returncode or tree.stdout.strip() != commit["staged_tree"]:
+        raise factory.FactoryError("Factory commit staged tree differs from the candidate; inspect the original receipt and Git tree before collection")
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
