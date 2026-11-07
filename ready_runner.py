@@ -118,8 +118,17 @@ def capacity_reason(snapshot, binary, now, minimum, job):
 
 class Runner:
     def __init__(self, directory, plan, *, codex, rex, server, probe=codex_capacity.snapshot,
-                 clock=time.time):
+                 clock=time.time, from_writer=None):
         self.plan = validate_plan(plan)
+        self.supplied_plan, self.from_writer = self.plan, from_writer
+        if from_writer is not None:
+            jobs = self.plan["jobs"]
+            if (not isinstance(from_writer, str) or not re.fullmatch(SLUG, from_writer)
+                    or len({job["task"] for job in jobs}) != 1
+                    or any(job["role"] not in {"qa", "code-review", "test-automation"}
+                           or job["write"] or job["commit_message"] is not None
+                           or job["id"] == from_writer or from_writer not in job["after"] for job in jobs)):
+                raise factory.FactoryError("--from-writer requires exactly one task with read-only independent verification jobs, distinct IDs and explicit writer dependencies")
         self.directory, self.binary = Path(directory).resolve(), Path(codex).resolve()
         if not Path(codex).is_absolute() or not Path(rex).is_absolute() or not server.startswith("unix://"):
             raise factory.FactoryError("Supply absolute Codex/Rex paths and an explicit unix:// Rex endpoint")
@@ -132,6 +141,50 @@ class Runner:
         self.probe_limit, self.probe_failures = 1 + retries, 0
         self.launch_errors = {}
         self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0)
+
+    def select_writer_candidate(self):
+        """Called under the execution lock; derive continuity from original evidence."""
+        if self.from_writer is None:
+            return
+        jobs = self.supplied_plan["jobs"]
+        original = dict(candidate=jobs[0]["candidate"], requirements=jobs[0]["requirements"])
+        with factory.task_lock(self.directory, jobs[0]["task"]) as path:
+            record = factory.load_task(path)
+            source = record["assignments"].get(self.from_writer)
+            if record["admission"] is None or source is None:
+                raise factory.FactoryError("--from-writer needs an admitted task and an existing writer assignment")
+            if (source["state"] != "launched" or not native_request(source["request"])
+                    or not writer(source["request"]) or source["result"] is None
+                    or source["result"]["outcome"] != "completed"):
+                raise factory.FactoryError("--from-writer needs a collected, completed native Codex writer")
+            if source["request"].get("inputs") != original:
+                raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
+            factory.check_repository(record["admission"])
+            rex = factory.connect(record, self.rex, self.server)
+            args, receipt, native = factory.codex_evidence(self.from_writer, record, source,
+                observe=lambda: factory.status(rex, record, source))
+            if not args.write or args.commit_message is None or receipt.get("commit") is None:
+                raise factory.FactoryError("--from-writer needs an explicit validated factory commit")
+            expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],
+                artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+            if source["result"] != expected:
+                raise factory.FactoryError("Collected writer result differs from its original native evidence")
+            target = dict(candidate=receipt["candidate"], requirements=original["requirements"])
+            if record["inputs"] not in (original, target):
+                raise factory.FactoryError("Selected task inputs changed; refuse stale or third-party candidate/requirements")
+            if record["inputs"] != target:
+                if record["hold"] is not None:
+                    raise factory.FactoryError("Task is paused: " + record["hold"])
+                for identity, assignment in record["assignments"].items():
+                    if identity == self.from_writer:
+                        continue
+                    # Even a saved result is no substitute for observing its process.
+                    if assignment["state"] == "launching":
+                        factory.reconcile(rex, record, assignment)
+                    if factory.status(rex, record, assignment)["state"] not in {"exited", "failed"}:
+                        raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
+                factory.set_inputs(path, **target)
+            self.plan = {**self.supplied_plan, "jobs": [{**job, **target} for job in jobs]}
 
     def observe(self):
         records, phases, active, issues = {}, {}, [], []
@@ -327,6 +380,7 @@ class Runner:
 def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) -> dict:
     started = timer()
     with factory.execution_lock(runner.directory):
+        runner.select_writer_candidate()
         while True:
             result = runner.tick()
             elapsed = timer() - started
@@ -347,6 +401,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=factory.ROOT / ".factory-state")
     parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--from-writer", metavar="ASSIGNMENT_ID")
     parser.add_argument("--codex", required=True)
     parser.add_argument("--rex", required=True)
     parser.add_argument("--server", required=True)
@@ -357,7 +412,8 @@ def main(argv=None):
         if not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS:
             raise factory.FactoryError("Use an orchestration budget between 1 and 86400 seconds")
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
-        runner = Runner(args.state_dir, plan, codex=args.codex, rex=args.rex, server=args.server)
+        runner = Runner(args.state_dir, plan, codex=args.codex, rex=args.rex, server=args.server,
+                        from_writer=args.from_writer)
         result = run(runner, seconds=args.seconds, once=args.once)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0 if result["result"] == "complete" else 1

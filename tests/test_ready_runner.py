@@ -84,9 +84,9 @@ class ReadyRunner(unittest.TestCase):
         self.probes += 1
         return copy.deepcopy(self.capacity)
 
-    def controller(self, plan):
+    def controller(self, plan, **options):
         return runner.Runner(self.directory, plan, codex=sys.executable, rex=sys.executable,
-                             server="unix:///test.sock", probe=self.probe, clock=lambda: self.now)
+                             server="unix:///test.sock", probe=self.probe, clock=lambda: self.now, **options)
 
     def tick(self, controller):
         return runner.run(controller, seconds=30, once=True)
@@ -125,6 +125,299 @@ class ReadyRunner(unittest.TestCase):
 
     def states(self, result):
         return {(item["task"], item["id"]): item["state"] for item in result["jobs"]}
+
+    def completed_writer(self, *, collect=True):
+        job = self.job("implement", write=True, commit_message="feat(fixture): Deliver candidate")
+        controller = self.controller(self.plan([job]))
+        self.assertEqual(self.tick(controller)["metrics"]["launched"], 1)
+        with patch.dict(os.environ, GIT_AUTHOR_DATE="2000-01-02T00:00:00Z",
+                        GIT_COMMITTER_DATE="2000-01-02T00:00:00Z"):
+            self.finish("task", "implement", outcome="completed", edit=True)
+        if collect:
+            self.tick(controller)
+        return factory.load_task(self.directory / "task.json")
+
+    def verification_plan(self, **changes):
+        return self.plan([self.job("verify", **{"after": ["implement"], **changes})])
+
+    def handoff(self, plan=None):
+        return self.tick(self.controller(plan or self.verification_plan(), from_writer="implement"))
+
+    def test_from_writer_dispatches_exact_commit_and_preserves_original_artifacts(self):
+        before = self.completed_writer()
+        target = before["assignments"]["implement"]["result"]["candidate"]
+        plan = self.plan([self.job(role=role, identity=role, after=["implement"])
+                          for role in ("qa", "code-review", "test-automation")], workers=3, reserve=0)
+        supplied = copy.deepcopy(plan)
+        plan_file = self.root / "verification-plan.json"
+        plan_file.write_text(json.dumps(plan))
+        originals = {path: path.read_bytes() for path in self.directory.iterdir() if path.suffix in {".md", ".jsonl"}}
+        receipt = self.directory / "task.implement.codex.json"
+        originals[receipt], originals[plan_file] = receipt.read_bytes(), plan_file.read_bytes()
+        result = self.handoff(plan)
+        self.assertEqual(result["metrics"]["launched"], 3)
+        selected = factory.load_task(self.directory / "task.json")
+        self.assertNotEqual(target, self.candidate)
+        self.assertEqual(selected["inputs"], dict(candidate=target, requirements="requirements-1"))
+        self.assertEqual(selected["assignments"]["implement"], before["assignments"]["implement"])
+        self.assertEqual(selected["admission"], before["admission"])
+        self.assertEqual(plan, supplied)
+        for identity in ("qa", "code-review", "test-automation"):
+            request = selected["assignments"][identity]["request"]
+            self.assertEqual(request["inputs"], selected["inputs"])
+            self.assertEqual(request["dependencies"], ["implement"])
+            self.assertNotIn("--write", request["command"])
+            self.finish("task", identity)
+        self.assertEqual(self.handoff(plan)["result"], "complete")
+        for path, content in originals.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_from_writer_restart_observes_running_jobs_without_duplicate_or_reset(self):
+        self.completed_writer()
+        plan = self.verification_plan(purpose="correction")
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 1)
+        path = self.directory / "task.json"
+        saved, sessions = path.read_bytes(), copy.deepcopy(PlanRex.sessions)
+        controller = self.controller(plan, from_writer="implement")
+        for _ in range(2):
+            result = self.tick(controller)
+            self.assertEqual(result["jobs"][0]["state"], "running")
+            self.assertEqual(result["metrics"]["launched"], 0)
+            self.assertEqual(path.read_bytes(), saved)
+            self.assertEqual(PlanRex.sessions, sessions)
+        self.finish("task", "verify")
+        self.assertEqual(self.handoff(plan)["result"], "complete")
+        saved = path.read_bytes()
+        self.assertEqual(self.handoff(plan)["result"], "complete")
+        self.assertEqual(path.read_bytes(), saved)
+        self.assertEqual(factory.task_view(factory.load_task(path))["allowances"]["correction"],
+                         dict(limit=1, used=1, remaining=0))
+
+    def test_from_writer_restart_after_selection_before_dispatch(self):
+        before = self.completed_writer()
+        controller = self.controller(self.verification_plan(), from_writer="implement")
+        with patch.object(controller, "tick", side_effect=RuntimeError("interrupted after selection")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                self.tick(controller)
+        selected = factory.load_task(self.directory / "task.json")
+        self.assertEqual(selected["inputs"]["candidate"], before["assignments"]["implement"]["result"]["candidate"])
+        self.assertEqual(selected["assignments"], before["assignments"])
+        self.assertEqual(self.handoff()["metrics"]["launched"], 1)
+        self.assertEqual(self.handoff()["metrics"]["launched"], 0)
+
+    def test_from_writer_cli_replays_original_plan_and_evidence(self):
+        self.completed_writer()
+        plan_file = self.root / "verification.json"
+        plan_file.write_text(json.dumps(self.verification_plan()))
+        self.handoff()
+        self.finish("task", "verify")
+        self.assertEqual(self.handoff()["result"], "complete")
+        before, sessions = (self.directory / "task.json").read_bytes(), copy.deepcopy(PlanRex.sessions)
+        output = StringIO()
+        with redirect_stdout(output):
+            code = runner.main(["--state-dir", str(self.directory), "--plan", str(plan_file),
+                "--from-writer", "implement", "--codex", sys.executable, "--rex", sys.executable,
+                "--server", "unix:///test.sock", "--once"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["result"], "complete")
+        self.assertEqual(json.loads(plan_file.read_text()), self.verification_plan())
+        self.assertEqual((self.directory / "task.json").read_bytes(), before)
+        self.assertEqual(PlanRex.sessions, sessions)
+
+    def test_from_writer_selection_requires_both_existing_locks(self):
+        self.completed_writer()
+        path = self.directory / "task.json"
+        before, calls = path.read_bytes(), list(PlanRex.calls)
+        for lock in (factory.execution_lock(self.directory), factory.task_lock(self.directory, "task")):
+            with lock, self.assertRaisesRegex(factory.FactoryError, "Another"):
+                self.handoff()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(PlanRex.calls, calls)
+
+    def test_from_writer_stale_original_pair_and_changed_selection_refuse(self):
+        before = self.completed_writer()
+        target = before["assignments"]["implement"]["result"]["candidate"]
+        for changes in (dict(candidate=target), dict(requirements="requirements-2")):
+            with self.subTest(plan=changes), self.assertRaisesRegex(factory.FactoryError, "frozen original pair"):
+                self.handoff(self.verification_plan(**changes))
+        # A real third commit is neither the frozen input nor the produced candidate.
+        subprocess.run(["git", "-C", str(self.repo), "-c", "commit.gpgsign=false",
+                        "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Third party", "--allow-empty"], check=True)
+        third = factory.git_commit(str(self.repo), "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "--quiet", "--detach", target], check=True)
+        for candidate, requirements in ((third, "requirements-1"), (self.candidate, "requirements-2"),
+                                        (target, "requirements-2")):
+            with factory.task_lock(self.directory, "task") as path:
+                factory.set_inputs(path, candidate=candidate, requirements=requirements)
+            saved = path.read_bytes()
+            with self.subTest(selected=candidate, requirements=requirements):
+                with self.assertRaisesRegex(factory.FactoryError, "Selected task inputs changed"):
+                    self.handoff()
+                self.assertEqual(path.read_bytes(), saved)
+        self.assertEqual(len(PlanRex.sessions[0]["windows"]), 1)
+
+    def test_from_writer_hold_refuses_selection_and_preserves_controls(self):
+        self.completed_writer()
+        with factory.task_lock(self.directory, "task") as path:
+            factory.hold_task(path, "Operator hold", request_id="hold", clock=lambda: 1000.0)
+        before = path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "paused"):
+            self.handoff()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_from_writer_running_verification_remains_observable_during_hold(self):
+        self.completed_writer()
+        self.handoff()
+        with factory.task_lock(self.directory, "task") as path:
+            factory.hold_task(path, "Operator hold", clock=lambda: 1000.0)
+        self.assertEqual(self.handoff()["jobs"][0]["state"], "running")
+        self.finish("task", "verify")
+        self.assertEqual(self.handoff()["result"], "complete")
+        self.assertEqual(factory.load_task(path)["hold"], "Operator hold")
+
+    def test_from_writer_other_process_must_be_observed_terminal_even_with_result(self):
+        # Launch before the writer moves HEAD; retain a completed result with a live process.
+        other = self.controller(self.plan([self.job("other")]))
+        self.tick(other)
+        self.finish("task", "other")
+        self.tick(other)
+        self.completed_writer()
+        path = self.directory / "task.json"
+        before = path.read_bytes()
+        record = factory.load_task(path)
+        key = (record["session_id"], record["assignments"]["other"]["block_id"])
+        for state in ("running", "unknown"):
+            PlanRex.processes[key] = state
+            with self.subTest(state=state), self.assertRaisesRegex(factory.FactoryError, "active or unknown"):
+                self.handoff()
+            self.assertEqual(path.read_bytes(), before)
+        PlanRex.processes[key] = "failed"
+        self.assertEqual(self.handoff()["metrics"]["launched"], 1)
+
+    def test_from_writer_requires_collected_source_before_observation(self):
+        self.completed_writer(collect=False)
+        before = (self.directory / "task.json").read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "collected, completed"):
+            self.handoff()
+        self.assertEqual((self.directory / "task.json").read_bytes(), before)
+
+    def test_from_writer_manually_recorded_completion_without_native_evidence_refuses(self):
+        self.tick(self.controller(self.plan([self.job("implement", write=True, commit_message="Fixture")])))
+        with factory.task_lock(self.directory, "task") as path:
+            record = factory.record_result(path, assignment_id="implement", candidate=self.candidate,
+                requirements="requirements-1", outcome="completed", artifacts=["manual-report"])
+        PlanRex.processes[(record["session_id"], record["assignments"]["implement"]["block_id"])] = "exited"
+        before = path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "receipt is missing"):
+            self.handoff()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_from_writer_failed_or_unknown_source_process_refuses_saved_success(self):
+        record = self.completed_writer()
+        key = (record["session_id"], record["assignments"]["implement"]["block_id"])
+        for state in ("failed", "running", "unknown"):
+            PlanRex.processes[key] = state
+            with self.subTest(state=state), self.assertRaisesRegex(factory.FactoryError, "not exited successfully"):
+                self.handoff()
+        self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"], record["inputs"])
+
+    def test_from_writer_non_writer_and_non_native_source_refuse(self):
+        self.tick(self.controller(self.plan([self.job("implement")])))
+        self.finish("task", "implement", outcome="completed")
+        self.tick(self.controller(self.plan([self.job("implement")])))
+        with self.assertRaisesRegex(factory.FactoryError, "native Codex writer"):
+            self.handoff()
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        record["assignments"]["implement"]["request"]["command"] = [sys.executable, "--write"]
+        factory.save(path, record)
+        with self.assertRaisesRegex(factory.FactoryError, "native Codex writer"):
+            self.handoff()
+
+    def test_from_writer_no_explicit_commit_refuses(self):
+        plan = self.plan([self.job("implement", write=True)])
+        self.tick(self.controller(plan))
+        self.finish("task", "implement", outcome="completed")
+        self.tick(self.controller(plan))
+        with self.assertRaisesRegex(factory.FactoryError, "explicit validated factory commit"):
+            self.handoff()
+
+    def test_from_writer_tampered_result_receipt_events_or_binding_refuse(self):
+        record = self.completed_writer()
+        path = self.directory / "task.json"
+        receipt_path = self.directory / "task.implement.codex.json"
+        events_path = self.directory / "task.implement.codex.jsonl"
+        original_receipt, original_events = receipt_path.read_bytes(), events_path.read_bytes()
+        variants = [dict(outcome="findings"), dict(candidate=self.candidate), dict(artifacts=["manual-report"]),
+                    dict(inputs=dict(candidate=record["inputs"]["candidate"], requirements="requirements-2"))]
+        for change in variants:
+            altered = copy.deepcopy(record)
+            altered["assignments"]["implement"]["result"].update(change)
+            factory.save(path, altered)
+            before = path.read_bytes()
+            with self.subTest(result=change), self.assertRaises(factory.FactoryError):
+                self.handoff()
+            self.assertEqual(path.read_bytes(), before)
+        factory.save(path, record)
+        receipt = json.loads(original_receipt)
+        for change in (dict(report=dict(outcome="approved", artifacts=["forged"])),
+                       dict(commit={**receipt["commit"], "staged_tree": self.candidate}),
+                       dict(worktree_git_dir=str(self.root / "foreign")),
+                       dict(repository_identity={**receipt["repository_identity"], "repository_id": "f" * 32})):
+            receipt_path.write_text(json.dumps({**receipt, **change}))
+            with self.subTest(receipt=change), self.assertRaises(factory.FactoryError):
+                self.handoff()
+        receipt_path.write_bytes(original_receipt)
+        events_path.write_bytes(original_events.replace(b"fixture/evidence.txt", b"forged/evidence.txt"))
+        with self.assertRaisesRegex(factory.FactoryError, "original events"):
+            self.handoff()
+        self.assertEqual(factory.load_task(path), record)
+        self.assertEqual(len(PlanRex.sessions[0]["windows"]), 1)
+
+    def test_from_writer_invalid_verification_plan_refuses_without_effects(self):
+        self.completed_writer()
+        valid = self.verification_plan()
+        changes = [lambda d: d.update(jobs=[]),
+            lambda d: d["jobs"].append(self.job("elsewhere", task="other", after=["implement"])),
+            lambda d: d["jobs"][0].update(role="backend"),
+            lambda d: d["jobs"][0].update(role="qa", write=True, commit_message="Write"),
+            lambda d: d["jobs"][0].update(id="implement", after=[]),
+            lambda d: d["jobs"][0].update(after=[]),
+            lambda d: d["jobs"].append(self.job("other", requirements="requirements-2", after=["implement"]))]
+        before, calls = (self.directory / "task.json").read_bytes(), list(PlanRex.calls)
+        for change in changes:
+            plan = copy.deepcopy(valid)
+            change(plan)
+            with self.subTest(plan=plan), self.assertRaises(factory.FactoryError):
+                self.handoff(plan)
+        self.assertEqual((self.directory / "task.json").read_bytes(), before)
+        self.assertEqual(PlanRex.calls, calls)
+
+    def test_from_writer_keeps_capacity_checkout_dependency_and_attempt_gates(self):
+        record = self.completed_writer()
+        target = record["assignments"]["implement"]["result"]["candidate"]
+        self.capacity["ordinaryUsageAllowed"] = False
+        result = self.handoff()
+        self.assertEqual(result["jobs"][0]["state"], "waiting")
+        self.assertEqual(result["metrics"]["launched"], 0)
+        self.capacity["ordinaryUsageAllowed"] = True
+        (self.repo / "untracked.txt").write_text("Dirty checkout\n")
+        self.assertEqual(self.handoff()["jobs"][0]["state"], "blocked")
+        (self.repo / "untracked.txt").unlink()
+        self.assertEqual(self.handoff(self.verification_plan(after=["implement", "absent"]))["jobs"][0]["state"], "blocked")
+        with factory.task_lock(self.directory, "task") as path:
+            # Consume the existing cumulative allowance through an ordinary factory assignment.
+            command = factory.codex_command(path, task="task", assignment_id="prior", codex=sys.executable,
+                model="fixture-model", effort="high", cwd=str(self.repo), seconds=30, role="qa")
+            factory.launch(path, task="task", assignment_id="prior", role="qa", goal="Prior correction",
+                cwd=str(self.repo), command=command, binary=sys.executable, server="unix:///test.sock", purpose="correction")
+        self.finish("task", "prior")
+        for _ in range(2):
+            result = self.handoff(self.verification_plan(purpose="correction"))
+            self.assertEqual(result["jobs"][0]["state"], "blocked")
+            self.assertIn("exhausted", result["jobs"][0]["reason"])
+            self.assertEqual(result["metrics"]["launched"], 0)
+        self.assertEqual(factory.load_task(path)["inputs"]["candidate"], target)
 
     def test_readonly_verifier_cannot_request_writer_mode(self):
         before = (self.directory / "task.json").read_bytes()
