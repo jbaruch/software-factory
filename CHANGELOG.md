@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — 2026-11-07
+## 0.5.0 — 2026-11-07
 
 ### Explicit read-only Grok execution
 
@@ -23,6 +23,8 @@ strict sandbox; refuse inherited route/profile environment overrides. Earlier
 configuration-1 evidence remains inspection-only under the tightened reader.
 Validate nested configuration layers, CLI identity and timing, and reuse the
 native discovery validation at both execution and collection boundaries.
+
+## 0.4.0 — 2026-11-07
 
 ### Native Antigravity quota observations
 
