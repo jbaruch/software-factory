@@ -198,16 +198,19 @@ Python environment/startup overrides. Historical
 commands and version-4 receipts remain reconnectable/collectable without rewriting.
 
 For an admitted writer task, replace the paths and discovered model/effort below
-(see [operator-approved exceptions](../AGENTS.md#operator-approved-exceptions)):
+(see [operator-approved exceptions](../AGENTS.md#operator-approved-exceptions)).
+Use the same admitted task state directory for launch and collection:
 
 ```sh
-python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+python3 factory.py --state-dir '/absolute/path/to/task/state' \
+  --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
   codex-start --task example --id writer-1 --role documentation \
   --goal 'Update the admitted documentation and report original evidence' \
   --cwd '/absolute/path/to/isolated/writer/worktree' --purpose work \
   --codex '/absolute/path/to/discovered/codex' --model 'discovered-model-id' \
   --effort 'discovered-supported-effort' --write --commit-message 'docs: clarify writer invocation'
-python3 factory.py codex-collect --task example --id writer-1
+python3 factory.py --state-dir '/absolute/path/to/task/state' \
+  codex-collect --task example --id writer-1
 ```
 
 Inspect the retained receipt, stream and worktree before authorizing any retry.
