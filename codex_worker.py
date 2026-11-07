@@ -358,8 +358,11 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
             public_key = Path(selected.stdout.strip()).expanduser()
             if public_key.suffix != ".pub" or not public_key.is_file():
                 raise factory.FactoryError("Configure an SSH public-key file with its unlocked private companion for isolated signed commits")
-            with public_key.open(encoding="utf-8") as stream:
-                public = stream.read(16385)
+            try:
+                with public_key.open(encoding="utf-8") as stream:
+                    public = stream.read(16385)
+            except (OSError, UnicodeError):
+                raise factory.FactoryError("Cannot read the configured SSH public key as UTF-8; restore a readable, valid SSH public-key file before another attempt") from None
             if len(public) > 16384 or not public.startswith(("ssh-", "ecdsa-", "sk-")):
                 raise factory.FactoryError("The configured signing file must contain an SSH public key; keep private keys outside callback access")
             private_key = public_key.with_suffix("").resolve()

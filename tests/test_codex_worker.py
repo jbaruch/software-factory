@@ -682,6 +682,17 @@ class NativeResults(unittest.TestCase):
                 self.assertEqual(files[str(self.repo.resolve() / ".git/hooks")], "read")
                 self.assertEqual("--allow-unix-socket" in command, platform == "darwin")
 
+    def test_invalid_utf8_public_key_names_signing_recovery_before_agent_start(self):
+        public = self.root / "invalid-key.pub"
+        public.write_bytes(b"ssh-ed25519 \xff\n")
+        for key, value in {"user.signingkey": str(public), "gpg.format": "ssh", "commit.gpgsign": "true"}.items():
+            self.assertEqual(factory.git_run(".", "config", key, value).returncode, 0)
+        with patch.object(worker, "private_signer") as signer:
+            with self.assertRaisesRegex(factory.FactoryError, "restore a readable, valid SSH public-key file"):
+                with worker.isolated_git(self.args, self.identity, signing=True):
+                    self.fail("Malformed public key must not yield a signing scope")
+        signer.assert_not_called()
+
     def test_factory_commit_detaches_finished_output_without_changing_its_alias(self):
         self.writer()
         original = self.spawn
