@@ -1,6 +1,6 @@
 """Explicit native Rex launches. No scheduler, provider broker or model routing."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import fcntl
 import hashlib
@@ -119,6 +119,21 @@ def save(path, value, *, exclusive=False):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+@contextmanager
+def execution_lock(directory):
+    """Serialize controller/CLI launch decisions within one factory instance."""
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(directory / ".execution.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise FactoryError("Another launcher or ready-work controller owns execution; wait for it to finish before starting more work") from None
+        yield
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -539,6 +554,14 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None, expect
         raise FactoryError("Assignment worktree differs; restore its original Git directory and use the assigned checkout")
 
 
+def independent_source(path):
+    """Copy a shared regular source file without changing any of its aliases."""
+    with tempfile.TemporaryDirectory(prefix=".factory-source-", dir=path.parent) as temporary:
+        independent = Path(temporary) / "source"
+        shutil.copy2(path, independent, follow_symlinks=False)
+        os.replace(independent, path)
+
+
 def check_tracked_bytes(cwd, candidate):
     """Check source bytes/modes against the commit without trusting index stat hints."""
     tree = git_run(cwd, "ls-tree", "-r", "-z", "--full-tree", candidate)
@@ -563,7 +586,8 @@ def check_tracked_bytes(cwd, candidate):
                 raise FactoryError("Assignment source contains symlinks; use a full checkout of independent regular files before launching")
             elif stat.S_ISREG(info.st_mode):
                 if info.st_nlink > 1:
-                    raise FactoryError("Assignment source contains shared hard links; use a full checkout of independent regular files before launching")
+                    independent_source(path)
+                    info = path.lstat()
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
                 data = path.read_bytes()
             else:
@@ -1151,7 +1175,7 @@ def main(argv=None):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
         if args.action == "codex-start":
             check_commit_message(args.commit_message, write=args.write)
-        with task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,

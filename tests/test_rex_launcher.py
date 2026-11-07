@@ -936,10 +936,21 @@ class TaskAdmission(unittest.TestCase):
         source.write_text("VALUE = 'committed'\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "source.py"], check=True)
         self.commit("Regular source")
-        record = self.admit()
-        os.link(source, self.root / "another-checkouts-source.py")
+        self.admit()
+        outside = self.root / "another-checkouts-source.py"
+        os.link(source, outside)
         self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
-        self.assert_source_refuses_at_both_launch_boundaries(record, "source contains shared hard links")
+        self.start(command=[sys.executable, "-c", "from pathlib import Path; Path('source.py').write_text('owned change\\n')"])
+        self.assertNotEqual(source.stat().st_ino, outside.stat().st_ino)
+        source.unlink()
+        os.link(outside, source)  # Exercise the executable consumer boundary too.
+        call = self.creation_calls()[0]
+        result = subprocess.run(call[call.index("--") + 1:], cwd=self.repo,
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(source.read_text(), "owned change\n")
+        self.assertEqual(outside.read_text(), "VALUE = 'committed'\n")
+        self.assertNotEqual(source.stat().st_ino, outside.stat().st_ino)
 
     def test_configured_worktree_cannot_hide_changes_in_the_actual_checkout(self):
         source = self.repo / "source.txt"

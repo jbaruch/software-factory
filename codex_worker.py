@@ -590,10 +590,7 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
             raise factory.FactoryError("Writer contains linked or non-regular source; inspect the retained changes and use independent regular files")
         if info.st_nlink > 1:
             # Materialize finished output without changing its other hard links.
-            with tempfile.TemporaryDirectory(prefix=".factory-source-", dir=source.parent) as temporary:
-                independent = Path(temporary) / "source"
-                shutil.copy2(source, independent, follow_symlinks=False)
-                os.replace(independent, source)
+            factory.independent_source(source)
     status = git("status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
     if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
         raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")

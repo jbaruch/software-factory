@@ -10,11 +10,13 @@ the command guides describe operation rather than maintain separate status lists
 | --- | --- | --- |
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
+| Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots and fresh quota gating | Fixed fake-process tests and the bounded live controller evidence below. Candidate handoff/worktree provisioning and complete delivery remain incomplete |
 | Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
-| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, real read-only execution, revision-bound collection/reconnect and scoped independent source approvals. Writer fixtures cover commit/error boundaries; live automatic writer delivery and broader judgment quality remain unverified |
+| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, revision-bound collection/reconnect and scoped source approvals; writer/Git qualification is described below. Broader automatic delivery and judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
 | Native Grok metadata | Cached OIDC sign-in, subscription/access-gate metadata and per-model effort choices through a private ACP child | Fixed protocol/process tests and a live owner-script probe of agent 1.0.77: X Premium+, no access gate, four model choices and their reported effort values. Quota and worker lifecycle remain unverified |
+| Native Grok read-only baseline | Generic Rex launch, headless structured response and exact-assignment reconnect | On 2026-11-07, Grok 4.7 read an owned fixture and returned its exact contents and working directory in 12 seconds. The source stayed unchanged and replay reused the same exited pane and original output. Dedicated event collection, automatic capacity observation and broader lifecycle/recovery remain unverified |
 | Local operator view | Stored task facts, holds, allowances, report freshness, evidence references, explicit live process observations and pause/resume controls | Offline replay/lost-reply/conflict tests and an owned Chrome fixture exercise pause/resume, keyboard submission and visible history. No live worker was interrupted. Other controls and the full seven-view dashboard remain incomplete |
 | CI and review | Offline tests, diagnostics, design/package validation and independent review dispatch | Policy review and CI remain required; the operator temporarily waived waiting for Claude review during its subscription outage, as recorded in AGENTS.md |
 
@@ -40,6 +42,17 @@ or accept the task; this establishes bounded source-review delivery rather than
 general quality or writer-commit readiness. Existing version-4 receipts remain
 collectable unchanged; version-3 artifacts stay unchanged and inspection-only
 under the current receipt reader.
+
+On 2026-11-06, the explicit plan controller launched and collected a real native
+documentation assignment, producing local commit `c5089c4` in 31.7 seconds. An
+independent native correction review approved that exact candidate and was
+collected automatically. Earlier failed attempts remain retained. That pair
+predates the closed Git backend: its separate OS/Git conformance uses fake native
+events with real Git, the installed pre-commit hook and SSH signing. It creates
+a local commit while blocking a hook's external push, network connection and
+outside credential-file read. These are distinct component checks; they do not
+establish a fresh end-to-end native writer run through the closed backend or
+complete task acceptance/integration.
 Jev then returned resolved in a live shadow reassessment of the narrow decoder
 question; no acceptance or review gate changed. Task schema 4
 pins new admissions to an immutable Git-local repository marker. Ordinary clones
@@ -63,7 +76,7 @@ Gemini and Claude families, without a model turn.
 
 ## Next slices
 
-1. **Operational store and scripted execution.** Add capacity reservations, queue fairness, automatic ready-work execution, worktree provisioning and cross-task concurrency controls. Add task acceptance and integration/merge recovery using the existing general coding/release policy.
+1. **Operational store and scripted execution.** Qualify live ready-work execution and add worktree provisioning, candidate handoff and finer provider reservations. Add task acceptance and integration/merge recovery using the existing general coding/release policy.
 2. **Jev routing evaluation.** Verify live evaluation, cache independent judgments and route explicit uncertainty through a durable bounded standby queue. Build representative labeled and held-out evaluations before enabling consequential routing. Use recorded responses for replay, never fabricated live-success receipts.
 3. **Rex and provider conformance.** Pin the discovered Rex binary/server identity and verify process launch, working directory, native session identity, input delivery, readiness and recovery for Claude, Codex, Grok and both Antigravity model families. Discover actual account eligibility, tools, supported thinking levels, model catalogs and shared allowance boundaries. Native subscription sign-in is not interchangeable with an API key.
 4. **First live specialist loop.** Deliver an authorized repository task with the appropriate developer, independent verifier and domain specialists. Route findings directly; prove that investigator -> Jev can avoid a judge invocation. Exercise changed-input invalidation, one real exception and controller restart without duplicate effects.

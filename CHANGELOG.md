@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-11-06
+
+### Explicit ready-work execution
+
+Run preselected Codex assignments from a versioned plan, collect finished native
+reports and start current successful dependencies without a foreman turn. Reuse
+the task store's intents, holds and cumulative limits across controller restarts.
+Bound instance workers/tasks, preserve verification/recovery slots, share starts
+across tasks and gate new launches on fresh native quota/model facts. Keep unknown
+processes reserved and failed attempts unretried. Serialize controllers/manual
+launch commands while leaving observation and operator controls available.
+
 ## 0.2.0 — 2026-11-06
 
 ### Factory-owned writer commits
