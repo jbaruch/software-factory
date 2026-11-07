@@ -10,7 +10,8 @@ the command guides describe operation rather than maintain separate status lists
 | --- | --- | --- |
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
-| Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots and fresh quota gating | Fixed fake-process tests and the bounded live controller evidence below. Candidate handoff/worktree provisioning and complete delivery remain incomplete |
+| Writer worktree provisioning | One explicit task-owned branch/path from selected inputs, durable before-effect intent, raw regular-file checkout, completed replay and conservative pending reconciliation | `tests/test_provisioning.py` uses real temporary Git repositories for lost replies/restarts, collisions, holds, changed inputs and callback denial. No provider/Rex, automatic candidate handoff or independent release-readiness claim |
+| Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots and fresh quota gating | Fixed fake-process tests and the bounded live controller evidence below. Automatic candidate handoff and complete delivery remain incomplete |
 | Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, revision-bound collection/reconnect and scoped source approvals; writer/Git qualification is described below. Broader automatic delivery and judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
@@ -76,11 +77,14 @@ new admission before repository-backed work.
 Task schema 5 adds ordered operator-control requests without changing task limits
 or evidence. Legacy holds migrate without invented request history. Native receipt
 versions remain separate from the task store.
-Task schema 7 adds explicit operator allowance additions while preserving original
-admission and used attempts. Offline fixtures verify exhaustion, lost-reply replay,
-stale-decision refusal and unchanged holds. No live task received an addition as
-part of that verification; the schema-6 provisioning prototype remains unsupported
-by this reader.
+Task schema 8 combines the earlier provisioning and allowance owners. Migration
+preserves existing provisioning intents, allowance additions, holds, inputs and
+assignments; it adds only the missing empty field. Provisioning recovery uses the
+saved intent and a unique Git worktree lock marker. Incomplete outcomes require
+inspection rather than another creation attempt. Offline fixtures verify migration
+from both earlier formats without granting attempts or adopting worktrees.
+The filename-normalization defect found by native review remains uncorrected;
+schema compatibility does not qualify provisioning for delivery.
 
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
 Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`
@@ -95,7 +99,7 @@ Gemini and Claude families, without a model turn.
 
 ## Next slices
 
-1. **Operational store and scripted execution.** Qualify live ready-work execution and add worktree provisioning, candidate handoff and finer provider reservations. Add task acceptance and integration/merge recovery using the existing general coding/release policy.
+1. **Operational store and scripted execution.** Qualify live ready-work execution, connect explicit provisioning to candidate handoff and add finer provider reservations. Add task acceptance and integration/merge recovery using the existing general coding/release policy.
 2. **Jev routing evaluation.** Verify live evaluation, cache independent judgments and route explicit uncertainty through a durable bounded standby queue. Build representative labeled and held-out evaluations before enabling consequential routing. Use recorded responses for replay, never fabricated live-success receipts.
 3. **Rex and provider conformance.** Pin the discovered Rex binary/server identity and verify process launch, working directory, native session identity, input delivery, readiness and recovery for Claude, Codex, Grok and both Antigravity model families. Discover actual account eligibility, tools, supported thinking levels, model catalogs and shared allowance boundaries. Native subscription sign-in is not interchangeable with an API key.
 4. **First live specialist loop.** Deliver an authorized repository task with the appropriate developer, independent verifier and domain specialists. Route findings directly; prove that investigator -> Jev can avoid a judge invocation. Exercise changed-input invalidation, one real exception and controller restart without duplicate effects.

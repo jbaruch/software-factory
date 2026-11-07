@@ -76,17 +76,18 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. Task records must be regular files; links, directories and FIFOs
 refuse without resetting holds or history. External consumers must not edit or migrate these records. The
-runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance` and
-`record_result` functions define schema version 7:
+runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
+`provision_worktree` and `record_result` functions define schema version 8:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `7` on every task record |
+| `schema_version` | Integer `8` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
 | `hold` | `null`, or the operator's nonempty pause reason |
 | `control_events` | Ordered pause/resume requests; each has a unique `id`, nullable integer `expected_revision`, `previous_hold`, resulting `hold`, and `at` in UTC epoch seconds |
+| `provisioning` | `null`, or one immutable writer-worktree request, unique owner token, effect state and nullable returned Git directory |
 | `allowance_events` | Ordered operator additions; each has a unique `id`, `purpose`, `previous_limit`, positive integer `additional`, nonempty `reason` and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
@@ -114,11 +115,14 @@ An identical request replay returns the current record without another write,
 even when a subsequent decision has changed the hold. These records trace control
 effects; they do not interrupt workers or change scope, reports or allowances.
 
-The owner upgrades supported versions 0–5 to version 7 with `allowance_events: []`.
-Original admission, used attempts, control requests and assignment history remain
-unchanged. Version 6 belongs to the retained, unmerged provisioning prototype and
-is unsupported here: use its compatible factory owner rather than editing or
-downgrading the record. This runtime never guesses a migration for that format.
+Schema 8 combines the earlier schema-6 provisioning owner and schema-7 allowance
+owner. A schema-6 record retains its provisioning intent and gains only an empty
+`allowance_events` list. A schema-7 record retains its allowance history and gains
+only `provisioning: null`. Versions 0–5 gain both empty fields. Migration preserves
+original admission, used attempts, control requests, holds, selected inputs and
+assignment history; it grants no attempts and adopts no existing worktree.
+Older-version records carrying fields their owner did not support refuse without
+rewriting. Missing required fields and unsupported future versions also refuse.
 
 The original unversioned launcher record is legacy version 0. Version 1 added
 admission and holds. The owner migrates either on read, preserving requests,
@@ -136,6 +140,10 @@ Version 5 adds `control_events`. The owner migrates versions 0–4 on read,
 preserving their holds/history and adding an empty event list. It never invents
 historical control requests. Existing holds without events remain valid. Version-4
 consumers must update before using version-5 task files; they refuse newer gates.
+Version 6 introduced nullable `provisioning` in the retained prototype. Version 7
+introduced operator allowance additions on main without interpreting that
+prototype's records. Both formats now migrate through the schema-8 contract above.
+Older readers must update before opening schema-8 task files.
 Before repository-backed mutations the owner verifies this identity and the
 initial commit. Revision reads verify the marker before and after Git resolves the commit. Launch
 passes the saved identity through checkout validation; `checkout_exec.py` checks
@@ -185,6 +193,56 @@ The [ready-work runner](ready-runner.md) uses these existing intents/results and
 serializes launch decisions with the owner's `.execution.lock`. It adds no task
 fields or migrations. No acceptance or release is implied by admission,
 a saved intent, a reported result or process exit.
+
+## Writer worktree provisioning
+
+After admission and explicit input selection, provision one named writer checkout:
+
+```sh
+python3 factory.py --state-dir '/absolute/path/to/private-state' provision \
+  --task example --id backend --path '/absolute/path/to/new-writer'
+python3 factory.py --state-dir '/absolute/path/to/private-state' show --task example
+```
+
+The destination's parent must exist. The destination must be absent and outside
+existing checkouts, Git directories and the task store. The branch is
+`factory/<task>/<id>` and must not already exist. The API is
+`provision_worktree(task_record_path, worktree_id=..., destination=...)`; callers
+hold the existing execution and task locks, as the CLI does. There is one
+provisioning request per task in this slice; it does not consume or restore
+specialist correction/investigation attempts.
+
+Before Git mutation, the owner atomically saves `provisioning` with `id`,
+`request: {path, branch, inputs}`, a unique `owner_token`, `state: provisioning`
+and `git_dir: null`. Admission supplies the immutable repository identity. Paths
+are absolute with a resolved existing parent. A paused task or pending launch
+blocks new provisioning. Missing legacy repository identity refuses action.
+Git creates a locked worktree without checkout; its lock reason includes this
+task, worktree ID and owner token. The owner writes the new index and independent
+regular files directly from raw blobs, preserves executable modes, verifies the
+selected candidate and repository, then saves `state: provisioned` and `git_dir`.
+No checkout hooks, clean/smudge filters or provider calls run. Existing source
+checkouts may be dirty and remain unchanged.
+
+Tracked symlinks, submodules, partial clones, object alternates, sparse checkout,
+executable fsmonitor, redirected worktree configuration and per-worktree config
+are unsupported and visibly refuse. Working-tree transformations such as CRLF
+conversion are bypassed: the new checkout contains the candidate's raw bytes.
+
+Repeat the exact command after a restart or lost reply. A completed request
+returns the same worktree after verifying its ownership, without writing state
+or resetting subsequent writer edits. A pending request can reconcile only when
+the uniquely locked worktree is already complete and clean; this read-only
+inspection is permitted while held. Missing, partial, dirty or conflicting
+outcomes remain pending for inspection, without retry, reset, deletion or repair.
+A lock marker, branch, Git directory or repository identity mismatch refuses.
+Changed name, path, candidate or requirements revision cannot rebind the saved
+request. `show` and the existing operator view expose the saved provisioning
+state and generated `inputs_current`; they do not observe live checkout health.
+
+Provisioning does not launch a writer, select new task inputs, hand off a produced
+candidate, accept a task or grant merge/release authority. Select the provisioned
+path explicitly in the existing assignment command.
 
 ## Repository marker
 
