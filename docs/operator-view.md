@@ -98,9 +98,14 @@ agent/classifier to grant itself budget.
 The **Decision inbox** groups operator, standby-reasoner, investigator and judge
 proposals. Task conditions come directly from `task_view`: holds, current
 blocked/findings reports with original artifacts, and exhausted admitted
-correction/investigation allowances. Correction exhaustion proposes investigation;
-investigation exhaustion requires the operator. These diagnostics dispatch
-nothing. Unknown finding recipients/options remain operator planning. Stale
+correction/investigation allowances. Zero allowance with no attempts is an
+authorization condition, not a failed loop. Correction exhaustion proposes
+investigation only with attempted correction work relevant to current inputs and
+current blocked/findings evidence. Existing completed investigation evidence goes
+to reassessment; pending work is not duplicated. Blocked investigations or no
+remaining investigation allowance require an operator decision. Explicit holds
+remain binding. These diagnostics dispatch nothing. Unknown finding
+recipients/options remain operator planning. Stale
 reports stay visible in Team and do not become current inbox findings.
 
 `--decision-store` is optional. Without it, Jev evidence is unknown/not configured.
@@ -111,6 +116,12 @@ readers reconcile collected original native answers offline. Their errors are
 sanitized; no state-supplied path is used to locate a task. Only explicit
 investigator/native task IDs under `--state-dir` can bind tasks. Generic decisions
 can be unbound and their evidence freshness remains unknown.
+
+Bounded before/after identity and content checks surround owner collection of
+selected Jev/task records. New, changed, removed or unreadable sources make the
+inbox unavailable and suppress mixed items/current native resolutions until a
+fresh read. These transient checks create no snapshot store or transaction and
+do not establish freshness after collection.
 
 Each item separates original shadow owner/condition, current condition, action
 availability, used/remaining attempts when bound, original evidence revision and
@@ -166,12 +177,14 @@ Version 3 adds per-assignment `requested_native` (`adapter`, `harness`, `route`,
 sanitized recovery `error`, and `exit_code` after a successful process read. It
 omits native process/exit objects and their potentially private fields. A link
 is a saved target, not proof the pane is currently available.
-Version 4 adds per-task allowlisted `admission` (`goal`, `initial_candidate`,
+Version 4 includes each assignment's original `purpose` (null for legacy unknown)
+and adds per-task allowlisted `admission` (`goal`, `initial_candidate`,
 `acceptance`, original `limits`) and original `allowance_events`, plus
 `decision_inbox` with `status` (`not_configured`, `available`, `unavailable`),
 sanitized nullable `error`, `conditions`, `items` and `resolutions`. Task conditions
-carry owner, condition, task/assignment and artifact references, allowance facts
-and the decision needed. Jev items/resolutions carry original `proposal_owner`/
+carry owner, condition, task/assignment and artifact references, allowance facts,
+availability/prerequisites where applicable and the decision needed.
+Jev items/resolutions carry original `proposal_owner`/
 `proposal_reason`, current `owner`/`condition`, nullable bound task, original
 decision/question/version/options/dispute question and evidence revision/reference,
 explicit freshness/availability/decision needed, allowlisted native `attempts`

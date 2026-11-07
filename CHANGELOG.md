@@ -12,6 +12,12 @@ commands. Unconfigured, damaged, stale, unbound, conflicting and unavailable
 evidence remain explicit; judging requires the original exact current completed
 investigation. No automatic dispatch, semantic finding routing or acceptance.
 
+Distinguish zero authorization with no attempts from failed correction loops.
+Require current failure evidence and relevant attempted corrections before
+proposing investigation; respect exhausted allowance, blocked/pending work and
+existing successful investigation evidence. Detect Jev/task source changes during
+collection and report unavailable instead of mixing empty/pending/current views.
+
 An authenticated same-origin valid-CSRF operator form can approve exactly one
 additional correction/investigation attempt through `factory.extend_allowance`,
 with bounded reason, observed limit and replay-safe request ID. Preserve original

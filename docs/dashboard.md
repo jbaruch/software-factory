@@ -16,7 +16,11 @@ Controls: prioritize, pause/resume, cancel, reassign and act on a concrete decis
 
 The implemented Decision inbox groups operator, standby-reasoner, investigator
 and judge proposals from existing owners. Task conditions are deterministic:
-holds, current blocked/findings reports and exhausted admitted allowances. Finding
+holds, current blocked/findings reports and exhausted admitted allowances.
+Zero limits without attempts remain authorization conditions, not failed loops.
+Failed-loop proposals require relevant attempted correction work and current
+failure evidence. Investigation availability respects existing completed, pending
+or blocked work, remaining allowance and holds. Finding
 recipients and substantive options remain operator planning when unknown. Original
 shadow proposals stay separate from recorded current native answers and accepted
 outcomes. Generic Jev evidence can be unbound; its revision alone establishes no

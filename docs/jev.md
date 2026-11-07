@@ -191,6 +191,9 @@ Omission means unknown/not configured; a selected absent directory retains the
 owner's first-use empty meaning without creating it. Inaccessible, unsupported,
 damaged or dangling sources remain unavailable. No Rex/provider query is needed
 to read decisions, and malformed saved reasoner arguments do not echo argv.
+The dashboard checks source identities/content before and after owner reads;
+changes during collection make the inbox explicitly unavailable until refreshed,
+without claiming current native answers from a mixed view. No snapshot is stored.
 
 The dashboard shows original question IDs/versions and option descriptions,
 evidence references/revisions, and the original dispute question/options for

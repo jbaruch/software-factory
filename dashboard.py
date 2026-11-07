@@ -5,6 +5,7 @@ import binascii
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from html import escape
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -176,12 +177,37 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
     return detail
 
 
+def inbox_source_identity(directory, *, tasks=False):
+    """Transient change detector, not an owner reader or a saved snapshot."""
+    try:
+        paths = sorted(path for path in directory.iterdir() if path.suffix == ".json"
+                       and (not tasks or re.fullmatch(SLUG, path.stem)))
+    except FileNotFoundError:
+        try:
+            directory.lstat()
+        except FileNotFoundError:
+            return None  # Only absent first use is empty; dangling links refuse.
+        raise OSError("Unavailable source directory") from None
+    info = directory.stat()
+    files = []
+    for path in paths:
+        before = path.stat()
+        content = hashlib.sha256(path.read_bytes()).hexdigest()
+        after = path.stat()
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if identity(before) != identity(after):
+            raise OSError("Source changed during collection")
+        files.append((path.name, identity(after), content))
+    return (info.st_dev, info.st_ino, files)
+
+
 def decision_inbox(state_dir, decision_store, tasks):
     """Allowlisted owner views; no state-supplied paths, routing or effects."""
     inbox: dict = dict(status="not_configured", error=None, items=[], resolutions=[])
     if decision_store is None:
         return inbox
     try:
+        sources_before = (inbox_source_identity(decision_store), inbox_source_identity(state_dir, tasks=True))
         original = jev.pending_decisions(decision_store)
     except (jev.JevError, OSError, ValueError):
         inbox.update(status="unavailable", error="Decision evidence unavailable. Restore the selected private Jev store; refresh does not retry requests.")
@@ -267,7 +293,16 @@ def decision_inbox(state_dir, decision_store, tasks):
             inbox["resolutions" if resolution else "items"].append(item)
     except (jev.JevError, factory.FactoryError, OSError, ValueError):
         # A source changing/failing during collection is never an all-resolved inbox.
-        inbox.update(status="unavailable", error="Original decision evidence changed or became unavailable. Restore the selected store and refresh.")
+        inbox.update(status="unavailable", items=[], resolutions=[],
+                     error="Original decision evidence changed or became unavailable. Restore the selected store and refresh.")
+    try:
+        sources_after = (inbox_source_identity(decision_store), inbox_source_identity(state_dir, tasks=True))
+        if sources_before != sources_after:
+            raise OSError("Source changed during collection")
+    except (OSError, ValueError):
+        # Partial/mixed results cannot establish current answers or available work.
+        inbox.update(status="unavailable", items=[], resolutions=[],
+                     error="Decision or task evidence changed or became unavailable during collection. Refresh to read the original sources again; no current answers are established by this view.")
     return inbox
 
 
@@ -282,12 +317,51 @@ def task_conditions(tasks, errors):
             items.append(dict(**common, owner="operator", condition="allowances_unknown", detail="Task not admitted",
                               decision_needed="Establish authorized scope/admission before assigning work"))
         else:
+            current = [assignment for assignment in task["assignments"] if assignment["result_current"]]
+            failures = [assignment for assignment in current
+                        if assignment.get("purpose") != "investigation"
+                        and assignment["result"]["outcome"] in {"blocked", "findings"}]
+            corrections = [assignment for assignment in current if assignment.get("purpose") == "correction"]
+            investigations = [assignment for assignment in task["assignments"]
+                              if assignment.get("purpose") == "investigation"]
             for purpose, values in task["allowances"].items():
                 if values["remaining"] <= 0:
-                    items.append(dict(**common, owner="investigator" if purpose == "correction" else "operator",
-                        condition=purpose + "_exhausted", detail=purpose + " allowance exhausted",
-                        decision_needed=("Gather evidence for the failed correction loop; operator must select any assignment"
-                            if purpose == "correction" else "Decide whether to approve one additional investigation attempt or stop/wait")))
+                    item: dict = dict(**common, owner="operator",
+                        condition=purpose + ("_exhausted" if values["used"] else "_not_authorized"),
+                        detail=purpose + (" allowance exhausted" if values["used"] else " has no authorized attempts; no attempts made"),
+                        availability="No further " + purpose + " assignment is authorized",
+                        decision_needed="Decide whether to approve one additional " + purpose + " attempt or stop/wait")
+                    if purpose == "correction" and corrections and failures:
+                        item["artifacts"] = [ref for assignment in failures for ref in assignment["result"]["artifacts"]]
+                        item["detail"] += "; attempted correction work and current blocked/findings evidence remain"
+                        blocked = any(a["result_current"] and a["result"]["outcome"] in {"blocked", "findings"}
+                                      for a in investigations)
+                        completed = any(a["result_current"] and a["result"]["outcome"] == "completed"
+                                        for a in investigations)
+                        pending = any(a["inputs_current"] and a["result"] is None for a in investigations)
+                        item["artifacts"] += [ref for a in investigations if a["result_current"]
+                                              for ref in a["result"]["artifacts"]]
+                        if blocked:
+                            item.update(availability="Blocked: original current investigation requires operator recovery",
+                                        decision_needed="Inspect the original investigation report and supply its missing input or decide stop/wait")
+                            if task["allowances"]["investigation"]["remaining"] <= 0:
+                                item["availability"] += "; no investigation allowance remains"
+                                item["decision_needed"] += "; operator must explicitly approve one additional investigation attempt before further work"
+                        elif completed:
+                            item.update(availability="Current completed investigation evidence exists; no repeat investigation proposed",
+                                        decision_needed="Use the original completed investigation for bounded reassessment; do not repeat investigation or infer a ruling")
+                        elif pending:
+                            item.update(availability="Investigation already assigned; no duplicate assignment proposed",
+                                        decision_needed="Wait for or reconcile the original investigation assignment")
+                        elif task["allowances"]["investigation"]["remaining"] <= 0:
+                            item.update(availability="Blocked: no investigation allowance remains",
+                                        decision_needed="Operator must explicitly approve an additional investigation attempt or decide stop/wait")
+                        else:
+                            item.update(owner="investigator", availability="Investigation allowance remains; operator must select any assignment",
+                                        decision_needed="Gather evidence for the failed correction loop using the original current reports; no automatic assignment")
+                    if task["hold"] is not None:
+                        item["availability"] += "; Held: operator hold remains binding"
+                    items.append(item)
         for assignment in task["assignments"]:
             report = assignment["result"]
             if assignment["result_current"] and report["outcome"] in {"blocked", "findings"}:
@@ -304,6 +378,12 @@ def task_conditions(tasks, errors):
 
 def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.connect, clock=time.time, timer=time.monotonic) -> dict:
     started = timer()
+    task_sources_available, task_sources_before = True, None
+    if decision_store is not None:
+        try:
+            task_sources_before = inbox_source_identity(state_dir, tasks=True)
+        except (OSError, ValueError):
+            task_sources_available = False
     try:
         paths = sorted(path for path in state_dir.iterdir() if path.suffix == ".json")
     except FileNotFoundError:
@@ -340,6 +420,7 @@ def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.conn
                         except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
                             process = dict(state="unavailable", observed_at=None, error="Inspect the original Rex pane and restore access before refreshing")
                 assignments.append(dict(id=identity, role=assignment["request"]["role"],
+                    purpose=assignment["request"].get("purpose"),
                     goal=assignment["request"]["goal"], launch_state=assignment["state"],
                     inputs=assignment["request"].get("inputs"), process=process,
                     inputs_current=(assignment["request"].get("inputs") == record["inputs"]
@@ -366,6 +447,15 @@ def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.conn
             for key in ("id", "harness", "readiness")) for route in catalog["routes"]):
         raise factory.FactoryError("Incomplete provider catalog; restore its route identities and observations")
     inbox = decision_inbox(state_dir, decision_store, tasks)
+    if decision_store is not None:
+        try:
+            task_sources_available = (task_sources_available
+                                      and task_sources_before == inbox_source_identity(state_dir, tasks=True))
+        except (OSError, ValueError):
+            task_sources_available = False
+        if not task_sources_available:
+            inbox.update(status="unavailable", items=[], resolutions=[],
+                         error="Task evidence changed or became unavailable during collection. Refresh before deciding; no current native answers are established by this view.")
     inbox["conditions"] = task_conditions(tasks, errors)
     return dict(schema_version=4, observed_at=clock(), collection_seconds=timer() - started,
                 live=live, tasks=tasks, errors=errors, routes=catalog["routes"], decision_inbox=inbox)
@@ -468,6 +558,7 @@ def render_inbox(view):
                 f'<p><a href="#task-{text(item["task"])}">Task {text(item["task"])}</a>: {text(item["detail"])}</p>'
                 f'<p>{text(allowance_text(item["attempts"]))}</p><p>Source <code>{text(item["evidence"])}</code>'
                 f' {text(item.get("assignment", ""))}</p><ul>{refs}</ul>'
+                f'<p>{text(item.get("availability", "Planning only; no dispatch control"))}</p>'
                 f'<p><strong>Decision needed:</strong> {text(item["decision_needed"])}</p>'
                 '<p>Supported controls are in task detail. No semantic recipient or ruling is inferred.</p></article>')
         for item in inbox["items"]:

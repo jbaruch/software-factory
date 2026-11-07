@@ -152,6 +152,164 @@ class Inbox(unittest.TestCase):
         factory.save(self.fixture.path, record)
         self.assertEqual({item["condition"] for item in self.view()["decision_inbox"]["items"]}, {"investigation_unavailable_or_stale"})
 
+    def test_zero_admission_limits_without_assignments_are_not_failed_loops(self):
+        record = self.fixture.record
+        record["assignments"] = {}
+        record.update(rex=None, session_id=None)
+        record["admission"]["limits"] = dict(correction=0, investigation=0)
+        factory.save(self.fixture.path, record)
+        before = self.fixture.path.read_bytes()
+        view = self.view()
+        conditions = view["decision_inbox"]["conditions"]
+        self.assertEqual({item["condition"] for item in conditions},
+                         {"operator_hold", "correction_not_authorized", "investigation_not_authorized"})
+        self.assertTrue(all(item["owner"] == "operator" for item in conditions))
+        page = dashboard.render(view)
+        self.assertIn("no authorized attempts; no attempts made", page)
+        self.assertNotIn("failed correction loop", page)
+        self.assertIn("Investigator proposals (0)", page)
+        self.assertEqual(self.fixture.path.read_bytes(), before)
+
+    def test_failed_loop_requires_current_failures_and_actual_relevant_correction_work(self):
+        base = copy.deepcopy(self.fixture.record)
+        for outcome, stale, purpose, expected in (
+                ("completed", False, "correction", "operator"),
+                ("approved", False, "correction", "operator"),
+                ("findings", True, "correction", "operator"),
+                ("blocked", True, "correction", "operator"),
+                ("findings", False, "work", "operator"),
+                ("findings", False, "correction", "investigator"),
+                ("blocked", False, "correction", "investigator")):
+            with self.subTest(outcome=outcome, stale=stale, purpose=purpose):
+                record = copy.deepcopy(base)
+                assignment = record["assignments"]["backend"]
+                assignment["request"]["purpose"] = purpose
+                assignment["result"]["outcome"] = outcome
+                if purpose == "work":
+                    record["admission"]["limits"]["correction"] = 0
+                if stale:
+                    record["inputs"]["requirements"] = "new-requirements"
+                factory.save(self.fixture.path, record)
+                view = self.view()
+                item = next(i for i in view["decision_inbox"]["conditions"] if i["condition"].startswith("correction_"))
+                self.assertEqual(item["owner"], expected)
+                self.assertEqual("failed correction loop" in dashboard.render(view), expected == "investigator")
+                if expected == "investigator":
+                    self.assertEqual(item["artifacts"], ["evidence/original.txt"])
+                    self.assertIn("Held", item["availability"])
+                if stale:
+                    self.assertFalse(view["tasks"][0]["assignments"][0]["result_current"])
+
+    def test_current_review_failure_after_completed_correction_preserves_successful_work(self):
+        record = self.fixture.record
+        review = copy.deepcopy(record["assignments"]["backend"])
+        review["request"].update(role="qa", purpose="work")
+        review["window_label"] = "qa-review-00000000"
+        review.update(window_id="review-window", block_id="review-block")
+        review["result"].update(outcome="findings", artifacts=["review/current.txt"])
+        record["assignments"]["review"] = review
+        factory.save(self.fixture.path, record)
+        before = self.fixture.path.read_bytes()
+        view = self.view()
+        item = next(i for i in view["decision_inbox"]["conditions"] if i["condition"] == "correction_exhausted")
+        self.assertEqual(item["owner"], "investigator")
+        self.assertEqual(item["artifacts"], ["review/current.txt"])
+        self.assertEqual(view["tasks"][0]["assignments"][0]["result"]["outcome"], "completed")
+        self.assertEqual(self.fixture.path.read_bytes(), before)
+        # Old corrections do not establish an attempted loop on unrelated current inputs.
+        record["assignments"]["backend"]["result"]["candidate"] = "b" * 40
+        factory.save(self.fixture.path, record)
+        item = next(i for i in self.view()["decision_inbox"]["conditions"] if i["condition"] == "correction_exhausted")
+        self.assertEqual(item["owner"], "operator")
+
+    def test_investigation_prerequisites_prevent_another_assignment(self):
+        base = copy.deepcopy(self.fixture.record)
+        base["assignments"]["backend"]["result"]["outcome"] = "findings"
+        for outcome, limit, expected in (("blocked", 1, "operator recovery"),
+                ("blocked", 2, "operator recovery"), ("completed", 1, "completed investigation"),
+                (None, 2, "already assigned"), ("stale", 1, "no investigation allowance"),
+                ("absent", 0, "no investigation allowance")):
+            with self.subTest(outcome=outcome, limit=limit):
+                record = copy.deepcopy(base)
+                record["admission"]["limits"]["investigation"] = limit
+                if outcome != "absent":
+                    investigation = copy.deepcopy(record["assignments"]["backend"])
+                    investigation["request"].update(role="investigator", purpose="investigation")
+                    investigation["window_label"] = "investigator-investigate-00000000"
+                    investigation.update(window_id="investigation-window", block_id="investigation-block")
+                    investigation["result"].update(outcome="completed" if outcome == "stale" else outcome,
+                                                    artifacts=["investigation/original.txt"])
+                    if outcome == "stale":
+                        investigation["result"]["candidate"] = "b" * 40
+                    if outcome is None:
+                        investigation["result"] = None
+                    record["assignments"]["investigate"] = investigation
+                factory.save(self.fixture.path, record)
+                before = self.fixture.path.read_bytes()
+                view = self.view()
+                item = next(i for i in view["decision_inbox"]["conditions"] if i["condition"] == "correction_exhausted")
+                self.assertEqual(item["owner"], "operator")
+                self.assertIn(expected, item["availability"])
+                self.assertIn("Held", item["availability"])
+                self.assertIn("Investigator proposals (0)", dashboard.render(view))
+                self.assertEqual(self.fixture.path.read_bytes(), before)
+
+    def test_new_uncertain_decision_during_initial_empty_collection_is_unavailable(self):
+        pending = jev.pending_decisions
+        calls = []
+        def changing(*args, **kwargs):
+            result = pending(*args, **kwargs)  # Actual owner enumeration and validation.
+            calls.append(result)
+            if len(calls) == 1:
+                self.evaluate()
+            return result
+        with patch.object(jev, "pending_decisions", side_effect=changing):
+            view = self.view()
+        self.assertEqual(calls[0]["items"], [])
+        self.assertEqual(len(calls[1]["items"]), 1)
+        self.assertEqual(view["decision_inbox"]["status"], "unavailable")
+        self.assertEqual(view["decision_inbox"]["resolutions"], [])
+        self.assertIn("changed or became unavailable during collection", dashboard.render(view))
+        self.assertEqual(self.view()["decision_inbox"]["items"][0]["proposal_reason"], "uncertain")
+
+    def test_pending_to_completed_during_collection_is_not_available_pending(self):
+        completed = self.evaluate()
+        path = self.store / (completed["id"] + ".json")
+        pending_record = dict(completed, state="pending", response=None, finished_at=None, request_seconds=None)
+        for transition_after in (1, 2):
+            with self.subTest(transition_after=transition_after):
+                factory.save(path, pending_record)
+                pending = jev.pending_decisions
+                calls = []
+                def changing(*args, **kwargs):
+                    result = pending(*args, **kwargs)
+                    calls.append(result)
+                    if len(calls) == transition_after:
+                        factory.save(path, completed)
+                    return result
+                with patch.object(jev, "pending_decisions", side_effect=changing):
+                    view = self.view()
+                self.assertEqual(view["decision_inbox"]["status"], "unavailable")
+                self.assertEqual(view["decision_inbox"]["items"], [])
+                self.assertIn("not an empty or resolved inbox", dashboard.render(view))
+                self.assertEqual(self.view()["decision_inbox"]["items"][0]["question"], "task-demand")
+
+    def test_source_becoming_unreadable_during_collection_is_unavailable(self):
+        decision = self.evaluate()
+        source = self.store / (decision["id"] + ".json")
+        read = Path.read_bytes
+        reads = []
+        def unreadable(path):
+            if path == source:
+                reads.append(path)
+                if len(reads) > 1:
+                    raise PermissionError("private source error")
+            return read(path)
+        with patch.object(Path, "read_bytes", unreadable):
+            inbox = self.view()["decision_inbox"]
+        self.assertEqual(inbox["status"], "unavailable")
+        self.assertNotIn("private source error", json.dumps(inbox))
+
     def test_broken_native_evidence_keeps_original_proposal_and_unavailable_status(self):
         self.evaluate()
         (self.root / "damaged.json").write_text("broken")
@@ -318,6 +476,29 @@ class NativeInbox(unittest.TestCase):
         item, = self.view()["decision_inbox"]["items"]
         self.assertEqual((item["owner"], item["condition"]), ("operator", "stale"))
         self.assertIsNone(item["recorded_answer"])
+
+    def test_task_change_during_collection_cannot_claim_current_native_resolution(self):
+        f = self.fixture
+        f.start()
+        f.answer()
+        f.collect()
+        pending = jev.pending_decisions
+        calls = []
+        def changing(*args, **kwargs):
+            result = pending(*args, **kwargs)
+            calls.append(result)
+            if len(calls) == 2:
+                record = factory.load_task(f.path)
+                record["inputs"]["requirements"] = "new-requirements"
+                factory.save(f.path, record)
+            return result
+        with patch.object(jev, "pending_decisions", side_effect=changing):
+            view = self.view()
+        self.assertEqual(len(calls[1]["resolutions"]), 1)
+        self.assertEqual(view["decision_inbox"]["status"], "unavailable")
+        self.assertEqual(view["decision_inbox"]["resolutions"], [])
+        self.assertIn("Recorded current native answers (0)", dashboard.render(view))
+        self.assertEqual(self.view()["decision_inbox"]["items"][0]["condition"], "stale")
 
     def test_missing_input_engine_unavailable_and_conflicting_answers_stay_operator_items(self):
         f = self.fixture
