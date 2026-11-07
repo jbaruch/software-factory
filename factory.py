@@ -417,13 +417,13 @@ def git_worktree(repository):
     raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
 
 
-def git_run(repository, *args):
+def git_run(repository, *args, environment=None):
     try:
         worktree = git_worktree(repository)
         return subprocess.run([git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
                               text=True, timeout=10, check=False,
-                              env=git_environment())
+                              env=git_environment() if environment is None else environment)
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -945,12 +945,19 @@ def status(rex, record, assignment):
                 block_id=assignment["block_id"], exit=last_exit)
 
 
-def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600):
+def check_commit_message(message, *, write):
+    if message is not None and (not write or not isinstance(message, str) or not message.strip()
+            or not message.splitlines()[0].strip() or len(message.splitlines()[0]) > 72 or "\0" in message):
+        raise FactoryError("Use --commit-message only with --write and supply a nonempty commit subject of at most 72 characters")
+
+
+def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
     if not Path(codex).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS:
         raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
+    check_commit_message(commit_message, write=write)
     binary = Path(codex).resolve()
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None:
@@ -980,12 +987,12 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         if position >= len(saved) or not Path(saved[position]).is_absolute():
             raise FactoryError("Saved worktree argument is damaged; restore the original assignment before reconnecting")
         command.extend(["--worktree-git-dir", saved[position]])
-    return command + (["--write"] if write else [])
+    return command + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
 def collect_codex(path, assignment_id, rex, record, assignment):
     """Register a finished native report; this never accepts the whole task."""
-    from codex_worker import parse_events, parser, read_events
+    from codex_worker import check_commit_receipt, parse_events, parser, read_events
 
     command = assignment["request"]["command"]
     if command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
@@ -1014,7 +1021,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != 4
+            or receipt["schema_version"] not in (4, 5)
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or any(type(receipt.get(key)) not in (int, float)
                    or not 0 <= receipt[key] <= sys.float_info.max
@@ -1043,6 +1050,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     native = parse_events(read_events(args.events))
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
+    check_commit_receipt(receipt, args, record["admission"]["repository"])
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
     return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
                          requirements=receipt["inputs"]["requirements"],
@@ -1072,6 +1080,7 @@ def main(argv=None):
             start.add_argument("--model", required=True)
             start.add_argument("--effort", required=True)
             start.add_argument("--write", action="store_true")
+            start.add_argument("--commit-message", help="With --write, the factory commits a completed writer result")
             start.add_argument("--seconds", type=int, default=600)
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
@@ -1109,6 +1118,8 @@ def main(argv=None):
             raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
         if args.action == "codex-start" and (not Path(args.codex).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
+        if args.action == "codex-start":
+            check_commit_message(args.commit_message, write=args.write)
         with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
@@ -1134,7 +1145,7 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Codex assignment")
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
-                                         write=args.write, seconds=args.seconds)
+                                         write=args.write, seconds=args.seconds, commit_message=args.commit_message)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,

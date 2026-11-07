@@ -60,11 +60,20 @@ the actual selected commit and discovered eligible model ID:
       "seconds": 180,
       "purpose": "work",
       "write": false,
+      "commit_message": null,
       "after": []
     }
   ]
 }
 ```
+
+Set `write` to true and supply an explicit `commit_message` to authorize the
+factory-owned local commit after a successful writer report. This uses the
+[approved writer contract](native-providers.md#explicit-codex-assignments),
+including configured Git helpers. Read-only jobs use `commit_message: null`.
+Changing the message changes the immutable assignment request.
+After a writer creates a commit, explicitly select that produced candidate and
+submit a verification phase; the original input plan then reports stale.
 
 Jobs have distinct `(task, id)` pairs. `after` names earlier jobs in this plan or
 existing assignments in the same task. A dependency needs a successful current

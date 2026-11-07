@@ -17,7 +17,7 @@ CAPACITY_MAX_AGE = 60
 PROBE_TIMEOUT = 30
 RESERVED_ROLES = {"qa", "code-review", "investigator", "judge", "standby-reasoner"}
 JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
-              "model", "effort", "seconds", "purpose", "write", "after"}
+              "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
 
@@ -45,7 +45,7 @@ def validate_plan(value):
     for job in jobs:
         if not isinstance(job, dict) or set(job) != JOB_FIELDS:
             raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields")
-        if any(not isinstance(job[k], str) or not job[k].strip() for k in JOB_FIELDS - {"seconds", "write", "after"}):
+        if any(not isinstance(job[k], str) or not job[k].strip() for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"}):
             raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
         key = (job["task"], job["id"])
         if (not re.fullmatch(SLUG, job["task"]) or not re.fullmatch(SLUG, job["id"])
@@ -57,6 +57,7 @@ def validate_plan(value):
                 or job["purpose"] not in {"work", "correction", "investigation"}
                 or (job["role"] == "investigator") != (job["purpose"] == "investigation")):
             raise factory.FactoryError("Repair job identity, role, candidate, absolute cwd, purpose, writer flag or execution allowance")
+        factory.check_commit_message(job["commit_message"], write=job["write"])
         after = job["after"]
         if (not isinstance(after, list) or any(not isinstance(item, str) or not re.fullmatch(SLUG, item) for item in after)
                 or len(set(after)) != len(after)
@@ -230,7 +231,7 @@ class Runner:
                 try:
                     expected = factory.codex_command(self.directory / (job["task"] + ".json"), task=job["task"],
                         assignment_id=job["id"], codex=str(self.binary), model=job["model"], effort=job["effort"],
-                        cwd=job["cwd"], write=job["write"], seconds=job["seconds"])
+                        cwd=job["cwd"], write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"])
                     if (request.get("inputs") != dict(candidate=job["candidate"], requirements=job["requirements"])
                             or any(request[k] != job[k] for k in ("role", "goal", "cwd", "purpose"))
                             or request.get("dependencies", []) != sorted(job["after"]) or request["command"] != expected):
@@ -280,7 +281,7 @@ class Runner:
                         raise factory.FactoryError("Task inputs/hold changed before launch; inspect current state before resuming")
                     command = factory.codex_command(path, task=job["task"], assignment_id=job["id"],
                         codex=str(self.binary), model=job["model"], effort=job["effort"], cwd=job["cwd"],
-                        write=job["write"], seconds=job["seconds"])
+                        write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"])
                     current, assignment = factory.launch(path, task=job["task"], assignment_id=job["id"],
                         role=job["role"], goal=job["goal"], cwd=job["cwd"], command=command,
                         binary=self.rex, server=self.server, purpose=job["purpose"], dependencies=job["after"])

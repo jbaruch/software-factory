@@ -12,7 +12,7 @@ the command guides describe operation rather than maintain separate status lists
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
 | Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots and fresh quota gating | Fixed fake-process tests cover restart, uncertainty, holds, stale inputs, finite probe retries and worktree exclusion. Live controller conformance remains unverified; candidate handoff/worktree provisioning and complete delivery remain incomplete |
 | Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
-| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts and result collection | Native subscription sign-in, real read-only execution, revision-bound blocked/completed result collection and exact-pane reconnect; writer delivery and independent quality approval remain unverified |
+| Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, real read-only execution, revision-bound collection/reconnect and scoped independent source approvals. Writer fixtures cover commit/error boundaries; live automatic writer delivery and broader judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
 | Native Grok metadata | Cached OIDC sign-in, subscription/access-gate metadata and per-model effort choices through a private ACP child | Fixed protocol/process tests and a live owner-script probe of agent 1.0.77: X Premium+, no access gate, four model choices and their reported effort values. Quota and worker lifecycle remain unverified |
@@ -29,11 +29,17 @@ The harmless fixtures used earlier receipts. Marker-bound version-3 receipts now
 have live read-only coverage: a real review reported blocked, an investigator
 completed source inspection, and reconnect reused both original panes without
 consuming more allowance. The initial protocol-failure attempt remains failed.
-Current version-4 receipts additionally bind the individual worktree Git directory.
+Version-4 receipts additionally bind the individual worktree Git directory.
 Offline two-worktree fixtures and a separate live Rex event-transport fixture
 verify that binding, collection and exact-pane reconnect. The transport fixture
-makes no model turn or specialist judgment; real provider execution with version 4
-remains unverified. Existing version-3 artifacts stay unchanged and inspection-only
+makes no model turn or specialist judgment. Current version-5 receipts retain
+that binding and add the factory commit intent/result. The prerelease version-5
+engine independently reviewed the pause/resume change in PR #7 and its blank-hold
+correction, approving each exact candidate. Both reports were collected from
+their original Rex panes and streams. The reviewers did not rerun the full suite
+or accept the task; this establishes bounded source-review delivery rather than
+general quality or writer-commit readiness. Existing version-4 receipts remain
+collectable unchanged; version-3 artifacts stay unchanged and inspection-only
 under the current receipt reader.
 Jev then returned resolved in a live shadow reassessment of the narrow decoder
 question; no acceptance or review gate changed. Task schema 4

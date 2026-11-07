@@ -12,6 +12,16 @@ across tasks and gate new launches on fresh native quota/model facts. Keep unkno
 processes reserved and failed attempts unretried. Serialize controllers/manual
 launch commands while leaving observation and operator controls available.
 
+### Factory-owned writer commits
+
+Let explicit `--write --commit-message` assignments leave Git staging/commit to
+the runtime. Retain before-effect intent and staged tree in version-5 receipts,
+respect configured hooks/filters/signing and preserve failures without retries.
+The operator-approved exception permits those helpers to run edited source with
+normal host access; native model sandbox permissions remain unchanged. Collect
+valid version-4 receipts without rewriting them. Produced commits still require
+independent verification and the repository's review/CI gates.
+
 ### Safe Codex capacity snapshot
 
 Curate one native metadata probe into account type/plan, native allowance pools,

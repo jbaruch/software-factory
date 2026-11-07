@@ -69,7 +69,7 @@ class ReadyRunner(unittest.TestCase):
     def job(self, identity="first", *, task="task", role="qa", after=(), **changes) -> dict:
         return {**dict(task=task, id=identity, role=role, goal="Inspect the selected fixture candidate",
             cwd=str(self.repo), candidate=self.candidate, requirements="requirements-1",
-            model="fixture-model", effort="high", seconds=30, purpose="work", write=False,
+            model="fixture-model", effort="high", seconds=30, purpose="work", write=False, commit_message=None,
             after=list(after)), **changes}
 
     def plan(self, jobs, *, workers=2, reserve=1, tasks=4) -> dict:
@@ -87,7 +87,7 @@ class ReadyRunner(unittest.TestCase):
     def tick(self, controller):
         return runner.run(controller, seconds=30, once=True)
 
-    def finish(self, task, identity, outcome="approved"):
+    def finish(self, task, identity, outcome="approved", *, edit=False):
         record = factory.load_task(self.directory / (task + ".json"))
         assignment = record["assignments"][identity]
         request = assignment["request"]
@@ -103,6 +103,8 @@ class ReadyRunner(unittest.TestCase):
                 dict(outcome=outcome, artifacts=["fixture/evidence.txt"])))),
             dict(type="turn.completed", usage=dict(input_tokens=10, output_tokens=5))]
         async def spawn(*command, **options):
+            if edit:
+                (self.repo / "delivery.txt").write_text("Useful fixture delivery\n")
             return FakeProcess(events)
         before = Path.cwd()
         try:
@@ -117,6 +119,27 @@ class ReadyRunner(unittest.TestCase):
 
     def states(self, result):
         return {(item["task"], item["id"]): item["state"] for item in result["jobs"]}
+
+    def test_writer_commit_is_collected_and_changed_message_cannot_replay_it(self):
+        plan = self.plan([self.job(role="backend", write=True,
+                                  commit_message="feat(fixture): Deliver an explicit change")])
+        self.assertEqual(self.tick(self.controller(plan))["metrics"]["launched"], 1)
+        self.finish("task", "first", outcome="completed", edit=True)
+        candidate = factory.git_commit(str(self.repo), "HEAD")
+        self.assertNotEqual(candidate, self.candidate)
+        completed = self.tick(self.controller(plan))
+        self.assertEqual(completed["result"], "needs_action")
+        self.assertEqual(self.states(completed)[("task", "first")], "stale")
+        saved = factory.load_task(self.directory / "task.json")["assignments"]["first"]
+        self.assertEqual(saved["result"]["outcome"], "completed")
+        self.assertEqual(saved["result"]["candidate"], candidate)
+        self.assertIn("--commit-message", saved["request"]["command"])
+        changed = copy.deepcopy(plan)
+        changed["jobs"][0]["commit_message"] = "feat(fixture): Different intent"
+        conflict = self.tick(self.controller(changed))
+        self.assertEqual(self.states(conflict)[("task", "first")], "conflict")
+        self.assertEqual(factory.git_commit(str(self.repo), "HEAD"), candidate)
+        self.assertEqual(conflict["metrics"]["launched"], 0)
 
     def test_collected_dependency_starts_next_assignment_without_a_foreman_turn(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
@@ -354,6 +377,8 @@ class ReadyRunner(unittest.TestCase):
             lambda d: d.update(extra="unknown"), lambda d: d["limits"].update(workers=True),
             lambda d: d["limits"].update(reserve_workers=2),
             lambda d: d["jobs"][0].update(write="yes"), lambda d: d["jobs"][0].update(candidate="HEAD"),
+            lambda d: d["jobs"][0].update(commit_message="feat: Unapproved read-only commit"),
+            lambda d: d["jobs"][0].update(write=True, commit_message=""),
             lambda d: d["jobs"][0].update(after=["first"]),
             lambda d: d["jobs"].append(copy.deepcopy(d["jobs"][0]))]
         for mutate in changes:

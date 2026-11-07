@@ -19,12 +19,12 @@ import factory
 from test_rex_launcher import FakeRex
 
 
-def events():
+def events(outcome="approved"):
     return [dict(type="thread.started", thread_id="thread-fixture"),
             dict(type="turn.started"),
             dict(type="item.completed", item=dict(type="agent_message", text="Checking the candidate")),
             dict(type="item.completed", item=dict(type="agent_message", text=json.dumps(
-                dict(outcome="approved", artifacts=["evidence/qa.txt"])))),
+                dict(outcome=outcome, artifacts=["evidence/qa.txt"])))),
             dict(type="turn.completed", usage=dict(input_tokens=100, output_tokens=30))]
 
 
@@ -77,7 +77,8 @@ class NativeResults(unittest.TestCase):
             "--worktree-git-dir", str(factory.git_dir(str(self.repo))),
             "--model", "fixture-model", "--effort", "high", "--events", str(self.root / "events.jsonl"),
             "--receipt", str(self.root / "receipt.json")])
-        self.env = patch.dict(os.environ, {"CODEX_API_KEY": "", "OPENAI_API_KEY": ""})
+        self.env = patch.dict(os.environ, {"CODEX_API_KEY": "", "OPENAI_API_KEY": "",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.spawns = []
@@ -95,7 +96,7 @@ class NativeResults(unittest.TestCase):
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
         self.assertEqual(receipt["state"], "completed")
-        self.assertEqual(receipt["schema_version"], 4)
+        self.assertEqual(receipt["schema_version"], 5)
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertEqual(receipt["worktree_git_dir"], str(factory.git_dir(str(self.repo))))
         self.assertEqual(receipt["candidate"], self.candidate)
@@ -133,6 +134,274 @@ class NativeResults(unittest.TestCase):
         decoded = worker.read_events(self.args.events)
         self.assertNotIn("id", decoded[2]["item"])
         self.assertEqual(worker.parse_events(decoded)["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
+
+    def writer(self, *, outcome="completed", exit_code=0):
+        for key, value in {"user.name": "Fixture", "user.email": "fixture@example.invalid",
+                           "commit.gpgsign": "false", "core.hooksPath": "/dev/null"}.items():
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
+        self.args.write = True
+        self.args.commit_message = "feat(example): Add the assigned behavior\n\nExercise the factory-owned writer commit."
+        self.process = FakeProcess(events(outcome), exit_code=exit_code)
+        async def spawn(*command, **options):
+            self.spawns.append(command)
+            self.assertEqual(options["env"]["PYTHONDONTWRITEBYTECODE"], "1")
+            (self.repo / "feature.py").write_text("answer = 42\n")
+            return self.process
+        self.spawn = spawn
+
+    def test_factory_commits_finished_writer_changes_once(self):
+        self.writer()
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "created")
+        candidate = receipt["candidate"]
+        self.assertNotEqual(candidate, self.candidate)
+        self.assertEqual(factory.git_run(".", "show", "-s", "--format=%P", candidate).stdout.strip(), self.candidate)
+        self.assertEqual(factory.git_run(".", "show", candidate + ":feature.py").stdout, "answer = 42\n")
+        self.assertEqual(factory.git_run(".", "show", "-s", "--format=%B", candidate).stdout.strip(), self.args.commit_message)
+        self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
+        worker.check_commit_receipt(receipt, self.args, str(self.repo))
+        with self.assertRaisesRegex(factory.FactoryError, "never relaunch"):
+            self.execute()
+        self.assertEqual(len(self.spawns), 1)
+        self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
+
+    def test_factory_commit_with_no_changes_does_not_create_an_empty_commit(self):
+        self.args.write = True
+        self.args.commit_message = "feat(example): Keep existing behavior"
+        self.process = FakeProcess(events("completed"))
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "unchanged")
+        self.assertEqual(receipt["candidate"], self.candidate)
+        worker.check_commit_receipt(receipt, self.args, str(self.repo))
+
+    def test_unsuccessful_native_writer_does_not_commit_partial_changes(self):
+        for index, (outcome, code) in enumerate((("completed", 1), ("blocked", 0), ("findings", 0))):
+            self.args.events = self.root / f"failed-{index}.jsonl"
+            self.args.receipt = self.root / f"failed-{index}.json"
+            self.writer(outcome=outcome, exit_code=code)
+            receipt = self.execute()
+            self.assertEqual(receipt["state"], "failed")
+            self.assertIsNone(receipt["commit"])
+            self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+            self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+            (self.repo / "feature.py").unlink()
+
+    def test_failed_commit_hook_retains_changes_and_never_retries(self):
+        self.writer()
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        log = self.root / "hook-calls"
+        hook = hooks / "pre-commit"
+        hook.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nwith Path({str(log)!r}).open('a') as f: f.write('called\\n')\nraise SystemExit(1)\n")
+        hook.chmod(0o700)
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", str(hooks)], check=True)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("inspect the retained commit intent, Git HEAD", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "committing")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+        with self.assertRaises(factory.FactoryError):
+            self.execute()
+        self.assertEqual(log.read_text(), "called\n")
+
+    def test_lost_commit_response_preserves_uncertainty_without_a_second_commit(self):
+        self.writer()
+        git_run = factory.git_run
+        def lost_reply(repository, *args, **options):
+            result = git_run(repository, *args, **options)
+            if args[0] == "commit":
+                self.assertEqual(result.returncode, 0)
+                raise factory.FactoryError("fixture lost response")
+            return result
+        with patch.object(factory, "git_run", side_effect=lost_reply):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("outcome is uncertain", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "committing")
+        candidate = factory.git_commit(".", "HEAD")
+        self.assertNotEqual(candidate, self.candidate)
+        with self.assertRaises(factory.FactoryError):
+            self.execute()
+        self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
+        self.assertEqual(len(self.spawns), 1)
+
+    def test_factory_commit_works_from_an_admitted_subdirectory(self):
+        self.writer()
+        docs = self.repo / "docs"
+        docs.mkdir()
+        (docs / "contract.txt").write_text("Fixture contract\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add contract fixture").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.args.cwd = docs
+        os.chdir(docs)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["parent"], self.candidate)
+        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
+        self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
+
+    def test_authorized_hook_imports_writer_edited_source_with_normal_host_access(self):
+        self.writer()
+        helper = self.repo / "hook_helper.py"
+        helper.write_text("def effect():\n    pass\n")
+        hooks = self.repo / ".githooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path.cwd()))\nfrom hook_helper import effect\neffect()\n")
+        hook.chmod(0o700)
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add authorized fixture hook").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", ".githooks"], check=True)
+        effect = self.root / "authorized-hook-effect"
+        original_spawn = self.spawn
+        async def changed(*command, **options):
+            helper.write_text(f"from pathlib import Path\ndef effect():\n    Path({str(effect)!r}).write_text('writer-edited source')\n")
+            return await original_spawn(*command, **options)
+        self.spawn = changed
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(effect.read_text(), "writer-edited source")
+        self.assertEqual(receipt["commit"]["state"], "created")
+        self.assertNotEqual(receipt["candidate"], self.candidate)
+        self.assertIn("workspace-write", self.spawns[0])
+        self.assertFalse((self.repo / "__pycache__").exists())
+
+    def test_authorized_transitive_filter_observes_intent_before_host_status(self):
+        self.writer()
+        tools = self.repo / "tools"
+        tools.mkdir()
+        (self.repo / ".gitattributes").write_text("*.audit filter=audit\n")
+        (self.repo / "sample.audit").write_text("base\n")
+        helper = tools / "filter_helper.py"
+        helper.write_text("def clean(data):\n    return data\n")
+        program = tools / "filter.py"
+        program.write_text("import sys\nfrom filter_helper import clean\nsys.stdout.write(clean(sys.stdin.read()))\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add authorized filter fixture").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
+                        shlex.quote(sys.executable) + " -B tools/filter.py"], check=True)
+        effect = self.root / "authorized-filter-intents"
+        original_spawn = self.spawn
+        async def changed(*command, **options):
+            helper.write_text("import json\nfrom pathlib import Path\ndef clean(data):\n"
+                f"    receipt = json.loads(Path({str(self.args.receipt)!r}).read_text())\n"
+                f"    with Path({str(effect)!r}).open('a') as log: log.write(receipt['commit']['state'] + '\\n')\n"
+                "    return data\n")
+            (self.repo / "sample.audit").write_text("updated\n")
+            return await original_spawn(*command, **options)
+        self.spawn = changed
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        states = effect.read_text().splitlines()
+        self.assertEqual(states[0], "preparing")
+        self.assertTrue(all(state in {"preparing", "committing", "created"} for state in states))
+        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":sample.audit").stdout, "updated\n")
+        self.assertFalse((tools / "__pycache__").exists())
+
+    def inherited_policy(self, kind, transport):
+        self.writer()
+        log = self.root / (kind + "-calls")
+        program = self.root / (kind + " fixture")
+        program.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nwith Path({str(log)!r}).open('a') as f: f.write('called\\n')\nraise SystemExit(1)\n")
+        program.chmod(0o700)
+        if kind == "hook":
+            hooks = self.root / "hooks with spaces"
+            hooks.mkdir()
+            program.rename(hooks / "pre-commit")
+            settings = {"core.hooksPath": str(hooks)}
+            subprocess.run(["git", "-C", str(self.repo), "config", "--unset", "core.hooksPath"], check=True)
+        else:
+            settings = {"commit.gpgsign": "true", "gpg.format": "openpgp", "gpg.program": str(program)}
+            subprocess.run(["git", "-C", str(self.repo), "config", "--unset", "commit.gpgsign"], check=True)
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_CONFIG")}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        if transport == "count":
+            environment["GIT_CONFIG_COUNT"] = str(len(settings))
+            for index, (key, value) in enumerate(settings.items()):
+                environment[f"GIT_CONFIG_KEY_{index}"] = key
+                environment[f"GIT_CONFIG_VALUE_{index}"] = value
+        elif transport == "parameters":
+            def quoted(value):
+                return "'" + value.replace("'", "'\\''") + "'"
+            environment["GIT_CONFIG_PARAMETERS"] = " ".join(quoted(key + "=" + value) for key, value in settings.items())
+        else:
+            config = self.root / "policy.config"
+            for key, value in settings.items():
+                subprocess.run(["git", "config", "--file", str(config), "--add", key, value], check=True)
+            environment["GIT_CONFIG_GLOBAL"] = str(config)
+        with patch.dict(os.environ, environment, clear=True):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("configured hooks/signing", receipt["error"])
+        self.assertEqual(log.read_text(), "called\n")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+
+    def test_count_supplied_hook_is_enforced(self):
+        self.inherited_policy("hook", "count")
+
+    def test_parameter_supplied_hook_is_enforced(self):
+        self.inherited_policy("hook", "parameters")
+
+    def test_global_file_supplied_hook_is_enforced(self):
+        self.inherited_policy("hook", "global")
+
+    def test_count_supplied_signing_is_enforced(self):
+        self.inherited_policy("signing", "count")
+
+    def test_parameter_supplied_signing_is_enforced(self):
+        self.inherited_policy("signing", "parameters")
+
+    def test_global_file_supplied_signing_is_enforced(self):
+        self.inherited_policy("signing", "global")
+
+    def test_factory_commit_refuses_source_links_before_creating_a_commit(self):
+        outside = self.root / "outside.txt"
+        outside.write_text("original\n")
+        for kind in ("symlink", "hardlink"):
+            self.writer()
+            self.args.events = self.root / f"link-{kind}.jsonl"
+            self.args.receipt = self.root / f"link-{kind}.json"
+            source = self.repo / "source-link"
+            async def spawn(*command, **options):
+                if kind == "symlink":
+                    source.symlink_to(outside)
+                else:
+                    os.link(outside, source)
+                return self.process
+            self.spawn = spawn
+            receipt = self.execute()
+            self.assertEqual(receipt["state"], "failed")
+            self.assertIn("linked or non-regular source", receipt["error"])
+            self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+            self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
+            self.assertEqual(outside.read_text(), "original\n")
+            source.unlink()
+
+    def test_bad_commit_message_refuses_before_task_locks_or_execution_artifacts(self):
+        for write, message in ((False, "A message"), (True, " "), (True, "\nNo subject"),
+                               (True, "x" * 73), (True, "bad\0message")):
+            self.args.write, self.args.commit_message = write, message
+            with self.subTest(message=message), self.assertRaisesRegex(factory.FactoryError, "commit subject"):
+                self.execute()
+            state = self.root / "never-created"
+            argv = ["--state-dir", str(state), "codex-start", "--task", "task", "--id", "writer",
+                    "--role", "backend", "--goal", "Implement", "--cwd", str(self.repo),
+                    "--codex", sys.executable, "--model", "fixture", "--effort", "low", "--commit-message", message]
+            if write:
+                argv.append("--write")
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(factory.main(argv), 1)
+            self.assertFalse(state.exists())
+            self.assertFalse(self.args.receipt.exists())
+            self.assertFalse(self.args.events.exists())
+            self.assertEqual(self.spawns, [])
 
     def test_other_native_duplicate_fields_still_refuse_decoding(self):
         for raw in (
@@ -311,12 +580,13 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertIn("repository identity differs", receipt["error"])
 
-    def launch_assignment(self, codex=sys.executable, *, execute=True, legacy=False):
+    def launch_assignment(self, codex=sys.executable, *, write=False, commit_message=None, execute=True, legacy=False):
         self.path = self.root / "task.json"
         factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
                       acceptance=["docs/acceptance.md"])
         command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=codex,
-                                        model="fixture-model", effort="high", cwd=str(self.repo))
+                                        model="fixture-model", effort="high", cwd=str(self.repo),
+                                        write=write, commit_message=commit_message)
         if legacy:
             del command[1:3]
         FakeRex.sessions, FakeRex.calls = [], []
@@ -339,6 +609,33 @@ class NativeResults(unittest.TestCase):
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
         return record, assignment
 
+    def test_factory_writer_collection_binds_the_produced_commit_without_approving_it(self):
+        self.writer()
+        message = self.args.commit_message
+        record, assignment = self.launch_assignment(write=True, commit_message=message)
+        original = json.loads(self.args.receipt.read_text())
+        before = self.path.read_bytes()
+        for change in (dict(state="committing"), dict(parent="a" * 40), dict(message="Changed"),
+                       dict(staged_tree=True), dict(candidate=self.candidate)):
+            damaged = copy.deepcopy(original)
+            damaged["commit"].update(change)
+            self.args.receipt.write_text(json.dumps(damaged))
+            with patch.object(factory, "status", return_value=dict(state="exited")), self.assertRaisesRegex(
+                    factory.FactoryError, "commit evidence"):
+                factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertEqual(self.path.read_bytes(), before)
+        self.args.receipt.write_text(json.dumps(original))
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            result = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        produced = result["assignments"]["qa"]["result"]
+        self.assertEqual(produced["outcome"], "completed")
+        self.assertEqual(produced["candidate"], original["candidate"])
+        self.assertFalse(factory.result_current(result, produced))
+        selected = factory.set_inputs(self.path, candidate=produced["candidate"],
+                                      requirements=produced["inputs"]["requirements"])
+        self.assertTrue(factory.result_current(selected, produced))
+        self.assertEqual(len(self.spawns), 1)
+
     def test_historical_worker_command_reconnects_and_collects_unchanged(self):
         record, assignment = self.launch_assignment(legacy=True)
         frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
@@ -350,6 +647,53 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
         self.assertEqual(self.args.receipt.read_bytes(), original)
         self.assertEqual(len(self.spawns), 1)
+
+    def test_version_four_receipt_remains_collectable_without_migration(self):
+        # Independent old-format fixture: never obtain it from the current writer.
+        path = self.root / "task.json"
+        factory.admit(path, task="task", goal="Inspect legacy evidence", repository=str(self.repo),
+                      acceptance=["fixture/legacy-acceptance.md"])
+        factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
+        stream, receipt = self.root / "task.qa.codex.jsonl", self.root / "task.qa.codex.json"
+        binary, gitdir = str(Path(sys.executable).resolve()), str(factory.git_dir(str(self.repo)))
+        command = [sys.executable, str(factory.ROOT / "codex_worker.py"), "--job", "task/qa",
+            "--codex", binary, "--model", "fixture-model", "--effort", "high", "--seconds", "600",
+            "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
+            "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
+            "--requirements", "{requirements}", "--events", str(stream), "--receipt", str(receipt),
+            "--repo-identity", "{repository_identity}", "--worktree-git-dir", gitdir]
+        FakeRex.sessions, FakeRex.calls = [], []
+        FakeRex.fail_after_create, FakeRex.host = False, "test-host"
+        with patch.object(factory, "Rex", FakeRex):
+            record, assignment = factory.launch(path, task="task", assignment_id="qa", role="qa",
+                goal="Review legacy candidate", cwd=str(self.repo), command=command, purpose="work",
+                binary=sys.executable, server="unix:///test.sock")
+        report = {"outcome": "approved", "artifacts": ["fixture/legacy-qa.txt"]}
+        usage = {"input_tokens": 17, "output_tokens": 3}
+        native = [{"type": "thread.started", "thread_id": "legacy-thread"}, {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(report)}},
+            {"type": "turn.completed", "usage": usage}]
+        stream.write_text("".join(json.dumps({"schema_version": 1, "kind": "codex-event-line",
+            "data": json.dumps(event) + "\n"}) + "\n" for event in native))
+        legacy = {"schema_version": 4, "kind": "codex-execution", "job": "task/qa", "state": "completed",
+            "inputs": {"candidate": self.candidate, "requirements": "requirements-1"},
+            "repository_identity": self.identity, "worktree_git_dir": gitdir,
+            "brief_sha256": hashlib.sha256(Path(assignment["brief"]).read_bytes()).hexdigest(),
+            "cwd": str(self.repo.resolve()), "requested_model": "fixture-model", "requested_effort": "high",
+            "binary": binary, "writer": False, "created_at": 1000.0, "finished_at": 1001.0,
+            "elapsed_seconds": 1.0, "exit_code": 0, "thread_id": "legacy-thread", "report": report,
+            "usage": usage, "candidate": self.candidate, "events": str(stream), "error": None}
+        receipt.write_text(json.dumps(legacy))
+        original, original_stream = receipt.read_bytes(), stream.read_bytes()
+        frozen = factory.codex_command(path, task="task", assignment_id="qa", codex=binary,
+            model="fixture-model", effort="high", cwd=str(self.repo))
+        self.assertEqual(frozen, command)
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            result = factory.collect_codex(path, "qa", FakeRex(sys.executable, "unix:///test.sock"), record, assignment)
+        self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
+        self.assertEqual(receipt.read_bytes(), original)
+        self.assertEqual(stream.read_bytes(), original_stream)
+        self.assertEqual(self.spawns, [])
 
     def test_workspace_python_startup_code_cannot_run_in_the_host_worker(self):
         effect = self.root / "startup-effect"
@@ -668,7 +1012,7 @@ class NativeResults(unittest.TestCase):
         record, assignment = self.launch_assignment()
         receipt = self.args.receipt.read_text()
         events_text = self.args.events.read_text()
-        duplicate_receipt = receipt.replace('"schema_version": 4', '"schema_version": 99, "schema_version": 4', 1)
+        duplicate_receipt = receipt.replace('"schema_version": 5', '"schema_version": 99, "schema_version": 5', 1)
         duplicate_event = events_text.replace('"schema_version": 1', '"schema_version": 99, "schema_version": 1', 1)
         for damaged_receipt, damaged_events, error in (
                 (duplicate_receipt, events_text, "Cannot read native receipt"),
