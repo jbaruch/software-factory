@@ -23,6 +23,51 @@ class GrokProbeError(Exception):
     pass
 
 
+def validate_configuration(value, cwd):
+    """Validate retained configuration evidence without rereading mutable files."""
+    if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 2 or value.get("kind") != "grok-subscription-configuration"
+            or value.get("cwd") != str(Path(cwd).resolve())
+            or value.get("route") != "cached-session-without-routing-overrides"
+            or value.get("sandbox") != "strict" or value.get("tools") != ["read_file"]
+            or value.get("no_executable_customizations") is not True
+            or not isinstance(value.get("grok_home"), str) or "\0" in value["grok_home"]
+            or not Path(value["grok_home"]).is_absolute()
+            or not isinstance(value.get("cli_version"), str) or not value["cli_version"].strip()
+            or not isinstance(value.get("layers"), list)
+            or any(type(value.get(key)) not in (int, float) or not 0 <= value[key] <= sys.float_info.max
+                   for key in ("observed_at", "probe_seconds"))):
+        raise GrokProbeError("Unsupported Grok configuration evidence; inspect the original observation and update its reader before execution or collection")
+    for layer in value["layers"]:
+        if (not isinstance(layer, dict) or not isinstance(layer.get("path"), str)
+                or "\0" in layer["path"] or not Path(layer["path"]).is_absolute()
+                or not isinstance(layer.get("role"), str) or not layer["role"].strip()
+                or not isinstance(layer.get("sha256"), str) or len(layer["sha256"]) != 64
+                or any(character not in "0123456789abcdef" for character in layer["sha256"])):
+            raise GrokProbeError("Malformed Grok configuration layer evidence; inspect its original path, role and SHA-256 before execution or collection")
+
+
+def validate_discovery(value, binary, cwd):
+    """Apply the native metadata contract to both fresh and retained evidence."""
+    if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1 or value.get("kind") != "grok-native-metadata"
+            or value.get("route") != "grok-native" or value.get("binary") != str(binary)
+            or value.get("cwd") != str(Path(cwd).resolve())
+            or value.get("readiness") != "unverified" or "quota_observation" not in value
+            or value["quota_observation"] is not None
+            or any(type(value.get(key)) not in (int, float) or not 0 <= value[key] <= sys.float_info.max
+                   for key in ("observed_at", "probe_seconds"))
+            or not isinstance(value.get("authentication"), dict)
+            or value["authentication"].get("method") != "cached_token"):
+        raise GrokProbeError("Unsupported Grok discovery evidence; inspect the original metadata and update its reader before execution or collection")
+    validate_configuration(value.get("configuration"), cwd)
+    metadata(dict(protocolVersion=1, agentCapabilities=value.get("capabilities"),
+                  _meta=dict(agentVersion=value.get("agent_version"),
+                             modelState=dict(currentModelId=value.get("current_model"),
+                                             availableModels=value.get("models")))),
+             dict(_meta=value["authentication"]))
+
+
 def environment():
     """Keep the selected native profile without forwarding host credentials."""
     if any(key.startswith("GROK_") and key not in {"GROK_HOME", "GROK_WORKTREE_AUTO_GC"} for key in os.environ):
@@ -56,7 +101,9 @@ async def subscription_configuration(binary, cwd, *, spawn=asyncio.create_subpro
         if process.returncode or stderr:
             raise GrokProbeError("Cannot inspect native Grok configuration; inspect the selected profile and native inspect command before execution")
         result = parse_configuration(decode_json(stdout), cwd)
-        return {**result, "observed_at": time.time(), "probe_seconds": time.monotonic() - started}
+        observation = {**result, "observed_at": time.time(), "probe_seconds": time.monotonic() - started}
+        validate_configuration(observation, cwd)
+        return observation
     except (OSError, ValueError, UnicodeError, TimeoutError):
         raise GrokProbeError("Cannot establish Grok subscription configuration; inspect its native configuration layers before execution") from None
     finally:
@@ -235,6 +282,7 @@ async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec,
         raise GrokProbeError("Supply an executable native Grok file and an existing --cwd directory")
     started = timer()
     config = await configuration(binary, cwd)
+    validate_configuration(config, cwd)
     try:
         process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
             "--sandbox", "strict", *read_options(cwd), "agent", "--no-leader", "stdio", cwd=str(cwd),
@@ -254,9 +302,11 @@ async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec,
             raise GrokProbeError("Native Grok authentication methods are ambiguous; inspect CLI compatibility before refreshing")
         authenticated = await exchange(process, 1, "authenticate", dict(methodId="cached_token", _meta=dict(headless=True)))
         facts = metadata(initialized, authenticated)
-        return dict(schema_version=1, kind="grok-native-metadata", route="grok-native", binary=str(binary), cwd=str(cwd),
+        observation = dict(schema_version=1, kind="grok-native-metadata", route="grok-native", binary=str(binary), cwd=str(cwd),
             observed_at=clock(), probe_seconds=timer() - started, configuration=config, **facts, quota_observation=None, readiness="unverified",
             note="Native cached sign-in and model metadata only; no model turn requested. Quota and worker lifecycle remain unverified.")
+        validate_discovery(observation, binary, cwd)
+        return observation
     finally:
         if process.returncode is None:
             try:

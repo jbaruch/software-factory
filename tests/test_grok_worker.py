@@ -89,9 +89,11 @@ class GrokWorker(unittest.TestCase):
     async def probe(self, binary, cwd, *, configuration) -> dict[str, Any]:
         config = await configuration(binary, cwd)
         self.probes.append((binary, cwd))
-        return dict(schema_version=1, kind="grok-native-metadata", binary=str(binary), cwd=str(self.repo),
+        return dict(schema_version=1, kind="grok-native-metadata", route="grok-native", binary=str(binary), cwd=str(self.repo),
                     observed_at=1000, probe_seconds=0.25, configuration=config,
-                    authentication=dict(auth_mode="Oidc", subscription_tier="Fixture", gate=None),
+                    readiness="unverified", quota_observation=None, agent_version="fixture", capabilities={},
+                    current_model="fixture-model",
+                    authentication=dict(method="cached_token", auth_mode="Oidc", subscription_tier="Fixture", gate=None, backend_billed=False),
                     models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value="high")]))])
 
     async def configuration(self, binary, cwd):
@@ -294,6 +296,56 @@ class GrokWorker(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "frozen completed assignment"):
             self.collect()
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_malformed_nested_configuration_cannot_launch_or_record_a_result(self):
+        original = self.configuration
+        for changed in (dict(layers=[None]), dict(layers=[{}]),
+                        dict(layers=[dict(path="relative", role="user", sha256="a" * 64)]),
+                        dict(layers=[dict(path=str(self.root / "config.toml"), role="", sha256="a" * 64)]),
+                        dict(layers=[dict(path=str(self.root / "config.toml"), role="user", sha256="not-a-digest")]),
+                        dict(cli_version=""), dict(probe_seconds=-1), dict(observed_at=True)):
+            async def malformed(binary, cwd):
+                return {**await original(binary, cwd), **changed}
+            self.configuration = malformed
+            with self.subTest(changed=changed), self.assertRaisesRegex(factory.FactoryError, "Grok configuration"):
+                self.execute()
+            self.assertEqual(self.spawns, [])
+            self.assertFalse(self.args.receipt.exists())
+        self.configuration = original
+        receipt = self.execute()
+        before = self.path.read_bytes()
+        for changed in (dict(layers=[None]), dict(cli_version=""), dict(probe_seconds=float("inf")),
+                        dict(observed_at=False)):
+            damaged = copy.deepcopy(receipt)
+            damaged["configuration"].update(changed)
+            damaged["discovery"]["configuration"].update(changed)
+            self.args.receipt.write_text(json.dumps(damaged))
+            with self.subTest(changed=changed), self.assertRaises(factory.FactoryError):
+                self.collect()
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_malformed_discovery_cannot_launch_or_record_a_result(self):
+        original = self.probe
+        for changed in (dict(agent_version=""), dict(capabilities=None), dict(models=[None]),
+                        dict(authentication={}), dict(current_model=""), dict(observed_at=-1)):
+            async def malformed(binary, cwd, **options):
+                return {**await original(binary, cwd, **options), **changed}
+            self.probe = malformed
+            with self.subTest(changed=changed), self.assertRaises(factory.FactoryError):
+                self.execute()
+            self.assertEqual(self.spawns, [])
+            self.assertFalse(self.args.events.exists())
+        self.probe = original
+        receipt = self.execute()
+        before = self.path.read_bytes()
+        for changed in (dict(models=[None]), dict(authentication={}), dict(agent_version=""),
+                        dict(probe_seconds=True)):
+            damaged = copy.deepcopy(receipt)
+            damaged["discovery"].update(changed)
+            self.args.receipt.write_text(json.dumps(damaged))
+            with self.subTest(changed=changed), self.assertRaises(factory.FactoryError):
+                self.collect()
+            self.assertEqual(self.path.read_bytes(), before)
 
 
 if __name__ == "__main__":

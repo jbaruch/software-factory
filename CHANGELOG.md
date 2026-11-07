@@ -21,6 +21,8 @@ Require native project trust and no executable customizations before metadata
 agents start. Restrict model tools to file reads with overriding denies and the
 strict sandbox; refuse inherited route/profile environment overrides. Earlier
 configuration-1 evidence remains inspection-only under the tightened reader.
+Validate nested configuration layers, CLI identity and timing, and reuse the
+native discovery validation at both execution and collection boundaries.
 
 ## 0.3.0 — 2026-11-06
 

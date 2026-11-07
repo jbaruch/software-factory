@@ -219,6 +219,10 @@ timestamps/duration, exit code, final report/request identity, native usage/mode
 usage, actual turn count, candidate, stream path and error. Before completion,
 result/timing/exit fields are null. State is `starting`, `completed` or `failed`.
 The discovery retains its own native metadata schema version and probe duration.
+Execution and collection share validation of discovery metadata and configuration
+evidence, including each layer's absolute path, nonempty role and SHA-256 digest,
+the CLI version and finite nonnegative observation timing. Collection validates
+the retained observation without rereading mutable profile files.
 No quota or monetary spend is inferred from native token/cost telemetry.
 
 Collection requires successful owned worker exit, a completed version-2 receipt

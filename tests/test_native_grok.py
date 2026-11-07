@@ -19,6 +19,7 @@ import native_grok
 async def plain_configuration(binary, cwd):
     return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(Path(cwd).resolve()),
                 grok_home=str(Path(cwd).resolve()), cli_version="fixture", layers=[],
+                observed_at=100, probe_seconds=0.1,
                 sandbox="strict", tools=["read_file"], no_executable_customizations=True,
                 route="cached-session-without-routing-overrides")
 

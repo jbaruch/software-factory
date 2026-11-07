@@ -1187,34 +1187,16 @@ def collect_grok(path, assignment_id, rex, record, assignment):
             or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
             or not args.grok.is_absolute() or receipt.get("binary") != str(args.grok)
             or receipt.get("native_session") != args.native_session
-            or not isinstance(receipt.get("configuration"), dict)
-            or type(receipt["configuration"].get("schema_version")) is not int
-            or receipt["configuration"]["schema_version"] != 2
-            or receipt["configuration"].get("kind") != "grok-subscription-configuration"
-            or receipt["configuration"].get("cwd") != request["cwd"]
-            or receipt["configuration"].get("route") != "cached-session-without-routing-overrides"
-            or receipt["configuration"].get("sandbox") != "strict"
-            or receipt["configuration"].get("tools") != ["read_file"]
-            or receipt["configuration"].get("no_executable_customizations") is not True
-            or not isinstance(receipt["configuration"].get("grok_home"), str)
-            or not Path(receipt["configuration"]["grok_home"]).is_absolute()
-            or not isinstance(receipt["configuration"].get("layers"), list)
             or not isinstance(receipt.get("discovery"), dict)
-            or type(receipt["discovery"].get("schema_version")) is not int
-            or receipt["discovery"]["schema_version"] != 1
-            or receipt["discovery"].get("kind") != "grok-native-metadata"
-            or receipt["discovery"].get("binary") != str(args.grok)
-            or receipt["discovery"].get("cwd") != request["cwd"]
+            or "configuration" not in receipt
             or receipt["discovery"].get("configuration") != receipt["configuration"]
-            or any(type(receipt["discovery"].get(key)) not in (int, float)
-                   or not 0 <= receipt["discovery"][key] <= sys.float_info.max
-                   for key in ("observed_at", "probe_seconds"))
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
             or type(receipt.get("max_turns")) is not int or receipt["max_turns"] != args.turns
             or receipt.get("events") != str(args.events)):
         raise FactoryError("Grok receipt differs from its frozen completed assignment; inspect the original artifacts")
     try:
+        native_grok.validate_discovery(receipt["discovery"], args.grok, request["cwd"])
         native = native_grok.parse_execution(grok_worker.read_events(args.events), session_id=args.native_session,
                                             cwd=request["cwd"], max_turns=args.turns)
     except native_grok.GrokProbeError as exc:

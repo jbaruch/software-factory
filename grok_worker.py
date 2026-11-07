@@ -66,6 +66,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         raise factory.FactoryError("Keep the native Grok installation outside the assigned checkout and Git metadata")
     try:
         observation = await probe(binary, Path("."), configuration=configuration)
+        native_grok.validate_discovery(observation, binary, args.cwd)
         config = observation["configuration"]
     except native_grok.GrokProbeError as exc:
         raise factory.FactoryError(str(exc)) from None
