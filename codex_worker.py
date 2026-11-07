@@ -427,9 +427,6 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError("Restore the saved absolute worktree Git directory before launching")
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
-    if args.write and any(binary.is_relative_to(root) for root in (
-            Path(factory.git_worktree(args.cwd)), factory.git_common_dir(args.cwd), args.worktree_git_dir)):
-        raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     if args.write and any(binary.is_relative_to(root) for root in (
