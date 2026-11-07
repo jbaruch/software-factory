@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0 — 2026-11-07 (unpublished)
+
+### Sanitized native Claude auth metadata
+
+Add an independent stdlib adapter for fixed native version/auth-status commands,
+strict allowlisted sign-in facts and explicit unknown eligibility/quota. Preserve
+signed-out exit 1 as an observation and non-subscription auth facts without
+claiming subscription access. Refuse environment overrides before launch, preserve
+an explicitly selected native config directory without reading its contents, and
+omit private native payloads/diagnostics. Fixed socket-free process tests cover
+success and refusal paths. Candidate live observation, independent QA/security,
+host full tests and current-head policy/CI remain separate gates. No publisher is
+configured or authorized; no route is activated.
+
 ## 0.11.0 — 2026-11-07 (unpublished)
 
 ### Retained Antigravity result decoding

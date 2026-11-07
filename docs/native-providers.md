@@ -41,6 +41,59 @@ lifecycle and subscription eligibility. Do not substitute API-key billing for
 subscription routes. See the [implementation inventory](implementation.md) for
 provider coverage.
 
+## Sanitized native Claude authentication
+
+```sh
+python3 -B native_claude.py --binary '/absolute/path/to/claude' --cwd '/absolute/trusted/directory'
+```
+
+`probe(binary, cwd)` invokes only `--version` and
+`--safe-mode --restricted auth status --json`, with closed stdin, the explicit
+accessible executable and trusted cwd, and a 20-second timeout per command.
+There is no retry, prompt, model turn, login/logout, paid API fallback or settings
+change. Our code opens no auth/config files; the CLI owns native authentication.
+`curate(output, returncode=...)` is pure and accepts original JSON text.
+
+The primary [Claude CLI reference](https://code.claude.com/docs/en/cli-reference)
+defines exit 0 as signed in and exit 1 as signed out. Both are successful metadata
+observations when JSON agrees. Supported `authMethod` values are `none`,
+`claude.ai`, `oauth_token`, `api_key`, `api_key_helper` and `third_party`.
+Signed out requires `none`; signed in requires a non-`none` method. A genuine
+API-key/helper or third-party sign-in remains a sign-in fact and supplies no
+subscription eligibility. The conservative `apiProvider` allowlist is
+`firstParty`, `bedrock`, `vertex`, `foundry`; changed values require adapter review.
+Missing/wrong types, unknown methods/providers, contradictory status/exit,
+duplicate keys, nonfinite numbers (even in omitted fields), malformed JSON,
+unsupported exits and invalid UTF-8 refuse with sanitized recovery guidance.
+
+Safe mode suppresses customizations while preserving native auth and permissions;
+restricted mode ignores user/project/local settings. Managed policy still applies,
+including permitted policy-configured commands. These flags do not establish
+model-tool confinement or suppress every policy effect. `--bare` skips OAuth and
+keychain authentication and is unsuitable here; `--print` is never requested.
+CLI 2.1.319 flag compatibility and a signed-out native status were supplied as
+admission evidence; they do not qualify execution or this candidate's live probe.
+
+Children receive the existing curated `native_environment()`. Claude/Anthropic
+and cloud provider environment selectors are refused, including empty values,
+before either child starts; remove overrides only when native account observation
+is intended. An explicit `CLAUDE_CONFIG_DIR` must be an accessible absolute
+directory and is forwarded unchanged, never silently replaced with the default.
+Only path metadata is checked, not directory contents. Other credentials and
+runtime injection variables are not forwarded. Path/timeout/process failures
+emit no native diagnostics and no partial observation JSON.
+
+`native_claude.py` owns the transient schema-1 `claude-native-auth` envelope:
+`harness`, resolved `binary`/`cwd`, validated `cli_version`, wall-clock
+`started_at`/`observed_at`, monotonic `probe_seconds` and `auth` containing only
+native `loggedIn`, `authMethod`, `apiProvider`. `readiness` stays `unverified`;
+`quota_observation` and `subscription_eligibility` stay null. No model list,
+subscription tier or allowance pool is inferred. Raw stdout/stderr, email,
+account IDs, credential/token fields and auth-payload paths are omitted.
+The adapter persists/migrates nothing and changes no task/route state. If retained,
+keep observation provenance private and refresh before any independent eligibility
+or scheduling decision. The [inventory](implementation.md) owns verification status.
+
 ## Safe Codex capacity snapshot
 
 ```sh
