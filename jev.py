@@ -288,10 +288,12 @@ def pending_decisions(directory, *, task_state_dir=None) -> dict:
             for question, answer in record["response"]["answers"].items():
                 choice = answer["choice"]
                 if choice == "uncertain" or question == "investigation-resolution" and choice == "unresolved":
-                    item = dict(decision=record["id"], question=question,
+                    item: dict = dict(decision=record["id"], question=question,
                         owner="judge" if question == "investigation-resolution" else "standby-reasoner",
                         reason=choice, evidence=str(path), evidence_revision=record["request"]["evidence_revision"])
                     sources = attempts.get((record["id"], question), [])
+                    current = [source for source in sources if source["state"] != "stale"]
+                    sources = current or sources
                     if len(sources) == 1 and sources[0]["state"] == "completed":
                         resolutions.append(dict(decision=record["id"], question=question, **sources[0]))
                         continue

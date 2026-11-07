@@ -27,12 +27,12 @@ class BoundedAnswers(unittest.TestCase):
         self.path = self.tasks / "resolve.json"
         self.inputs = dict(candidate=self.fixture.candidate, requirements="requirements-1")
         factory.admit(self.path, task="resolve", goal="Answer one bounded coordination question",
-                      repository=str(self.fixture.repo), acceptance=["original-question"])
+                      repository=str(self.fixture.repo), acceptance=["original-question"], corrections=1, investigations=1)
         factory.set_inputs(self.path, **self.inputs)
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
 
-    def start(self, *, question="task-demand", role="standby-reasoner", choice="uncertain"):
+    def start(self, *, question="task-demand", role="standby-reasoner", choice="uncertain", assignment="reason", purpose="work"):
         state: dict = {"assignment": "Missing acceptance evidence"}
         if role == "judge":
             with patch.object(factory, "Rex", FakeRex):
@@ -51,13 +51,14 @@ class BoundedAnswers(unittest.TestCase):
             specs=[spec], model="jev-1.14.0", evidence_revision="source-1", client_factory=lambda: client,
             clock=lambda: 1000, timer=lambda: 10)
         self.question = question
-        self.command = factory.codex_command(self.path, task="resolve", assignment_id="reason", codex=sys.executable,
+        self.assignment_id = assignment
+        self.command = factory.codex_command(self.path, task="resolve", assignment_id=assignment, codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(self.fixture.repo), role=role,
             decision_store=self.store, decision=self.decision["id"], question=question)
         with patch.object(factory, "Rex", FakeRex):
-            self.record, self.assignment = factory.launch(self.path, task="resolve", assignment_id="reason", role=role,
+            self.record, self.assignment = factory.launch(self.path, task="resolve", assignment_id=assignment, role=role,
                 goal="Answer the original bounded question", cwd=str(self.fixture.repo), command=self.command,
-                purpose="work", binary=sys.executable, server="unix:///fixture.sock")
+                purpose=purpose, binary=sys.executable, server="unix:///fixture.sock")
         actual = [call for call in FakeRex.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
         argv = actual[actual.index("--") + 1:]
         argv = argv[argv.index("--") + 1:]
@@ -73,9 +74,9 @@ class BoundedAnswers(unittest.TestCase):
 
     def collect(self):
         with patch.object(factory, "status", return_value=dict(state="exited")):
-            self.record = factory.collect_codex(self.path, "reason", Mock(), self.record, self.assignment)
+            self.record = factory.collect_codex(self.path, self.assignment_id, Mock(), self.record, self.assignment)
         self.record = factory.load_task(self.path)
-        self.assignment = self.record["assignments"]["reason"]
+        self.assignment = self.record["assignments"][self.assignment_id]
 
     def test_selected_answer_is_retained_once_and_closes_only_the_bound_queue_item(self):
         self.start()
@@ -197,3 +198,20 @@ class BoundedAnswers(unittest.TestCase):
         self.assertIn("Bind a read-only standby/judge", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_current_correction_does_not_conflict_with_retained_stale_failed_attempt(self):
+        self.start()
+        self.assertEqual(self.answer("uncertain", "Supply the original assignment")["state"], "failed")
+        failed_receipt = self.fixture.args.receipt
+        before = failed_receipt.read_bytes()
+        self.inputs["requirements"] = "requirements-2"
+        factory.set_inputs(self.path, **self.inputs)
+        self.start(assignment="reason-correction", purpose="correction")
+        self.answer(None, "Supply the original assignment", outcome="blocked")
+        self.collect()
+        item, = jev.pending_decisions(self.store, task_state_dir=self.tasks)["items"]
+        self.assertEqual((item["owner"], item["reason"]), ("operator", "blocked"))
+        self.assertEqual(item["attempts"][0]["assignment"], "reason-correction")
+        self.assertEqual(failed_receipt.read_bytes(), before)
+        self.assertEqual(len(self.record["assignments"]), 2)
+        self.assertEqual(factory.task_view(self.record)["allowances"]["correction"]["remaining"], 0)

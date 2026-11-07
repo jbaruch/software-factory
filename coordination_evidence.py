@@ -8,6 +8,9 @@ import factory
 import jev
 
 MARKER = "\n## Factory coordination question\n\n"
+REPORT_GUIDANCE = ("Report outcome completed only for a supported non-uncertain/non-unresolved choice, with missing_input null. "
+    "When missing evidence prevents that choice, report outcome blocked, choice null, and a concrete missing_input. "
+    "These labels describe the original coordination question, not completion of this model turn.")
 
 
 def owner(question):
@@ -51,7 +54,7 @@ def render(store, decision, question, role, inputs, *, task_record=None):
         check_investigation(record["request"], task_record)
     value = dict(schema_version=1, decision=decision, question=question, inputs=inputs,
                  request=record["request"], response=record["response"])
-    return MARKER + json.dumps(value, allow_nan=False, ensure_ascii=True) + "\n"
+    return "\n" + REPORT_GUIDANCE + "\n" + MARKER + json.dumps(value, allow_nan=False, ensure_ascii=True) + "\n"
 
 
 def read(instructions, decision, question, role, inputs, *, write=False):
@@ -123,13 +126,12 @@ def collected_attempts(directory):
                     raise factory.FactoryError("Restore the original bounded reasoner command before reading its answer") from None
                 binding(args.decision, args.question, assignment["request"]["role"], write=args.write)
                 item = dict(task=record["task"], assignment=identity, evidence=str(path), state="awaiting_collection", answer=None)
-                if assignment["result"] is not None:
-                    if not factory.result_current(record, assignment["result"]):
-                        item["state"] = "stale"
-                    else:
-                        _, receipt, native = factory.codex_evidence(identity, record, assignment)
-                        item.update(state=native["report"]["outcome"], answer=native["report"]["answer"],
-                                    evidence=str(args.receipt), inputs=receipt["inputs"])
+                if assignment["request"].get("inputs") != record["inputs"]:
+                    item["state"] = "stale"
+                elif assignment["result"] is not None:
+                    _, receipt, native = factory.codex_evidence(identity, record, assignment)
+                    item.update(state=native["report"]["outcome"], answer=native["report"]["answer"],
+                                evidence=str(args.receipt), inputs=receipt["inputs"])
                 attempts.setdefault((args.decision, args.question), []).append(item)
         return attempts
     except (OSError, ValueError) as exc:
