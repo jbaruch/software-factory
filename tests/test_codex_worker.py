@@ -192,6 +192,68 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
         self.assertEqual(receipt["commit"]["state"], "committing")
 
+    def test_clean_resolved_cherry_pick_author_cannot_enter_a_factory_commit(self):
+        self.writer()
+        def git(*command, **options):
+            result = factory.git_run(".", *command, **options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result
+        source = self.repo / "collision.txt"
+        source.write_text("base\n")
+        git("add", "--all")
+        git("commit", "-qm", "Base")
+        git("switch", "-qc", "picked")
+        source.write_text("picked\n")
+        git("add", "--all")
+        sentinel = "ghp_" + hashlib.sha256(b"cherry-pick fixture author").hexdigest()[:36]
+        git("commit", "-qm", "Picked", environment={**factory.git_environment(), "GIT_AUTHOR_NAME": sentinel})
+        picked = factory.git_commit(".", "HEAD")
+        git("switch", "-q", "main")
+        source.write_text("local\n")
+        git("add", "--all")
+        git("commit", "-qm", "Local")
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.assertEqual(factory.git_run(".", "cherry-pick", picked).returncode, 1)
+        git("restore", "--source=HEAD", "--staged", "--worktree", "collision.txt")
+        factory.check_checkout(str(self.repo), str(self.repo), self.candidate,
+            expected_identity=self.identity, expected_git_dir=self.args.worktree_git_dir)
+        self.assertEqual(git("show", "-s", "--format=%an", picked).stdout.strip(), sentinel)
+        before = (self.args.worktree_git_dir / "index").read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "In-progress Git operation"):
+            self.execute()
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.receipt.exists())
+        self.assertEqual((self.args.worktree_git_dir / "index").read_bytes(), before)
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
+    def test_operation_started_during_native_work_refuses_before_staging(self):
+        self.writer()
+        original = self.spawn
+        async def start_operation(*command, **options):
+            result = await original(*command, **options)
+            (self.args.worktree_git_dir / "CHERRY_PICK_HEAD").write_text(self.candidate + "\n")
+            return result
+        self.spawn = start_operation
+        index = self.args.worktree_git_dir / "index"
+        before = index.read_bytes() if index.exists() else None
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("In-progress Git operation", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "preparing")
+        self.assertEqual(index.read_bytes() if index.exists() else None, before)
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
+    def test_factory_commit_is_utf8_without_a_configured_encoding_header(self):
+        self.writer()
+        sentinel = "ghp_" + hashlib.sha256(b"encoding fixture").hexdigest()[:36]
+        self.assertEqual(factory.git_run(".", "config", "i18n.commitEncoding", sentinel).returncode, 0)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        commit = factory.git_run(".", "cat-file", "commit", receipt["candidate"])
+        self.assertEqual(commit.returncode, 0)
+        self.assertNotIn(sentinel, commit.stdout)
+        self.assertNotIn("\nencoding ", commit.stdout)
+
     def test_missing_secret_scanner_refuses_before_native_launch(self):
         self.writer()
         self.scan = worker.scan_staged

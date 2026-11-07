@@ -438,7 +438,8 @@ def commit_policy(args, environment):
     if enabled.returncode not in (0, 1):
         raise factory.FactoryError("Cannot inspect configured hooks/signing; repair commit.gpgsign before another attempt")
     flags = ["-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
-             "-c", "core.splitIndex=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *filter_flags]
+             "-c", "core.splitIndex=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+             "-c", "i18n.commitEncoding=UTF-8", *filter_flags]
     if enabled.stdout.strip() == "true":
         keygen = shutil.which("ssh-keygen", path=os.defpath)
         program = values.get("gpg.ssh.program", "ssh-keygen")
@@ -540,8 +541,15 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
             raise factory.FactoryError("Secret scan refused the staged tree; inspect it with redacted Gitleaks output before another attempt. No commit was retried")
 
 
+def check_git_operation(args):
+    markers = ("CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD", "rebase-apply", "rebase-merge", "sequencer", "BISECT_START")
+    if any(os.path.lexists(args.worktree_git_dir / name) for name in markers):
+        raise factory.FactoryError("In-progress Git operation; finish or abort it in the assigned worktree before a factory commit")
+
+
 def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     """Commit an opted-in writer's finished work in the factory Git sandbox."""
+    check_git_operation(args)
     if factory.git_commit(".", "HEAD") != args.candidate:
         raise factory.FactoryError("Writer changed Git HEAD before the factory commit; inspect the original candidate and retained work without retrying")
     if factory.repository_identity(".") != receipt["repository_identity"] or factory.git_dir(".") != args.worktree_git_dir:
@@ -725,6 +733,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
     if args.write:
         args._git_python = trusted_git_runtime(argparse.Namespace(**{**vars(args), "codex": binary}))
+    if args.commit_message is not None:
+        check_git_operation(args)
     if args.commit_message is not None and scan is scan_staged:
         args._gitleaks = scanner_binary(args)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,

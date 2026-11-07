@@ -46,6 +46,10 @@ embedded Go module metadata for unstamped builds. Structure the factory skill
 as separate coordinate and inspect actions.
 Scan effective author and committer identities resolved under the final commit's
 Git configuration and environment before copying inputs into the private scan view.
+Refuse in-progress Git operations before native launch and staging; a clean
+resolved cherry-pick cannot supply an unscanned author. Use UTF-8 for factory
+commits without copying a configured encoding header. Cover the explicit Git
+smoke command's orchestration and failure cleanup with offline fake transports.
 
 ## 0.1.0 — 2026-11-05
 
