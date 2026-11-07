@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 
 import native_antigravity as native
 
-USAGE = ("Gemini Models\tWeekly Limit Remaining\t99%\t2026-11-14T09:20:42Z\n"
-         "Claude and GPT models\tWeekly Limit Remaining\t0%\t2026-11-08T19:45:58Z\n")
+USAGE = ("Gemini Models\tWeekly Limit Remaining\t99%\t2020-11-14T09:20:42Z\n"
+         "Claude and GPT models\tWeekly Limit Remaining\t0%\t2020-11-08T19:45:58Z\n")
 
 
 class NativeAntigravity(unittest.TestCase):
@@ -24,17 +24,17 @@ class NativeAntigravity(unittest.TestCase):
     def test_native_groups_percentages_and_resets_are_preserved(self):
         groups = native.parse_usage(USAGE)
         self.assertEqual(groups, [dict(group="Gemini Models", window="weekly", percent_remaining=99.0,
-                                      resets_at="2026-11-14T09:20:42Z"),
+                                      resets_at="2020-11-14T09:20:42Z"),
                                   dict(group="Claude and GPT models", window="weekly", percent_remaining=0.0,
-                                      resets_at="2026-11-08T19:45:58Z")])
+                                      resets_at="2020-11-08T19:45:58Z")])
         self.assertEqual(native.parse_usage(USAGE.replace("99%", "0.5%"))[0]["percent_remaining"], 0.5)
 
     def test_missing_changed_duplicate_or_invalid_usage_refuses(self):
         for output in ("", "Authentication required", USAGE + USAGE, USAGE.replace("99%", "101%"),
                        USAGE.replace("99%", "nan%"), USAGE.replace("99%", "-1%"),
                        USAGE.replace("Weekly Limit Remaining", "Five Hour Limit Remaining"),
-                       USAGE.replace("2026-11-14T09:20:42Z", "2026-11-14T09:20:42"),
-                       USAGE.replace("2026-11-14T09:20:42Z", "not-a-date")):
+                       USAGE.replace("2020-11-14T09:20:42Z", "2020-11-14T09:20:42"),
+                       USAGE.replace("2020-11-14T09:20:42Z", "not-a-date")):
             with self.subTest(output=output), self.assertRaises(native.UsageError):
                 native.parse_usage(output)
 
