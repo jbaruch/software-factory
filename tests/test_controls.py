@@ -76,9 +76,10 @@ class TaskControls(ControlRecord):
         legacy = factory.new_task("fixture")
         legacy.update(schema_version=4, hold="Earlier operator hold")
         del legacy["control_events"]
+        del legacy["provisioning"]
         factory.save(self.path, legacy)
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(migrated["control_events"], [])
         self.assertEqual(migrated["hold"], legacy["hold"])
         self.assertEqual(migrated["assignments"], legacy["assignments"])
@@ -88,7 +89,7 @@ class TaskControls(ControlRecord):
     def test_damaged_or_downgraded_history_refuses_without_rewriting(self):
         original = self.hold("Keep", "pause-one", 0)
         variants = []
-        for update in ({"hold": None}, {"schema_version": 4}, {"schema_version": 6},
+        for update in ({"hold": None}, {"schema_version": 4}, {"schema_version": 7},
                        {"control_events": None}):
             variants.append({**copy.deepcopy(original), **update})
         for change in (dict(id=True), dict(expected_revision=1), dict(at=float("inf")),
@@ -113,6 +114,7 @@ class TaskControls(ControlRecord):
                 with self.subTest(version=version, reason=reason):
                     record = factory.new_task("fixture")
                     record.update(schema_version=version, hold=reason)
+                    del record["provisioning"]
                     if version == 4:
                         del record["control_events"]
                     factory.save(self.path, record)
