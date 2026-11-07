@@ -6,9 +6,11 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
+from typing import Callable
 import unittest
 from unittest.mock import patch
 
@@ -87,7 +89,7 @@ class ReadyRunner(unittest.TestCase):
     def tick(self, controller):
         return runner.run(controller, seconds=30, once=True)
 
-    def finish(self, task, identity, outcome="approved", *, edit=False):
+    def finish(self, task, identity, outcome="approved", *, edit: bool | Callable[[], None] = False):
         record = factory.load_task(self.directory / (task + ".json"))
         assignment = record["assignments"][identity]
         request = assignment["request"]
@@ -103,7 +105,9 @@ class ReadyRunner(unittest.TestCase):
                 dict(outcome=outcome, artifacts=["fixture/evidence.txt"])))),
             dict(type="turn.completed", usage=dict(input_tokens=10, output_tokens=5))]
         async def spawn(*command, **options):
-            if edit:
+            if callable(edit):
+                edit()
+            elif edit:
                 (self.repo / "delivery.txt").write_text("Useful fixture delivery\n")
             return FakeProcess(events)
         before = Path.cwd()
@@ -140,6 +144,43 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.states(conflict)[("task", "first")], "conflict")
         self.assertEqual(factory.git_commit(str(self.repo), "HEAD"), candidate)
         self.assertEqual(conflict["metrics"]["launched"], 0)
+
+    def test_writer_to_verifier_handoff_never_runs_clean_filters_on_the_host(self):
+        source = self.repo / "sample.audit"
+        source.write_text("committed\n")
+        (self.repo / ".gitattributes").write_text("*.audit filter=audit\n")
+        helper = self.repo / "filter.py"
+        helper.write_text("import sys\nsys.stdout.write(sys.stdin.read())\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--all"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "commit.gpgsign=false",
+                        "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Filter fixture"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
+                        shlex.quote(sys.executable) + " -B filter.py"], check=True)
+        self.candidate = factory.git_commit(str(self.repo), "HEAD")
+        with factory.task_lock(self.directory, "task") as path:
+            factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
+        plan = self.plan([self.job("implement", role="backend", write=True,
+                                  commit_message="feat(fixture): Update filter helper")])
+        self.assertEqual(self.tick(self.controller(plan))["metrics"]["launched"], 1)
+        effect = self.root / "callback-effect"
+        def edit():
+            helper.write_text("import sys\nfrom pathlib import Path\n"
+                f"Path({str(effect)!r}).write_text('called')\n"
+                "sys.stdout.write(sys.stdin.read())\n")
+            source.write_text("updated\n")
+        self.finish("task", "implement", outcome="completed", edit=edit)
+        self.assertTrue(effect.exists())  # The fixture runs during explicit staging.
+        self.assertEqual(self.tick(self.controller(plan))["result"], "needs_action")
+        effect.unlink()
+        self.candidate = factory.git_commit(str(self.repo), "HEAD")
+        with factory.task_lock(self.directory, "task") as path:
+            factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
+        os.utime(source, ns=(946684800000000000, 946684800000000000))
+        verification = self.controller(self.plan([self.job("qa", after=["implement"])]))
+        self.assertEqual(self.tick(verification)["metrics"]["launched"], 1)
+        self.finish("task", "qa")
+        self.assertEqual(self.tick(verification)["result"], "complete")
+        self.assertFalse(effect.exists())
 
     def test_collected_dependency_starts_next_assignment_without_a_foreman_turn(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))

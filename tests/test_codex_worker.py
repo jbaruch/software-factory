@@ -173,6 +173,12 @@ class NativeResults(unittest.TestCase):
     def test_git_callbacks_and_postflight_use_the_closed_local_execution_scope(self):
         self.writer()
         self.git_scope = worker.isolated_git
+        package = self.root / "external-cli/node_modules/@openai/codex"
+        (package / "bin").mkdir(parents=True)
+        (package / "package.json").write_text('{"name":"@openai/codex"}')
+        self.args.codex = package / "bin/codex.js"
+        self.args.codex.write_text("// Fake native transport; runtime is outside Python/Homebrew.\n")
+        self.args.codex.chmod(0o700)
         hook = self.repo / ".git/hooks/pre-commit"
         hook.write_text(f"#!{sys.executable}\nimport os\nfrom pathlib import Path\nassert 'GH_TOKEN' not in os.environ\nPath('.git/environment-checked').write_text('passed')\n")
         hook.chmod(0o700)
@@ -182,6 +188,9 @@ class NativeResults(unittest.TestCase):
         def sandbox_transport(command, **options):
             if len(command) > 1 and command[1] == "sandbox":
                 calls.append((command, dict(options["env"])))
+                name = command[command.index("--permission-profile") + 1]
+                profile = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]
+                self.assertEqual(profile["filesystem"][str(package.resolve())], "read")
                 # Fake only OS isolation; Git, hooks and receipt checks stay real.
                 command = command[command.index("--") + 1:]
                 options["env"] = {**options["env"], "GH_TOKEN": "fixture-cli-injected-token"}

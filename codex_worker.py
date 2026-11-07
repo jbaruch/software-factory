@@ -214,6 +214,16 @@ def isolated_git(args, identity, *, signing=False):
     files = {":root": "deny", ":minimal": "read", str(root): "write",
              str(factory.git_common_dir(".")): "write", str(args.worktree_git_dir): "write"}
     files.setdefault(str(Path(sys.base_prefix).resolve()), "read")
+    native = args.codex.resolve()
+    runtime = native.parent
+    package = runtime.parent / "package.json"
+    if runtime.name == "bin" and package.is_file():
+        try:
+            if json.loads(package.read_text()).get("name") == "@openai/codex":
+                runtime = runtime.parent
+        except (OSError, ValueError, AttributeError):
+            raise factory.FactoryError("Cannot inspect selected Codex package; restore its installation before local Git execution") from None
+    files.setdefault(str(runtime), "read")
     for directory in {factory.git_common_dir("."), args.worktree_git_dir}:
         for name in ("config", "config.worktree", "commondir", "hooks", "info", factory.REPOSITORY_MARKER):
             files[str(directory / name)] = "read"

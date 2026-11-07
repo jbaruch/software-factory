@@ -751,6 +751,33 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (1, ""))
         self.assertIn("Inherited Git configuration contains source-routing options", result.stderr)
 
+    def test_checkout_guards_do_not_execute_configured_clean_filters(self):
+        source = self.repo / "sample.audit"
+        source.write_text("committed\n")
+        (self.repo / ".gitattributes").write_text("*.audit filter=audit\n")
+        effect = self.root / "unexpected-filter-effect"
+        (self.repo / "filter.py").write_text(
+            "import sys\nfrom pathlib import Path\n"
+            f"Path({str(effect)!r}).write_text('called')\n"
+            "sys.stdout.write(sys.stdin.read())\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--all"], check=True)
+        self.commit("Identity filter fixture")
+        subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
+                        shlex.quote(sys.executable) + " -B filter.py"], check=True)
+        record = self.admit()
+        os.utime(source, ns=(946684800000000000, 946684800000000000))
+        self.start()
+        result = subprocess.run([sys.executable, "-B", str(factory.ROOT / "checkout_exec.py"),
+            "--identity", json.dumps(record["admission"]["repository_identity"]),
+            "--git-dir", str(factory.git_dir(str(self.repo))),
+            "--candidate", record["inputs"]["candidate"], "--", sys.executable,
+            "-c", "print('verified')"], cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (0, "verified\n"), result.stderr)
+        self.assertFalse(effect.exists())
+        # Establish that the fixture really executes on a stat-invalidated status.
+        self.assertEqual(factory.git_run(str(self.repo), "status", "--porcelain").stdout, "")
+        self.assertTrue(effect.exists())
+
     def test_stat_hints_cannot_hide_changed_source_bytes(self):
         source = self.repo / "source.txt"
         source.write_bytes(b"committed\n")
@@ -937,7 +964,7 @@ class TaskAdmission(unittest.TestCase):
         source.write_text("not committed\n")
         before = self.path.read_bytes()
         self.assertEqual(factory.git_run(str(self.repo), "rev-parse", "--show-toplevel").stdout.strip(), str(self.repo.resolve()))
-        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+        with self.assertRaisesRegex(factory.FactoryError, "source bytes or modes differ"):
             self.start()
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
@@ -945,7 +972,7 @@ class TaskAdmission(unittest.TestCase):
             "--candidate", record["inputs"]["candidate"], "--", sys.executable,
             "-c", "print('UNAUTHORIZED')"], cwd=self.repo, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
-        self.assertIn("uncommitted inputs", result.stderr)
+        self.assertIn("source bytes or modes differ", result.stderr)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
 

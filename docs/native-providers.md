@@ -190,7 +190,9 @@ Git and its final checkout checks through the selected native CLI's local sandbo
 this makes no model or provider call. Its invocation-only profile disables network
 access and limits writes to this worktree and its Git metadata. Other filesystem
 access is denied except read access to common runtimes, Git configuration, the
-installed hook tool/cache and a configured public signing key.
+installed hook tool/cache, the selected Codex runtime and a configured public signing key.
+Launch/verification guards compare the index and raw source bytes without running
+worktree status, clean filters, external diffs or text conversions.
 Publication-token environment variables are absent, and protected Git environment
 values are checked after native CLI startup. File-based SSH signing uses a private
 agent holding only the configured key; callbacks can read its public key but not
