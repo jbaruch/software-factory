@@ -32,6 +32,8 @@ its retained worktree HEAD, including writers without a factory commit.
 Verify the scanner's pinned version before a native writer starts, including
 embedded Go module metadata for unstamped builds. Structure the factory skill
 as separate coordinate and inspect actions.
+Scan effective author and committer identities resolved under the final commit's
+Git configuration and environment before copying inputs into the private scan view.
 
 ## 0.1.0 — 2026-11-05
 

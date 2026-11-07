@@ -493,9 +493,16 @@ def scanner_binary(args):
 
 
 def scan_staged(args, receipt, *, git_scope=isolated_git):
-    """Scan staged names, raw blobs and the message without a signer."""
+    """Scan staged data and resolved commit metadata without a signer."""
     if getattr(args, "_gitleaks", None) is None:
         args._gitleaks = scanner_binary(args)
+    # Resolve identities against the same original config/environment used by
+    # the final commit; the private scanner view omits that configuration.
+    with git_scope(args, receipt["repository_identity"]):
+        identities = [factory.git_run(".", "var", name) for name in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT")]
+        if any(value.returncode for value in identities):
+            raise factory.FactoryError("Cannot resolve commit identities for secret scanning; configure valid Git author/committer identities before another attempt")
+        identity_text = "\n".join(value.stdout for value in identities)
     with git_scope(args, receipt["repository_identity"], read_only=True):
         scope = factory.GIT_EXECUTION.get()
         if scope is None:
@@ -515,7 +522,7 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
             # Avoid the scanner's Git-diff parser: some versions report success
             # after Git stderr errors without scanning its additions.
             with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as blobs:
-                blobs.write((args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
+                blobs.write((identity_text + "\n" + args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
                 blobs.flush()
                 copied = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects",
                     "cat-file", "--batch"], input=objects.stdout.encode(), stdout=blobs,
