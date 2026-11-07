@@ -54,6 +54,16 @@ There is no retry, prompt, model turn, login/logout, paid API fallback or settin
 change. Our code opens no auth/config files; the CLI owns native authentication.
 `curate(output, returncode=...)` is pure and accepts original JSON text.
 
+The minimum CLI version is **2.1.317**. After strict version-response validation,
+the adapter compares numeric version components and refuses older versions with
+update guidance before invoking auth status. The primary
+[2.1.317 changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21317)
+records the fix for auth status exiting before a slow token refresh was saved,
+which could sign out the next run. The adapter never updates the CLI or repairs
+credentials. Renew compatibility review and candidate-bound metadata conformance
+when CLI changes affect command flags, auth-status fields/exits or authentication
+persistence; a newer version number alone does not establish compatibility.
+
 The primary [Claude CLI reference](https://code.claude.com/docs/en/cli-reference)
 defines exit 0 as signed in and exit 1 as signed out. Both are successful metadata
 observations when JSON agrees. Supported `authMethod` values are `none`,

@@ -89,7 +89,12 @@ def probe(binary, cwd, *, run=subprocess.run, clock=time.time, timer=time.monoto
                     or not isinstance(result.stdout, str)
                     or re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,6}(?: \(Claude Code\))?", result.stdout.strip()) is None):
                 raise ClaudeProbeError("Unsupported Claude CLI version response; restore the selected native installation or update the adapter")
-            outputs.append(result.stdout.strip())
+            version = result.stdout.strip()
+            # 2.1.317 fixes auth status exiting before refreshed tokens are saved:
+            # https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21317
+            if tuple(int(part) for part in version.split(" ", 1)[0].split(".")) < (2, 1, 317):
+                raise ClaudeProbeError("Update the selected native Claude CLI to 2.1.317 or newer before observing auth status")
+            outputs.append(version)
         else:
             outputs.append(curate(result.stdout, returncode=result.returncode))
     observed_at, duration = clock(), timer() - started

@@ -10,7 +10,11 @@ signed-out exit 1 as an observation and non-subscription auth facts without
 claiming subscription access. Refuse environment overrides before launch, preserve
 an explicitly selected native config directory without reading its contents, and
 omit private native payloads/diagnostics. Fixed socket-free process tests cover
-success and refusal paths. Candidate live observation, independent QA/security,
+success and refusal paths. Require CLI 2.1.317 or newer before auth status to avoid
+the upstream token-refresh persistence defect; fixed tests cover the floor,
+older-version refusal and installed/newer versions. Renew compatibility review
+when command/authentication contracts change, as documented in native providers.
+Candidate live observation, independent QA/security,
 host full tests and current-head policy/CI remain separate gates. No publisher is
 configured or authorized; no route is activated.
 

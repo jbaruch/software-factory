@@ -166,7 +166,8 @@ class NativeClaude(unittest.TestCase):
 
     def test_bad_version_stops_before_auth_and_bad_auth_never_retries(self):
         for code, version in ((1, "2.1.319"), (0, ""), (0, "fixture-secret"), (0, "2.1.319\nfixture-private"),
-                              (False, "2.1.319"), (0, b"2.1.319")):
+                              (False, "2.1.319"), (0, b"2.1.319"), (0, "2.1.317-beta"),
+                              (0, "2.1"), (0, "2.1.317.0"), (0, "v2.1.317")):
             run = Mock(return_value=subprocess.CompletedProcess([], code, version, "fixture-secret"))
             with self.subTest(code=code, version=version), self.assertRaises(native.ClaudeProbeError):
                 native.probe(sys.executable, Path.cwd(), run=run)
@@ -177,6 +178,36 @@ class NativeClaude(unittest.TestCase):
             with self.assertRaises(native.ClaudeProbeError):
                 native.probe(sys.executable, Path.cwd(), run=run)
             self.assertEqual(run.call_count, 2)
+
+    def test_older_versions_refuse_with_only_the_version_call(self):
+        for version in ("2.1.316", "2.1.316 (Claude Code)\n", "2.1.99", "2.0.999", "1.99.9999"):
+            run = Mock(return_value=subprocess.CompletedProcess([], 0, version, "fixture-private"))
+            with self.subTest(version=version), self.assertRaisesRegex(
+                    native.ClaudeProbeError, "Update.*2.1.317 or newer"):
+                native.probe(sys.executable, Path.cwd(), run=run)
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [[str(Path(sys.executable).resolve()), "--version"]])
+
+    def test_exact_floor_installed_and_newer_versions_preserve_sanitized_facts(self):
+        for version in ("2.1.317", "2.1.317 (Claude Code)\n", "2.1.319 (Claude Code)\n",
+                        "2.1.1000", "2.2.0", "3.0.0"):
+            for facts, code in ((SIGNED_IN, 0), (SIGNED_OUT, 1)):
+                payload = dict(facts, token="fixture-private-token", email="fixture@example.invalid")
+                run = Mock(side_effect=[subprocess.CompletedProcess([], 0, version, "fixture-private"),
+                                        subprocess.CompletedProcess([], code, json.dumps(payload), "fixture-private")])
+                with self.subTest(version=version, code=code):
+                    result = native.probe(sys.executable, Path.cwd(), run=run)
+                    self.assertEqual([call.args[0] for call in run.call_args_list],
+                                     [[str(Path(sys.executable).resolve()), "--version"],
+                                      [str(Path(sys.executable).resolve()), "--safe-mode", "--restricted",
+                                       "auth", "status", "--json"]])
+                    self.assertEqual(result["cli_version"], version.strip())
+                    self.assertEqual(result["auth"], facts)
+                    self.assertEqual(result["schema_version"], 1)
+                    self.assertEqual(result["readiness"], "unverified")
+                    self.assertIsNone(result["quota_observation"])
+                    self.assertIsNone(result["subscription_eligibility"])
+                    self.assertNotIn("fixture", json.dumps(result))
 
     def test_bad_clock_refuses(self):
         for times, ticks in (([10, 9], [1, 2]), ([10, float("inf")], [1, 2]), ([True, 10], [1, 2]),
