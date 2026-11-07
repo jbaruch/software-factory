@@ -53,8 +53,20 @@ predates the closed Git backend: its separate OS/Git conformance uses fake nativ
 events with real Git, the installed pre-commit hook and SSH signing. It creates
 a local commit while blocking a hook's external push, network connection and
 outside credential-file read. These are distinct component checks; they do not
-establish a fresh end-to-end native writer run through the closed backend or
-complete task acceptance/integration.
+establish complete task acceptance/integration.
+
+On 2026-11-07, a fresh owned fixture through the merged closed backend produced
+a real factory-staged SSH-signed commit after its mandatory scanner and installed
+pre-commit hook. The writer took 264.6 seconds. A restarted controller collected
+the original worker without launching a replacement, then correctly held the
+old input plan as stale. After explicit selection of the produced candidate, an
+independent native QA assignment approved its exact README contents and one-file
+diff; the verification controller finished in 37.5 seconds. A separate mechanical
+check verified the SSH signature with temporary allowed signers, without changing
+global Git settings. QA explicitly left factory ownership, hook execution and
+restart outside its observed coverage; the owner retains separate execution
+evidence for those facts. This qualifies fixture delivery and handoff mechanics,
+not general judgment quality, project task acceptance or release readiness.
 Jev then returned resolved in a live shadow reassessment of the narrow decoder
 question; no acceptance or review gate changed. Task schema 4
 pins new admissions to an immutable Git-local repository marker. Ordinary clones
