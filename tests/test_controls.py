@@ -77,9 +77,10 @@ class TaskControls(ControlRecord):
         legacy.update(schema_version=4, hold="Earlier operator hold")
         del legacy["control_events"]
         del legacy["provisioning"]
+        del legacy["allowance_events"]
         factory.save(self.path, legacy)
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 8)
         self.assertEqual(migrated["control_events"], [])
         self.assertEqual(migrated["hold"], legacy["hold"])
         self.assertEqual(migrated["assignments"], legacy["assignments"])
@@ -115,6 +116,7 @@ class TaskControls(ControlRecord):
                     record = factory.new_task("fixture")
                     record.update(schema_version=version, hold=reason)
                     del record["provisioning"]
+                    del record["allowance_events"]
                     if version == 4:
                         del record["control_events"]
                     factory.save(self.path, record)

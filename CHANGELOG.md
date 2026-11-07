@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — 2026-11-07
+## 0.6.0 — 2026-11-07
 
 ### Task-owned writer worktrees
 
@@ -12,9 +12,32 @@ Reuse completed requests after lost replies; reconcile pending effects only when
 the uniquely owned checkout is already complete and clean. Retain missing,
 partial, dirty or conflicting outcomes for inspection without retries or repair.
 Reject unsupported trees/configuration and destinations overlapping the task store.
-Schema 6 preserves legacy holds, inputs and cumulative allowances without adopting
-worktrees. Expose provisioning through the existing owner view. No automatic
+Schema 8 preserves legacy holds, inputs, provisioning intents and allowance
+additions from the earlier schema-6/schema-7 owners, without adopting worktrees
+or granting attempts. Expose provisioning through the existing owner view. No automatic
 candidate handoff, task acceptance or release authority is added.
+
+## 0.5.0 — 2026-11-07
+
+### Operator allowance additions
+
+Add `extend-allowance` for explicitly approved correction/investigation additions.
+Keep original admission limits and assignment history unchanged; derive effective
+limits from ordered, reasoned additions in the task record. Require a request ID
+and expected current limit. Replaying a saved decision grants nothing twice and
+preserves subsequent decisions. Task schema 7 migrates supported earlier records
+with no invented grants; schema 6 provisioning-prototype records remain held for
+their compatible owner. Holds, task acceptance and execution are unchanged.
+
+## 0.4.0 — 2026-11-07
+
+### Native Antigravity quota observations
+
+Read the native CLI version and standalone `/usage` report without a model turn.
+Retain original group labels, weekly percentages/reset times and collection
+duration in version-1 observations. Refuse malformed reports and API/ADC overrides;
+keep worker readiness and model-to-pool binding separate. Record the bounded
+Gemini fixture and current signed Codex writer/controller evidence.
 
 ## 0.3.0 — 2026-11-06
 
@@ -27,6 +50,10 @@ Bound instance workers/tasks, preserve verification/recovery slots, share starts
 across tasks and gate new launches on fresh native quota/model facts. Keep unknown
 processes reserved and failed attempts unretried. Serialize controllers/manual
 launch commands while leaving observation and operator controls available.
+
+Reuse the freshly resolved common Git directory throughout each isolated phase's
+permission, private-hook-view and signing-path setup to reduce repeated native
+sandbox launches.
 
 ## 0.2.0 — 2026-11-06
 
@@ -51,6 +78,23 @@ disposable index and no signing socket. Deny original configuration and shared
 metadata; enforce writer roles inside the worker before execution. Stage/commit
 without callbacks; unsupported hook/filter/signer configurations fail visibly
 without bypassing checks or signatures.
+Require an offline Gitleaks scan of staged paths, raw blobs and commit messages
+even without a hook; refuse
+missing scanners, scan errors and findings before signing or committing.
+Recheck the retained checkout's repository marker and exact Git directory during
+collection, including legacy version-4 receipts. Bind every writer candidate to
+its retained worktree HEAD, including writers without a factory commit.
+Verify the scanner's pinned version before a native writer starts, including
+embedded Go module metadata for unstamped builds. Structure the factory skill
+as separate coordinate and inspect actions.
+Scan effective author and committer identities resolved under the final commit's
+Git configuration and environment before copying inputs into the private scan view.
+Refuse in-progress Git operations before native launch and staging; a clean
+resolved cherry-pick cannot supply an unscanned author. Use UTF-8 for factory
+commits without copying a configured encoding header. Cover the explicit Git
+smoke command's orchestration and failure cleanup with offline fake transports.
+Report malformed or unreadable SSH public keys with focused signing-recovery
+guidance before starting the private signing agent.
 
 ## 0.1.0 — 2026-11-05
 

@@ -1,5 +1,6 @@
 """Explicit local Git/sandbox conformance; no model turn, Rex or user repository effects."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -178,6 +179,35 @@ def conformance(binary) -> dict:
                              external_remote_unchanged=git(remote, "show-ref", allowed=(0, 1)).returncode == 1,
                              source_clean=True, sibling_index_unchanged=sibling_index.read_bytes() == sibling_before,
                              fixture_agent_control_signed=True, user_agent_unchanged=os.environ.get("SSH_AUTH_SOCK") == agent)
+                negative = root / "no-hook-secret"
+                negative.mkdir()
+                git(negative, "init", "--quiet", "--initial-branch=main")
+                for name, value in {"user.name": "Fixture", "user.email": "fixture@example.invalid",
+                        "commit.gpgsign": "false", "core.hooksPath": os.devnull}.items():
+                    git(negative, "config", name, value)
+                git(negative, "commit", "--quiet", "--allow-empty", "-m", "Secret-scan fixture")
+                os.chdir(negative)
+                negative_identity = factory.repository_identity(".", create=True)
+                negative_parent = factory.git_commit(".", "HEAD")
+                sentinel = "ghp_" + hashlib.sha256(b"Software Factory offline credential fixture").hexdigest()[:36]
+                (negative / "token.txt").write_text("token = " + sentinel + " # gitleaks:allow\n")
+                (negative / ".gitleaks.toml").write_text("[allowlist]\nregexes = ['.*']\n")
+                scan_args = SimpleNamespace(codex=binary, worktree_git_dir=factory.git_dir("."),
+                    candidate=negative_parent, commit_message="Must refuse", receipt=root / "secret-receipt.json")
+                scan_receipt = dict(repository_identity=negative_identity, commit=dict(state="preparing",
+                    parent=negative_parent, message=scan_args.commit_message, staged_tree=None, candidate=None))
+                factory.save(scan_args.receipt, scan_receipt)
+                try:
+                    with codex_worker.isolated_git(scan_args, negative_identity):
+                        codex_worker.commit_changes(scan_args, scan_receipt)
+                    raise factory.FactoryError("The credential fixture unexpectedly committed")
+                except factory.FactoryError as exc:
+                    if "Secret scan refused" not in str(exc):
+                        raise
+                facts["credential_commit_refused_without_hook"] = (
+                    factory.git_commit(".", "HEAD") == negative_parent
+                    and scan_receipt["commit"]["state"] == "committing")
+                os.chdir(repo)
                 return dict(schema_version=1, scope="local Git/OS sandbox only; no native assignment or model turn", checks=facts)
             finally:
                 os.chdir(previous)

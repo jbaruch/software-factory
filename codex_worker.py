@@ -214,9 +214,10 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     if factory.repository_identity(".") != identity or factory.git_dir(".") != args.worktree_git_dir:
         raise factory.FactoryError("Writer checkout changed; restore its original repository before local Git execution")
     root = Path(factory.git_worktree("."))
+    common = factory.git_common_dir(".")
     python = str(getattr(args, "_git_python", None) or trusted_git_runtime(args))
     home = Path.home()
-    protected = (home.resolve(), root, factory.git_common_dir("."), args.worktree_git_dir,
+    protected = (home.resolve(), root, common, args.worktree_git_dir,
                  Path(tempfile.gettempdir()).resolve())
     def callback_path(path):
         path = path.resolve()
@@ -237,27 +238,29 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         environment = {key: value for key, value in environment.items() if not key.startswith("GIT_CONFIG")}
         environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     files = {":root": "deny", ":minimal": "read", str(root): "write",
-             str(factory.git_common_dir(".")): "deny" if read_only else "write",
+             str(common): "deny" if read_only else "write",
              str(args.worktree_git_dir): "deny" if read_only else "write"}
     if read_only:
-        files[str(factory.git_common_dir(".") / "objects")] = "read"
+        files[str(common / "objects")] = "read"
     if (root / ".git").is_file() or (root / ".git").is_symlink():
         files[str(root / ".git")] = "read"
     base = callback_path(Path(sys.base_prefix))
     files.setdefault(str(base), "read")
     native = args.codex.resolve()
     files.setdefault(str(native), "read")
+    if getattr(args, "_gitleaks", None) is not None:
+        files[str(args._gitleaks)] = "read"
     package = native.parent.parent / "package.json"
     if native.parent.name == "bin" and package.is_file():
         try:
             if json.loads(package.read_text()).get("name") == "@openai/codex":
                 if any((package.parent / "vendor").resolve().is_relative_to(path)
-                       for path in (root, factory.git_common_dir("."), args.worktree_git_dir)):
+                       for path in (root, common, args.worktree_git_dir)):
                     raise factory.FactoryError("Keep the selected Codex runtime outside writer-writable paths")
                 files.setdefault(str(package.parent / "vendor"), "read")
         except (OSError, ValueError, AttributeError):
             raise factory.FactoryError("Cannot inspect selected Codex package; restore its installation before local Git execution") from None
-    for directory in {factory.git_common_dir("."), args.worktree_git_dir}:
+    for directory in {common, args.worktree_git_dir}:
         for name in ("config", "config.worktree", "commondir", "hooks", "info", factory.REPOSITORY_MARKER):
             files[str(directory / name)] = "deny" if read_only and name != "hooks" else "read"
     files[str(root / ".codex")] = "read"
@@ -324,7 +327,7 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         if read_only:
             private_git = Path(temporary) / "git"
             (private_git / "objects/info").mkdir(parents=True)
-            (private_git / "objects/info/alternates").write_text(str(factory.git_common_dir(".") / "objects") + "\n")
+            (private_git / "objects/info/alternates").write_text(str(common / "objects") + "\n")
             hooks = factory.git_run(".", "rev-parse", "--path-format=absolute", "--git-path", "hooks", environment=inherited)
             if hooks.returncode:
                 raise factory.FactoryError("Cannot prepare the private pre-commit view; restore hook configuration")
@@ -356,12 +359,15 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
             public_key = Path(selected.stdout.strip()).expanduser()
             if public_key.suffix != ".pub" or not public_key.is_file():
                 raise factory.FactoryError("Configure an SSH public-key file with its unlocked private companion for isolated signed commits")
-            with public_key.open(encoding="utf-8") as stream:
-                public = stream.read(16385)
+            try:
+                with public_key.open(encoding="utf-8") as stream:
+                    public = stream.read(16385)
+            except (OSError, UnicodeError):
+                raise factory.FactoryError("Cannot read the configured SSH public key as UTF-8; restore a readable, valid SSH public-key file before another attempt") from None
             if len(public) > 16384 or not public.startswith(("ssh-", "ecdsa-", "sk-")):
                 raise factory.FactoryError("The configured signing file must contain an SSH public key; keep private keys outside callback access")
             private_key = public_key.with_suffix("").resolve()
-            if any(private_key.is_relative_to(path) for path in (root, factory.git_common_dir("."), args.worktree_git_dir)):
+            if any(private_key.is_relative_to(path) for path in (root, common, args.worktree_git_dir)):
                 raise factory.FactoryError("Keep private signing keys outside the writer checkout and Git metadata")
             agent = stack.enter_context(private_signer(private_key, python))
             environment["SSH_AUTH_SOCK"] = agent
@@ -436,7 +442,8 @@ def commit_policy(args, environment):
     if enabled.returncode not in (0, 1):
         raise factory.FactoryError("Cannot inspect configured hooks/signing; repair commit.gpgsign before another attempt")
     flags = ["-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
-             "-c", "core.splitIndex=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *filter_flags]
+             "-c", "core.splitIndex=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+             "-c", "i18n.commitEncoding=UTF-8", *filter_flags]
     if enabled.stdout.strip() == "true":
         keygen = shutil.which("ssh-keygen", path=os.defpath)
         program = values.get("gpg.ssh.program", "ssh-keygen")
@@ -454,8 +461,99 @@ def commit_policy(args, environment):
                 precommit="pre-commit" in active, flags=flags, drivers=drivers, config_paths=config_paths)
 
 
-def commit_changes(args, receipt, *, git_scope=isolated_git):
+def scanner_binary(args):
+    roots = (Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir,
+             Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
+    def tool(name):
+        selected = shutil.which(name)
+        if not selected:
+            raise factory.FactoryError("Install a native Gitleaks release, or Go for an unstamped Go build, before automatic writer commits")
+        path = Path(selected).resolve()
+        if not path.is_file() or any(path.is_relative_to(root) for root in roots):
+            raise factory.FactoryError("Install scanner tools outside writer-controlled and temporary paths before automatic commits")
+        with path.open("rb") as stream:
+            if stream.read(2) == b"#!":
+                raise factory.FactoryError("Use native scanner tools rather than script wrappers for automatic commits")
+        return path
+    binary = tool("gitleaks")
+    try:
+        config = (factory.ROOT / ".pre-commit-config.yaml").read_text()
+        pin = re.search(r"(?m)^  - repo: https://github.com/gitleaks/gitleaks\n    rev: v([0-9]+\.[0-9]+\.[0-9]+)\s*$", config)
+        if pin is None:
+            raise factory.FactoryError("Restore the pinned Gitleaks entry in .pre-commit-config.yaml before automatic commits")
+        version = subprocess.run([str(binary), "version"], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=10, check=False, env=native_environment())
+        verified = not version.returncode and not version.stderr and version.stdout.strip() == pin[1]
+        if not version.returncode and not version.stderr and version.stdout.strip() == "version is set by build process":
+            metadata = subprocess.run([str(tool("go")), "version", "-m", str(binary)], stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=10, check=False, env=native_environment())
+            module = "\tmod\tgithub.com/zricethezav/gitleaks/v8\tv" + pin[1] + "\t"
+            verified = not metadata.returncode and not metadata.stderr and any(
+                line.startswith(module) for line in metadata.stdout.splitlines())
+        if not verified:
+            raise factory.FactoryError("Scanner identity/version does not match the Gitleaks pin; install the pinned native release before starting a writer")
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        raise factory.FactoryError("Cannot verify the pinned scanner; restore its native installation and manifest before starting a writer") from None
+    return binary
+
+
+def scan_staged(args, receipt, *, git_scope=isolated_git):
+    """Scan staged data and resolved commit metadata without a signer."""
+    if getattr(args, "_gitleaks", None) is None:
+        args._gitleaks = scanner_binary(args)
+    # Resolve identities against the same original config/environment used by
+    # the final commit; the private scanner view omits that configuration.
+    with git_scope(args, receipt["repository_identity"]):
+        identities = [factory.git_run(".", "var", name) for name in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT")]
+        if any(value.returncode for value in identities):
+            raise factory.FactoryError("Cannot resolve commit identities for secret scanning; configure valid Git author/committer identities before another attempt")
+        identity_text = "\n".join(value.stdout for value in identities)
+    with git_scope(args, receipt["repository_identity"], read_only=True):
+        scope = factory.GIT_EXECUTION.get()
+        if scope is None:
+            raise factory.FactoryError("Secret scanning requires the isolated Git profile; no host fallback is allowed")
+        prefix, environment = scope
+        environment["PATH"] = os.defpath
+        config = Path(environment["TMPDIR"]) / "scanner.toml"
+        config.write_text("[extend]\nuseDefault = true\n")
+        objects = factory.git_run(".", "ls-tree", "-r", "--format=%(objectname)", receipt["commit"]["staged_tree"])
+        if objects.returncode or not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)
+                                         for oid in objects.stdout.splitlines()):
+            raise factory.FactoryError("Cannot enumerate the staged tree for secret scanning; inspect the retained index before another attempt")
+        paths = factory.git_run(".", "ls-tree", "-r", "--name-only", "-z", receipt["commit"]["staged_tree"])
+        if paths.returncode or paths.stdout and not paths.stdout.endswith("\0"):
+            raise factory.FactoryError("Cannot read staged filenames for secret scanning; inspect the retained tree before another attempt")
+        try:
+            # Avoid the scanner's Git-diff parser: some versions report success
+            # after Git stderr errors without scanning its additions.
+            with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as blobs:
+                blobs.write((identity_text + "\n" + args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
+                blobs.flush()
+                copied = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects",
+                    "cat-file", "--batch"], input=objects.stdout.encode(), stdout=blobs,
+                    stderr=subprocess.PIPE, env=environment, timeout=30, check=False)
+                if copied.returncode:
+                    raise factory.FactoryError("Cannot read staged blobs for secret scanning; inspect the retained tree before another attempt")
+                blobs.seek(0)
+                result = subprocess.run([*prefix(), str(args._gitleaks), "stdin",
+                    "--config", str(config), "--gitleaks-ignore-path", os.devnull, "--ignore-gitleaks-allow",
+                    "--redact=100", "--no-banner", "--log-level", "error", "--timeout", "30"],
+                    stdin=blobs, env=environment, capture_output=True, timeout=35, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise factory.FactoryError("Secret scanner unavailable; inspect the retained staged tree and restore offline Gitleaks before another attempt") from None
+        if result.returncode or result.stderr:
+            raise factory.FactoryError("Secret scan refused the staged tree; inspect it with redacted Gitleaks output before another attempt. No commit was retried")
+
+
+def check_git_operation(args):
+    markers = ("CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD", "rebase-apply", "rebase-merge", "sequencer", "BISECT_START")
+    if any(os.path.lexists(args.worktree_git_dir / name) for name in markers):
+        raise factory.FactoryError("In-progress Git operation; finish or abort it in the assigned worktree before a factory commit")
+
+
+def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     """Commit an opted-in writer's finished work in the factory Git sandbox."""
+    check_git_operation(args)
     if factory.git_commit(".", "HEAD") != args.candidate:
         raise factory.FactoryError("Writer changed Git HEAD before the factory commit; inspect the original candidate and retained work without retrying")
     if factory.repository_identity(".") != receipt["repository_identity"] or factory.git_dir(".") != args.worktree_git_dir:
@@ -531,6 +629,7 @@ def commit_changes(args, receipt, *, git_scope=isolated_git):
         return
     if unchanged.returncode != 1:
         raise factory.FactoryError("Cannot compare staged writer changes; inspect the retained index before another action")
+    scan(args, receipt, git_scope=git_scope)
     hooked = None
     if policy["precommit"]:
         with git_scope(args, receipt["repository_identity"], read_only=True, config_paths=policy["config_paths"]):
@@ -563,6 +662,11 @@ def commit_changes(args, receipt, *, git_scope=isolated_git):
 
 def check_commit_receipt(receipt, args, repository):
     """Version 4 has no factory commit; version 5 declares its nullable intent."""
+    if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
+            or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
+        raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
+    if args.write and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
+        raise factory.FactoryError("Writer candidate differs from the assigned worktree HEAD; inspect its retained checkout before collection")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:
@@ -590,12 +694,10 @@ def check_commit_receipt(receipt, args, repository):
     tree = factory.git_run(repository, "rev-parse", "--verify", commit["candidate"] + "^{tree}")
     if tree.returncode or tree.stdout.strip() != commit["staged_tree"]:
         raise factory.FactoryError("Factory commit staged tree differs from the candidate; inspect the original receipt and Git tree before collection")
-    if factory.git_commit(str(args.cwd), "HEAD") != commit["candidate"]:
-        raise factory.FactoryError("Factory commit differs from the assigned worktree HEAD; inspect its retained checkout before collection")
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
-                  git_scope=isolated_git):
+                  git_scope=isolated_git, scan=scan_staged):
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Native attempt already has artifacts; collect or inspect it, never relaunch it blindly")
     try:
@@ -635,6 +737,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
     if args.write:
         args._git_python = trusted_git_runtime(argparse.Namespace(**{**vars(args), "codex": binary}))
+    if args.commit_message is not None:
+        check_git_operation(args)
+    if args.commit_message is not None and scan is scan_staged:
+        args._gitleaks = scanner_binary(args)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")
@@ -713,7 +819,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         git_args = argparse.Namespace(**{**vars(args), "codex": binary})
         with git_scope(git_args, identity) if args.commit_message is not None else nullcontext():
             if committing:
-                commit_changes(git_args, receipt, git_scope=git_scope)
+                commit_changes(git_args, receipt, git_scope=git_scope, scan=scan)
             candidate = factory.git_commit(".", "HEAD")
             factory.check_checkout(".", ".", candidate, expected_identity=identity,
                                    expected_git_dir=args.worktree_git_dir)

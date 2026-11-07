@@ -24,6 +24,23 @@ Changed inputs are refused; admission never resets usage. An existing task with
 unclassified launches cannot acquire guessed budgets.
 Use a new task ID to admit explicitly scoped work.
 
+For an operator-approved addition to an existing task, use:
+
+```sh
+python3 factory.py extend-allowance --task example --purpose correction \
+  --additional 1 --expected-limit 1 --request-id approved-correction-one \
+  --reason 'Operator approved one additional correction for the existing scope'
+```
+
+This command records an approval already obtained; a worker or classifier cannot
+grant itself more attempts. It adds a positive number of correction or
+investigation attempts to the current limit. The supplied expected limit must
+match. Original admission, consumed attempts, selected revisions, reports and holds
+stay unchanged. It neither retries a failed assignment nor starts a worker.
+Repeat the same request ID and inputs after a lost reply; the replay adds nothing,
+even after subsequent decisions. A reused ID with changed inputs or a stale
+expected limit refuses. Changed scope still needs a new explicit admission.
+
 ## Launches and holds
 
 For an admitted task, add `--purpose work`, `--purpose correction` or
@@ -59,17 +76,19 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. Task records must be regular files; links, directories and FIFOs
 refuse without resetting holds or history. External consumers must not edit or migrate these records. The
-runtime's `new_task`, `admit`, `launch`, `hold_task`, `provision_worktree` and `record_result` functions define schema version 6:
+runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
+`provision_worktree` and `record_result` functions define schema version 8:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `6` on every task record |
+| `schema_version` | Integer `8` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
 | `hold` | `null`, or the operator's nonempty pause reason |
 | `control_events` | Ordered pause/resume requests; each has a unique `id`, nullable integer `expected_revision`, `previous_hold`, resulting `hold`, and `at` in UTC epoch seconds |
 | `provisioning` | `null`, or one immutable writer-worktree request, unique owner token, effect state and nullable returned Git directory |
+| `allowance_events` | Ordered operator additions; each has a unique `id`, `purpose`, `previous_limit`, positive integer `additional`, nonempty `reason` and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
 | `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker and returned pane IDs |
@@ -80,6 +99,12 @@ snapshot and any declared dependencies. Each assignment has a nullable `result`.
 States are
 `launching` or `launched`, describing the effect, not completion of engineering work.
 Allowance totals are generated output; no second usage ledger is stored.
+Effective limits start at the immutable admission limits. Each allowance event's
+`previous_limit` equals the effective limit for its correction/investigation
+purpose at that position, then `additional` is added. Event IDs are unique within
+allowance history; timestamps use the same finite year-9999 bound as hold events.
+Malformed or missing history refuses without resetting it. Admission-free tasks
+have an empty allowance history and unknown allowance totals.
 Control revision is generated from the event count. A supplied expected revision
 equals the event's position; `null` records a request without that precondition.
 Hold values in an event are null or nonempty strings. Timestamps are finite,
@@ -89,6 +114,15 @@ event agrees with the current hold. Duplicate IDs or damaged history refuse read
 An identical request replay returns the current record without another write,
 even when a subsequent decision has changed the hold. These records trace control
 effects; they do not interrupt workers or change scope, reports or allowances.
+
+Schema 8 combines the earlier schema-6 provisioning owner and schema-7 allowance
+owner. A schema-6 record retains its provisioning intent and gains only an empty
+`allowance_events` list. A schema-7 record retains its allowance history and gains
+only `provisioning: null`. Versions 0–5 gain both empty fields. Migration preserves
+original admission, used attempts, control requests, holds, selected inputs and
+assignment history; it grants no attempts and adopts no existing worktree.
+Older-version records carrying fields their owner did not support refuse without
+rewriting. Missing required fields and unsupported future versions also refuse.
 
 The original unversioned launcher record is legacy version 0. Version 1 added
 admission and holds. The owner migrates either on read, preserving requests,
@@ -106,10 +140,10 @@ Version 5 adds `control_events`. The owner migrates versions 0–4 on read,
 preserving their holds/history and adding an empty event list. It never invents
 historical control requests. Existing holds without events remain valid. Version-4
 consumers must update before using version-5 task files; they refuse newer gates.
-Version 6 adds nullable `provisioning`. Versions 0–5 migrate under the owner lock
-with `provisioning: null`, preserving all assignments, controls, holds, inputs and
-allowances. Migration never adopts an existing worktree. Older readers must update
-before reading version 6; downgraded records containing newer fields refuse.
+Version 6 introduced nullable `provisioning` in the retained prototype. Version 7
+introduced operator allowance additions on main without interpreting that
+prototype's records. Both formats now migrate through the schema-8 contract above.
+Older readers must update before opening schema-8 task files.
 Before repository-backed mutations the owner verifies this identity and the
 initial commit. Revision reads verify the marker before and after Git resolves the commit. Launch
 passes the saved identity through checkout validation; `checkout_exec.py` checks

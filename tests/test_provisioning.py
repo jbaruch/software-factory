@@ -310,15 +310,59 @@ class WorktreeProvisioning(unittest.TestCase):
         legacy = copy.deepcopy(original)
         legacy.update(schema_version=5)
         del legacy["provisioning"]
+        del legacy["allowance_events"]
         factory.save(self.path, legacy)
         upgraded = factory.load_task(self.path)
         self.assertEqual(upgraded, original)
-        self.assertEqual(upgraded["schema_version"], 6)
+        self.assertEqual(upgraded["schema_version"], 8)
         for broken in ({**upgraded, "schema_version": 5}, {**upgraded, "provisioning": {}},
                        {key: value for key, value in upgraded.items() if key != "provisioning"}):
             factory.save(self.path, broken)
             before = self.path.read_bytes()
             with self.assertRaises(factory.FactoryError):
+                factory.load_task(self.path)
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_schema_six_provisioning_migration_preserves_owned_effect_without_a_grant(self):
+        provisioned = self.provision()
+        factory.hold_task(self.path, "Keep the existing hold", request_id="operator-hold", clock=lambda: 1000)
+        original = factory.load_task(self.path)
+        legacy = copy.deepcopy(original)
+        legacy["schema_version"] = 6
+        del legacy["allowance_events"]
+        factory.save(self.path, legacy)
+        upgraded = factory.load_task(self.path)
+        self.assertEqual(upgraded, original)
+        self.assertEqual(upgraded["provisioning"], provisioned["provisioning"])
+        self.assertEqual(upgraded["allowance_events"], [])
+        self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"], dict(limit=2, used=0, remaining=2))
+        before = self.path.read_bytes()
+        with patch.object(factory, "provisioning_git", side_effect=AssertionError("Migration never launches Git")):
+            self.assertEqual(factory.load_task(self.path), upgraded)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_schema_seven_migration_preserves_additions_without_adopting_a_worktree(self):
+        factory.extend_allowance(self.path, purpose="correction", additional=1, expected_limit=2,
+            request_id="fixture-grant", reason="Fixture-only operator decision", clock=lambda: 1000)
+        original = factory.load_task(self.path)
+        legacy = copy.deepcopy(original)
+        legacy["schema_version"] = 7
+        del legacy["provisioning"]
+        factory.save(self.path, legacy)
+        with patch.object(factory, "provisioning_git", side_effect=AssertionError("Migration never launches Git")):
+            upgraded = factory.load_task(self.path)
+        self.assertEqual(upgraded, original)
+        self.assertIsNone(upgraded["provisioning"])
+        self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"], dict(limit=3, used=0, remaining=3))
+        self.assertFalse(self.destination.exists())
+
+    def test_old_versions_cannot_silently_drop_new_owner_fields(self):
+        current = factory.load_task(self.path)
+        for version in (5, 6, 7):
+            malformed = {**current, "schema_version": version}
+            factory.save(self.path, malformed)
+            before = self.path.read_bytes()
+            with self.subTest(version=version), self.assertRaisesRegex(factory.FactoryError, "newer fields"):
                 factory.load_task(self.path)
             self.assertEqual(self.path.read_bytes(), before)
 

@@ -15,9 +15,12 @@ the command guides describe operation rather than maintain separate status lists
 | Jev adapter | Choice compilation, dynamic candidates, account model discovery and explicit shadow evaluation | Recorded HTTP tests plus a live two-question shadow evaluation on jev-1.14.0; calibration and consequential routing remain unverified |
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, revision-bound collection/reconnect and scoped source approvals; writer/Git qualification is described below. Broader automatic delivery and judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
-| Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Verified against native catalog commands; quota, worker lifecycle, supported effort and allowance sharing remain unknown |
+| Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Native catalog commands establish model lists. Separate rows cover subsequent quota and lifecycle observations |
 | Native Grok metadata | Cached OIDC sign-in, subscription/access-gate metadata and per-model effort choices through a private ACP child | Fixed protocol/process tests and a live owner-script probe of agent 1.0.77: X Premium+, no access gate, four model choices and their reported effort values. Quota and worker lifecycle remain unverified |
+| Native Grok read-only baseline | Generic Rex launch, headless structured response and exact-assignment reconnect | On 2026-11-07, Grok 4.7 read an owned fixture and returned its exact contents and working directory in 12 seconds. The source stayed unchanged and replay reused the same exited pane and original output. Dedicated event collection, automatic capacity observation and broader lifecycle/recovery remain unverified |
 | Local operator view | Stored task facts, holds, allowances, report freshness, evidence references, explicit live process observations and pause/resume controls | Offline replay/lost-reply/conflict tests and an owned Chrome fixture exercise pause/resume, keyboard submission and visible history. No live worker was interrupted. Other controls and the full seven-view dashboard remain incomplete |
+| Antigravity native usage | Metadata-only native `/usage` reports with original group labels, weekly percentages/reset timestamps and collection duration | Recorded/fake transport tests and a live 1.5.3 probe agree with its native quota panel: Gemini quota was available; the shared Claude/GPT group was exhausted. Account eligibility, model binding, reservations and automatic scheduling remain separate |
+| Antigravity Gemini baseline | Generic Rex launch, exact-fixture read, structured response and exact-effect reconnect | On 2026-11-07 the initial invocation warned that slash-command disabling suppressed plan mode and wrote its own native brain artifact. One recorded correction removed that flag and denied file writes, commands, web and MCP tools; it used only `read_file`, returned exact fixture contents/cwd inline, left the source unchanged and reconnected without changing its task/output. Dedicated collection and interruption/recovery remain unverified; the Claude route was held on its observed zero quota |
 | CI and review | Offline tests, diagnostics, design/package validation and independent review dispatch | Policy review and CI remain required; the operator temporarily waived waiting for Claude review during its subscription outage, as recorded in AGENTS.md |
 
 The live Rex fixture checks exercise transport, timeout, reconnect and receipt
@@ -51,8 +54,20 @@ predates the closed Git backend: its separate OS/Git conformance uses fake nativ
 events with real Git, the installed pre-commit hook and SSH signing. It creates
 a local commit while blocking a hook's external push, network connection and
 outside credential-file read. These are distinct component checks; they do not
-establish a fresh end-to-end native writer run through the closed backend or
-complete task acceptance/integration.
+establish complete task acceptance/integration.
+
+On 2026-11-07, a fresh owned fixture through the merged closed backend produced
+a real factory-staged SSH-signed commit after its mandatory scanner and installed
+pre-commit hook. The writer took 264.6 seconds. A restarted controller collected
+the original worker without launching a replacement, then correctly held the
+old input plan as stale. After explicit selection of the produced candidate, an
+independent native QA assignment approved its exact README contents and one-file
+diff; the verification controller finished in 37.5 seconds. A separate mechanical
+check verified the SSH signature with temporary allowed signers, without changing
+global Git settings. QA explicitly left factory ownership, hook execution and
+restart outside its observed coverage; the owner retains separate execution
+evidence for those facts. This qualifies fixture delivery and handoff mechanics,
+not general judgment quality, project task acceptance or release readiness.
 Jev then returned resolved in a live shadow reassessment of the narrow decoder
 question; no acceptance or review gate changed. Task schema 4
 pins new admissions to an immutable Git-local repository marker. Ordinary clones
@@ -62,11 +77,14 @@ new admission before repository-backed work.
 Task schema 5 adds ordered operator-control requests without changing task limits
 or evidence. Legacy holds migrate without invented request history. Native receipt
 versions remain separate from the task store.
-Task schema 6 adds the owner's nullable provisioning request and effect state.
-Legacy migrations preserve holds and cumulative allowances without adopting any
-existing worktree. Provisioning recovery uses the saved intent and a unique Git
-worktree lock marker; incomplete outcomes require inspection rather than another
-creation attempt. This adds no receipt store or scheduling policy.
+Task schema 8 combines the earlier provisioning and allowance owners. Migration
+preserves existing provisioning intents, allowance additions, holds, inputs and
+assignments; it adds only the missing empty field. Provisioning recovery uses the
+saved intent and a unique Git worktree lock marker. Incomplete outcomes require
+inspection rather than another creation attempt. Offline fixtures verify migration
+from both earlier formats without granting attempts or adopting worktrees.
+The filename-normalization defect found by native review remains uncorrected;
+schema compatibility does not qualify provisioning for delivery.
 
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
 Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`
