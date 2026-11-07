@@ -76,6 +76,11 @@ new admission before repository-backed work.
 Task schema 5 adds ordered operator-control requests without changing task limits
 or evidence. Legacy holds migrate without invented request history. Native receipt
 versions remain separate from the task store.
+Task schema 7 adds explicit operator allowance additions while preserving original
+admission and used attempts. Offline fixtures verify exhaustion, lost-reply replay,
+stale-decision refusal and unchanged holds. No live task received an addition as
+part of that verification; the schema-6 provisioning prototype remains unsupported
+by this reader.
 
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
 Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`

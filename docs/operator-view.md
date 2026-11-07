@@ -42,6 +42,10 @@ CLI; protect the access file as an operator credential. The task shows its curre
 hold and five most recent control requests, with original IDs and timestamps.
 Full history remains in the task record/source facts.
 
+Allowance values include explicit additions recorded by the operator's
+[`extend-allowance` CLI command](task-state.md). Full allowance-decision history
+is available in `factory.py show`; this page's forms change only pause/resume.
+
 Forms submit to `POST /tasks/<task-slug>/hold` using the authenticated process's
 CSRF token, a stable request ID and the observed control revision. Foreign origins,
 bad tokens, duplicate fields, unknown actions and oversized bodies refuse before
