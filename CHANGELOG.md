@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-11-07
+
+### Native Antigravity quota observations
+
+Read the native CLI version and standalone `/usage` report without a model turn.
+Retain original group labels, weekly percentages/reset times and collection
+duration in version-1 observations. Refuse malformed reports and API/ADC overrides;
+keep worker readiness and model-to-pool binding separate. Record the bounded
+Gemini fixture and current signed Codex writer/controller evidence.
+
 ## 0.3.0 — 2026-11-06
 
 ### Explicit ready-work execution
