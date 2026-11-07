@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.0 — 2026-11-06
+
 ### Factory-owned writer commits
 
 Let explicit `--write --commit-message` assignments leave Git staging/commit to

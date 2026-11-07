@@ -176,7 +176,10 @@ it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
 
 Writer CLI installations must remain outside the assigned checkout and Git
-metadata; the resolved executable is reused for later sandbox commands.
+metadata; the resolved executable is reused for later sandbox commands. Writer
+mode requires a native CLI binary, a Python runtime outside writer-controlled
+paths, and no checkout/Git metadata entries in PATH. Script-form CLI wrappers
+refuse; select their installed native binary directly.
 
 New writer assignments require the selected role catalog entry's `write_allowed`
 permission. The worker checks the role and bound brief before creating artifacts
@@ -296,9 +299,10 @@ or report evidence; top-level errors and failed turns still refuse collection.
 Version 5 adds nullable `commit` evidence. A factory-owned commit records `state`
 (`preparing`, `committing`, `created` or `unchanged`), input `parent`, requested
 `message`, nullable `staged_tree` and nullable produced `candidate`. Intent is saved
-before staging and again before committing. Hooks may change the staged contents;
-the resulting candidate and clean source check bind the actual output assessed by
-later verification. A completed receipt requires a terminal commit state matching
+before staging and again before committing. Pre-commit runs against a disposable
+index; changes to that private index refuse the commit. The candidate stays bound
+to the factory-recorded staged tree, and the clean source check binds the output
+assessed by later verification. A completed receipt requires a terminal commit state matching
 its frozen assignment and, for a new commit, the actual Git parent.
 
 The schema file beside the receipt requires only `outcome` and original
