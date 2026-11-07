@@ -207,6 +207,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_run(".", "-c", "core.autocrlf=false", "add", "--all").returncode, 0)
         tree = factory.git_run(".", "write-tree").stdout.strip()
         self.args._gitleaks = Path(sys.executable)
+        self.args.commit_message = "Fixture commit"
         @contextmanager
         def scope(*args, **kwargs):
             with factory.git_execution(lambda: [], {**factory.git_environment(), "TMPDIR": str(self.root)}):
@@ -219,6 +220,31 @@ class NativeResults(unittest.TestCase):
                         return run(command, **options)
                     self.assertIn(b"staged fixture bytes\r\n", options["stdin"].read())
                     return subprocess.CompletedProcess(command, code, stdout=b"", stderr=error)
+                with patch.object(worker.subprocess, "run", side_effect=scanner):
+                    with self.assertRaisesRegex(factory.FactoryError, "Secret scan refused"):
+                        worker.scan_staged(self.args, dict(repository_identity=self.identity,
+                            commit=dict(staged_tree=tree)), git_scope=scope)
+
+    def test_secret_scan_includes_filenames_and_commit_message(self):
+        self.args._gitleaks = Path(sys.executable)
+        @contextmanager
+        def scope(*args, **kwargs):
+            with factory.git_execution(lambda: [], {**factory.git_environment(), "TMPDIR": str(self.root)}):
+                yield
+        run = subprocess.run
+        for location in ("filename", "message"):
+            with self.subTest(location=location):
+                sentinel = "ghp_" + hashlib.sha256(location.encode()).hexdigest()[:36]
+                name = sentinel if location == "filename" else "ordinary.txt"
+                (self.repo / name).write_text("Innocuous fixture contents\n")
+                self.args.commit_message = sentinel if location == "message" else "Fixture commit"
+                self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+                tree = factory.git_run(".", "write-tree").stdout.strip()
+                def scanner(command, **options):
+                    if command[0] != str(self.args._gitleaks):
+                        return run(command, **options)
+                    present = sentinel.encode() in options["stdin"].read()
+                    return subprocess.CompletedProcess(command, int(present), stdout=b"", stderr=b"")
                 with patch.object(worker.subprocess, "run", side_effect=scanner):
                     with self.assertRaisesRegex(factory.FactoryError, "Secret scan refused"):
                         worker.scan_staged(self.args, dict(repository_identity=self.identity,
@@ -632,8 +658,10 @@ class NativeResults(unittest.TestCase):
             damaged = json.loads(json.dumps(receipt))
             damaged["candidate"] = damaged["commit"]["candidate"] = candidate
             damaged["commit"]["state"] = state
+            self.assertEqual(factory.git_run(".", "update-ref", "HEAD", candidate).returncode, 0)
             with self.subTest(state=state), self.assertRaisesRegex(factory.FactoryError, "staged tree differs"):
                 worker.check_commit_receipt(damaged, self.args, str(self.repo))
+        self.assertEqual(factory.git_run(".", "update-ref", "HEAD", receipt["candidate"]).returncode, 0)
         worker.check_commit_receipt(receipt, self.args, str(self.repo))
 
     def test_same_tree_sibling_cannot_replace_the_produced_commit(self):
@@ -1169,6 +1197,31 @@ class NativeResults(unittest.TestCase):
         args = SimpleNamespace(**{**vars(self.args), "commit_message": None})
         with self.assertRaisesRegex(factory.FactoryError, "worktree binding differs"):
             worker.check_commit_receipt(legacy, args, str(main))
+
+    def test_writer_receipts_without_a_factory_commit_cannot_substitute_the_candidate(self):
+        self.process = FakeProcess(events("completed"))
+        record, assignment = self.launch_assignment(write=True)
+        original = json.loads(self.args.receipt.read_text())
+        self.assertIsNone(original["commit"])
+        tree = factory.git_run(".", "rev-parse", self.candidate + "^{tree}").stdout.strip()
+        sibling = factory.git_run(".", "commit-tree", tree, "-p", self.candidate, "-m", "Substituted candidate")
+        self.assertEqual(sibling.returncode, 0)
+        before = self.path.read_bytes()
+        for version in (4, 5):
+            with self.subTest(version=version):
+                damaged = copy.deepcopy(original)
+                damaged.update(schema_version=version, candidate=sibling.stdout.strip())
+                if version == 4:
+                    del damaged["commit"]
+                self.args.receipt.write_text(json.dumps(damaged))
+                with patch.object(factory, "status", return_value=dict(state="exited")):
+                    with self.assertRaisesRegex(factory.FactoryError, "assigned worktree HEAD"):
+                        factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+                self.assertEqual(self.path.read_bytes(), before)
+        self.args.receipt.write_text(json.dumps(original))
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            result = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        self.assertEqual(result["assignments"]["qa"]["result"]["candidate"], self.candidate)
 
     def test_factory_writer_collection_binds_the_produced_commit_without_approving_it(self):
         self.writer()

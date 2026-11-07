@@ -472,7 +472,7 @@ def scanner_binary(args):
 
 
 def scan_staged(args, receipt, *, git_scope=isolated_git):
-    """Scan raw staged blobs with trusted defaults, without a signer."""
+    """Scan staged names, raw blobs and the message without a signer."""
     if getattr(args, "_gitleaks", None) is None:
         args._gitleaks = scanner_binary(args)
     with git_scope(args, receipt["repository_identity"], read_only=True):
@@ -487,10 +487,15 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
         if objects.returncode or not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)
                                          for oid in objects.stdout.splitlines()):
             raise factory.FactoryError("Cannot enumerate the staged tree for secret scanning; inspect the retained index before another attempt")
+        paths = factory.git_run(".", "ls-tree", "-r", "--name-only", "-z", receipt["commit"]["staged_tree"])
+        if paths.returncode or paths.stdout and not paths.stdout.endswith("\0"):
+            raise factory.FactoryError("Cannot read staged filenames for secret scanning; inspect the retained tree before another attempt")
         try:
             # Avoid the scanner's Git-diff parser: some versions report success
             # after Git stderr errors without scanning its additions.
             with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as blobs:
+                blobs.write((args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
+                blobs.flush()
                 copied = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects",
                     "cat-file", "--batch"], input=objects.stdout.encode(), stdout=blobs,
                     stderr=subprocess.PIPE, env=environment, timeout=30, check=False)
@@ -623,6 +628,8 @@ def check_commit_receipt(receipt, args, repository):
     if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
             or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
         raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
+    if args.write and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
+        raise factory.FactoryError("Writer candidate differs from the assigned worktree HEAD; inspect its retained checkout before collection")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:
@@ -650,8 +657,6 @@ def check_commit_receipt(receipt, args, repository):
     tree = factory.git_run(repository, "rev-parse", "--verify", commit["candidate"] + "^{tree}")
     if tree.returncode or tree.stdout.strip() != commit["staged_tree"]:
         raise factory.FactoryError("Factory commit staged tree differs from the candidate; inspect the original receipt and Git tree before collection")
-    if factory.git_commit(str(args.cwd), "HEAD") != commit["candidate"]:
-        raise factory.FactoryError("Factory commit differs from the assigned worktree HEAD; inspect its retained checkout before collection")
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
