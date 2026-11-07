@@ -429,6 +429,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                            expected_git_dir=args.worktree_git_dir)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
+    if args.write and any(binary.is_relative_to(root) for root in (
+            Path(factory.git_worktree(args.cwd)), factory.git_common_dir(args.cwd), args.worktree_git_dir)):
+        raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
     receipt = dict(schema_version=5, kind="codex-execution", job=args.job, state="starting",
@@ -502,7 +505,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
                                      staged_tree=None, candidate=None)
             factory.save(args.receipt, receipt)
-        with git_scope(args, identity, signing=committing) if args.commit_message is not None else nullcontext():
+        git_args = argparse.Namespace(**{**vars(args), "codex": binary})
+        with git_scope(git_args, identity, signing=committing) if args.commit_message is not None else nullcontext():
             if committing:
                 commit_changes(args, receipt)
             candidate = factory.git_commit(".", "HEAD")
