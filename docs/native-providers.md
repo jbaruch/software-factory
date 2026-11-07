@@ -109,6 +109,31 @@ or migration reader; keep retained observations private and refresh before use.
 Native usage follows [Grok's CLI reference](https://docs.x.ai/build/cli/reference) and
 [Antigravity's model listing](https://antigravity.google/docs/cli/headless/#select-a-model-effort-or-agent).
 
+## Antigravity native quota
+
+```sh
+python3 native_antigravity.py --binary '/absolute/path/to/agy' --cwd '/absolute/path/to/worktree'
+```
+
+This runs only `--version` and `--print /usage`, which the native CLI handles
+without a model turn. Version-1 `antigravity-native-usage` observations retain
+the binary, cwd, CLI version, timestamp, probe duration, original usage rows and
+native group labels, weekly percentages remaining and reset timestamps. The
+reader requires the observed four-column format, unique groups, percentages in
+0–100 and timestamps with timezones. Missing or changed data refuses rather than
+becoming unlimited capacity. It infers no five-hour window, model-to-group map,
+account entitlement, reservation or worker readiness.
+
+API/ADC environment overrides refuse, including empty values. Native children
+receive the shared curated environment; process/format failures report a recovery
+action without echoing native diagnostics or retrying. The command writes
+version-1 snapshots for inspection; it adds no persisted-observation reader or
+scheduler. Old catalog observations keep their original unknown quota and remain
+unchanged.
+The native [headless command guide](https://antigravity.google/docs/cli/headless/)
+describes standalone slash-command reports; the
+[usage guide](https://antigravity.google/docs/cli/commands/usage/) describes quota groups.
+
 ## Grok authenticated metadata
 
 The metadata command applies the same native configuration/trust and executable-

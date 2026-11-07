@@ -24,6 +24,14 @@ configuration-1 evidence remains inspection-only under the tightened reader.
 Validate nested configuration layers, CLI identity and timing, and reuse the
 native discovery validation at both execution and collection boundaries.
 
+### Native Antigravity quota observations
+
+Read the native CLI version and standalone `/usage` report without a model turn.
+Retain original group labels, weekly percentages/reset times and collection
+duration in version-1 observations. Refuse malformed reports and API/ADC overrides;
+keep worker readiness and model-to-pool binding separate. Record the bounded
+Gemini fixture and current signed Codex writer/controller evidence.
+
 ## 0.3.0 — 2026-11-06
 
 ### Explicit ready-work execution
@@ -35,6 +43,10 @@ Bound instance workers/tasks, preserve verification/recovery slots, share starts
 across tasks and gate new launches on fresh native quota/model facts. Keep unknown
 processes reserved and failed attempts unretried. Serialize controllers/manual
 launch commands while leaving observation and operator controls available.
+
+Reuse the freshly resolved common Git directory throughout each isolated phase's
+permission, private-hook-view and signing-path setup to reduce repeated native
+sandbox launches.
 
 ## 0.2.0 — 2026-11-06
 

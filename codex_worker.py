@@ -214,9 +214,10 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     if factory.repository_identity(".") != identity or factory.git_dir(".") != args.worktree_git_dir:
         raise factory.FactoryError("Writer checkout changed; restore its original repository before local Git execution")
     root = Path(factory.git_worktree("."))
+    common = factory.git_common_dir(".")
     python = str(getattr(args, "_git_python", None) or trusted_git_runtime(args))
     home = Path.home()
-    protected = (home.resolve(), root, factory.git_common_dir("."), args.worktree_git_dir,
+    protected = (home.resolve(), root, common, args.worktree_git_dir,
                  Path(tempfile.gettempdir()).resolve())
     def callback_path(path):
         path = path.resolve()
@@ -237,10 +238,10 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         environment = {key: value for key, value in environment.items() if not key.startswith("GIT_CONFIG")}
         environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     files = {":root": "deny", ":minimal": "read", str(root): "write",
-             str(factory.git_common_dir(".")): "deny" if read_only else "write",
+             str(common): "deny" if read_only else "write",
              str(args.worktree_git_dir): "deny" if read_only else "write"}
     if read_only:
-        files[str(factory.git_common_dir(".") / "objects")] = "read"
+        files[str(common / "objects")] = "read"
     if (root / ".git").is_file() or (root / ".git").is_symlink():
         files[str(root / ".git")] = "read"
     base = callback_path(Path(sys.base_prefix))
@@ -254,12 +255,12 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         try:
             if json.loads(package.read_text()).get("name") == "@openai/codex":
                 if any((package.parent / "vendor").resolve().is_relative_to(path)
-                       for path in (root, factory.git_common_dir("."), args.worktree_git_dir)):
+                       for path in (root, common, args.worktree_git_dir)):
                     raise factory.FactoryError("Keep the selected Codex runtime outside writer-writable paths")
                 files.setdefault(str(package.parent / "vendor"), "read")
         except (OSError, ValueError, AttributeError):
             raise factory.FactoryError("Cannot inspect selected Codex package; restore its installation before local Git execution") from None
-    for directory in {factory.git_common_dir("."), args.worktree_git_dir}:
+    for directory in {common, args.worktree_git_dir}:
         for name in ("config", "config.worktree", "commondir", "hooks", "info", factory.REPOSITORY_MARKER):
             files[str(directory / name)] = "deny" if read_only and name != "hooks" else "read"
     files[str(root / ".codex")] = "read"
@@ -326,7 +327,7 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         if read_only:
             private_git = Path(temporary) / "git"
             (private_git / "objects/info").mkdir(parents=True)
-            (private_git / "objects/info/alternates").write_text(str(factory.git_common_dir(".") / "objects") + "\n")
+            (private_git / "objects/info/alternates").write_text(str(common / "objects") + "\n")
             hooks = factory.git_run(".", "rev-parse", "--path-format=absolute", "--git-path", "hooks", environment=inherited)
             if hooks.returncode:
                 raise factory.FactoryError("Cannot prepare the private pre-commit view; restore hook configuration")
@@ -366,7 +367,7 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
             if len(public) > 16384 or not public.startswith(("ssh-", "ecdsa-", "sk-")):
                 raise factory.FactoryError("The configured signing file must contain an SSH public key; keep private keys outside callback access")
             private_key = public_key.with_suffix("").resolve()
-            if any(private_key.is_relative_to(path) for path in (root, factory.git_common_dir("."), args.worktree_git_dir)):
+            if any(private_key.is_relative_to(path) for path in (root, common, args.worktree_git_dir)):
                 raise factory.FactoryError("Keep private signing keys outside the writer checkout and Git metadata")
             agent = stack.enter_context(private_signer(private_key, python))
             environment["SSH_AUTH_SOCK"] = agent
