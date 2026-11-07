@@ -170,6 +170,23 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
 
+    def test_writer_cannot_replace_the_cli_used_to_confine_later_git_callbacks(self):
+        self.writer()
+        for directory in (self.repo, self.repo / ".git"):
+            selected = directory / "selected-codex"
+            selected.write_text("#!/bin/sh\nexit 0\n")
+            selected.chmod(0o700)
+            if directory == self.repo:
+                self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+                self.assertEqual(factory.git_run(".", "commit", "-m", "Tracked CLI fixture").returncode, 0)
+                self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+            self.args.codex = selected
+            with self.assertRaisesRegex(factory.FactoryError, "trusted Codex installation outside"):
+                self.execute()
+            self.assertFalse(self.args.receipt.exists())
+            self.assertFalse(self.args.events.exists())
+            self.assertEqual(self.spawns, [])
+
     def test_git_callbacks_and_postflight_use_the_closed_local_execution_scope(self):
         self.writer()
         self.git_scope = worker.isolated_git

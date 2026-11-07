@@ -430,6 +430,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError("Restore the saved absolute worktree Git directory before launching")
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
+    if args.write and any(binary.is_relative_to(root) for root in (
+            Path(factory.git_worktree(args.cwd)), factory.git_common_dir(args.cwd), args.worktree_git_dir)):
+        raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")
@@ -505,7 +508,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
                                      staged_tree=None, candidate=None)
             factory.save(args.receipt, receipt)
-        with git_scope(args, identity, signing=committing) if args.commit_message is not None else nullcontext():
+        git_args = argparse.Namespace(**{**vars(args), "codex": binary})
+        with git_scope(git_args, identity, signing=committing) if args.commit_message is not None else nullcontext():
             if committing:
                 commit_changes(args, receipt)
             candidate = factory.git_commit(".", "HEAD")

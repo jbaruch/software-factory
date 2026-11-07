@@ -175,6 +175,9 @@ The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
 
+Writer CLI installations must remain outside the assigned checkout and Git
+metadata; the resolved executable is reused for later sandbox commands.
+
 New writer assignments require the selected role catalog entry's `write_allowed`
 permission. Read-only verification roles refuse before command/launch intent;
 historical assignments retain their original reconnect and collection behavior.
