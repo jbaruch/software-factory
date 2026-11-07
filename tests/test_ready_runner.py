@@ -115,7 +115,7 @@ class ReadyRunner(unittest.TestCase):
             os.chdir(self.repo)
             with redirect_stdout(StringIO()):
                 receipt = asyncio.run(codex_worker.execute(args, spawn=spawn,
-                    clock=lambda: 1000.0, timer=lambda: 10.0, git_scope=lambda *args, **kwargs: nullcontext()))
+                    clock=lambda: 1000.0, timer=lambda: 10.0, git_scope=lambda *args, **kwargs: nullcontext(), scan=lambda *args, **kwargs: None))
             self.assertEqual(receipt["state"], "completed")
         finally:
             os.chdir(before)

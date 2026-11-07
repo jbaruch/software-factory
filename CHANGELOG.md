@@ -35,6 +35,10 @@ disposable index and no signing socket. Deny original configuration and shared
 metadata; enforce writer roles inside the worker before execution. Stage/commit
 without callbacks; unsupported hook/filter/signer configurations fail visibly
 without bypassing checks or signatures.
+Require an offline Gitleaks scan of raw staged blobs even without a hook; refuse
+missing scanners, scan errors and findings before signing or committing.
+Recheck the retained checkout's repository marker and exact Git directory during
+collection, including legacy version-4 receipts.
 
 ## 0.1.0 — 2026-11-05
 

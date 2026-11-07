@@ -87,6 +87,8 @@ class NativeResults(unittest.TestCase):
         self.spawns = []
         self.process = FakeProcess(events())
         self.git_scope = lambda *args, **kwargs: nullcontext()
+        self.scans = []
+        self.scan = lambda args, receipt, **kwargs: self.scans.append(receipt["commit"]["staged_tree"])
 
     async def spawn(self, *command, **options):
         self.spawns.append(command)
@@ -96,7 +98,7 @@ class NativeResults(unittest.TestCase):
         with redirect_stdout(StringIO()):
             return asyncio.run(worker.execute(self.args, spawn=self.spawn,
                                                clock=lambda: 1000.0, timer=lambda: 10.0,
-                                               git_scope=self.git_scope))
+                                               git_scope=self.git_scope, scan=self.scan))
 
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
@@ -174,6 +176,53 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
+        self.assertEqual(self.scans, [receipt["commit"]["staged_tree"]])
+
+    def test_secret_scan_cannot_be_skipped_when_hooks_are_disabled(self):
+        self.writer()
+        def refuse(args, receipt, **kwargs):
+            self.assertEqual(receipt["commit"]["state"], "committing")
+            raise factory.FactoryError("Secret scan refused the staged tree")
+        self.scan = refuse
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("Secret scan refused", receipt["error"])
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(receipt["commit"]["state"], "committing")
+
+    def test_missing_secret_scanner_refuses_before_native_launch(self):
+        self.writer()
+        self.scan = worker.scan_staged
+        which = shutil.which
+        def unavailable(name, *args, **kwargs):
+            return None if name == "gitleaks" else which(name, *args, **kwargs)
+        with patch.object(worker.shutil, "which", side_effect=unavailable):
+            with self.assertRaisesRegex(factory.FactoryError, "Install a native Gitleaks"):
+                self.execute()
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.receipt.exists())
+
+    def test_scanner_errors_cannot_report_a_clean_staged_tree(self):
+        (self.repo / "source.txt").write_bytes(b"staged fixture bytes\r\n")
+        self.assertEqual(factory.git_run(".", "-c", "core.autocrlf=false", "add", "--all").returncode, 0)
+        tree = factory.git_run(".", "write-tree").stdout.strip()
+        self.args._gitleaks = Path(sys.executable)
+        @contextmanager
+        def scope(*args, **kwargs):
+            with factory.git_execution(lambda: [], {**factory.git_environment(), "TMPDIR": str(self.root)}):
+                yield
+        run = subprocess.run
+        for code, error in ((1, b""), (0, b"scanner error")):
+            with self.subTest(code=code, error=error):
+                def scanner(command, **options):
+                    if command[0] != str(self.args._gitleaks):
+                        return run(command, **options)
+                    self.assertIn(b"staged fixture bytes\r\n", options["stdin"].read())
+                    return subprocess.CompletedProcess(command, code, stdout=b"", stderr=error)
+                with patch.object(worker.subprocess, "run", side_effect=scanner):
+                    with self.assertRaisesRegex(factory.FactoryError, "Secret scan refused"):
+                        worker.scan_staged(self.args, dict(repository_identity=self.identity,
+                            commit=dict(staged_tree=tree)), git_scope=scope)
 
     def test_native_environment_dump_cannot_commit_host_credentials(self):
         self.writer()
@@ -1088,6 +1137,38 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
         return record, assignment
+
+    def test_collection_rejects_a_replacement_linked_worktree_at_the_same_path(self):
+        main = self.repo
+        linked = self.root / "assigned"
+        self.assertEqual(factory.git_run(str(main), "worktree", "add", "--detach", str(linked), "HEAD").returncode, 0)
+        self.repo = linked
+        self.writer()
+        message = self.args.commit_message
+        record, assignment = self.launch_assignment(write=True, commit_message=message, execute=False)
+        os.chdir(linked)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        sibling = factory.git_run(str(main), "commit-tree", receipt["commit"]["staged_tree"],
+                                  "-p", self.candidate, "-m", "Substitute sibling")
+        self.assertEqual(sibling.returncode, 0)
+        os.chdir(main)
+        self.assertEqual(factory.git_run(str(main), "worktree", "move", str(linked), str(self.root / "retained")).returncode, 0)
+        self.assertEqual(factory.git_run(str(main), "worktree", "add", "--detach", str(linked), sibling.stdout.strip()).returncode, 0)
+        damaged = copy.deepcopy(receipt)
+        damaged["candidate"] = damaged["commit"]["candidate"] = sibling.stdout.strip()
+        self.args.receipt.write_text(json.dumps(damaged))
+        before = self.path.read_bytes()
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            with self.assertRaisesRegex(factory.FactoryError, "worktree binding differs"):
+                factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        self.assertEqual(self.path.read_bytes(), before)
+        legacy = copy.deepcopy(receipt)
+        legacy["schema_version"] = 4
+        del legacy["commit"]
+        args = SimpleNamespace(**{**vars(self.args), "commit_message": None})
+        with self.assertRaisesRegex(factory.FactoryError, "worktree binding differs"):
+            worker.check_commit_receipt(legacy, args, str(main))
 
     def test_factory_writer_collection_binds_the_produced_commit_without_approving_it(self):
         self.writer()
