@@ -12,6 +12,10 @@ across tasks and gate new launches on fresh native quota/model facts. Keep unkno
 processes reserved and failed attempts unretried. Serialize controllers/manual
 launch commands while leaving observation and operator controls available.
 
+Reuse the freshly resolved common Git directory throughout each isolated phase's
+permission, private-hook-view and signing-path setup to reduce repeated native
+sandbox launches.
+
 ## 0.2.0 — 2026-11-06
 
 ### Factory-owned writer commits
