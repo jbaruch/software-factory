@@ -203,7 +203,7 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     if factory.repository_identity(".") != identity or factory.git_dir(".") != args.worktree_git_dir:
         raise factory.FactoryError("Writer checkout changed; restore its original repository before local Git execution")
     root = Path(factory.git_worktree("."))
-    python = str(Path(sys.executable).resolve())
+    python = str(getattr(args, "_git_python", None) or trusted_git_runtime(args))
     home = Path.home()
     inherited = factory.command_environment()
     environment = {key: value for key, value in inherited.items()
@@ -338,6 +338,24 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
                 yield
         except factory.FactoryError as exc:
             raise factory.FactoryError(str(exc) + "; inspect native Git sandbox support and offline hook/signing access before another attempt; no host fallback was used") from None
+
+
+def trusted_git_runtime(args):
+    """Require native launchers and a runtime outside writer-controlled paths."""
+    roots = (Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)
+    python = Path(sys.executable).resolve()
+    runtime = (python, args.codex.resolve(), Path(sys.prefix).absolute(), Path(sys.base_prefix).resolve())
+    if any(path.is_relative_to(root) for path in runtime for root in roots):
+        raise factory.FactoryError("Use a Python runtime outside the writer checkout and Git metadata before execution")
+    for binary in (python, args.codex):
+        with binary.open("rb") as stream:
+            if stream.read(2) == b"#!":
+                raise factory.FactoryError("Script-form launchers are unsupported for writer Git mode; select the installed native Codex binary and Python runtime")
+    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        path = Path(entry or ".").absolute()
+        if any(value.is_relative_to(root) for value in (path.resolve(), *(parent.resolve() for parent in path.parents)) for root in roots):
+            raise factory.FactoryError("Remove writer-controlled PATH entries before execution; keep Git runtime lookup outside the checkout and metadata")
+    return python
 
 
 def commit_policy(args, environment):
@@ -573,6 +591,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     if args.write and any(binary.is_relative_to(root) for root in (
             Path(factory.git_worktree(args.cwd)), factory.git_common_dir(args.cwd), args.worktree_git_dir)):
         raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
+    if args.write:
+        args._git_python = trusted_git_runtime(argparse.Namespace(**{**vars(args), "codex": binary}))
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")

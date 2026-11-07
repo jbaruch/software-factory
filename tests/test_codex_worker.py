@@ -214,6 +214,44 @@ class NativeResults(unittest.TestCase):
             self.assertFalse(self.args.events.exists())
             self.assertEqual(self.spawns, [])
 
+    def test_writer_cannot_replace_the_python_used_by_git_or_signing(self):
+        self.writer()
+        interpreter = self.repo / "replaceable-python"
+        interpreter.write_text("writer-controlled interpreter fixture\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Runtime fixture").returncode, 0)
+        self.args.candidate = factory.git_commit(".", "HEAD")
+        for signing in ("false", "true"):
+            with self.subTest(signing=signing), patch.object(worker.sys, "executable", str(interpreter)), \
+                    patch.object(worker, "private_signer") as signer:
+                self.assertEqual(factory.git_run(".", "config", "commit.gpgsign", signing).returncode, 0)
+                with self.assertRaisesRegex(factory.FactoryError, "Python runtime outside"):
+                    self.execute()
+                signer.assert_not_called()
+                self.assertFalse(self.args.receipt.exists())
+                self.assertFalse(self.args.events.exists())
+                self.assertEqual(self.spawns, [])
+
+    def test_writer_refuses_script_wrappers_and_checkout_path_lookup(self):
+        self.writer()
+        wrapper = self.root / "codex-wrapper"
+        wrapper.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+        wrapper.chmod(0o700)
+        original = self.args.codex
+        self.args.codex = wrapper
+        with self.assertRaisesRegex(factory.FactoryError, "Script-form launchers"):
+            self.execute()
+        self.args.codex = original
+        alias = self.repo / ".git/trusted-tools"
+        alias.symlink_to(Path(sys.executable).resolve().parent, target_is_directory=True)
+        for entry in (str(self.repo), str(alias), ""):
+            with self.subTest(entry=entry), patch.dict(os.environ, PATH=entry + os.pathsep + os.defpath):
+                with self.assertRaisesRegex(factory.FactoryError, "writer-controlled PATH"):
+                    self.execute()
+        self.assertFalse(self.args.receipt.exists())
+        self.assertFalse(self.args.events.exists())
+        self.assertEqual(self.spawns, [])
+
     def test_git_callbacks_and_postflight_use_the_closed_local_execution_scope(self):
         self.writer()
         self.git_scope = worker.isolated_git
