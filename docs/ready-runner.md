@@ -73,7 +73,8 @@ factory-owned local commit after a successful writer report. This uses the
 including configured Git helpers. Read-only jobs use `commit_message: null`.
 Changing the message changes the immutable assignment request.
 After a writer creates a commit, explicitly select that produced candidate and
-submit a verification phase; the original input plan then reports stale.
+submit a verification phase, or use the opt-in handoff below. The original writer
+plan then reports stale.
 
 Jobs have distinct `(task, id)` pairs. `after` names earlier jobs in this plan or
 existing assignments in the same task. A dependency needs a successful current
@@ -81,6 +82,44 @@ report and an observed successful process exit. Findings, failures, stale report
 and changed requests do not advance it. One plan uses one candidate/requirements
 pair per task. A later phase can depend on an existing implementation's produced
 commit after explicit input selection, without relabeling the original request.
+
+## Opt-in writer candidate handoff
+
+For an explicitly authorized independent verification phase, add
+`--from-writer ASSIGNMENT_ID` to the command above. Keep the verification plan's
+candidate/requirements at the writer's **original frozen input pair**; no manual
+copy of the output SHA is needed. Ready-plan schema 1 and the task schema stay
+unchanged.
+
+The plan must contain jobs for exactly one admitted task. Every job must be
+read-only `qa`, `code-review` or `test-automation`, use an ID distinct from the
+writer, and name that existing writer explicitly in `after`. Additional explicit
+dependencies retain their normal gates. The source must already have a collected
+`completed` native Codex result and an explicit factory commit. The runner
+revalidates its original receipt/events, commit and repository/worktree binding,
+observes its successful terminal Rex process, and compares the saved result with
+that evidence. A manually recorded completion alone is insufficient. Collect the
+writer through the existing runner or `factory.py codex-collect` first.
+
+Under the instance execution lock and task lock, the runner selects the exact
+produced commit with the original requirements revision through the task owner.
+It retargets only its in-memory verification plan. Initial selection refuses
+holds, selected inputs outside the original/produced pair, changed requirements
+and any other active or unknown assignment in the task. Actual Rex processes
+must be observed; a saved result never establishes terminal status. Unknown
+launches need reconciliation before selection can proceed.
+
+Restart with the same original verification plan and writer ID. An already
+selected target is reused without rewriting task inputs or resetting attempts;
+existing verification IDs remain observable, including during holds. There is no
+continuity ledger, and supplied plans, original requests/results, holds and
+limits are preserved. Capacity, checkout, dependency and allowance checks still
+gate every new launch. This selects a candidate for verification only; it never
+accepts a task, pushes, merges or waives review. Offline tests exercise these
+mechanics with fake native/Rex transports and real temporary Git commits; they
+do not establish live handoff integration or specialist quality.
+
+## Execution and recovery
 
 The owner store retains launch intent before Rex effects. A lost reply reconciles
 the original pane; failed or missing/unknown effects never acquire a new attempt
@@ -112,8 +151,8 @@ Checkout exclusion compares Git worktree identities, including subdirectory
 assignments. Verified regular files with shared hard links are materialized as
 independent copies before execution and after native work; source bytes and
 modes still have to match the candidate. Other aliases remain unchanged.
-Writers still require isolated worktrees. Worktree creation and candidate
-handoff are explicit in this slice.
+Writers still require isolated worktrees. Worktree creation remains explicit;
+candidate handoff can use the opt-in source validation above.
 
 The runner holds the owner's `.execution.lock` during its invocation. Other
 controllers and manual launch commands refuse while it owns execution. Status,

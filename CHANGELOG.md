@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 — 2026-11-07 (unpublished)
+
+### Opt-in writer candidate handoff
+
+Add `ready_runner.py --from-writer ASSIGNMENT_ID` for explicitly authorized
+read-only independent verification plans. Validate the collected native Codex
+writer against original receipts/events, its factory commit and live Rex status;
+select its exact output with unchanged requirements through the existing task
+owner. Preserve original plans/history, holds and cumulative allowances, and
+reuse selected targets and existing verification launches on restart. Keep
+schema versions, launch gates and acceptance/release authority unchanged.
+Offline fake-transport tests with real temporary Git commits cover handoff,
+replay and refusal paths; live integration and judgment quality remain separate.
+
 ## 0.8.0 — 2026-11-07
 
 ### Bounded native reasoner answers
