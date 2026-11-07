@@ -215,15 +215,14 @@ def isolated_git(args, identity, *, signing=False):
              str(factory.git_common_dir(".")): "write", str(args.worktree_git_dir): "write"}
     files.setdefault(str(Path(sys.base_prefix).resolve()), "read")
     native = args.codex.resolve()
-    runtime = native.parent
-    package = runtime.parent / "package.json"
-    if runtime.name == "bin" and package.is_file():
+    files.setdefault(str(native), "read")
+    package = native.parent.parent / "package.json"
+    if native.parent.name == "bin" and package.is_file():
         try:
             if json.loads(package.read_text()).get("name") == "@openai/codex":
-                runtime = runtime.parent
+                files.setdefault(str(package.parent / "vendor"), "read")
         except (OSError, ValueError, AttributeError):
             raise factory.FactoryError("Cannot inspect selected Codex package; restore its installation before local Git execution") from None
-    files.setdefault(str(runtime), "read")
     for directory in {factory.git_common_dir("."), args.worktree_git_dir}:
         for name in ("config", "config.worktree", "commondir", "hooks", "info", factory.REPOSITORY_MARKER):
             files[str(directory / name)] = "read"
@@ -260,7 +259,7 @@ def isolated_git(args, identity, *, signing=False):
             json.dumps(path, ensure_ascii=False) + "=" + json.dumps(mode) for path, mode in files.items()) + "}}"
         prefix = [str(args.codex), "sandbox", "--permission-profile", name,
                   "-c", "permissions={" + name + "=" + profile + "}", "--cd", str(root)]
-        if agent:
+        if agent and sys.platform == "darwin":
             prefix.extend(["--allow-unix-socket", agent])
         digest = hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
         runtime = json.dumps({key: environment[key] for key in ("PATH", "TMPDIR") if key in environment})

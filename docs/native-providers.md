@@ -175,6 +175,10 @@ The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
 
+New writer assignments require the selected role catalog entry's `write_allowed`
+permission. Read-only verification roles refuse before command/launch intent;
+historical assignments retain their original reconnect and collection behavior.
+
 For a factory-owned writer commit, supply `--write --commit-message` with the
 intended commit message. The specialist edits/tests within its workspace sandbox
 and leaves Git staging/commit to the runtime. Only a successful native run with a
@@ -190,7 +194,7 @@ Git and its final checkout checks through the selected native CLI's local sandbo
 this makes no model or provider call. Its invocation-only profile disables network
 access and limits writes to this worktree and its Git metadata. Other filesystem
 access is denied except read access to common runtimes, Git configuration, the
-installed hook tool/cache, the selected Codex runtime and a configured public signing key.
+installed hook tool/cache, the selected Codex executable/required vendor files and a configured public signing key.
 Launch/verification guards compare the index and raw source bytes without running
 worktree status, clean filters, external diffs or text conversions.
 Publication-token environment variables are absent, and protected Git environment
@@ -198,6 +202,8 @@ values are checked after native CLI startup. File-based SSH signing uses a priva
 agent holding only the configured key; callbacks can read its public key but not
 the private file. The agent closes with the owner and gives keys a five-minute
 lifetime. It cannot load PKCS#11/FIDO libraries. The user's agent stays unchanged.
+The private socket is exposed through filesystem grants; macOS additionally uses
+its native `--allow-unix-socket` option. Linux does not accept that macOS option.
 Hooks need offline inputs. Unsupported sandbox or noninteractive
 hook/signing access fails visibly with retained intent and no host fallback.
 Native model commands retain their declared sandbox. Writers may

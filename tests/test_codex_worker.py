@@ -190,7 +190,10 @@ class NativeResults(unittest.TestCase):
                 calls.append((command, dict(options["env"])))
                 name = command[command.index("--permission-profile") + 1]
                 profile = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]
-                self.assertEqual(profile["filesystem"][str(package.resolve())], "read")
+                self.assertEqual(profile["filesystem"][str(self.args.codex.resolve())], "read")
+                self.assertEqual(profile["filesystem"][str(package.resolve() / "vendor")], "read")
+                self.assertNotIn(str(package.resolve()), profile["filesystem"])
+                self.assertNotIn(str(package.resolve() / "bin"), profile["filesystem"])
                 # Fake only OS isolation; Git, hooks and receipt checks stay real.
                 command = command[command.index("--") + 1:]
                 options["env"] = {**options["env"], "GH_TOKEN": "fixture-cli-injected-token"}
@@ -219,6 +222,17 @@ class NativeResults(unittest.TestCase):
             self.assertTrue(Path(environment["TMPDIR"]).is_relative_to(self.repo.resolve() / ".git"))
             self.assertFalse(any(key in environment for key in (
                 "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY")))
+
+    def test_standalone_cli_does_not_grant_its_parent_directory(self):
+        self.args.codex = self.root / "codex"
+        self.args.codex.write_text("Standalone fixture executable\n")
+        self.args.codex.chmod(0o700)
+        with worker.isolated_git(self.args, self.identity):
+            prefix = factory.GIT_EXECUTION.get()[0]()
+            name = prefix[prefix.index("--permission-profile") + 1]
+            files = tomllib.loads(prefix[prefix.index("-c") + 1])["permissions"][name]["filesystem"]
+            self.assertEqual(files[str(self.args.codex.resolve())], "read")
+            self.assertNotIn(str(self.root.resolve()), files)
 
     def test_native_sandbox_cannot_rewrite_configured_git_policy(self):
         self.writer()
@@ -305,16 +319,19 @@ class NativeResults(unittest.TestCase):
         def signer(key, python):
             self.assertEqual(key, private.resolve())
             yield str(self.root / "private-signer-socket")
-        with patch.object(worker, "private_signer", signer), worker.isolated_git(self.args, self.identity, signing=True):
-            prefix, environment = factory.GIT_EXECUTION.get()
-            command = prefix()
-            name = command[command.index("--permission-profile") + 1]
-            files = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]["filesystem"]
-            self.assertEqual(files[str(public.resolve())], "read")
-            self.assertEqual(files[str(private.resolve())], "deny")
-            self.assertEqual(files[environment["SSH_AUTH_SOCK"]], "read")
-            self.assertEqual(files[str(self.repo.resolve() / ".git/config")], "read")
-            self.assertEqual(files[str(self.repo.resolve() / ".git/hooks")], "read")
+        for platform in ("darwin", "linux"):
+            with patch.object(worker.sys, "platform", platform), patch.object(worker, "private_signer", signer), \
+                    worker.isolated_git(self.args, self.identity, signing=True):
+                prefix, environment = factory.GIT_EXECUTION.get()
+                command = prefix()
+                name = command[command.index("--permission-profile") + 1]
+                files = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]["filesystem"]
+                self.assertEqual(files[str(public.resolve())], "read")
+                self.assertEqual(files[str(private.resolve())], "deny")
+                self.assertEqual(files[environment["SSH_AUTH_SOCK"]], "read")
+                self.assertEqual(files[str(self.repo.resolve() / ".git/config")], "read")
+                self.assertEqual(files[str(self.repo.resolve() / ".git/hooks")], "read")
+                self.assertEqual("--allow-unix-socket" in command, platform == "darwin")
 
     def test_factory_commit_detaches_finished_output_without_changing_its_alias(self):
         self.writer()
@@ -774,19 +791,40 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertIn("repository identity differs", receipt["error"])
 
+    def test_readonly_roles_refuse_writer_commands_and_prebuilt_writer_launches(self):
+        path = self.root / "task.json"
+        factory.admit(path, task="task", goal="Independent verification", repository=str(self.repo),
+                      acceptance=["fixture/acceptance"])
+        before = path.read_bytes()
+        for role in ("code-review", "qa", "investigator", "judge", "standby-reasoner", "observer"):
+            with self.subTest(role=role):
+                with self.assertRaisesRegex(factory.FactoryError, "specialty does not permit writer"):
+                    factory.codex_command(path, task="task", assignment_id="review", codex=sys.executable,
+                        model="fixture", effort="high", cwd=str(self.repo), write=True,
+                        commit_message="Unauthorized verifier edit", role=role)
+                command = factory.codex_command(path, task="task", assignment_id="review", codex=sys.executable,
+                    model="fixture", effort="high", cwd=str(self.repo), write=True,
+                    commit_message="Authorized implementation", role="backend")
+                with self.assertRaisesRegex(factory.FactoryError, "specialty does not permit writer"):
+                    factory.launch(path, task="task", assignment_id="review", role=role,
+                        goal="Independent verification", cwd=str(self.repo), command=command, purpose="work",
+                        binary=sys.executable, server="unix:///test.sock")
+                self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((self.root / "task.review.md").exists())
+
     def launch_assignment(self, codex=sys.executable, *, write=False, commit_message=None, execute=True, legacy=False):
         self.path = self.root / "task.json"
         factory.admit(self.path, task="task", goal="Verify the change", repository=str(self.repo),
                       acceptance=["docs/acceptance.md"])
         command = factory.codex_command(self.path, task="task", assignment_id="qa", codex=codex,
                                         model="fixture-model", effort="high", cwd=str(self.repo),
-                                        write=write, commit_message=commit_message)
+                                        write=write, commit_message=commit_message, role="backend" if write else "qa")
         if legacy:
             del command[1:3]
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
         with patch.object(factory, "Rex", FakeRex):
-            record, assignment = factory.launch(self.path, task="task", assignment_id="qa", role="qa",
+            record, assignment = factory.launch(self.path, task="task", assignment_id="qa", role="backend" if write else "qa",
                 goal="Review the change", cwd=str(self.repo), command=command, purpose="work",
                 binary=sys.executable, server="unix:///test.sock")
         actual = next(call for call in FakeRex.calls if call[0] == "new")

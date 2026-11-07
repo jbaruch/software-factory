@@ -711,11 +711,21 @@ def hold_task(path, reason, *, request_id=None, expected_revision=None, clock=ti
     return record
 
 
-def brief(role_id, goal):
+def role_spec(role_id):
     roles = json.loads((ROOT / "skills/factory/references/roles.json").read_text())["roles"]
     role = next((item for item in roles if item["id"] == role_id), None)
     if role is None:
         raise FactoryError("Unknown specialty: " + role_id)
+    return role
+
+
+def check_role_write(role_id):
+    if not isinstance(role_id, str) or role_spec(role_id).get("write_allowed") is not True:
+        raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")
+
+
+def brief(role_id, goal):
+    role = role_spec(role_id)
     return (f"# Assignment: {role_id}\n\n{goal}\n\n"
             + "\n".join("- " + item for item in role["instructions"])
             + "\n\nAuthority: " + role["decision_authority"]
@@ -824,6 +834,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Command executable must be an absolute executable file")
     record = load_task(path) if os.path.lexists(path) else new_task(task)
     existing = record["assignments"].get(assignment_id)
+    if existing is None and "--write" in command and (
+            command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
+            or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
+        check_role_write(role)
     instructions = "" if existing else brief(role, goal)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
@@ -955,7 +969,7 @@ def check_commit_message(message, *, write):
         raise FactoryError("Use --commit-message only with --write and supply a nonempty commit subject of at most 72 characters")
 
 
-def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None):
+def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
@@ -964,6 +978,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     check_commit_message(commit_message, write=write)
     binary = Path(codex).resolve()
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None and write:
+        check_role_write(role)
     if existing is None:
         try:
             binary = Path(codex).resolve(strict=True)
@@ -1149,7 +1165,7 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Codex assignment")
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
-                                         write=args.write, seconds=args.seconds, commit_message=args.commit_message)
+                                         write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
