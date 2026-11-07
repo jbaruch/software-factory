@@ -483,10 +483,15 @@ collection completes.
 
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
-code. Schema changes belong to the worker. Receipt readers accept versions 4 and 5;
+code. Explicit bounded coordination assignments additionally return the typed
+answer described in [bounded native answers](jev.md#bounded-native-answers) and
+use version-6 receipts. Generic reports remain unchanged. The frozen question
+and native event report must agree at execution and collection.
+Schema changes belong to the worker. Receipt readers accept versions 4, 5 and 6;
 version 4 has no factory-owned commit and remains collectable unchanged with its
 original command. Version 5 requires the nullable `commit` field. Neither version
-is migrated or rewritten by collection. Versions below 4 remain inspection-only:
+is migrated or rewritten by collection. Version 6 retains the version-5 metadata
+and nullable commit field and requires its bound read-only answer. Versions below 4 remain inspection-only:
 version 1 lacks the repository pin and version 2 uses a reusable filesystem pin.
 Version 3 binds the repository but not the individual worktree.
 Existing commands reconnect unchanged; they cannot acquire

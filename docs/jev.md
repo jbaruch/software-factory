@@ -123,3 +123,41 @@ routing. Evaluate representative labeled and held-out cases, including sampled
 confident errors, before enabling answer-to-action mappings. Typed answers and
 valid distributions do not establish judgment quality. Ordinary tests use fixed
 fake transports; live evaluation must be invoked separately.
+
+## Bounded native answers
+
+An explicitly admitted `codex-start` assignment can add `--decision-store` with
+an absolute store path, `--decision` with its SHA-256 ID and `--question` with one
+unresolved question ID. Generic uncertainty requires read-only role
+`standby-reasoner`; post-investigation uncertainty/unresolved requires `judge`.
+Admission, native eligibility, current candidate/requirements, task limits and
+Rex ownership remain binding. The ready-plan format does not yet select these
+optional bindings automatically.
+
+`coordination_evidence.py` owns the version-1 coordination section in the existing
+frozen brief: `decision`, `question`, task `inputs`, original `request` and original
+classifier `response`, plus `schema_version`. Its brief hash binds execution and
+collection. A judge's original Jev state must include
+`investigation: {task, assignment, result}` matching the exact current completed
+investigator result in the admitted task. A claim that investigation happened is
+insufficient. Select a highly capable judge at its maximum supported effort.
+
+The version-6 native report adds `answer: {decision, question, choice, missing_input}`.
+`completed` selects a non-uncertain/non-unresolved original option with null
+missing input. `blocked` supplies a concrete missing input and a null, uncertain
+or unresolved choice. The existing `codex-collect` records that original report;
+it grants no specialist approval, task acceptance, release permission or retries.
+
+```sh
+python3 jev.py pending --store /path/to/private/decisions --task-state-dir /path/to/tasks
+```
+
+This optional view uses schema 2 with `items` and `resolutions`. Already collected
+current native answers close only the matching question. Missing inputs, stale
+results, uncollected effects and conflicting attempts remain operator requests.
+The view verifies original events and frozen bindings without contacting Rex or
+writing a second resolution record. Original classifier records stay unchanged.
+Archived answers survive worktree removal if the original repository marker and
+collected evidence remain available. Without `--task-state-dir`, the schema-1
+classifier-only inbox is unchanged. These are shadow judgments until routing
+calibration is approved; callers must still verify actual source freshness.

@@ -17,6 +17,9 @@ import time
 from typing import Any
 import uuid
 
+if __name__ == "__main__":
+    sys.modules.setdefault("factory", sys.modules[__name__])
+
 ROOT = Path(__file__).resolve().parent
 GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
@@ -942,6 +945,20 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if record["admission"] is None:
             raise FactoryError("Admit a task before declaring assignment dependencies")
         request["dependencies"] = sorted(set(dependencies))
+    if (not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
+            and any(flag in command for flag in ("--decision-store", "--decision", "--question"))):
+        import codex_worker
+        import coordination_evidence
+        try:
+            native_args = codex_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Native command is damaged; restore its arguments before launching") from None
+        if native_args.decision is not None or native_args.question is not None or native_args.decision_store is not None:
+            if native_args.role != role or not native_args.decision_store or record["inputs"] is None:
+                raise FactoryError("Bind a native coordination assignment to its role, original store and selected inputs")
+            coordination_evidence.binding(native_args.decision, native_args.question, role, write=native_args.write)
+            instructions += coordination_evidence.render(native_args.decision_store, native_args.decision,
+                native_args.question, role, record["inputs"], task_record=record)
     if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
         require_grok_execution()
         import grok_worker
@@ -1064,7 +1081,8 @@ def check_commit_message(message, *, write):
         raise FactoryError("Use --commit-message only with --write and supply a nonempty commit subject of at most 72 characters")
 
 
-def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None):
+def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None,
+                  decision_store=None, decision=None, question=None):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
@@ -1110,11 +1128,16 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         role = saved[position]
     elif existing is not None:
         role = None  # Preserve historical worker commands unchanged.
+    if decision_store is not None or decision is not None or question is not None:
+        import coordination_evidence
+        if not coordination_evidence.binding(decision, question, role, write=write) or decision_store is None or not Path(decision_store).is_absolute():
+            raise FactoryError("Supply the absolute original Jev decision store before a coordination assignment")
+        command.extend(["--decision-store", str(decision_store), "--decision", str(decision), "--question", str(question)])
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
-def collect_codex(path, assignment_id, rex, record, assignment):
-    """Register a finished native report; this never accepts the whole task."""
+def codex_evidence(assignment_id, record, assignment, *, observe=None):
+    """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import check_commit_receipt, parse_events, parser, read_events
 
     command = assignment["request"]["command"]
@@ -1134,8 +1157,9 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
-    observed = status(rex, record, assignment)
-    if observed["state"] != "exited":
+    if observe is None and (assignment["result"] is None or not result_current(record, assignment["result"])):
+        raise FactoryError("Collect a current native result before using its answer as coordination evidence")
+    if observe is not None and observe()["state"] != "exited":
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -1146,7 +1170,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in (4, 5)
+            or receipt["schema_version"] not in (4, 5, 6)
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or any(type(receipt.get(key)) not in (int, float)
                    or not 0 <= receipt[key] <= sys.float_info.max
@@ -1172,11 +1196,41 @@ def collect_codex(path, assignment_id, rex, record, assignment):
             or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
             or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
-    native = parse_events(read_events(args.events))
+    import coordination_evidence
+    coordination = None
+    if args.decision is not None or args.question is not None:
+        try:
+            args.brief = Path(assignment["brief"])
+            instructions = args.brief.read_text()
+        except (OSError, UnicodeError):
+            raise FactoryError("Restore the original native brief before collecting its bounded answer") from None
+        if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
+            raise FactoryError("Native coordination brief changed; inspect the original frozen question")
+        coordination = coordination_evidence.read(instructions, args.decision, args.question, args.role,
+            assignment["request"]["inputs"], write=args.write)
+        if args.role == "judge":
+            coordination_evidence.check_investigation(coordination["request"], record)
+    if (receipt["schema_version"] == 6) != (coordination is not None):
+        raise FactoryError("Native receipt format differs from its bounded coordination assignment")
+    native = parse_events(read_events(args.events), coordination)
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
-    check_commit_receipt(receipt, args, record["admission"]["repository"])
+    if observe is not None:
+        check_commit_receipt(receipt, args, record["admission"]["repository"])
+    elif (coordination is None or args.write or receipt.get("commit") is not None
+            or repository_identity(record["admission"]["repository"]) != receipt["repository_identity"]):
+        raise FactoryError("Offline coordination needs collected read-only evidence from the original repository")
+    if observe is None and (assignment["result"]["outcome"] != native["report"]["outcome"]
+            or assignment["result"]["candidate"] != receipt["candidate"]
+            or str(args.receipt) not in assignment["result"]["artifacts"]):
+        raise FactoryError("Collected native result differs from its original answer evidence")
+    return args, receipt, native
+
+
+def collect_codex(path, assignment_id, rex, record, assignment):
+    """Register a finished native report; this never accepts the whole task."""
+    args, receipt, native = codex_evidence(assignment_id, record, assignment, observe=lambda: status(rex, record, assignment))
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
     return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
                          requirements=receipt["inputs"]["requirements"],
@@ -1326,6 +1380,9 @@ def main(argv=None):
             start.add_argument("--write", action="store_true")
             start.add_argument("--commit-message", help="With --write, the factory commits a completed writer result")
             start.add_argument("--seconds", type=int, default=600)
+            start.add_argument("--decision-store", type=Path)
+            start.add_argument("--decision")
+            start.add_argument("--question")
         else:
             start.add_argument("--grok", required=True)
             start.add_argument("--model", required=True)
@@ -1410,7 +1467,8 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Codex assignment")
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
-                                         write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role)
+                                         write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role,
+                                         decision_store=args.decision_store, decision=args.decision, question=args.question)
                 elif args.action == "grok-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")
