@@ -174,6 +174,8 @@ native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
+The native child receives only the locale/path/temp and subscription-configuration
+settings allowed by `native_environment()`; host credential variables are not forwarded.
 
 Writer CLI installations must remain outside the assigned checkout and Git
 metadata; the resolved executable is reused for later sandbox commands. Writer
@@ -220,7 +222,11 @@ with its owner and cannot load PKCS#11/FIDO libraries. The user's agent is uncha
 Each Git invocation uses a fresh native CLI permission profile, with network
 access disabled, an allowlisted validated environment and read-only configuration
 and caches. The standalone CLI itself and required npm vendor files are readable;
-its arbitrary parent directory is not granted. Unsupported access fails with
+its arbitrary parent directory is not granted. Pre-commit uses a dedicated virtual
+environment or the factory Python installation and a dedicated cache named
+`pre-commit`. Supplemental grants reject broad home/temp roots and source/Git
+metadata overlap. Other Python runtimes expose only their executable, standard
+library and libpython files. Unsupported access fails with
 retained intent and no host fallback. Launch/verification guards compare the index
 and raw source bytes without worktree status, filters, external diffs or text
 conversion. macOS additionally receives its native socket option for the signer;
@@ -308,7 +314,9 @@ index; changes to that private index refuse the commit. The candidate stays boun
 to the factory-recorded staged tree, and the clean source check binds the output
 assessed by later verification. A completed receipt requires a terminal commit state matching
 its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
-for a new commit, the actual Git parent.
+for a new commit, the actual Git parent. Collection also requires the retained
+assigned worktree's exact HEAD to equal the candidate; keep that checkout until
+collection completes.
 
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
