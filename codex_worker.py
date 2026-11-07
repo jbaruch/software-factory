@@ -156,15 +156,17 @@ def commit_changes(args, receipt):
     for name in paths.stdout.split("\0"):
         if not name:
             continue
+        source = root / name
+        if any(parent.is_symlink() for parent in source.parents if parent != root and root in parent.parents):
+            raise factory.FactoryError("Writer contains a symlinked source directory; restore independent source paths inside its assigned worktree")
         try:
-            info = (root / name).lstat()
+            info = source.lstat()
         except FileNotFoundError:
             continue  # Tracked deletions are part of the writer's change.
         if not stat.S_ISREG(info.st_mode):
             raise factory.FactoryError("Writer contains linked or non-regular source; inspect the retained changes and use independent regular files")
         if info.st_nlink > 1:
             # Materialize finished output without changing its other hard links.
-            source = root / name
             with tempfile.TemporaryDirectory(prefix=".factory-source-", dir=source.parent) as temporary:
                 independent = Path(temporary) / "source"
                 shutil.copy2(source, independent, follow_symlinks=False)
@@ -184,7 +186,10 @@ def commit_changes(args, receipt):
                 continue
             metadata, name = entry.split("\t", 1)
             mode, _, stage = metadata.split()
-            info = (root / name).lstat()
+            source = root / name
+            if any(parent.is_symlink() for parent in source.parents if parent != root and root in parent.parents):
+                raise factory.FactoryError("Writer staged a symlinked source directory; inspect its retained changes before committing")
+            info = source.lstat()
             if mode not in {"100644", "100755"} or stage != "0" or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise factory.FactoryError("Writer staged linked or non-regular source; inspect the retained changes and use independent regular files")
     except ValueError:
