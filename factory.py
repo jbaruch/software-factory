@@ -1,6 +1,7 @@
 """Explicit native Rex launches. No scheduler, provider broker or model routing."""
 import argparse
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ from typing import Any
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 REPOSITORY_MARKER = "software-factory-repository.json"
@@ -417,13 +419,29 @@ def git_worktree(repository):
     raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
 
 
+@contextmanager
+def git_execution(prefix, environment):
+    token = GIT_EXECUTION.set((prefix, environment))
+    try:
+        yield
+    finally:
+        GIT_EXECUTION.reset(token)
+
+
 def git_run(repository, *args, environment=None):
     try:
         worktree = git_worktree(repository)
-        return subprocess.run([git_binary(), "--no-replace-objects", "-C", worktree,
+        scope = GIT_EXECUTION.get()
+        prefix = [] if scope is None else scope[0]()
+        if scope is not None:
+            environment = scope[1]
+        result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
                               text=True, timeout=10, check=False,
                               env=git_environment() if environment is None else environment)
+        if scope is not None and result.returncode == 125:
+            raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
+        return result
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
     except (OSError, subprocess.TimeoutExpired):

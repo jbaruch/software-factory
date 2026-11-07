@@ -1,7 +1,7 @@
 """Controller contracts use fake Rex and native processes, never providers."""
 import asyncio
 import copy
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
@@ -111,7 +111,7 @@ class ReadyRunner(unittest.TestCase):
             os.chdir(self.repo)
             with redirect_stdout(StringIO()):
                 receipt = asyncio.run(codex_worker.execute(args, spawn=spawn,
-                    clock=lambda: 1000.0, timer=lambda: 10.0))
+                    clock=lambda: 1000.0, timer=lambda: 10.0, git_scope=lambda *args, **kwargs: nullcontext()))
             self.assertEqual(receipt["state"], "completed")
         finally:
             os.chdir(before)

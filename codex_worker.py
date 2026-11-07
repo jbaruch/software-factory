@@ -1,21 +1,33 @@
 """One explicit native Codex assignment; retain its original events and compact result."""
 import argparse
 import asyncio
+from contextlib import contextmanager, ExitStack, nullcontext
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import stat
+import subprocess
 import sys
+import tempfile
 import time
+import uuid
 
 sys.dont_write_bytecode = True
 
 import factory
 
 NATIVE_LINE_LIMIT = 1024 * 1024
+GIT_ENV_LAUNCHER = """import hashlib,json,os,sys
+environment = {key: os.environ[key] for key in json.loads(sys.argv[2]) if key in os.environ}
+environment.update(json.loads(sys.argv[1]))
+if hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest() != sys.argv[3]:
+    raise SystemExit(125)
+os.execve(sys.argv[4], sys.argv[4:], environment)
+"""
 
 
 class WorkerError(ValueError):
@@ -135,8 +147,142 @@ async def stop_child(process):
         await process.wait()
 
 
+@contextmanager
+def private_signer(key, python):
+    """Own one short-lived signing agent; never change the user's agent."""
+    agent = shutil.which("ssh-agent", path=os.defpath)
+    add = shutil.which("ssh-add", path=os.defpath)
+    if not agent or not add:
+        raise factory.FactoryError("Install OpenSSH agent tools for isolated SSH-signed commits")
+    with tempfile.TemporaryDirectory(prefix="sf-sign-") as directory:
+        socket = str(Path(directory).resolve() / "s")
+        environment = {"PATH": os.defpath, "HOME": str(Path.home()), "SSH_AUTH_SOCK": socket,
+                       "SSH_ASKPASS_REQUIRE": "never"}
+        # Command mode ties agent lifetime to this pipe, including owner crashes.
+        # No PKCS#11/FIDO libraries may be loaded through the callback socket.
+        try:
+            process = subprocess.Popen([agent, "-a", socket, "-P", "", "-t", "300", python,
+                "-I", "-S", "-c", "import sys; sys.stdin.buffer.read()"], cwd=directory,
+                env=environment, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            raise factory.FactoryError("Cannot start the private SSH signer; restore local OpenSSH and socket access before another attempt") from None
+        try:
+            deadline = time.monotonic() + 5
+            while not Path(socket).exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not Path(socket).exists() or process.poll() is not None:
+                raise factory.FactoryError("Private SSH signing agent did not start; restore local OpenSSH/socket access before another attempt")
+            try:
+                loaded = subprocess.run([add, "-q", "-k", "-t", "300", str(key)], env=environment,
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False, start_new_session=True)
+            except (OSError, subprocess.TimeoutExpired):
+                raise factory.FactoryError("Private SSH key loading failed or timed out; restore noninteractive local signing access before another attempt") from None
+            if loaded.returncode:
+                raise factory.FactoryError("Cannot load the configured SSH signing key without interaction; choose an approved noninteractive signing setup before another attempt")
+            yield socket
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        raise factory.FactoryError(f"Private signing helper process {process.pid} did not stop; inspect that owned process and retained Git intent before another attempt") from None
+
+
+@contextmanager
+def isolated_git(args, identity, *, signing=False):
+    """Run Git and all its callbacks with local writes and no network access."""
+    if factory.repository_identity(".") != identity or factory.git_dir(".") != args.worktree_git_dir:
+        raise factory.FactoryError("Writer checkout changed; restore its original repository before local Git execution")
+    root = Path(factory.git_worktree("."))
+    python = str(Path(sys.executable).resolve())
+    home = Path.home()
+    inherited = factory.command_environment()
+    environment = {key: value for key, value in inherited.items()
+                   if key in {"PATH", "HOME", "LANG"}
+                   or key.startswith("LC_") or key.startswith("GIT_CONFIG")
+                   or key in factory.GIT_IDENTITY_VARIABLES}
+    environment.update(PYTHONDONTWRITEBYTECODE="1", GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
+    files = {":root": "deny", ":minimal": "read", str(root): "write",
+             str(factory.git_common_dir(".")): "write", str(args.worktree_git_dir): "write"}
+    files.setdefault(str(Path(sys.base_prefix).resolve()), "read")
+    for directory in {factory.git_common_dir("."), args.worktree_git_dir}:
+        for name in ("config", "config.worktree", "commondir", "hooks", "info", factory.REPOSITORY_MARKER):
+            files[str(directory / name)] = "read"
+    files[str(root / ".codex")] = "read"
+    for name in ("bin", "Cellar", "opt", "lib"):
+        runtime = Path("/opt/homebrew") / name
+        if runtime.is_dir():
+            files[str(runtime)] = "read"
+    for path in [home / ".gitconfig", *(home / ".config/git" / name for name in ("config", "ignore", "attributes")),
+                 *(Path(inherited[key]) for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM") if key in inherited)]:
+        files[str(path.resolve())] = "read"
+    # The configured local hook tool may use its already-installed offline cache.
+    precommit = shutil.which("pre-commit")
+    if precommit:
+        tool = Path(precommit).resolve().parent.parent
+        files.setdefault(str(tool), "read")
+        interpreter = tool / "bin/python"
+        if interpreter.is_file():
+            files.setdefault(str(interpreter.resolve().parent.parent), "read")
+        cache = Path(inherited.get("PRE_COMMIT_HOME", str(Path(inherited.get("XDG_CACHE_HOME", str(home / ".cache"))) / "pre-commit")))
+        files[str(cache.resolve())] = "read"
+        environment["PRE_COMMIT_HOME"] = str(cache.resolve())
+    selected = factory.git_run(".", "config", "--get", "user.signingkey", environment=inherited)
+    enabled = factory.git_run(".", "config", "--bool", "--get", "commit.gpgsign", environment=inherited)
+    method = factory.git_run(".", "config", "--get", "gpg.format", environment=inherited)
+    if any(result.returncode not in (0, 1) for result in (selected, enabled, method)):
+        raise factory.FactoryError("Cannot inspect local signing configuration; restore Git config access before committing")
+    agent = None
+    def command_prefix():
+        # Config tables merge. A fresh command-local name prevents earlier
+        # callbacks or loaded project profiles from adding grants to this one.
+        name = "factory-git-" + uuid.uuid4().hex
+        profile = '{extends=":read-only",network={enabled=false},filesystem={' + ",".join(
+            json.dumps(path, ensure_ascii=False) + "=" + json.dumps(mode) for path, mode in files.items()) + "}}"
+        prefix = [str(args.codex), "sandbox", "--permission-profile", name,
+                  "-c", "permissions={" + name + "=" + profile + "}", "--cd", str(root)]
+        if agent:
+            prefix.extend(["--allow-unix-socket", agent])
+        digest = hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
+        runtime = json.dumps({key: environment[key] for key in ("PATH", "TMPDIR") if key in environment})
+        return [*prefix, "--", python, "-I", "-S", "-c", GIT_ENV_LAUNCHER,
+                runtime, json.dumps(sorted(environment)), digest]
+    with tempfile.TemporaryDirectory(prefix="factory-git-", dir=args.worktree_git_dir) as temporary, ExitStack() as stack:
+        environment["TMPDIR"] = temporary
+        if signing and enabled.stdout.strip() == "true" and method.stdout.strip() == "ssh":
+            public_key = Path(selected.stdout.strip()).expanduser()
+            if public_key.suffix != ".pub" or not public_key.is_file():
+                raise factory.FactoryError("Configure an SSH public-key file with its unlocked private companion for isolated signed commits")
+            with public_key.open(encoding="utf-8") as stream:
+                public = stream.read(16385)
+            if len(public) > 16384 or not public.startswith(("ssh-", "ecdsa-", "sk-")):
+                raise factory.FactoryError("The configured signing file must contain an SSH public key; keep private keys outside callback access")
+            private_key = public_key.with_suffix("").resolve()
+            if any(private_key.is_relative_to(path) for path in (root, factory.git_common_dir("."), args.worktree_git_dir)):
+                raise factory.FactoryError("Keep private signing keys outside the writer checkout and Git metadata")
+            agent = stack.enter_context(private_signer(private_key, python))
+            environment["SSH_AUTH_SOCK"] = agent
+            files[str(public_key.resolve())] = "read"
+            files[str(private_key)] = "deny"
+            files[agent] = "read"
+        try:
+            with factory.git_execution(command_prefix, environment):
+                yield
+        except factory.FactoryError as exc:
+            raise factory.FactoryError(str(exc) + "; inspect native Git sandbox support and offline hook/signing access before another attempt; no host fallback was used") from None
+
+
 def commit_changes(args, receipt):
-    """Commit an opted-in writer's finished work outside the native sandbox."""
+    """Commit an opted-in writer's finished work in the factory Git sandbox."""
     if factory.git_commit(".", "HEAD") != args.candidate:
         raise factory.FactoryError("Writer changed Git HEAD before the factory commit; inspect the original candidate and retained work without retrying")
     if factory.repository_identity(".") != receipt["repository_identity"] or factory.git_dir(".") != args.worktree_git_dir:
@@ -144,9 +290,6 @@ def commit_changes(args, receipt):
     root = Path(factory.git_worktree("."))
     environment = factory.command_environment()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
-                             staged_tree=None, candidate=None)
-    factory.save(args.receipt, receipt)
     # Even status can execute configured clean filters; retain intent first.
     paths = factory.git_run(".", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     if paths.returncode:
@@ -243,7 +386,8 @@ def check_commit_receipt(receipt, args, repository):
             raise factory.FactoryError("Factory commit parent differs from the assignment; inspect its original Git history before collection")
 
 
-async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic):
+async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
+                  git_scope=isolated_git):
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Native attempt already has artifacts; collect or inspect it, never relaunch it blindly")
     try:
@@ -344,11 +488,17 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
         receipt.update(parse_events(events))
-        if args.commit_message is not None and receipt["report"]["outcome"] == "completed":
-            commit_changes(args, receipt)
-        candidate = factory.git_commit(".", "HEAD")
-        factory.check_checkout(".", ".", candidate, expected_identity=identity,
-                               expected_git_dir=args.worktree_git_dir)
+        committing = args.commit_message is not None and receipt["report"]["outcome"] == "completed"
+        if committing:
+            receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
+                                     staged_tree=None, candidate=None)
+            factory.save(args.receipt, receipt)
+        with git_scope(args, identity, signing=committing) if args.commit_message is not None else nullcontext():
+            if committing:
+                commit_changes(args, receipt)
+            candidate = factory.git_commit(".", "HEAD")
+            factory.check_checkout(".", ".", candidate, expected_identity=identity,
+                                   expected_git_dir=args.worktree_git_dir)
         if not args.write and candidate != args.candidate:
             raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
         receipt.update(candidate=candidate, state="completed")
