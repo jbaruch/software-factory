@@ -17,6 +17,25 @@ def owner(question):
     return "judge" if question == "investigation-resolution" else "standby-reasoner"
 
 
+def dispute(request):
+    state = request["payload"]["state"]
+    case = state.get("dispute") if isinstance(state, dict) else None
+    if (not isinstance(case, dict) or set(case) != {"question", "options"}
+            or not isinstance(case["question"], str) or not case["question"].strip()
+            or not isinstance(case["options"], dict) or not 2 <= len(case["options"]) <= 255
+            or any(not key.strip() or not isinstance(value, str) or not value.strip() for key, value in case["options"].items())):
+        raise factory.FactoryError("Supply the original dispute question and bounded ruling options in state.dispute before judging")
+    return case
+
+
+def report_guidance(value):
+    if owner(value["question"]) == "judge":
+        return ("Adjudicate the original state.dispute using its supplied ruling options; do not re-answer the investigation-resolution classifier. "
+            "Report completed only with a supported ruling, concrete consequences, and missing_input null. "
+            "If evidence or authority is missing, report blocked, ruling null, consequences [], and a concrete missing_input.")
+    return REPORT_GUIDANCE
+
+
 def binding(decision, question, role, *, write=False):
     if decision is None and question is None:
         return False
@@ -35,6 +54,7 @@ def check_investigation(request, record):
             or assignment["request"]["role"] != "investigator" or assignment["result"] is None
             or not factory.result_current(record, assignment["result"]) or assignment["result"]["outcome"] != "completed"):
         raise factory.FactoryError("Judge reassessment must include the exact current investigator result in state.investigation before launch")
+    dispute(request)
 
 
 def render(store, decision, question, role, inputs, *, task_record=None):
@@ -54,7 +74,7 @@ def render(store, decision, question, role, inputs, *, task_record=None):
         check_investigation(record["request"], task_record)
     value = dict(schema_version=1, decision=decision, question=question, inputs=inputs,
                  request=record["request"], response=record["response"])
-    return "\n" + REPORT_GUIDANCE + "\n" + MARKER + json.dumps(value, allow_nan=False, ensure_ascii=True) + "\n"
+    return "\n" + report_guidance(value) + "\n" + MARKER + json.dumps(value, allow_nan=False, ensure_ascii=True) + "\n"
 
 
 def read(instructions, decision, question, role, inputs, *, write=False):
@@ -76,12 +96,21 @@ def read(instructions, decision, question, role, inputs, *, write=False):
         answer = value["response"]["answers"][question]
         if answer["choice"] not in ({"uncertain", "unresolved"} if role == "judge" else {"uncertain"}):
             raise ValueError("Not an unresolved question")
+        if role == "judge":
+            dispute(value["request"])
         return value
     except (ValueError, KeyError, jev.JevError):
         raise factory.FactoryError("Frozen coordination evidence changed; inspect the original brief, decision and question without relaunching") from None
 
 
 def answer_schema(evidence):
+    if owner(evidence["question"]) == "judge":
+        return dict(type="object", additionalProperties=False,
+            required=["decision", "question", "ruling", "consequences", "missing_input"], properties=dict(
+                decision=dict(type="string", enum=[evidence["decision"]]),
+                question=dict(type="string", enum=[evidence["question"]]),
+                ruling=dict(type=["string", "null"], enum=[*dispute(evidence["request"])["options"], None]),
+                consequences=dict(type="array", items=dict(type="string")), missing_input=dict(type=["string", "null"])))
     return dict(type="object", additionalProperties=False, required=["decision", "question", "choice", "missing_input"],
         properties=dict(decision=dict(type="string", enum=[evidence["decision"]]),
             question=dict(type="string", enum=[evidence["question"]]),
@@ -90,10 +119,23 @@ def answer_schema(evidence):
 
 
 def validate_answer(answer, evidence, outcome):
-    if (not isinstance(answer, dict) or set(answer) != {"decision", "question", "choice", "missing_input"}
+    judge = owner(evidence["question"]) == "judge"
+    fields = {"decision", "question", "ruling", "consequences", "missing_input"} if judge else {"decision", "question", "choice", "missing_input"}
+    if (not isinstance(answer, dict) or set(answer) != fields
             or answer["decision"] != evidence["decision"] or answer["question"] != evidence["question"]
             or outcome not in {"completed", "blocked"}):
         raise factory.FactoryError("Reasoner answer differs from its bounded question; inspect its original event stream")
+    if judge:
+        ruling, consequences, missing = answer["ruling"], answer["consequences"], answer["missing_input"]
+        if outcome == "completed":
+            valid = (isinstance(ruling, str) and ruling in dispute(evidence["request"])["options"] and ruling != "uncertain"
+                and isinstance(consequences, list) and bool(consequences)
+                and all(isinstance(item, str) and item.strip() for item in consequences) and missing is None)
+        else:
+            valid = ruling is None and consequences == [] and isinstance(missing, str) and bool(missing.strip())
+        if not valid:
+            raise factory.FactoryError("Return a supported dispute ruling and consequences, or the concrete missing input; a classifier label is not adjudication")
+        return
     choices = evidence["request"]["payload"]["questions"][evidence["question"]]["criteria"]
     choice, missing = answer["choice"], answer["missing_input"]
     if outcome == "completed":

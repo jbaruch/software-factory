@@ -61,7 +61,7 @@ def outcome_schema(coordination=None):
     if coordination is not None:
         import coordination_evidence
         schema["properties"]["outcome"]["enum"] = ["blocked", "completed"]
-        schema["properties"]["outcome"]["description"] = coordination_evidence.REPORT_GUIDANCE
+        schema["properties"]["outcome"]["description"] = coordination_evidence.report_guidance(coordination)
         schema["properties"]["answer"] = coordination_evidence.answer_schema(coordination)
         schema["required"].append("answer")
     return schema

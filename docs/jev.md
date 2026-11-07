@@ -143,10 +143,17 @@ investigator result in the admitted task. A claim that investigation happened is
 insufficient. Select a highly capable judge at its maximum supported effort.
 
 The version-6 native report adds `answer: {decision, question, choice, missing_input}`.
-`completed` selects a non-uncertain/non-unresolved original option with null
+For a standby reasoner, `completed` selects a non-uncertain/non-unresolved original option with null
 missing input. `blocked` supplies a concrete missing input and a null, uncertain
 or unresolved choice. The existing `codex-collect` records that original report;
 it grants no specialist approval, task acceptance, release permission or retries.
+
+A judge also requires `state.dispute: {question, options}` with at least two
+original ruling options. Its `answer` carries `decision`, `question`, `ruling`,
+`consequences` and `missing_input`: a completed ruling selects an original option
+and supplies concrete consequences. A blocked ruling has null ruling, empty
+consequences and a concrete missing input. It does not re-answer the classifier's
+resolved/unresolved labels. Original artifact references supply its evidence basis.
 
 ```sh
 python3 jev.py pending --store /path/to/private/decisions --task-state-dir /path/to/tasks

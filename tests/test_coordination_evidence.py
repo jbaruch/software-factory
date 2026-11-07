@@ -35,6 +35,8 @@ class BoundedAnswers(unittest.TestCase):
     def start(self, *, question="task-demand", role="standby-reasoner", choice="uncertain", assignment="reason", purpose="work"):
         state: dict = {"assignment": "Missing acceptance evidence"}
         if role == "judge":
+            state["dispute"] = dict(question="Which fixture behavior should be selected?",
+                options={"adopt-fix": "Use the investigator's demonstrated correction", "keep-behavior": "Keep the original behavior"})
             with patch.object(factory, "Rex", FakeRex):
                 factory.launch(self.path, task="resolve", assignment_id="investigate", role="investigator",
                     goal="Gather the exact disputed evidence", cwd=str(self.fixture.repo), command=[sys.executable, "-c", "pass"],
@@ -65,8 +67,11 @@ class BoundedAnswers(unittest.TestCase):
         self.fixture.args = codex_worker.parser().parse_args(argv[4:])
 
     def answer(self, choice: str | None ="routine", missing=None, *, outcome="completed"):
-        self.report = dict(outcome=outcome, artifacts=[str(self.fixture.args.brief)], answer=dict(
+        self.report: dict = dict(outcome=outcome, artifacts=[str(self.fixture.args.brief)], answer=dict(
             decision=self.decision["id"], question=self.question, choice=choice, missing_input=missing))
+        if self.fixture.args.role == "judge":
+            self.report["answer"] = dict(decision=self.decision["id"], question=self.question,
+                ruling=choice, consequences=["Apply the selected fixture behavior"] if outcome == "completed" else [], missing_input=missing)
         events = fixtures.events(outcome)
         events[-2]["item"]["text"] = json.dumps(self.report)
         self.fixture.process = fixtures.FakeProcess(events)
@@ -121,9 +126,17 @@ class BoundedAnswers(unittest.TestCase):
 
     def test_judge_gets_post_investigation_uncertainty_and_a_bounded_answer(self):
         self.start(question="investigation-resolution", role="judge", choice="unresolved")
-        self.assertEqual(self.answer("resolved")["state"], "completed")
+        self.assertEqual(self.answer("adopt-fix")["state"], "completed")
         self.collect()
-        self.assertEqual(jev.pending_decisions(self.store, task_state_dir=self.tasks)["items"], [])
+        view = jev.pending_decisions(self.store, task_state_dir=self.tasks)
+        self.assertEqual(view["items"], [])
+        self.assertEqual(view["resolutions"][0]["answer"]["ruling"], "adopt-fix")
+
+    def test_judge_cannot_replace_a_ruling_with_a_classifier_label(self):
+        self.start(question="investigation-resolution", role="judge", choice="unresolved")
+        receipt = self.answer("resolved")
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("classifier label", receipt["error"])
 
     def test_out_of_set_answer_refuses_completion(self):
         self.start()
