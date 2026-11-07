@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import stat
 import sys
+import tempfile
 import time
 
 sys.dont_write_bytecode = True
@@ -148,9 +150,6 @@ def commit_changes(args, receipt):
                              staged_tree=None, candidate=None)
     factory.save(args.receipt, receipt)
     # Even status can execute configured clean filters; retain intent first.
-    status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
-    if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
-        raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
     paths = factory.git_run(".", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     if paths.returncode:
         raise factory.FactoryError("Cannot inspect writer source paths; restore Git access before staging changes")
@@ -161,8 +160,18 @@ def commit_changes(args, receipt):
             info = (root / name).lstat()
         except FileNotFoundError:
             continue  # Tracked deletions are part of the writer's change.
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        if not stat.S_ISREG(info.st_mode):
             raise factory.FactoryError("Writer contains linked or non-regular source; inspect the retained changes and use independent regular files")
+        if info.st_nlink > 1:
+            # Materialize finished output without changing its other hard links.
+            source = root / name
+            with tempfile.TemporaryDirectory(prefix=".factory-source-", dir=source.parent) as temporary:
+                independent = Path(temporary) / "source"
+                shutil.copy2(source, independent, follow_symlinks=False)
+                os.replace(independent, source)
+    status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
+    if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
+        raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
     staged = factory.git_run(".", "add", "--all", "--", ".", environment=environment)
     if staged.returncode:
         raise factory.FactoryError("Cannot stage writer changes; inspect the retained commit intent, index and worktree before correcting it")
