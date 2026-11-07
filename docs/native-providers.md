@@ -136,6 +136,11 @@ describes standalone slash-command reports; the
 
 ## Grok authenticated metadata
 
+The ACP metadata command is currently held before any native child starts. The
+CLI reloads mutable executable configuration after inspection, so the check below
+does not establish a safe execution boundary. Use another eligible route.
+The following describes retained protocol coverage, not current route readiness.
+
 The metadata command applies the same native configuration/trust and executable-
 customization checks as the [inspection worker](#explicit-grok-inspection-assignments)
 before starting its ACP agent. Unsupported profiles remain held without a model turn.
@@ -187,8 +192,18 @@ is used by the explicit worker and collector below.
 
 ## Explicit Grok inspection assignments
 
-Use an admitted task, selected candidate/requirements and an actual discovered
-model/effort, as with [native launcher commands](native-rex.md):
+New assignments, direct worker execution and new result collection are currently
+held. Existing assignment reconnect and raw artifact inspection remain available.
+The native built-in sandbox can fail open, `read_file` does not enforce checkout
+confinement, and custom profiles only add to inherited filesystem grants. Native
+configuration inspection also leaves a gap before mutable hooks/plugins/MCP/LSP
+configuration is reloaded. Tool denies and file hashes do not close those gaps.
+No environment switch or command-line option bypasses the hold. Restore execution
+only with a compatible boundary and separate live conformance evidence.
+
+The retained command interface uses an admitted task, selected
+candidate/requirements and discovered model/effort, as with
+[native launcher commands](native-rex.md):
 
 ```sh
 python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
@@ -216,7 +231,7 @@ Reconnecting an existing effect preserves its original brief and range. Historic
 code-review assignments without a base remain inspection-only; they cannot gain
 review evidence retroactively. Historical non-review briefs stay unchanged.
 
-This slice permits only the built-in `read_file` tool, with explicit write, edit,
+The retained protocol implementation requests only the built-in `read_file` tool, with explicit write, edit,
 shell, MCP, web, workflow and subagent denies and the native `strict` sandbox.
 Source reads are explicitly allowed; model file reads of the default and selected
 Grok profile directories are denied. It disables native subagents, web search and automatic
@@ -234,9 +249,9 @@ empty issuer/client/proxy overrides. `GROK_HOME` reaches both native children;
 the recorded configuration includes its resolved root and layer paths/hashes,
 without configuration contents or credentials. Native discovery must report
 the assigned project trusted and no executable hooks, enabled plugins, MCP or
-LSP servers. This check precedes the metadata agent as well as the model child;
-project/compatibility discovery cannot silently add executable tools. The command
-holds unsupported profiles rather than changing the user's global configuration.
+LSP servers. Inspection precedes the metadata agent and model child, but does not
+freeze the configuration either child consumes. The execution hold prevents
+these checks from being treated as sufficient confinement. It changes no global configuration.
 Unknown quota stays unknown;
 these explicit commands do not add automatic Grok scheduling to the ready runner.
 

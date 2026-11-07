@@ -17,12 +17,17 @@ from typing import Any
 
 import factory
 import grok_worker
+import native_grok
 from test_codex_worker import FakeProcess
 from test_rex_launcher import FakeRex
 
 
 class GrokWorker(unittest.TestCase):
     def setUp(self):
+        # These fake-process tests retain protocol coverage, not route eligibility.
+        self.boundary = patch.object(native_grok, "require_execution_boundary")
+        self.boundary.start()
+        self.addCleanup(self.boundary.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
@@ -110,6 +115,50 @@ class GrokWorker(unittest.TestCase):
     def collect(self):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             return factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
+
+    def test_production_hold_prevents_worker_probe_and_model_launch(self):
+        self.boundary.stop()
+        with self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
+            self.execute()
+        self.assertEqual(self.probes, [])
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.events.exists())
+        self.assertFalse(self.args.receipt.exists())
+
+    def test_production_hold_refuses_new_effect_without_consuming_allowance(self):
+        before = self.path.read_bytes()
+        calls = copy.deepcopy(FakeRex.calls)
+        self.boundary.stop()
+        with self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
+            self.make_command(assignment_id="held")
+        with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
+            factory.launch(self.path, task="task", assignment_id="held", role="qa",
+                goal="Inspect the fixture", cwd=str(self.repo), command=self.command, purpose="work",
+                binary=sys.executable, server="unix:///test.sock")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, calls)
+
+    def test_production_hold_retains_historical_receipt_without_new_result(self):
+        self.assertEqual(self.execute()["state"], "completed")
+        before = [path.read_bytes() for path in (self.path, self.args.receipt, self.args.events)]
+        self.boundary.stop()
+        with self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
+            self.collect()
+        self.assertEqual([path.read_bytes() for path in (self.path, self.args.receipt, self.args.events)], before)
+
+    def test_production_hold_allows_existing_effect_reconnect_without_relaunch(self):
+        before = self.path.read_bytes()
+        calls = copy.deepcopy(FakeRex.calls)
+        self.boundary.stop()
+        self.assertEqual(self.make_command(), self.command)
+        with patch.object(factory, "Rex", FakeRex):
+            _, assignment = factory.launch(self.path, task="task", assignment_id="inspect", role="qa",
+                goal="Inspect the exact fixture", cwd=str(self.repo), command=self.command, purpose="work",
+                binary=sys.executable, server="unix:///test.sock")
+        self.assertEqual(assignment, self.assignment)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual([call for call in FakeRex.calls if call[0] == "new"],
+                         [call for call in calls if call[0] == "new"])
 
     def test_original_events_bound_receipt_and_idempotent_collection(self):
         with patch.dict(os.environ, {"GH_TOKEN": "fixture-private-token"}):

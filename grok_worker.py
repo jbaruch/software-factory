@@ -36,6 +36,7 @@ def read_events(path):
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_grok.probe,
                   configuration=native_grok.subscription_configuration, clock=time.time, timer=time.monotonic):
+    factory.require_grok_execution()
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Grok attempt already has artifacts; inspect or collect it without relaunching")
     if any(name in os.environ for name in native_grok.API_KEY_ENVIRONMENT):

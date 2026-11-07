@@ -4,6 +4,13 @@
 
 ### Explicit read-only Grok execution
 
+Keep this route held before native inspection, metadata or model children start.
+Refuse new assignments without consuming allowance and refuse new result collection;
+preserve existing effects and raw artifacts. The native sandbox does not confine
+reads to the assigned checkout, and mutable executable configuration is reloaded
+after inspection. Offline protocol tests and historical fixtures do not qualify
+that boundary. No runtime override bypasses the hold.
+
 Add `grok-start` and `grok-collect` with frozen native sessions, brief/repository
 bindings, bounded seconds/turns, retained original event lines and version-1
 receipts. Verify cached OIDC subscription metadata and advertised model/effort

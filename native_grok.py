@@ -23,6 +23,15 @@ class GrokProbeError(Exception):
     pass
 
 
+def require_execution_boundary():
+    """Hold execution until the native boundary meets the assignment contract."""
+    raise GrokProbeError(
+        "Grok execution is held: native sandbox permissions do not confine reads to the assigned checkout, "
+        "and configuration inspection does not freeze executable integrations. "
+        "Select another eligible route; retain existing Grok artifacts for inspection. "
+        "Re-enable only after a compatible boundary passes live conformance.")
+
+
 def validate_configuration(value, cwd):
     """Validate retained configuration evidence without rereading mutable files."""
     if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
@@ -90,6 +99,7 @@ def read_options(cwd):
 
 async def subscription_configuration(binary, cwd, *, spawn=asyncio.create_subprocess_exec):
     """Refuse routing overrides rather than reproduce Grok's config merge."""
+    require_execution_boundary()
     if any(key in os.environ for key in (*API_KEY_ENVIRONMENT, "GROK_AUTH", "GROK_CONFIG", "GROK_CONFIG_PATH",
             "GROK_MODELS_BASE_URL", "GROK_MODELS_LIST_URL", "GROK_AUTH_PROVIDER_COMMAND")):
         raise GrokProbeError("Unset Grok API, endpoint, auth-provider and config-overlay environment overrides before subscription execution")
@@ -270,6 +280,7 @@ def metadata(initialized, authenticated) -> dict:
 
 async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec,
                 configuration=subscription_configuration, clock=time.time, timer=time.monotonic) -> dict:
+    require_execution_boundary()
     if any(name in os.environ for name in API_KEY_ENVIRONMENT):
         raise GrokProbeError("Unset XAI_API_KEY and GROK_CODE_XAI_API_KEY before native subscription discovery")
     if not Path(binary).is_absolute():

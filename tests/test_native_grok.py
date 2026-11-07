@@ -57,6 +57,10 @@ class Process:
 
 class NativeGrok(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        # Exercise retained protocol behavior separately from the production hold.
+        boundary = patch.object(native_grok, "require_execution_boundary")
+        boundary.start()
+        self.addCleanup(boundary.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.cwd = Path(directory.name)
@@ -233,6 +237,9 @@ class NativeGrok(unittest.IsolatedAsyncioTestCase):
 
 class NativeGrokConfiguration(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        boundary = patch.object(native_grok, "require_execution_boundary")
+        boundary.start()
+        self.addCleanup(boundary.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.cwd = Path(temporary.name).resolve()
@@ -441,6 +448,24 @@ class NativeGrokExecution(unittest.TestCase):
         for index, event in enumerate(cases):
             with self.subTest(index=index), self.assertRaises(native_grok.GrokProbeError):
                 self.parse([event])
+
+
+class NativeGrokHeld(unittest.IsolatedAsyncioTestCase):
+    async def test_metadata_and_inspection_hold_before_any_native_child(self):
+        for command in (native_grok.probe, native_grok.subscription_configuration):
+            with self.subTest(command=command.__name__):
+                spawn = AsyncMock()
+                with self.assertRaisesRegex(native_grok.GrokProbeError, "Grok execution is held"):
+                    await command(sys.executable, Path.cwd(), spawn=spawn)
+                spawn.assert_not_called()
+
+    def test_metadata_cli_returns_hold_without_output_or_child(self):
+        output, error = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            code = native_grok.main(["--grok", sys.executable, "--cwd", str(Path.cwd())])
+        self.assertEqual(code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("Grok execution is held", error.getvalue())
 
 
 class NativeGrokCli(unittest.TestCase):
