@@ -1,8 +1,10 @@
 """A bounded coordination question in the existing frozen assignment brief."""
 import json
+import asyncio
 from pathlib import Path
 import re
 import sys
+import time
 
 import factory
 import jev
@@ -15,6 +17,37 @@ REPORT_GUIDANCE = ("Report outcome completed only for a supported non-uncertain/
 
 def owner(question):
     return "judge" if question == "investigation-resolution" else "standby-reasoner"
+
+
+def judge_model():
+    try:
+        policy = factory.decode_json((factory.ROOT / "config/coordination.json").read_text())
+        model = policy["policies"]["judge_model"]
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Missing judge model")
+        return model
+    except (OSError, ValueError, KeyError, TypeError):
+        raise factory.FactoryError("Configure judge_model from eligible highly capable native models before judging") from None
+
+
+def validate_judge_capacity(capacity, binary, model, effort, configured_model, now):
+    import ready_runner
+    if model != configured_model or not isinstance(configured_model, str) or not configured_model.strip():
+        raise factory.FactoryError("Select the configured judge_model; arbitrary model choices cannot adjudicate this case")
+    try:
+        reason = ready_runner.capacity_reason(capacity, binary, now, 0, dict(model=model, effort=effort))
+        if reason:
+            raise factory.FactoryError(reason)
+        selected = [item for item in capacity["models"] if item["model"] == model]
+        rank = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+        efforts = selected[0]["effort_ids"] if len(selected) == 1 else None
+        if (not isinstance(efforts, list) or not efforts or any(not isinstance(item, str) or item not in rank for item in efforts)
+                or len(set(efforts)) != len(efforts)):
+            raise factory.FactoryError("Judge effort ordering is unavailable; refresh the native catalog and update supported effort ranks")
+        if effort != max(efforts, key=rank.index):
+            raise factory.FactoryError("Judge requires the selected model's maximum supported effort from fresh native evidence")
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise factory.FactoryError("Judge capability evidence is malformed; refresh the curated native capacity observation before judging") from None
 
 
 def dispute(request):
@@ -57,7 +90,7 @@ def check_investigation(request, record):
     dispute(request)
 
 
-def render(store, decision, question, role, inputs, *, task_record=None):
+def render(store, decision, question, role, inputs, *, task_record=None, native=None):
     if not binding(decision, question, role):
         raise factory.FactoryError("Supply the original decision and question before freezing coordination evidence")
     try:
@@ -72,8 +105,20 @@ def render(store, decision, question, role, inputs, *, task_record=None):
         if task_record is None:
             raise factory.FactoryError("Supply the original admitted task for post-investigation adjudication")
         check_investigation(record["request"], task_record)
-    value = dict(schema_version=1, decision=decision, question=question, inputs=inputs,
+    value: dict = dict(schema_version=1, decision=decision, question=question, inputs=inputs,
                  request=record["request"], response=record["response"])
+    if role == "judge":
+        import codex_capacity
+        import native_codex
+        if native is None or native.model != judge_model():
+            raise factory.FactoryError("Select the configured judge_model before collecting native capability evidence")
+        try:
+            capacity = asyncio.run(codex_capacity.snapshot(Path(native.codex)))
+        except (codex_capacity.CapacityError, native_codex.CodexProbeError, OSError, TimeoutError):
+            raise factory.FactoryError("Judge native capability evidence is unavailable; refresh sign-in/catalog/capacity before judging") from None
+        configured = judge_model()
+        validate_judge_capacity(capacity, Path(native.codex), native.model, native.effort, configured, time.time())
+        value.update(judge_capacity=capacity, judge_model=configured)
     return "\n" + report_guidance(value) + "\n" + MARKER + json.dumps(value, allow_nan=False, ensure_ascii=True) + "\n"
 
 

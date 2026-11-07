@@ -1,13 +1,19 @@
 """Bounded answers use fixed classifier replies, fake native events and fake Rex."""
 import hashlib
+import asyncio
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
 import json
 import os
 import subprocess
 import sys
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import codex_worker
+import codex_capacity
+import native_codex
 import coordination_evidence as evidence
 import factory
 import jev
@@ -31,8 +37,15 @@ class BoundedAnswers(unittest.TestCase):
         factory.set_inputs(self.path, **self.inputs)
         FakeRex.sessions, FakeRex.calls = [], []
         FakeRex.fail_after_create, FakeRex.host = False, "test-host"
+        self.capacity: dict = dict(schema_version=1, observed_at=1000, binary=str(Path(sys.executable).resolve()),
+            route="codex-native", account=dict(type="chatgpt", plan="fixture"), ordinaryUsageAllowed=True,
+            pools=[dict(limit_id="codex", primary=dict(remaining_percent=80), secondary=None,
+                rate_limit_reached_type=None, spend_control_reached=False)],
+            models=[dict(model="gpt-6-astra", effort_ids=["ultra", "low", "high"])])
+        self.capability_probe = AsyncMock(side_effect=lambda binary: self.capacity)
 
-    def start(self, *, question="task-demand", role="standby-reasoner", choice="uncertain", assignment="reason", purpose="work"):
+    def start(self, *, question="task-demand", role="standby-reasoner", choice="uncertain", assignment="reason", purpose="work",
+              model=None, effort=None):
         state: dict = {"assignment": "Missing acceptance evidence"}
         if role == "judge":
             state["dispute"] = dict(question="Which fixture behavior should be selected?",
@@ -54,10 +67,13 @@ class BoundedAnswers(unittest.TestCase):
             clock=lambda: 1000, timer=lambda: 10)
         self.question = question
         self.assignment_id = assignment
+        model = model or ("gpt-6-astra" if role == "judge" else "fixture-model")
+        effort = effort or ("ultra" if role == "judge" else "high")
         self.command = factory.codex_command(self.path, task="resolve", assignment_id=assignment, codex=sys.executable,
-            model="fixture-model", effort="high", cwd=str(self.fixture.repo), role=role,
+            model=model, effort=effort, cwd=str(self.fixture.repo), role=role,
             decision_store=self.store, decision=self.decision["id"], question=question)
-        with patch.object(factory, "Rex", FakeRex):
+        with patch.object(factory, "Rex", FakeRex), patch.object(codex_capacity, "snapshot", self.capability_probe), \
+                patch.object(evidence.time, "time", return_value=1000):
             self.record, self.assignment = factory.launch(self.path, task="resolve", assignment_id=assignment, role=role,
                 goal="Answer the original bounded question", cwd=str(self.fixture.repo), command=self.command,
                 purpose=purpose, binary=sys.executable, server="unix:///fixture.sock")
@@ -137,6 +153,31 @@ class BoundedAnswers(unittest.TestCase):
         receipt = self.answer("resolved")
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("classifier label", receipt["error"])
+
+    def test_low_capability_model_cannot_start_a_judge(self):
+        with self.assertRaisesRegex(factory.FactoryError, "configured judge_model"):
+            self.start(question="investigation-resolution", role="judge", choice="unresolved",
+                       model="fixture-low-capability", effort="low")
+        self.capability_probe.assert_not_called()
+        self.assertNotIn("reason", factory.load_task(self.path)["assignments"])
+
+    def test_configured_judge_requires_maximum_observed_effort_not_catalog_order(self):
+        with self.assertRaisesRegex(factory.FactoryError, "maximum supported effort"):
+            self.start(question="investigation-resolution", role="judge", choice="unresolved", effort="low")
+        self.assertEqual(self.capability_probe.await_count, 1)
+        self.assertNotIn("reason", factory.load_task(self.path)["assignments"])
+
+    def test_unavailable_judge_capability_evidence_refuses_before_launch(self):
+        self.capability_probe.side_effect = native_codex.CodexProbeError("Fixture unavailable")
+        with self.assertRaisesRegex(factory.FactoryError, "capability evidence is unavailable"):
+            self.start(question="investigation-resolution", role="judge", choice="unresolved")
+        self.assertNotIn("reason", factory.load_task(self.path)["assignments"])
+
+    def test_judge_worker_refuses_aged_evidence_before_starting_a_native_turn(self):
+        self.start(question="investigation-resolution", role="judge", choice="unresolved")
+        with self.assertRaisesRegex(factory.FactoryError, "stale"), redirect_stdout(StringIO()):
+            asyncio.run(codex_worker.execute(self.fixture.args, spawn=self.fixture.spawn, clock=lambda: 1061, timer=lambda: 10))
+        self.assertEqual(self.fixture.spawns, [])
 
     def test_out_of_set_answer_refuses_completion(self):
         self.start()

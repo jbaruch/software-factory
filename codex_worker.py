@@ -739,6 +739,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             raise factory.FactoryError("Bind the original decision and question before a coordination worker starts")
         coordination = coordination_evidence.read(instructions, args.decision,
             args.question, args.role, dict(candidate=args.candidate, requirements=args.requirements), write=args.write)
+        if args.role == "judge":
+            coordination_evidence.validate_judge_capacity(coordination.get("judge_capacity"), binary,
+                args.model, args.effort, coordination.get("judge_model"), clock())
     try:
         identity = factory.decode_json(args.repo_identity)
     except (ValueError, TypeError):

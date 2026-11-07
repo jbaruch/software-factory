@@ -142,6 +142,16 @@ collection. A judge's original Jev state must include
 investigator result in the admitted task. A claim that investigation happened is
 insufficient. Select a highly capable judge at its maximum supported effort.
 
+`config/coordination.json` selects the native `judge_model`; arbitrary models
+refuse. New judge launches use the existing curated Codex capacity probe and
+require the selected model's maximum observed supported effort, independent of
+catalog order. Missing, malformed, stale or unknown-effort evidence refuses.
+The owner freezes `judge_model` and schema-1 `judge_capacity` in the existing
+brief; the worker rechecks freshness before its native turn. Collection checks
+against the original launch time, so completed judgments do not expire merely
+while waiting for collection. Initial model selection is not a quality claim;
+refresh it monthly against the live catalog and judgment evaluations.
+
 The version-6 native report adds `answer: {decision, question, choice, missing_input}`.
 For a standby reasoner, `completed` selects a non-uncertain/non-unresolved original option with null
 missing input. `blocked` supplies a concrete missing input and a null, uncertain

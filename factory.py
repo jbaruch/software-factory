@@ -945,20 +945,6 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if record["admission"] is None:
             raise FactoryError("Admit a task before declaring assignment dependencies")
         request["dependencies"] = sorted(set(dependencies))
-    if (not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
-            and any(flag in command for flag in ("--decision-store", "--decision", "--question"))):
-        import codex_worker
-        import coordination_evidence
-        try:
-            native_args = codex_worker.parser().parse_args(command[4:])
-        except SystemExit:
-            raise FactoryError("Native command is damaged; restore its arguments before launching") from None
-        if native_args.decision is not None or native_args.question is not None or native_args.decision_store is not None:
-            if native_args.role != role or not native_args.decision_store or record["inputs"] is None:
-                raise FactoryError("Bind a native coordination assignment to its role, original store and selected inputs")
-            coordination_evidence.binding(native_args.decision, native_args.question, role, write=native_args.write)
-            instructions += coordination_evidence.render(native_args.decision_store, native_args.decision,
-                native_args.question, role, record["inputs"], task_record=record)
     if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
         require_grok_execution()
         import grok_worker
@@ -1005,6 +991,21 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         check_checkout(record["admission"]["repository"], cwd, current,
                        expected_identity=record["admission"]["repository_identity"],
                        expected_git_dir=worktree_git_dir)
+    if (not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
+            and any(flag in command for flag in ("--decision-store", "--decision", "--question"))):
+        import codex_worker
+        import coordination_evidence
+        try:
+            native_args = codex_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Native command is damaged; restore its arguments before launching") from None
+        if native_args.decision is not None or native_args.question is not None or native_args.decision_store is not None:
+            if native_args.role != role or not native_args.decision_store or record["inputs"] is None:
+                raise FactoryError("Bind a native coordination assignment to its role, original store and selected inputs")
+            coordination_evidence.binding(native_args.decision, native_args.question, role, write=native_args.write)
+            instructions += coordination_evidence.render(native_args.decision_store, native_args.decision,
+                native_args.question, role, record["inputs"], task_record=record, native=native_args)
+        request["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
     if record["rex"] is not None:
         rex = connect(record, binary, server)
     else:
@@ -1132,6 +1133,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         import coordination_evidence
         if not coordination_evidence.binding(decision, question, role, write=write) or decision_store is None or not Path(decision_store).is_absolute():
             raise FactoryError("Supply the absolute original Jev decision store before a coordination assignment")
+        if existing is None and role == "judge" and model != coordination_evidence.judge_model():
+            raise FactoryError("Select the configured judge_model; arbitrary model choices cannot adjudicate this case")
         command.extend(["--decision-store", str(decision_store), "--decision", str(decision), "--question", str(question)])
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
@@ -1210,6 +1213,8 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None):
             assignment["request"]["inputs"], write=args.write)
         if args.role == "judge":
             coordination_evidence.check_investigation(coordination["request"], record)
+            coordination_evidence.validate_judge_capacity(coordination.get("judge_capacity"), args.codex,
+                args.model, args.effort, coordination.get("judge_model"), receipt["created_at"])
     if (receipt["schema_version"] == 6) != (coordination is not None):
         raise FactoryError("Native receipt format differs from its bounded coordination assignment")
     native = parse_events(read_events(args.events), coordination)
