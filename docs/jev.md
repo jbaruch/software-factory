@@ -161,3 +161,9 @@ Archived answers survive worktree removal if the original repository marker and
 collected evidence remain available. Without `--task-state-dir`, the schema-1
 classifier-only inbox is unchanged. These are shadow judgments until routing
 calibration is approved; callers must still verify actual source freshness.
+
+The native engine path is part of command identity. A relocated/retired engine
+produces `engine_unavailable` for operator inspection, never silent adoption or
+a new standby proposal. Cross-engine-path adoption is not implemented. Earlier
+attempts on stale task inputs remain in history; only current-input attempts can
+resolve the current phase.

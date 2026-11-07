@@ -117,8 +117,8 @@ def collected_attempts(directory):
                 record = factory.load_task(path)
             for identity, assignment in record["assignments"].items():
                 command = assignment["request"]["command"]
-                if (command[:4] != [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
-                        or "--decision" not in command):
+                if (len(command) < 4 or command[1:3] != ["-E", "-s"]
+                        or Path(command[3]).name != "codex_worker.py" or "--decision" not in command):
                     continue
                 try:
                     args = codex_worker.parser().parse_args(command[4:])
@@ -126,7 +126,9 @@ def collected_attempts(directory):
                     raise factory.FactoryError("Restore the original bounded reasoner command before reading its answer") from None
                 binding(args.decision, args.question, assignment["request"]["role"], write=args.write)
                 item = dict(task=record["task"], assignment=identity, evidence=str(path), state="awaiting_collection", answer=None)
-                if assignment["request"].get("inputs") != record["inputs"]:
+                if command[:4] != [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]:
+                    item["state"] = "engine_unavailable"
+                elif assignment["request"].get("inputs") != record["inputs"]:
                     item["state"] = "stale"
                 elif assignment["result"] is not None:
                     _, receipt, native = factory.codex_evidence(identity, record, assignment)

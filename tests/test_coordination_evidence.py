@@ -215,3 +215,13 @@ class BoundedAnswers(unittest.TestCase):
         self.assertEqual(failed_receipt.read_bytes(), before)
         self.assertEqual(len(self.record["assignments"]), 2)
         self.assertEqual(factory.task_view(self.record)["allowances"]["correction"]["remaining"], 0)
+
+    def test_relocated_engine_does_not_erase_an_attempt_or_propose_duplicate_work(self):
+        self.start()
+        self.answer()
+        self.collect()
+        self.record["assignments"]["reason"]["request"]["command"][3] = "/retired-engine/codex_worker.py"
+        factory.save(self.path, self.record)
+        item, = jev.pending_decisions(self.store, task_state_dir=self.tasks)["items"]
+        self.assertEqual((item["owner"], item["reason"]), ("operator", "engine_unavailable"))
+        self.assertEqual(item["attempts"][0]["assignment"], "reason")
