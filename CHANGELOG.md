@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0 — 2026-11-07 (unpublished)
+
+### Exact-candidate integration and original release evidence
+
+Add `factory.py integrate`, a mechanical head-conditional merge adapter and
+frozen original canonical feedback for selected native specialist/release
+judgments. Reuse schema-7 intents/results, locks, holds and cumulative attempts.
+Require unchanged canonical watcher readiness, original exact-input independent
+approvals, actual repository gates, source-bound merge ancestry, terminal current-
+attempt push CI and issue checks. Replays reconcile read-only without resending
+unknown effects. Final acceptance requires a separate native delivered-evidence
+judgment. Keep PR preparation and cleanup with release, add no automatic quality
+waiver or publication claim. Fixed offline transports and temporary Git cover
+refusals, lost replies and recovery; live delivery and judgment remain unqualified.
+
 ## 0.9.0 — 2026-11-07 (unpublished)
 
 ### Opt-in writer candidate handoff

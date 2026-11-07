@@ -14,6 +14,7 @@ verification limits and the remaining work toward live delivery.
 - [Native provider adapters](docs/native-providers.md): native model catalogs, Codex account observations and explicit execution/result collection.
 - [Local operator view](docs/operator-view.md): task records, current/stale reports and explicit live Rex process checks.
 - [Jev adapter](docs/jev.md): question compilation, model discovery and explicit shadow evaluation.
+- [Integration](docs/integration.md): original native release judgments, canonical readiness, conditional merge and read-only recovery.
 - [Task state](docs/task-state.md): admission, attempt limits, holds and the state schema.
 - `skills/factory/references/roles.json`: the specialist catalog, focused prompts and decision authority.
 - `config/providers.json`: the five requested subscription routes, with unknown capabilities and quota sharing preserved explicitly.

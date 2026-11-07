@@ -732,6 +732,20 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         factory.check_role_write(args.role)
     if args.role is not None and instructions.split("\n", 1)[0] != "# Assignment: " + args.role:
         raise factory.FactoryError("Worker role differs from the bound assignment brief; inspect the original request")
+    if getattr(args, "delivery_evidence", None) is not None:
+        import release_evidence
+        frozen = factory.decode_json(args.delivery_evidence)
+        if args.write or args.role != "release" or not instructions.endswith(release_evidence.render_delivery(frozen)):
+            raise factory.FactoryError("Final acceptance needs its original frozen read-only release brief")
+        if frozen["receipt"]["intent"]["inputs"] != dict(candidate=args.candidate, requirements=args.requirements):
+            raise factory.FactoryError("Final acceptance inputs differ from confirmed delivery")
+    if getattr(args, "release_evidence", None) is not None:
+        import release_evidence
+        frozen = factory.decode_json(args.release_evidence)
+        if args.write or not instructions.endswith(release_evidence.render(frozen)):
+            raise factory.FactoryError("Original release evidence differs from the frozen read-only brief")
+        if frozen.get("inputs") != dict(candidate=args.candidate, requirements=args.requirements):
+            raise factory.FactoryError("Release evidence inputs differ from native assignment")
     coordination = None
     if any(getattr(args, key, None) is not None for key in ("decision_store", "decision", "question")):
         import coordination_evidence
@@ -867,6 +881,8 @@ def parser():
         command.add_argument("--" + field, type=Path, required=True)
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
+    command.add_argument("--delivery-evidence", help="Original confirmed delivery for final native acceptance")
+    command.add_argument("--release-evidence", help="Original canonical snapshot frozen by the task owner")
     command.add_argument("--role", help="Owner-selected role; required for writer execution")
     command.add_argument("--decision-store", type=Path, help="Original Jev decision store; frozen before the native launch")
     command.add_argument("--decision", help="Exact original Jev decision ID")
