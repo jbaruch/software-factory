@@ -206,6 +206,16 @@ The private socket is exposed through filesystem grants; macOS additionally uses
 its native `--allow-unix-socket` option. Linux does not accept that macOS option.
 Hooks need offline inputs. Unsupported sandbox or noninteractive
 hook/signing access fails visibly with retained intent and no host fallback.
+Run the separate local conformance fixture explicitly:
+
+```sh
+python3 scripts/smoke_git.py --codex '/absolute/path/to/codex'
+```
+
+It creates only its own temporary repository, bare remote and test signing key,
+checks real Git/sandbox signing and blocked effects, then removes its fixtures.
+It makes no model turn or Rex call and does not qualify a native assignment.
+
 Native model commands retain their declared sandbox. Writers may
 start from an admitted subdirectory; source checks still use the worktree root.
 No changes produce no empty commit. Commit errors or lost responses preserve the
