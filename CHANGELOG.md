@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 2026-11-07
+
+### Explicit read-only Grok execution
+
+Add `grok-start` and `grok-collect` with frozen native sessions, brief/repository
+bindings, bounded seconds/turns, retained original event lines and version-1
+receipts. Verify cached OIDC subscription metadata and advertised model/effort
+before a model turn; retain that observation and its probe duration. Filter host
+credential environment variables from metadata and worker children. Decode only
+the final structured report, preserving native usage and model labels separately
+from quota and spend. Collection verifies original events and current repository/
+worktree identity without accepting a task. Existing effects reconnect unchanged;
+failed or uncertain attempts never retry themselves. Automatic Grok quota-aware
+scheduling and writer mode remain incomplete.
+
 ## 0.3.0 — 2026-11-06
 
 ### Explicit ready-work execution

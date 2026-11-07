@@ -1,19 +1,62 @@
-"""Observe native Grok cached sign-in and model metadata without requesting a turn."""
+"""Native Grok metadata discovery and final-event decoding."""
 import argparse
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import sys
 import time
 
-from factory import decode_json
+from factory import decode_json, RESULT_OUTCOMES
+from codex_worker import native_environment
 
 API_KEY_ENVIRONMENT = ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
 
 
 class GrokProbeError(Exception):
     pass
+
+
+def parse_execution(events, *, session_id, cwd, max_turns):
+    """Decode headless Grok's final event; text fragments carry no result."""
+    final = None
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise GrokProbeError("Malformed native Grok event; inspect its original stream before collection")
+        if final is not None:
+            raise GrokProbeError("Native Grok emitted data after its final event; inspect the original stream before collection")
+        if event["type"] == "error":
+            raise GrokProbeError("Native Grok reported an execution error; inspect the original stream without retrying")
+        if event["type"] == "end":
+            final = event
+    if (final is None or final.get("stopReason") != "end_turn"
+            or not isinstance(session_id, str) or not session_id.strip()
+            or not isinstance(cwd, str) or not Path(cwd).is_absolute()
+            or final.get("sessionId") != session_id or final.get("cwd") != cwd
+            or not isinstance(final.get("requestId"), str) or not final["requestId"].strip()
+            or type(max_turns) is not int or max_turns < 1
+            or type(final.get("num_turns")) is not int or not 1 <= final["num_turns"] <= max_turns):
+        raise GrokProbeError("Native Grok completion differs from the frozen session, directory or turn bound; inspect its original stream before collection")
+    report = final.get("structuredOutput")
+    if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
+            or not isinstance(report["outcome"], str) or report["outcome"] not in RESULT_OUTCOMES
+            or not isinstance(report["artifacts"], list)
+            or any(not isinstance(value, str) or not value.strip() for value in report["artifacts"])):
+        raise GrokProbeError("Native Grok has no supported final structured report; inspect its original stream and update the adapter before collection")
+    usage, models = final.get("usage"), final.get("modelUsage")
+    if usage is not None and (not isinstance(usage, dict)
+            or any(type(value) is not int or value < 0 or value > sys.float_info.max for value in usage.values())):
+        raise GrokProbeError("Native Grok token usage is malformed; inspect the original final event before collection")
+    if models is not None:
+        if (not isinstance(models, dict) or any(not isinstance(model, str) or not model.strip()
+                or not isinstance(values, dict) or any(type(value) not in (int, float)
+                    or value < 0 or value > sys.float_info.max
+                    or type(value) is float and not math.isfinite(value) for value in values.values())
+                for model, values in models.items())):
+            raise GrokProbeError("Native Grok model usage is malformed; inspect the original final event before collection")
+    return dict(report=report, session_id=session_id, request_id=final["requestId"],
+                usage=usage, model_usage=models, turns=final["num_turns"])
 
 
 async def exchange(process, identity, method, params):
@@ -112,7 +155,7 @@ async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec, clock=time
     try:
         process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
             "--sandbox", "read-only", "agent", "--no-leader", "stdio", cwd=str(cwd),
-            env={**os.environ, "GROK_WORKTREE_AUTO_GC": "0"}, stdin=asyncio.subprocess.PIPE,
+            env={**native_environment(), "GROK_WORKTREE_AUTO_GC": "0"}, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     except OSError:
         raise GrokProbeError("Cannot start native Grok metadata; restore executable access and local process resources") from None

@@ -147,6 +147,66 @@ The adapter has no persistence/migration reader; keep retained output private.
 Tests use fixed ACP replies and fake processes. Live discovery is recorded in
 the [implementation inventory](implementation.md).
 
+`native_grok.parse_execution` decodes the observed Grok 1.0.77 headless event
+format after strict JSON decoding. It requires one final `end` event with
+`end_turn`, the frozen native session/directory, a request identity and a turn
+count within the declared bound. Only `structuredOutput` supplies the report;
+provisional text and tool telemetry never supply completion or acceptance.
+Native usage and reported model identities remain separate from requested model
+selection, quota and monetary spend. Missing usage stays unknown. This decoder
+is used by the explicit worker and collector below.
+
+## Explicit Grok inspection assignments
+
+Use an admitted task, selected candidate/requirements and an actual discovered
+model/effort, as with [native launcher commands](native-rex.md):
+
+```sh
+python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  grok-start --task example --id inspect --role qa --goal 'Inspect the selected candidate' \
+  --cwd '/absolute/path/to/clean/worktree' --purpose work \
+  --grok '/absolute/path/to/native/grok' --model 'discovered-model-id' \
+  --effort 'discovered-supported-effort' --seconds 600 --turns 30
+python3 factory.py grok-collect --task example --id inspect
+```
+
+This slice is read-only. It disables native subagents, web search and automatic
+updates, preserves native subscription configuration and excludes host credential
+environment variables. API-key overrides, including empty ones, refuse. Metadata
+preflight requires cached OIDC sign-in, a reported subscription, no access gate,
+and the requested model/effort in the actual catalog. Unknown quota stays unknown;
+these explicit commands do not add automatic Grok scheduling to the ready runner.
+
+`--seconds` accepts 1–86400 and `--turns` accepts 1–1000. Invalid bounds refuse
+before task locks; worker deadlines interrupt only the owned child. A local exit
+does not prove a provider request was cancelled. Inspect the original native
+session, receipt and stream before authorizing a new attempt after an unknown
+outcome. The native CLI installation must remain outside the checkout/Git metadata.
+
+`grok_worker.py` owns version-1 `*.grok.json` receipts and `*.grok.jsonl` streams.
+Every stream record has `schema_version: 1`, `kind: grok-event-line` and `data`,
+the unchanged native line including its newline. Invalid bytes stay escaped
+inspection evidence and refuse collection. Native lines are limited to 1 MiB.
+The reader accepts only version 1; unversioned captures and unsupported versions
+remain inspection-only. Neither reader migrates or rewrites old evidence.
+
+The exclusively claimed receipt records job/input revisions, repository marker,
+worktree Git directory, cwd, role/brief digest, resolved binary, requested model/
+effort, native session, declared seconds/turn bound, preflight discovery snapshot,
+timestamps/duration, exit code, final report/request identity, native usage/model
+usage, actual turn count, candidate, stream path and error. Before completion,
+result/timing/exit fields are null. State is `starting`, `completed` or `failed`.
+The discovery retains its own native metadata schema version and probe duration.
+No quota or monetary spend is inferred from native token/cost telemetry.
+
+Collection requires successful owned worker exit, a completed version-1 receipt
+with finite nonnegative timing and null error, exact frozen command/input/role
+bindings, and agreement with the original final event. It revalidates repository
+marker and worktree Git directory; replaced linked checkouts refuse. Reports stay
+bound to their assessed candidate when current task inputs change. Repeated
+collection reuses the immutable result. Task records keep their existing schema;
+generic historical Grok commands are not adopted as managed worker evidence.
+
 ## Explicit Codex assignments
 
 `factory.py codex-start` builds one native `codex exec` invocation in an admitted

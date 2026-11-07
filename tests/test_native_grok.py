@@ -1,4 +1,4 @@
-"""Native Grok metadata fixtures only; no provider calls or live Rex sessions."""
+"""Native Grok protocol fixtures; no provider calls or live Rex sessions."""
 import asyncio
 import copy
 from contextlib import redirect_stderr, redirect_stdout
@@ -203,6 +203,81 @@ class NativeGrok(unittest.IsolatedAsyncioTestCase):
             spawn.assert_not_called()
         with self.assertRaisesRegex(native_grok.GrokProbeError, "restore executable access and local process resources"):
             await native_grok.probe(sys.executable, self.cwd, spawn=AsyncMock(side_effect=OSError("private")))
+
+
+class NativeGrokExecution(unittest.TestCase):
+    def final(self) -> dict:
+        # Sanitized final-event shape from the owned Grok 1.0.77 fixture.
+        return dict(type="end", stopReason="end_turn", sessionId="fixture-session",
+            requestId="fixture-request", cwd="/fixture", num_turns=2,
+            usage=dict(input_tokens=11876, cache_read_input_tokens=29184, output_tokens=428,
+                       reasoning_tokens=265, total_tokens=41488),
+            modelUsage={"grok-4.7-build": dict(inputTokens=11876, outputTokens=428,
+                cacheReadInputTokens=29184, modelCalls=2, costUSD=0.01391008)},
+            structuredOutput=dict(outcome="approved", artifacts=["README.md"]))
+
+    def parse(self, events):
+        return native_grok.parse_execution(events, session_id="fixture-session", cwd="/fixture", max_turns=3)
+
+    def test_only_final_structured_output_supplies_the_specialist_report(self):
+        events = [dict(type="text", data='{"outcome":"blocked","artifacts":[]}'),
+                  dict(type="tool_call", toolCallId="fixture-read", toolName="read_file"),
+                  dict(type="tool_call_update", toolCallId="fixture-read", status="completed"), self.final()]
+        result = self.parse(events)
+        self.assertEqual(result["report"], dict(outcome="approved", artifacts=["README.md"]))
+        self.assertEqual(result["session_id"], "fixture-session")
+        self.assertEqual(result["request_id"], "fixture-request")
+        self.assertEqual(result["turns"], 2)
+        self.assertEqual(result["usage"], events[-1]["usage"])
+        self.assertEqual(result["model_usage"], events[-1]["modelUsage"])
+
+    def test_missing_ambiguous_failed_or_unbound_completion_refuses(self):
+        final = self.final()
+        cases = [[], [dict(type="text", data=json.dumps(final["structuredOutput"]))],
+                 [final, final], [final, dict(type="text", data="late")],
+                 [dict(type="error", message="private provider detail"), final], [None]]
+        for key, value in (("sessionId", "other-session"), ("cwd", "/other"), ("requestId", " "),
+                           ("stopReason", "max_turns"), ("num_turns", True), ("num_turns", 4),
+                           ("structuredOutput", None), ("structuredOutput", {"outcome": "approved"})):
+            damaged = copy.deepcopy(final)
+            damaged[key] = value
+            cases.append([damaged])
+        for index, events in enumerate(cases):
+            with self.subTest(index=index), self.assertRaises(native_grok.GrokProbeError) as raised:
+                self.parse(events)
+            self.assertNotIn("private provider detail", str(raised.exception))
+        with self.assertRaises(native_grok.GrokProbeError):
+            self.parse([{**final, "cwd": None}])
+        with self.assertRaises(native_grok.GrokProbeError):
+            native_grok.parse_execution([{**final, "cwd": None}], session_id="fixture-session", cwd=None, max_turns=3)
+
+    def test_absent_usage_stays_unknown_and_report_outcomes_stay_distinct(self):
+        for outcome in ("completed", "approved", "findings", "blocked"):
+            final = self.final()
+            del final["usage"], final["modelUsage"]
+            final["structuredOutput"] = dict(outcome=outcome, artifacts=[])
+            result = self.parse([final])
+            self.assertEqual(result["report"]["outcome"], outcome)
+            self.assertIsNone(result["usage"])
+            self.assertIsNone(result["model_usage"])
+
+    def test_malformed_usage_and_final_reports_refuse(self):
+        final = self.final()
+        cases = []
+        for key, value in (("usage", []), ("usage", {"input_tokens": True}),
+                           ("usage", {"input_tokens": -1}), ("usage", {"input_tokens": 10 ** 400}),
+                           ("modelUsage", []), ("modelUsage", {"fixture": {"costUSD": float("nan")}}),
+                           ("modelUsage", {"fixture": {"modelCalls": True}}),
+                           ("modelUsage", {"fixture": {"modelCalls": 10 ** 400}}),
+                           ("structuredOutput", dict(outcome="accepted", artifacts=[])),
+                           ("structuredOutput", dict(outcome="approved", artifacts=[" "])),
+                           ("structuredOutput", dict(outcome="approved", artifacts=[], permission="merge"))):
+            damaged = copy.deepcopy(final)
+            damaged[key] = value
+            cases.append(damaged)
+        for index, event in enumerate(cases):
+            with self.subTest(index=index), self.assertRaises(native_grok.GrokProbeError):
+                self.parse([event])
 
 
 class NativeGrokCli(unittest.TestCase):
