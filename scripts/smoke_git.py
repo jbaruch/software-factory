@@ -18,7 +18,7 @@ import factory
 
 
 HOOK = """import json,os,pathlib,socket,subprocess,sys
-git,credential,key,port,marker=sys.argv[1:]
+git,keygen,credential,key,port,agent,public,sibling,config=sys.argv[1:]
 facts={'external_push_blocked':subprocess.run([git,'push','origin','HEAD'],capture_output=True).returncode!=0}
 for name,path in [('credential_read_blocked',credential),('private_key_read_blocked',key)]:
  try:
@@ -32,7 +32,25 @@ try:
 except OSError:
  facts['network_blocked']=True
 facts['publication_token_absent']='GH_TOKEN' not in os.environ
-pathlib.Path(marker).write_text(json.dumps(facts))
+facts['signer_environment_absent']='SSH_AUTH_SOCK' not in os.environ
+facts['inherited_git_auth_absent']=not any('fixture-auth-sentinel' in value for value in os.environ.values())
+p=subprocess.run([git,'config','--get-regexp','^http.*extraheader$'],capture_output=True,text=True)
+facts['git_auth_settings_absent']='fixture-auth-sentinel' not in p.stdout
+try:
+ pathlib.Path(config).read_text()
+ facts['original_config_read_blocked']=False
+except (PermissionError,FileNotFoundError):
+ facts['original_config_read_blocked']=True
+probe=pathlib.Path(os.environ['TMPDIR'])/'probe.pub'
+probe.write_text(public)
+signed=subprocess.run([keygen,'-Y','sign','-n','fixture-probe','-f',str(probe)],input=b'not a git commit',capture_output=True,env={**os.environ,'SSH_AUTH_SOCK':agent})
+facts['arbitrary_agent_signing_blocked']=signed.returncode!=0
+try:
+ pathlib.Path(sibling).write_bytes(b'unrelated index corruption')
+ facts['sibling_index_write_blocked']=False
+except (PermissionError,FileNotFoundError):
+ facts['sibling_index_write_blocked']=True
+print(json.dumps(facts))
 """
 
 
@@ -72,43 +90,68 @@ def conformance(binary) -> dict:
         git(repo, "commit", "--quiet", "-m", "Initial fixture")
         git(repo, "config", "commit.gpgsign", "true")
         git(repo, "remote", "add", "origin", str(remote))
+        git(repo, "config", "http.extraHeader", "Authorization: Bearer fixture-auth-sentinel-local")
+        os.environ.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.extraHeader",
+                          GIT_CONFIG_VALUE_0="Authorization: Bearer fixture-auth-sentinel-inherited")
         credential = root / "credential-fixture"
         credential.write_text("not a real credential\n")
-        program, marker = repo / ".git/probe.py", repo / ".git/probe.json"
+        sibling = root / "sibling"
+        git(repo, "worktree", "add", "--quiet", "--detach", str(sibling), "HEAD")
+        sibling_index = Path(git(sibling, "rev-parse", "--absolute-git-dir").stdout.strip()) / "index"
+        sibling_before = sibling_index.read_bytes()
+        program = repo / ".git/hooks/probe.py"
         program.write_text(HOOK)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             listener.listen()
-            hook = repo / ".git/hooks/post-commit"
-            hook.write_text("#!/bin/sh\n" + shlex.join([str(Path(sys.executable).resolve()), "-B",
-                str(program), factory.git_binary(), str(credential), str(key),
-                str(listener.getsockname()[1]), str(marker)]) + "\n")
-            hook.chmod(0o700)
             previous = Path.cwd()
             try:
                 os.chdir(repo)
                 identity = factory.repository_identity(".", create=True)
                 parent = factory.git_commit(".", "HEAD")
-                args = SimpleNamespace(codex=binary, worktree_git_dir=factory.git_dir("."))
-                (repo / "source.txt").write_text("changed fixture source\n")
-                with codex_worker.isolated_git(args, identity, signing=True):
-                    for command in [("add", "--all"), ("commit", "--quiet", "-m", "Signed fixture")]:
-                        if factory.git_run(".", *command).returncode:
-                            raise factory.FactoryError("Sandboxed fixture Git failed; inspect native sandbox and SSH signing support")
-                    candidate = factory.git_commit(".", "HEAD")
-                    signed = "gpgsig -----BEGIN SSH SIGNATURE-----" in factory.git_run(".", "cat-file", "commit", candidate).stdout
-                    factory.check_checkout(str(repo), str(repo), candidate, expected_identity=identity,
-                                           expected_git_dir=args.worktree_git_dir)
-                if not marker.is_file():
-                    raise factory.FactoryError("Fixture hook produced no evidence; inspect native sandbox execution")
-                facts = json.loads(marker.read_text())
-                if (not isinstance(facts, dict) or set(facts) != {"external_push_blocked", "credential_read_blocked",
-                        "private_key_read_blocked", "network_blocked", "publication_token_absent"}
+                args = SimpleNamespace(codex=binary, worktree_git_dir=factory.git_dir("."),
+                    candidate=parent, commit_message="Signed fixture", receipt=root / "receipt.json")
+                receipt = dict(repository_identity=identity, commit=dict(state="preparing", parent=parent,
+                    message=args.commit_message, staged_tree=None, candidate=None))
+                factory.save(args.receipt, receipt)
+                control_public = root / "control.pub"
+                control_public.write_bytes(key.with_suffix(".pub").read_bytes())
+                with codex_worker.private_signer(key, str(Path(sys.executable).resolve())) as attack_agent:
+                    control = subprocess.run([keygen, "-Y", "sign", "-n", "fixture-probe", "-f", str(control_public)],
+                        input=b"not a git commit", capture_output=True, timeout=10,
+                        env={**os.environ, "SSH_AUTH_SOCK": attack_agent})
+                    if control.returncode:
+                        raise factory.FactoryError("Fixture agent control could not sign; repair SSH tools before checking denial")
+                    hook = repo / ".git/hooks/pre-commit"
+                    hook.write_text("#!/bin/sh\n" + shlex.join([str(Path(sys.executable).resolve()), "-B",
+                        str(program), factory.git_binary(), keygen, str(credential), str(key),
+                        str(listener.getsockname()[1]), attack_agent, control_public.read_text(), str(sibling_index), str(repo / ".git/config")]) + "\n")
+                    hook.chmod(0o700)
+                    (repo / "source.txt").write_text("changed fixture source\n")
+                    with codex_worker.isolated_git(args, identity):
+                        hooked = codex_worker.commit_changes(args, receipt)
+                if hooked is None:
+                    raise factory.FactoryError("Fixture pre-commit produced no evidence; inspect native sandbox execution")
+                lines = (hooked.stdout + "\n" + hooked.stderr).splitlines()
+                evidence = [line for line in lines if line.startswith("{") and line.endswith("}")]
+                if len(evidence) != 1:
+                    raise factory.FactoryError("Fixture hook produced no unique evidence; inspect native sandbox execution")
+                facts = json.loads(evidence[0])
+                expected = {"external_push_blocked", "credential_read_blocked", "private_key_read_blocked",
+                    "network_blocked", "publication_token_absent", "signer_environment_absent",
+                    "arbitrary_agent_signing_blocked", "sibling_index_write_blocked", "inherited_git_auth_absent",
+                    "git_auth_settings_absent", "original_config_read_blocked"}
+                if (not isinstance(facts, dict) or set(facts) != expected
                         or any(type(value) is not bool for value in facts.values())):
                     raise factory.FactoryError("Fixture hook evidence is incomplete; inspect the selected sandbox")
+                candidate = factory.git_commit(".", "HEAD")
+                signed = "gpgsig -----BEGIN SSH SIGNATURE-----" in git(repo, "cat-file", "commit", candidate).stdout
+                factory.check_checkout(str(repo), str(repo), candidate, expected_identity=identity,
+                                       expected_git_dir=args.worktree_git_dir)
                 facts.update(local_signed_commit_created=candidate != parent and signed,
                              external_remote_unchanged=git(remote, "show-ref", allowed=(0, 1)).returncode == 1,
-                             source_clean=True, user_agent_unchanged=os.environ.get("SSH_AUTH_SOCK") == agent)
+                             source_clean=True, sibling_index_unchanged=sibling_index.read_bytes() == sibling_before,
+                             fixture_agent_control_signed=True, user_agent_unchanged=os.environ.get("SSH_AUTH_SOCK") == agent)
                 return dict(schema_version=1, scope="local Git/OS sandbox only; no native assignment or model turn", checks=facts)
             finally:
                 os.chdir(previous)

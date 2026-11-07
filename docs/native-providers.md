@@ -179,8 +179,10 @@ Writer CLI installations must remain outside the assigned checkout and Git
 metadata; the resolved executable is reused for later sandbox commands.
 
 New writer assignments require the selected role catalog entry's `write_allowed`
-permission. Read-only verification roles refuse before command/launch intent;
-historical assignments retain their original reconnect and collection behavior.
+permission. The worker checks the role and bound brief before creating artifacts
+or starting the native CLI, including with an alternate Python interpreter.
+Read-only verification roles refuse writer execution; historical read-only
+assignments retain their original reconnect and collection behavior.
 
 For a factory-owned writer commit, supply `--write --commit-message` with the
 intended commit message. The specialist edits/tests within its workspace sandbox
@@ -191,33 +193,45 @@ independent files without changing their other links, rejects non-regular files,
 records the staged tree, then runs one local
 Git commit with the repository's existing hooks, signing and author settings.
 Validated inherited Git configuration also applies to status/staging/commit.
-The operator-approved exception in `AGENTS.md` permits configured hooks, filters
-and signing helpers to load writer-edited source. The factory additionally runs
-Git and its final checkout checks through the selected native CLI's local sandbox;
-this makes no model or provider call. Its invocation-only profile disables network
-access and limits writes to this worktree and its Git metadata. Other filesystem
-access is denied except read access to common runtimes, Git configuration, the
-installed hook tool/cache, the selected Codex executable/required vendor files and a configured public signing key.
-Launch/verification guards compare the index and raw source bytes without running
-worktree status, clean filters, external diffs or text conversions.
-Publication-token environment variables are absent, and protected Git environment
-values are checked after native CLI startup. File-based SSH signing uses a private
-agent holding only the configured key; callbacks can read its public key but not
-the private file. The agent closes with the owner and gives keys a five-minute
-lifetime. It cannot load PKCS#11/FIDO libraries. The user's agent stays unchanged.
-The private socket is exposed through filesystem grants; macOS additionally uses
-its native `--allow-unix-socket` option. Linux does not accept that macOS option.
-Hooks need offline inputs. Unsupported sandbox or noninteractive
-hook/signing access fails visibly with retained intent and no host fallback.
+The operator-approved exception in `AGENTS.md` permits configured helpers to load
+writer-edited source. The initial automatic mode supports an optional pre-commit
+hook and unsigned commits or file-based SSH signing with the operating system's
+signer. Active clean/smudge/process filters, other executable hook types, custom
+signing programs and partial clones refuse visibly; use an inspected explicit
+local commit for those configurations. Required checks/signatures are never
+silently disabled.
+
+Staging and the final signed commit run with executable Git callbacks disabled.
+Pre-commit runs separately with no signing agent or inherited Git auth settings.
+It receives a disposable Git view with a private staged index and sanitized
+configuration. Original Git configuration and shared metadata are denied; shared
+objects and hook programs are readable. Only its own temporary directory is
+writable under Git metadata. Changes to that private index refuse rather than
+silently bypassing a hook's staging decision. Hook source edits remain subject to
+final candidate validation. Only the callback-free commit phase receives the
+short-lived signer; callback processes cannot connect even to a known socket.
+The agent holds only the configured key, expires it after five minutes, closes
+with its owner and cannot load PKCS#11/FIDO libraries. The user's agent is unchanged.
+
+Each Git invocation uses a fresh native CLI permission profile, with network
+access disabled, an allowlisted validated environment and read-only configuration
+and caches. The standalone CLI itself and required npm vendor files are readable;
+its arbitrary parent directory is not granted. Unsupported access fails with
+retained intent and no host fallback. Launch/verification guards compare the index
+and raw source bytes without worktree status, filters, external diffs or text
+conversion. macOS additionally receives its native socket option for the signer;
+Linux uses the filesystem socket grant without that macOS option.
+
 Run the separate local conformance fixture explicitly:
 
 ```sh
 python3 scripts/smoke_git.py --codex '/absolute/path/to/codex'
 ```
 
-It creates only its own temporary repository, bare remote and test signing key,
-checks real Git/sandbox signing and blocked effects, then removes its fixtures.
-It makes no model turn or Rex call and does not qualify a native assignment.
+It creates only temporary repositories and test signing keys, verifies a real
+signed commit, tests arbitrary signing, sibling-index mutation and Git auth
+exposure attempts in the callback phase, then removes its fixtures. It makes no model turn or Rex call and
+does not qualify a native assignment.
 
 Native model commands retain their declared sandbox. Writers may
 start from an admitted subdirectory; source checks still use the worktree root.

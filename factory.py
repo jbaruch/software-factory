@@ -1031,7 +1031,15 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         if position >= len(saved) or not Path(saved[position]).is_absolute():
             raise FactoryError("Saved worktree argument is damaged; restore the original assignment before reconnecting")
         command.extend(["--worktree-git-dir", saved[position]])
-    return command + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
+    if existing is not None and "--role" in existing["request"]["command"]:
+        saved = existing["request"]["command"]
+        position = saved.index("--role") + 1
+        if position >= len(saved) or saved[position] != existing["request"]["role"]:
+            raise FactoryError("Saved role argument is damaged; restore the original assignment before reconnecting")
+        role = saved[position]
+    elif existing is not None:
+        role = None  # Preserve historical worker commands unchanged.
+    return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
 def collect_codex(path, assignment_id, rex, record, assignment):
@@ -1053,6 +1061,8 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         args = parser().parse_args(command[offset:])
     except SystemExit:
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
+    if args.role is not None and args.role != assignment["request"]["role"]:
+        raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
     observed = status(rex, record, assignment)
     if observed["state"] != "exited":
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")

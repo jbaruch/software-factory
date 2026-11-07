@@ -144,6 +144,10 @@ class NativeResults(unittest.TestCase):
                            "commit.gpgsign": "false", "core.hooksPath": "/dev/null"}.items():
             subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
         self.args.write = True
+        if self.args.role is None:
+            self.args.role = "backend"
+            self.args.brief.write_text("# Assignment: backend\n\nDeliver the fixture change.\n")
+            self.args.brief_sha256 = hashlib.sha256(self.args.brief.read_bytes()).hexdigest()
         self.args.commit_message = "feat(example): Add the assigned behavior\n\nExercise the factory-owned writer commit."
         self.process = FakeProcess(events(outcome), exit_code=exit_code)
         async def spawn(*command, **options):
@@ -169,6 +173,29 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
+
+    def test_alternate_python_cannot_give_a_readonly_role_writer_effects(self):
+        self.writer()
+        self.args.role = "qa"
+        self.args.brief.write_text("# Assignment: qa\n\nIndependent verification.\n")
+        self.args.brief_sha256 = hashlib.sha256(self.args.brief.read_bytes()).hexdigest()
+        alternate = self.root / "alternate-python"
+        alternate.symlink_to(sys.executable)
+        command = [str(alternate), "-B", str(Path(worker.__file__).resolve())]
+        for key, value in vars(self.args).items():
+            if key == "write":
+                command.append("--write")
+            elif value is not None:
+                command.extend(["--" + key.replace("_", "-"), str(value)])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("specialty does not permit writer", result.stderr)
+        self.assertFalse(self.args.receipt.exists())
+        self.assertFalse(self.args.events.exists())
+        self.args.role = "backend"
+        with self.assertRaisesRegex(factory.FactoryError, "role differs from the bound"):
+            self.execute()
+        self.assertEqual(self.spawns, [])
 
     def test_writer_cannot_replace_the_cli_used_to_confine_later_git_callbacks(self):
         self.writer()
@@ -235,7 +262,9 @@ class NativeResults(unittest.TestCase):
             self.assertIs(profile["network"]["enabled"], False)
             self.assertEqual(profile["filesystem"][":root"], "deny")
             self.assertEqual(profile["filesystem"][str(self.repo.resolve())], "write")
-            self.assertEqual(profile["filesystem"][str(self.repo.resolve() / ".git")], "write")
+            self.assertEqual(profile["filesystem"][str(self.repo.resolve() / ".git")], "deny" if "GIT_INDEX_FILE" in environment else "write")
+            if "GIT_INDEX_FILE" in environment:
+                self.assertNotIn("SSH_AUTH_SOCK", environment)
             self.assertTrue(Path(environment["TMPDIR"]).is_relative_to(self.repo.resolve() / ".git"))
             self.assertFalse(any(key in environment for key in (
                 "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY")))
@@ -286,6 +315,58 @@ class NativeResults(unittest.TestCase):
         self.assertIsNone(factory.GIT_EXECUTION.get())
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
         self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+
+    def test_callback_scope_cannot_expose_an_agent_or_write_shared_metadata(self):
+        with patch.object(worker, "private_signer") as signer:
+            with worker.isolated_git(self.args, self.identity, read_only=True):
+                prefix, environment = factory.GIT_EXECUTION.get()
+                command = prefix()
+                name = command[command.index("--permission-profile") + 1]
+                files = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]["filesystem"]
+                self.assertEqual(files[str(self.repo.resolve() / ".git")], "deny")
+                self.assertEqual(files[environment["TMPDIR"]], "write")
+                self.assertNotIn("SSH_AUTH_SOCK", environment)
+                self.assertNotIn("--allow-unix-socket", command)
+            with self.assertRaisesRegex(factory.FactoryError, "callback scope cannot expose"):
+                with worker.isolated_git(self.args, self.identity, signing=True, read_only=True):
+                    self.fail("Combined callback/signer scope entered")
+            signer.assert_not_called()
+
+    def test_precommit_index_edits_are_private_and_cannot_be_silently_ignored(self):
+        self.writer()
+        self.git_scope = worker.isolated_git
+        hook = self.repo / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\n" + shlex.quote(factory.git_binary()) + " reset -q HEAD -- feature.py\n")
+        hook.chmod(0o700)
+        self.assertEqual(factory.git_run(".", "config", "core.hooksPath", ".git/hooks").returncode, 0)
+        run, staged_index = subprocess.run, []
+        def transport(command, **options):
+            if len(command) > 1 and command[1] == "sandbox":
+                if "hook" in command:
+                    staged_index.append((self.repo / ".git/index").read_bytes())
+                command = command[command.index("--") + 1:]
+            return run(command, **options)
+        with patch.object(factory.subprocess, "run", side_effect=transport):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("changed its private index", receipt["error"])
+        self.assertEqual(len(staged_index), 1)
+        self.assertEqual((self.repo / ".git/index").read_bytes(), staged_index[0])
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
+    def test_extra_commit_hooks_refuse_without_running_or_creating_a_commit(self):
+        self.writer()
+        effect = self.root / "unapproved-post-commit-effect"
+        hook = self.repo / ".git/hooks/post-commit"
+        hook.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(effect)!r}).write_text('called')\n")
+        hook.chmod(0o700)
+        self.assertEqual(factory.git_run(".", "config", "core.hooksPath", ".git/hooks").returncode, 0)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("only the separately confined pre-commit", receipt["error"])
+        self.assertFalse(effect.exists())
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(receipt["commit"]["state"], "preparing")
 
     def test_private_signer_retires_its_socket_on_success_or_rejected_key(self):
         original_agent = os.environ.get("SSH_AUTH_SOCK")
@@ -371,6 +452,9 @@ class NativeResults(unittest.TestCase):
 
     def test_factory_commit_with_no_changes_does_not_create_an_empty_commit(self):
         self.args.write = True
+        self.args.role = "backend"
+        self.brief.write_text("# Assignment: backend\n\nKeep existing behavior.\n")
+        self.args.brief_sha256 = hashlib.sha256(self.brief.read_bytes()).hexdigest()
         self.args.commit_message = "feat(example): Keep existing behavior"
         self.process = FakeProcess(events("completed"))
         receipt = self.execute()
@@ -415,7 +499,7 @@ class NativeResults(unittest.TestCase):
         git_run = factory.git_run
         def lost_reply(repository, *args, **options):
             result = git_run(repository, *args, **options)
-            if args[0] == "commit":
+            if "commit" in args:
                 self.assertEqual(result.returncode, 0)
                 raise factory.FactoryError("fixture lost response")
             return result
@@ -474,7 +558,7 @@ class NativeResults(unittest.TestCase):
         self.assertIn("workspace-write", self.spawns[0])
         self.assertFalse((self.repo / "__pycache__").exists())
 
-    def test_authorized_transitive_filter_observes_intent_before_host_status(self):
+    def test_active_transitive_filter_refuses_before_any_helper_execution(self):
         self.writer()
         tools = self.repo / "tools"
         tools.mkdir()
@@ -500,12 +584,11 @@ class NativeResults(unittest.TestCase):
             return await original_spawn(*command, **options)
         self.spawn = changed
         receipt = self.execute()
-        self.assertEqual(receipt["state"], "completed", receipt["error"])
-        states = effect.read_text().splitlines()
-        self.assertEqual(states[0], "preparing")
-        self.assertTrue(all(state in {"preparing", "committing", "created"} for state in states))
-        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":sample.audit").stdout, "updated\n")
-        self.assertFalse((tools / "__pycache__").exists())
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("active Git filters", receipt["error"])
+        self.assertFalse(effect.exists())
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(receipt["commit"]["state"], "preparing")
 
     def inherited_policy(self, kind, transport):
         self.writer()
@@ -542,7 +625,10 @@ class NativeResults(unittest.TestCase):
             receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("configured hooks/signing", receipt["error"])
-        self.assertEqual(log.read_text(), "called\n")
+        if kind == "hook":
+            self.assertEqual(log.read_text(), "called\n")
+        else:
+            self.assertFalse(log.exists())
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
         self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
 
@@ -1090,6 +1176,9 @@ class NativeResults(unittest.TestCase):
         other = self.root / "other-worktree"
         subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach", str(other), "HEAD"], check=True)
         self.args.write = True
+        self.args.role = "backend"
+        self.brief.write_text("# Assignment: backend\n\nDeliver the fixture change.\n")
+        self.args.brief_sha256 = hashlib.sha256(self.brief.read_bytes()).hexdigest()
         os.chdir(other)
         try:
             with self.assertRaisesRegex(factory.FactoryError, "Assignment worktree differs"):

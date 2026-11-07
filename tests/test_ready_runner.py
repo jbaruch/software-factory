@@ -164,8 +164,6 @@ class ReadyRunner(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "--all"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "-c", "commit.gpgsign=false",
                         "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Filter fixture"], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
-                        shlex.quote(sys.executable) + " -B filter.py"], check=True)
         self.candidate = factory.git_commit(str(self.repo), "HEAD")
         with factory.task_lock(self.directory, "task") as path:
             factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
@@ -179,9 +177,10 @@ class ReadyRunner(unittest.TestCase):
                 "sys.stdout.write(sys.stdin.read())\n")
             source.write_text("updated\n")
         self.finish("task", "implement", outcome="completed", edit=edit)
-        self.assertTrue(effect.exists())  # The fixture runs during explicit staging.
+        self.assertFalse(effect.exists())
+        subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
+                        shlex.quote(sys.executable) + " -B filter.py"], check=True)
         self.assertEqual(self.tick(self.controller(plan))["result"], "needs_action")
-        effect.unlink()
         self.candidate = factory.git_commit(str(self.repo), "HEAD")
         with factory.task_lock(self.directory, "task") as path:
             factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
@@ -191,6 +190,8 @@ class ReadyRunner(unittest.TestCase):
         self.finish("task", "qa")
         self.assertEqual(self.tick(verification)["result"], "complete")
         self.assertFalse(effect.exists())
+        self.assertEqual(factory.git_run(str(self.repo), "status", "--porcelain").stdout, "")
+        self.assertTrue(effect.exists())
 
     def test_collected_dependency_starts_next_assignment_without_a_foreman_turn(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
