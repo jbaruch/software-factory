@@ -195,8 +195,16 @@ and leaves Git staging/commit to the runtime. Only a successful native run with 
 `completed` report can enter this step. The runtime retains an intent before
 status/staging can execute a configured filter, copies shared regular outputs to
 independent files without changing their other links, rejects non-regular files,
-records the staged tree, then runs one local
-Git commit with the repository's existing hooks, signing and author settings.
+records the staged tree, scans its raw blobs with native Gitleaks, then runs one
+local Git commit with the repository's supported hooks, signing and author settings.
+Install Gitleaks outside the checkout, Git metadata and temporary directories.
+Use the version pinned in `.pre-commit-config.yaml`; refresh the native tool when
+the weekly Dependabot hook update changes that pin.
+The mandatory scan uses built-in rules through a generated configuration; source
+configuration, ignore files and `gitleaks:allow` comments cannot disable it.
+It runs even without a pre-commit hook. Missing tools, scanner errors or findings
+retain the intent and refuse the commit. Scanner output is redacted and never
+copied into the receipt. Ordinary tests inject a fake scanner.
 Validated inherited Git configuration also applies to status/staging/commit.
 The operator-approved exception in `AGENTS.md` permits configured helpers to load
 writer-edited source. The initial automatic mode supports an optional pre-commit
@@ -240,8 +248,9 @@ python3 scripts/smoke_git.py --codex '/absolute/path/to/codex'
 
 It creates only temporary repositories and test signing keys, verifies a real
 signed commit, tests arbitrary signing, sibling-index mutation and Git auth
-exposure attempts in the callback phase, then removes its fixtures. It makes no model turn or Rex call and
-does not qualify a native assignment.
+exposure attempts in the callback phase, and refuses a generated credential fixture
+without a hook. It then removes its fixtures. It makes no model turn or Rex call
+and does not qualify a native assignment.
 
 Native model commands retain their declared sandbox. Writers may
 start from an admitted subdirectory; source checks still use the worktree root.
@@ -311,9 +320,10 @@ index; changes to that private index refuse the commit. The candidate stays boun
 to the factory-recorded staged tree, and the clean source check binds the output
 assessed by later verification. A completed receipt requires a terminal commit state matching
 its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
-for a new commit, the actual Git parent. Collection also requires the retained
-assigned worktree's exact HEAD to equal the candidate; keep that checkout until
-collection completes.
+for a new commit, the actual Git parent. Collection revalidates the retained
+assigned checkout's repository marker and frozen worktree Git directory for both
+receipt versions, and requires its exact HEAD to equal the candidate for writer
+commits. Keep that checkout until collection completes.
 
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by

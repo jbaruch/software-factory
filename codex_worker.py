@@ -247,6 +247,8 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     files.setdefault(str(base), "read")
     native = args.codex.resolve()
     files.setdefault(str(native), "read")
+    if getattr(args, "_gitleaks", None) is not None:
+        files[str(args._gitleaks)] = "read"
     package = native.parent.parent / "package.json"
     if native.parent.name == "bin" and package.is_file():
         try:
@@ -454,7 +456,58 @@ def commit_policy(args, environment):
                 precommit="pre-commit" in active, flags=flags, drivers=drivers, config_paths=config_paths)
 
 
-def commit_changes(args, receipt, *, git_scope=isolated_git):
+def scanner_binary(args):
+    selected = shutil.which("gitleaks")
+    if not selected:
+        raise factory.FactoryError("Install a native Gitleaks executable before automatic writer commits")
+    binary = Path(selected).resolve()
+    roots = (Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir,
+             Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
+    if not binary.is_file() or any(binary.is_relative_to(root) for root in roots):
+        raise factory.FactoryError("Install native Gitleaks outside writer-controlled and temporary paths before automatic commits")
+    with binary.open("rb") as stream:
+        if stream.read(2) == b"#!":
+            raise factory.FactoryError("Use a native Gitleaks binary rather than a script wrapper for automatic commits")
+    return binary
+
+
+def scan_staged(args, receipt, *, git_scope=isolated_git):
+    """Scan raw staged blobs with trusted defaults, without a signer."""
+    if getattr(args, "_gitleaks", None) is None:
+        args._gitleaks = scanner_binary(args)
+    with git_scope(args, receipt["repository_identity"], read_only=True):
+        scope = factory.GIT_EXECUTION.get()
+        if scope is None:
+            raise factory.FactoryError("Secret scanning requires the isolated Git profile; no host fallback is allowed")
+        prefix, environment = scope
+        environment["PATH"] = os.defpath
+        config = Path(environment["TMPDIR"]) / "scanner.toml"
+        config.write_text("[extend]\nuseDefault = true\n")
+        objects = factory.git_run(".", "ls-tree", "-r", "--format=%(objectname)", receipt["commit"]["staged_tree"])
+        if objects.returncode or not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)
+                                         for oid in objects.stdout.splitlines()):
+            raise factory.FactoryError("Cannot enumerate the staged tree for secret scanning; inspect the retained index before another attempt")
+        try:
+            # Avoid the scanner's Git-diff parser: some versions report success
+            # after Git stderr errors without scanning its additions.
+            with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as blobs:
+                copied = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects",
+                    "cat-file", "--batch"], input=objects.stdout.encode(), stdout=blobs,
+                    stderr=subprocess.PIPE, env=environment, timeout=30, check=False)
+                if copied.returncode:
+                    raise factory.FactoryError("Cannot read staged blobs for secret scanning; inspect the retained tree before another attempt")
+                blobs.seek(0)
+                result = subprocess.run([*prefix(), str(args._gitleaks), "stdin",
+                    "--config", str(config), "--gitleaks-ignore-path", os.devnull, "--ignore-gitleaks-allow",
+                    "--redact=100", "--no-banner", "--log-level", "error", "--timeout", "30"],
+                    stdin=blobs, env=environment, capture_output=True, timeout=35, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise factory.FactoryError("Secret scanner unavailable; inspect the retained staged tree and restore offline Gitleaks before another attempt") from None
+        if result.returncode or result.stderr:
+            raise factory.FactoryError("Secret scan refused the staged tree; inspect it with redacted Gitleaks output before another attempt. No commit was retried")
+
+
+def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     """Commit an opted-in writer's finished work in the factory Git sandbox."""
     if factory.git_commit(".", "HEAD") != args.candidate:
         raise factory.FactoryError("Writer changed Git HEAD before the factory commit; inspect the original candidate and retained work without retrying")
@@ -534,6 +587,7 @@ def commit_changes(args, receipt, *, git_scope=isolated_git):
         return
     if unchanged.returncode != 1:
         raise factory.FactoryError("Cannot compare staged writer changes; inspect the retained index before another action")
+    scan(args, receipt, git_scope=git_scope)
     hooked = None
     if policy["precommit"]:
         with git_scope(args, receipt["repository_identity"], read_only=True, config_paths=policy["config_paths"]):
@@ -566,6 +620,9 @@ def commit_changes(args, receipt, *, git_scope=isolated_git):
 
 def check_commit_receipt(receipt, args, repository):
     """Version 4 has no factory commit; version 5 declares its nullable intent."""
+    if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
+            or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
+        raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:
@@ -598,7 +655,7 @@ def check_commit_receipt(receipt, args, repository):
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
-                  git_scope=isolated_git):
+                  git_scope=isolated_git, scan=scan_staged):
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Native attempt already has artifacts; collect or inspect it, never relaunch it blindly")
     try:
@@ -638,6 +695,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError("Use a trusted Codex installation outside the writer checkout and Git metadata")
     if args.write:
         args._git_python = trusted_git_runtime(argparse.Namespace(**{**vars(args), "codex": binary}))
+    if args.commit_message is not None and scan is scan_staged:
+        args._gitleaks = scanner_binary(args)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")
@@ -716,7 +775,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         git_args = argparse.Namespace(**{**vars(args), "codex": binary})
         with git_scope(git_args, identity) if args.commit_message is not None else nullcontext():
             if committing:
-                commit_changes(git_args, receipt, git_scope=git_scope)
+                commit_changes(git_args, receipt, git_scope=git_scope, scan=scan)
             candidate = factory.git_commit(".", "HEAD")
             factory.check_checkout(".", ".", candidate, expected_identity=identity,
                                    expected_git_dir=args.worktree_git_dir)
