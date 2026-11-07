@@ -17,6 +17,7 @@ def check():
                 "judge", "standby-reasoner", "observer", "optimizer"}
     assert set(ids) == expected, "Role coverage changed; review the design"
     assert all(role["instructions"] and role["decision_authority"] for role in roles)
+    assert all(type(role.get("write_allowed")) is bool for role in roles), "Every role needs an explicit write permission"
     providers = json.loads((ROOT / "config/providers.json").read_text())["routes"]
     assert {route["id"] for route in providers} == {
         "claude-native", "codex-native", "grok-native",

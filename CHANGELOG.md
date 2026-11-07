@@ -25,7 +25,9 @@ model sandbox permissions remain unchanged. Collect
 valid version-4 receipts without rewriting them. Produced commits still require
 independent verification and the repository's review/CI gates.
 Keep all launch guards callback-free by comparing the index and raw candidate
-bytes, and include the selected Codex installation in read-only runtime access.
+bytes, and read only the selected Codex executable/required vendor files.
+Respect explicit catalog writer permissions before new launch effects and use
+the macOS socket flag only on macOS; historical reconnects remain unchanged.
 
 ### Safe Codex capacity snapshot
 

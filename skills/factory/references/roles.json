@@ -3,6 +3,7 @@
   "roles": [
     {
       "id": "foreman",
+      "write_allowed": true,
       "purpose": "Plan and prioritize authorized delivery; resolve exceptional planning decisions.",
       "activate_when": "New goals, competing priorities, changed scope or decomposition that needs engineering judgment.",
       "capabilities": [
@@ -21,6 +22,7 @@
     },
     {
       "id": "product",
+      "write_allowed": true,
       "purpose": "Define the intended product outcome and acceptance criteria.",
       "activate_when": "Unclear user needs, competing product behaviors or missing acceptance evidence.",
       "capabilities": [
@@ -39,6 +41,7 @@
     },
     {
       "id": "ux-research",
+      "write_allowed": true,
       "purpose": "Investigate user needs and evaluate usability.",
       "activate_when": "User research, uncertain interaction assumptions or usability validation.",
       "capabilities": [
@@ -57,6 +60,7 @@
     },
     {
       "id": "ui-design",
+      "write_allowed": true,
       "purpose": "Design interactions and visual interfaces.",
       "activate_when": "Interaction flows, information hierarchy, visual design or UI behavior.",
       "capabilities": [
@@ -76,6 +80,7 @@
     },
     {
       "id": "accessibility",
+      "write_allowed": true,
       "purpose": "Evaluate and improve accessibility of assigned experiences.",
       "activate_when": "Accessibility design, implementation validation or an accessibility finding.",
       "capabilities": [
@@ -94,6 +99,7 @@
     },
     {
       "id": "architecture",
+      "write_allowed": true,
       "purpose": "Design system boundaries, interfaces and technical approaches.",
       "activate_when": "System design, consequential technical tradeoffs or cross-component dependencies.",
       "capabilities": [
@@ -112,6 +118,7 @@
     },
     {
       "id": "frontend",
+      "write_allowed": true,
       "purpose": "Implement client interfaces and interactions.",
       "activate_when": "Frontend implementation or correction of client behavior.",
       "capabilities": [
@@ -130,6 +137,7 @@
     },
     {
       "id": "backend",
+      "write_allowed": true,
       "purpose": "Implement services and server-side behavior.",
       "activate_when": "Service, API or backend implementation and corrections.",
       "capabilities": [
@@ -148,6 +156,7 @@
     },
     {
       "id": "mobile",
+      "write_allowed": true,
       "purpose": "Implement and validate mobile client behavior.",
       "activate_when": "Native/mobile application implementation and platform-specific behavior.",
       "capabilities": [
@@ -166,6 +175,7 @@
     },
     {
       "id": "data-engineering",
+      "write_allowed": true,
       "purpose": "Design and implement data models, processing and migrations.",
       "activate_when": "Database schema, migration, data integrity or data pipeline work.",
       "capabilities": [
@@ -184,6 +194,7 @@
     },
     {
       "id": "security",
+      "write_allowed": true,
       "purpose": "Assess security and privacy for assigned designs and changes.",
       "activate_when": "Threat modeling, security/privacy review, a vulnerability or a sensitive effect.",
       "capabilities": [
@@ -203,6 +214,7 @@
     },
     {
       "id": "qa",
+      "write_allowed": false,
       "purpose": "Own verification strategy and acceptance coverage.",
       "activate_when": "Test strategy, acceptance verification or a quality finding.",
       "capabilities": [
@@ -221,6 +233,7 @@
     },
     {
       "id": "test-automation",
+      "write_allowed": true,
       "purpose": "Build and run effective automated verification.",
       "activate_when": "Test implementation, regression coverage or automation tooling.",
       "capabilities": [
@@ -239,6 +252,7 @@
     },
     {
       "id": "performance",
+      "write_allowed": true,
       "purpose": "Measure and improve performance, efficiency and capacity.",
       "activate_when": "Latency, throughput, memory, resource efficiency or capacity questions.",
       "capabilities": [
@@ -257,6 +271,7 @@
     },
     {
       "id": "code-review",
+      "write_allowed": false,
       "purpose": "Independently assess correctness and maintainability.",
       "activate_when": "Independent code review or a current-candidate recheck.",
       "capabilities": [
@@ -275,6 +290,7 @@
     },
     {
       "id": "sre",
+      "write_allowed": true,
       "purpose": "Own operational reliability and deployment readiness.",
       "activate_when": "Reliability, observability, infrastructure, incidents or deployment behavior.",
       "capabilities": [
@@ -293,6 +309,7 @@
     },
     {
       "id": "integration",
+      "write_allowed": true,
       "purpose": "Coordinate technical integration of parallel changes.",
       "activate_when": "Shared-interface dependencies, merge conflicts or integration validation.",
       "capabilities": [
@@ -311,6 +328,7 @@
     },
     {
       "id": "release",
+      "write_allowed": true,
       "purpose": "Deliver verified changes through the selected release procedure.",
       "activate_when": "Merge, publication or deployment of an eligible candidate.",
       "capabilities": [
@@ -329,6 +347,7 @@
     },
     {
       "id": "documentation",
+      "write_allowed": true,
       "purpose": "Create accurate user and engineering documentation.",
       "activate_when": "User guides, API documentation, technical explanations or operational instructions.",
       "capabilities": [
@@ -347,6 +366,7 @@
     },
     {
       "id": "investigator",
+      "write_allowed": false,
       "purpose": "Gather evidence that can resolve a specific failure or dispute.",
       "activate_when": "A substantive disagreement, unexplained failure or exhausted correction loop.",
       "capabilities": [
@@ -366,6 +386,7 @@
     },
     {
       "id": "judge",
+      "write_allowed": false,
       "purpose": "Adjudicate genuinely unresolved cases after investigation and Jev reassessment.",
       "activate_when": "A current case remains unresolved or uncertain after the investigator and Jev have evaluated it.",
       "capabilities": [
@@ -385,6 +406,7 @@
     },
     {
       "id": "standby-reasoner",
+      "write_allowed": false,
       "purpose": "Resolve bounded coordination questions that Jev marked uncertain.",
       "activate_when": "A generic Jev coordination judgment has an explicit uncertain outcome.",
       "capabilities": [
@@ -403,6 +425,7 @@
     },
     {
       "id": "observer",
+      "write_allowed": false,
       "purpose": "Measure delivery, utilization, overhead and factory behavior.",
       "activate_when": "Factory measurement, efficiency analysis or a meaningful operational anomaly.",
       "capabilities": [
@@ -421,6 +444,7 @@
     },
     {
       "id": "optimizer",
+      "write_allowed": true,
       "purpose": "Improve factory behavior across quality, delivery and resource efficiency.",
       "activate_when": "An evidenced opportunity in models, prompts, workflows, tooling or coordination.",
       "capabilities": [

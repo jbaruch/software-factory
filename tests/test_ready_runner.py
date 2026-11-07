@@ -68,8 +68,8 @@ class ReadyRunner(unittest.TestCase):
                 repository=str(self.repo), acceptance=["fixture/acceptance.md"], corrections=corrections)
             factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
 
-    def job(self, identity="first", *, task="task", role="qa", after=(), **changes) -> dict:
-        return {**dict(task=task, id=identity, role=role, goal="Inspect the selected fixture candidate",
+    def job(self, identity="first", *, task="task", role=None, after=(), **changes) -> dict:
+        return {**dict(task=task, id=identity, role=role or ("backend" if changes.get("write") else "qa"), goal="Inspect the selected fixture candidate",
             cwd=str(self.repo), candidate=self.candidate, requirements="requirements-1",
             model="fixture-model", effort="high", seconds=30, purpose="work", write=False, commit_message=None,
             after=list(after)), **changes}
@@ -123,6 +123,16 @@ class ReadyRunner(unittest.TestCase):
 
     def states(self, result):
         return {(item["task"], item["id"]): item["state"] for item in result["jobs"]}
+
+    def test_readonly_verifier_cannot_request_writer_mode(self):
+        before = (self.directory / "task.json").read_bytes()
+        plan = self.plan([self.job(role="code-review", write=True, commit_message="Unauthorized edit")])
+        result = self.tick(self.controller(plan))
+        self.assertEqual(result["result"], "needs_action")
+        self.assertEqual(result["jobs"][0]["state"], "blocked")
+        self.assertIn("specialty does not permit writer", result["jobs"][0]["reason"])
+        self.assertEqual((self.directory / "task.json").read_bytes(), before)
+        self.assertEqual(result["metrics"]["launched"], 0)
 
     def test_writer_commit_is_collected_and_changed_message_cannot_replay_it(self):
         plan = self.plan([self.job(role="backend", write=True,

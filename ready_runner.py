@@ -231,7 +231,7 @@ class Runner:
                 try:
                     expected = factory.codex_command(self.directory / (job["task"] + ".json"), task=job["task"],
                         assignment_id=job["id"], codex=str(self.binary), model=job["model"], effort=job["effort"],
-                        cwd=job["cwd"], write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"])
+                        cwd=job["cwd"], write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"], role=job["role"])
                     if (request.get("inputs") != dict(candidate=job["candidate"], requirements=job["requirements"])
                             or any(request[k] != job[k] for k in ("role", "goal", "cwd", "purpose"))
                             or request.get("dependencies", []) != sorted(job["after"]) or request["command"] != expected):
@@ -291,7 +291,7 @@ class Runner:
                         raise factory.FactoryError("Task inputs/hold changed before launch; inspect current state before resuming")
                     command = factory.codex_command(path, task=job["task"], assignment_id=job["id"],
                         codex=str(self.binary), model=job["model"], effort=job["effort"], cwd=job["cwd"],
-                        write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"])
+                        write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"], role=job["role"])
                     current, assignment = factory.launch(path, task=job["task"], assignment_id=job["id"],
                         role=job["role"], goal=job["goal"], cwd=job["cwd"], command=command,
                         binary=self.rex, server=self.server, purpose=job["purpose"], dependencies=job["after"])
