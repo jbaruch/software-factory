@@ -50,6 +50,8 @@ Refuse in-progress Git operations before native launch and staging; a clean
 resolved cherry-pick cannot supply an unscanned author. Use UTF-8 for factory
 commits without copying a configured encoding header. Cover the explicit Git
 smoke command's orchestration and failure cleanup with offline fake transports.
+Report malformed or unreadable SSH public keys with focused signing-recovery
+guidance before starting the private signing agent.
 
 ## 0.1.0 — 2026-11-05
 
