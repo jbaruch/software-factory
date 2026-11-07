@@ -136,6 +136,15 @@ describes standalone slash-command reports; the
 
 ## Grok authenticated metadata
 
+The ACP metadata command is currently held before any native child starts. The
+CLI reloads mutable executable configuration after inspection, so the check below
+does not establish a safe execution boundary. Use another eligible route.
+The following describes retained protocol coverage, not current route readiness.
+
+The metadata command applies the same native configuration/trust and executable-
+customization checks as the [inspection worker](#explicit-grok-inspection-assignments)
+before starting its ACP agent. Unsupported profiles remain held without a model turn.
+
 ```sh
 python3 native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
 ```
@@ -171,6 +180,118 @@ The adapter has no persistence/migration reader; keep retained output private.
 
 Tests use fixed ACP replies and fake processes. Live discovery is recorded in
 the [implementation inventory](implementation.md).
+
+`native_grok.parse_execution` decodes the observed Grok 1.0.77 headless event
+format after strict JSON decoding. It requires one final `end` event with
+`end_turn`, the frozen native session/directory, a request identity and a turn
+count within the declared bound. Only `structuredOutput` supplies the report;
+provisional text and tool telemetry never supply completion or acceptance.
+Native usage and reported model identities remain separate from requested model
+selection, quota and monetary spend. Missing usage stays unknown. This decoder
+is used by the explicit worker and collector below.
+
+## Explicit Grok inspection assignments
+
+New assignments, direct worker execution and new result collection are currently
+held. Existing assignment reconnect and raw artifact inspection remain available.
+The native built-in sandbox can fail open, `read_file` does not enforce checkout
+confinement, and custom profiles only add to inherited filesystem grants. Native
+configuration inspection also leaves a gap before mutable hooks/plugins/MCP/LSP
+configuration is reloaded. Tool denies and file hashes do not close those gaps.
+No environment switch or command-line option bypasses the hold. Restore execution
+only with a compatible boundary and separate live conformance evidence.
+
+The retained command interface uses an admitted task, selected
+candidate/requirements and discovered model/effort, as with
+[native launcher commands](native-rex.md):
+
+```sh
+python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  grok-start --task example --id inspect --role qa --goal 'Inspect the selected candidate' \
+  --cwd '/absolute/path/to/clean/worktree' --purpose work \
+  --grok '/absolute/path/to/native/grok' --model 'discovered-model-id' \
+  --effort 'discovered-supported-effort' --seconds 600 --turns 30
+python3 factory.py grok-collect --task example --id inspect
+```
+
+For `--role code-review`, also supply `--base` with the full base commit ID.
+The factory never guesses a review range. Before a new launch, `review_evidence.py`
+adds a version-1 JSON section to the existing frozen brief: `candidate`,
+`requirements`, nullable `base`, the candidate's tracked `paths`, and nullable
+`changed_paths`/`diff`. An explicit base produces both changed paths and the full
+binary-capable patch from that base to the selected candidate. Git external diff,
+text conversion, hooks and fsmonitor callbacks are disabled for this read. The
+brief's existing SHA-256 covers the evidence; no second task store is created.
+The worker validates its revision binding and passes the brief with native
+`--prompt-file`, avoiding command-argument size limits. Git/encoding failures
+refuse before a model launch. Evidence gathering uses local objects and never
+chooses the base or judges whether the change is correct.
+
+Reconnecting an existing effect preserves its original brief and range. Historical
+code-review assignments without a base remain inspection-only; they cannot gain
+review evidence retroactively. Historical non-review briefs stay unchanged.
+
+The retained protocol implementation requests only the built-in `read_file` tool, with explicit write, edit,
+shell, MCP, web, workflow and subagent denies and the native `strict` sandbox.
+Source reads are explicitly allowed; model file reads of the default and selected
+Grok profile directories are denied. It disables native subagents, web search and automatic
+updates, preserves native subscription configuration and excludes host credential
+environment variables. API-key overrides, including empty ones, refuse. Metadata
+preflight requires cached OIDC sign-in, a reported subscription, no access gate,
+and the requested model/effort in the actual catalog. Before a model turn,
+`grok inspect --json` identifies native configuration layers. The worker reads
+those TOML layers and refuses authentication, model, endpoint, experiment,
+campaign and version overrides rather than reproducing native precedence.
+Opaque/unreadable layers and API, endpoint, auth-provider or configuration-overlay
+environment overrides also refuse. All inherited `GROK_*` variables except
+`GROK_HOME` and the runtime-controlled worktree-GC setting refuse, including
+empty issuer/client/proxy overrides. `GROK_HOME` reaches both native children;
+the recorded configuration includes its resolved root and layer paths/hashes,
+without configuration contents or credentials. Native discovery must report
+the assigned project trusted and no executable hooks, enabled plugins, MCP or
+LSP servers. Inspection precedes the metadata agent and model child, but does not
+freeze the configuration either child consumes. The execution hold prevents
+these checks from being treated as sufficient confinement. It changes no global configuration.
+Unknown quota stays unknown;
+these explicit commands do not add automatic Grok scheduling to the ready runner.
+
+`--seconds` accepts 1–86400 and `--turns` accepts 1–1000. Invalid bounds refuse
+before task locks; worker deadlines interrupt only the owned child. A local exit
+does not prove a provider request was cancelled. Inspect the original native
+session, receipt and stream before authorizing a new attempt after an unknown
+outcome. The native CLI installation must remain outside the checkout/Git metadata.
+
+`grok_worker.py` owns version-2 `*.grok.json` receipts and version-1 `*.grok.jsonl` streams.
+Every stream record has `schema_version: 1`, `kind: grok-event-line` and `data`,
+the unchanged native line including its newline. Invalid bytes stay escaped
+inspection evidence and refuse collection. Native lines are limited to 1 MiB.
+The event reader accepts only version 1; unversioned captures and unsupported versions
+remain inspection-only. Neither reader migrates or rewrites old evidence.
+
+The exclusively claimed receipt records job/input revisions, repository marker,
+worktree Git directory, cwd, role/brief digest, resolved binary, requested model/
+effort, native session, declared seconds/turn bound, preflight discovery snapshot,
+version-2 subscription-configuration observation and its probe duration,
+timestamps/duration, exit code, final report/request identity, native usage/model
+usage, actual turn count, candidate, stream path and error. Before completion,
+result/timing/exit fields are null. State is `starting`, `completed` or `failed`.
+The discovery retains its own native metadata schema version and probe duration.
+Execution and collection share validation of discovery metadata and configuration
+evidence, including each layer's absolute path, nonempty role and SHA-256 digest,
+the CLI version and finite nonnegative observation timing. Collection validates
+the retained observation without rereading mutable profile files.
+No quota or monetary spend is inferred from native token/cost telemetry.
+
+Collection requires successful owned worker exit, a completed version-2 receipt
+with finite nonnegative timing and null error, exact frozen command/input/role
+bindings, and agreement with the original final event. It revalidates repository
+marker and worktree Git directory; replaced linked checkouts refuse. Reports stay
+bound to their assessed candidate when current task inputs change. Repeated
+collection reuses the immutable result. Task records keep their existing schema;
+generic historical Grok commands are not adopted as managed worker evidence.
+Version-1 execution receipts and earlier version-2 receipts containing a version-1
+configuration observation predate these capability checks. They remain unchanged
+and inspection-only, without being upgraded into capability evidence.
 
 ## Explicit Codex assignments
 

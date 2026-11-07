@@ -942,6 +942,21 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if record["admission"] is None:
             raise FactoryError("Admit a task before declaring assignment dependencies")
         request["dependencies"] = sorted(set(dependencies))
+    if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
+        require_grok_execution()
+        import grok_worker
+        import review_evidence
+        try:
+            native_args = grok_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Grok command is damaged; restore its arguments before creating an assignment") from None
+        if record["admission"] is None or not valid_inputs(record["inputs"]) or native_args.role != role:
+            raise FactoryError("Admit the Grok task and select matching role/revision inputs before launching")
+        check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
+                       expected_identity=record["admission"]["repository_identity"],
+                       expected_git_dir=native_args.worktree_git_dir)
+        instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
+            requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
@@ -1168,13 +1183,131 @@ def collect_codex(path, assignment_id, rex, record, assignment):
                          outcome=native["report"]["outcome"], artifacts=artifacts)
 
 
+def require_grok_execution():
+    import native_grok
+    try:
+        native_grok.require_execution_boundary()
+    except native_grok.GrokProbeError as exc:
+        raise FactoryError(str(exc)) from None
+
+
+def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None):
+    """Freeze one explicit read-only Grok effect, including its native session."""
+    if (not model.strip() or not effort.strip() or not Path(grok).is_absolute()
+            or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
+            or type(turns) is not int or not 1 <= turns <= 1000):
+        raise FactoryError("Supply an absolute native Grok executable, discovered model/effort and bounded seconds/turns")
+    worker = [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]
+    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None:
+        require_grok_execution()
+    if existing is None or base is not None:
+        from review_evidence import valid_base
+        valid_base(base, role)
+    binary = Path(grok).resolve()
+    if existing is None:
+        try:
+            binary = Path(grok).resolve(strict=True)
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                raise FactoryError("Supply an executable native Grok file before creating an assignment")
+        except OSError:
+            raise FactoryError("Restore the selected native Grok installation before creating an assignment") from None
+        native_session, gitdir = str(uuid.uuid4()), str(git_dir(cwd))
+    else:
+        saved = existing["request"]["command"]
+        if saved[:4] != worker:
+            raise FactoryError("Existing assignment uses another command; inspect its original effect without relaunching")
+        try:
+            native_session = saved[saved.index("--native-session") + 1]
+            gitdir = saved[saved.index("--worktree-git-dir") + 1]
+            if str(uuid.UUID(native_session)) != native_session or not Path(gitdir).is_absolute():
+                raise ValueError("Invalid frozen binding")
+        except (ValueError, IndexError):
+            raise FactoryError("Saved Grok binding is damaged; restore the original command without relaunching") from None
+    prefix = path.parent / (task + "." + assignment_id + ".grok")
+    return worker + ([] if base is None else ["--base", base]) + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
+        "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
+        "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
+        "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
+        "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
+        "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
+
+
+def collect_grok(path, assignment_id, rex, record, assignment):
+    """Collect the original Grok report; this never accepts a task."""
+    require_grok_execution()
+    import grok_worker
+    import native_grok
+
+    command = assignment["request"]["command"]
+    if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
+        raise FactoryError("Assignment is not a Grok worker; use its original provider's result adapter")
+    try:
+        args = grok_worker.parser().parse_args(command[4:])
+    except SystemExit:
+        raise FactoryError("Saved Grok command is damaged; restore its original arguments before collection") from None
+    from review_evidence import valid_base
+    if args.role == "code-review" and args.base is None:
+        raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
+    valid_base(args.base, args.role)
+    if status(rex, record, assignment)["state"] != "exited":
+        raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
+    try:
+        receipt = decode_json(args.receipt.read_text())
+    except (OSError, ValueError, UnicodeError):
+        raise FactoryError("Cannot read the original Grok receipt; inspect or restore it without relaunching") from None
+    request = assignment["request"]
+    keys = ("report", "request_id", "usage", "model_usage", "turns")
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 2 or receipt.get("kind") != "grok-execution"
+            or receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or any(type(receipt.get(key)) not in (int, float) or not 0 <= receipt[key] <= sys.float_info.max
+                   for key in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"] or any(key not in receipt for key in keys)
+            or receipt.get("job") != record["task"] + "/" + assignment_id
+            or not valid_inputs(receipt.get("inputs")) or receipt["inputs"] != request.get("inputs")
+            or receipt.get("candidate") != request["inputs"]["candidate"]
+            or receipt.get("repository_identity") != record["admission"]["repository_identity"]
+            or not valid_repository_identity(receipt.get("repository_identity"))
+            or receipt.get("brief_sha256") != request["instructions_sha256"]
+            or args.role != request["role"] or receipt.get("role") != args.role
+            or receipt.get("cwd") != request["cwd"] or not args.worktree_git_dir.is_absolute()
+            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or not args.grok.is_absolute() or receipt.get("binary") != str(args.grok)
+            or receipt.get("native_session") != args.native_session
+            or not isinstance(receipt.get("discovery"), dict)
+            or "configuration" not in receipt
+            or receipt["discovery"].get("configuration") != receipt["configuration"]
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
+            or type(receipt.get("max_turns")) is not int or receipt["max_turns"] != args.turns
+            or receipt.get("events") != str(args.events)):
+        raise FactoryError("Grok receipt differs from its frozen completed assignment; inspect the original artifacts")
+    try:
+        native_grok.validate_discovery(receipt["discovery"], args.grok, request["cwd"])
+        native = native_grok.parse_execution(grok_worker.read_events(args.events), session_id=args.native_session,
+                                            cwd=request["cwd"], max_turns=args.turns)
+    except native_grok.GrokProbeError as exc:
+        raise FactoryError(str(exc)) from None
+    if json.dumps({key: receipt[key] for key in keys}, sort_keys=True) != json.dumps(
+            {key: native[key] for key in keys}, sort_keys=True):
+        raise FactoryError("Grok receipt differs from its original events; reconcile the retained attempt before recording a result")
+    if (repository_identity(request["cwd"]) != receipt["repository_identity"]
+            or git_dir(request["cwd"]) != args.worktree_git_dir):
+        raise FactoryError("Grok worktree binding changed; restore its original repository and Git directory before collection")
+    return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
+        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".factory-state")
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
     parser.add_argument("--server", help="Explicit local unix:// Rex endpoint; pinned per task")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("start", "codex-start"):
+    for action in ("start", "codex-start", "grok-start"):
         start = sub.add_parser(action, help="Launch or reconnect to an explicit assignment")
         start.add_argument("--task", required=True)
         start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
@@ -1186,13 +1319,20 @@ def main(argv=None):
         start.add_argument("--after", action="append", default=[], help="Earlier assignment requiring a current successful result")
         if action == "start":
             start.add_argument("command", nargs=argparse.REMAINDER)
-        else:
+        elif action == "codex-start":
             start.add_argument("--codex", required=True)
             start.add_argument("--model", required=True)
             start.add_argument("--effort", required=True)
             start.add_argument("--write", action="store_true")
             start.add_argument("--commit-message", help="With --write, the factory commits a completed writer result")
             start.add_argument("--seconds", type=int, default=600)
+        else:
+            start.add_argument("--grok", required=True)
+            start.add_argument("--model", required=True)
+            start.add_argument("--effort", required=True)
+            start.add_argument("--seconds", type=int, default=600)
+            start.add_argument("--turns", type=int, default=30)
+            start.add_argument("--base", help="Full base commit ID; required for code-review")
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -1226,7 +1366,7 @@ def main(argv=None):
         if action in {"pause", "resume"}:
             command.add_argument("--request-id", help="Stable ID makes a repeated control request idempotent")
             command.add_argument("--expected-revision", type=int, help="Apply only to this control-history revision")
-    for action in ("status", "capture", "codex-collect"):
+    for action in ("status", "capture", "codex-collect", "grok-collect"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
@@ -1238,7 +1378,11 @@ def main(argv=None):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
         if args.action == "codex-start":
             check_commit_message(args.commit_message, write=args.write)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        if args.action == "grok-start" and (not args.model.strip() or not args.effort.strip()
+                or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
+                or not 1 <= args.turns <= 1000):
+            raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
@@ -1260,13 +1404,19 @@ def main(argv=None):
                                        request_id=args.request_id, expected_revision=args.expected_revision)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
-            if args.action in {"start", "codex-start"}:
+            if args.action in {"start", "codex-start", "grok-start"}:
                 if args.action == "codex-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Codex assignment")
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
                                          write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role)
+                elif args.action == "grok-start":
+                    if load_task(path)["admission"] is None:
+                        raise FactoryError("Admit a task before starting a native Grok assignment")
+                    argv = grok_command(path, task=args.task, assignment_id=args.id, grok=args.grok,
+                        model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
+                        seconds=args.seconds, turns=args.turns, base=args.base)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
@@ -1284,6 +1434,8 @@ def main(argv=None):
                     save(path, record)
             if args.action == "codex-collect":
                 print(json.dumps(task_view(collect_codex(path, args.id, rex, record, assignment)), indent=2))
+            elif args.action == "grok-collect":
+                print(json.dumps(task_view(collect_grok(path, args.id, rex, record, assignment)), indent=2))
             elif args.action == "capture":
                 print(rex.call("capture", "-s", record["session_id"], "-b",
                                assignment["block_id"], "--trim", "--unwrap", raw=True), end="")

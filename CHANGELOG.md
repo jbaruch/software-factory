@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.0 — 2026-11-07
+
+### Explicit read-only Grok execution
+
+Keep this route held before native inspection, metadata or model children start.
+Refuse new assignments without consuming allowance and refuse new result collection;
+preserve existing effects and raw artifacts. The native sandbox does not confine
+reads to the assigned checkout, and mutable executable configuration is reloaded
+after inspection. Offline protocol tests and historical fixtures do not qualify
+that boundary. No runtime override bypasses the hold.
+
+Add `grok-start` and `grok-collect` with frozen native sessions, brief/repository
+bindings, bounded seconds/turns, retained original event lines and version-1
+receipts. Verify cached OIDC subscription metadata and advertised model/effort
+before a model turn; retain that observation and its probe duration. Filter host
+credential environment variables from metadata and worker children. Decode only
+the final structured report, preserving native usage and model labels separately
+from quota and spend. Collection verifies original events and current repository/
+worktree identity without accepting a task. Existing effects reconnect unchanged;
+failed or uncertain attempts never retry themselves. Automatic Grok quota-aware
+scheduling and writer mode remain incomplete. Preserve the selected `GROK_HOME`
+profile and refuse native authentication/model/endpoint overrides before a model
+turn. Retain only inspected configuration paths/hashes in version-2 execution
+receipts; earlier execution receipts remain unchanged and inspection-only.
+Require native project trust and no executable customizations before metadata
+agents start. Restrict model tools to file reads with overriding denies and the
+strict sandbox; refuse inherited route/profile environment overrides. Earlier
+configuration-1 evidence remains inspection-only under the tightened reader.
+Validate nested configuration layers, CLI identity and timing, and reuse the
+native discovery validation at both execution and collection boundaries.
+Supply candidate path inventories in the existing frozen brief and require an
+explicit base for code reviews, with revision-bound changed paths and full diffs.
+Use native prompt-file input; keep older reviews without a range inspection-only.
+
 ## 0.5.0 — 2026-11-07
 
 ### Operator allowance additions
