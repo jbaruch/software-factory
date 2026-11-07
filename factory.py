@@ -1,6 +1,7 @@
 """Explicit native Rex launches. No scheduler, provider broker or model routing."""
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ from typing import Any
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 REPOSITORY_MARKER = "software-factory-repository.json"
@@ -402,13 +404,29 @@ def git_worktree(repository):
     raise FactoryError("Working directory is not a Git checkout; supply an isolated worktree of the admitted repository")
 
 
-def git_run(repository, *args):
+@contextmanager
+def git_execution(prefix, environment):
+    token = GIT_EXECUTION.set((prefix, environment))
+    try:
+        yield
+    finally:
+        GIT_EXECUTION.reset(token)
+
+
+def git_run(repository, *args, environment=None):
     try:
         worktree = git_worktree(repository)
-        return subprocess.run([git_binary(), "--no-replace-objects", "-C", worktree,
+        scope = GIT_EXECUTION.get()
+        prefix = [] if scope is None else scope[0]()
+        if scope is not None:
+            environment = scope[1]
+        result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
                               text=True, timeout=10, check=False,
-                              env=git_environment())
+                              env=git_environment() if environment is None else environment)
+        if scope is not None and result.returncode == 125:
+            raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
+        return result
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -498,12 +516,13 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None, expect
         raise FactoryError("Assignment index hides tracked inputs; clear assume-unchanged/skip-worktree/fsmonitor-valid flags or use a clean full checkout")
     if any(entry[2:].startswith("160000 ") for entry in flags.stdout.split("\0") if entry):
         raise FactoryError("Assignment contains submodules; this runtime requires a checkout without submodules before launching")
-    changed = git_run(cwd, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                      "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
-                      "--ignore-submodules=none")
-    if changed.returncode:
+    # Compare only the index here: worktree status can execute clean filters.
+    # Raw source validation below checks files, modes and untracked directories.
+    changed = git_run(cwd, "-c", "core.fsmonitor=false", "diff-index", "--cached", "--quiet",
+                      "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", candidate, "--")
+    if changed.returncode not in (0, 1):
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
-    if changed.stdout:
+    if changed.returncode:
         raise FactoryError("Assignment checkout has uncommitted inputs (including ignored files); use a clean worktree and keep runtime state/output outside it")
     check_tracked_bytes(cwd, candidate)
     configured = git_run(cwd, "config", "--path", "--get", "core.worktree")
@@ -692,11 +711,21 @@ def hold_task(path, reason, *, request_id=None, expected_revision=None, clock=ti
     return record
 
 
-def brief(role_id, goal):
+def role_spec(role_id):
     roles = json.loads((ROOT / "skills/factory/references/roles.json").read_text())["roles"]
     role = next((item for item in roles if item["id"] == role_id), None)
     if role is None:
         raise FactoryError("Unknown specialty: " + role_id)
+    return role
+
+
+def check_role_write(role_id):
+    if not isinstance(role_id, str) or role_spec(role_id).get("write_allowed") is not True:
+        raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")
+
+
+def brief(role_id, goal):
+    role = role_spec(role_id)
     return (f"# Assignment: {role_id}\n\n{goal}\n\n"
             + "\n".join("- " + item for item in role["instructions"])
             + "\n\nAuthority: " + role["decision_authority"]
@@ -805,6 +834,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Command executable must be an absolute executable file")
     record = load_task(path) if os.path.lexists(path) else new_task(task)
     existing = record["assignments"].get(assignment_id)
+    if existing is None and "--write" in command and (
+            command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
+            or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
+        check_role_write(role)
     instructions = "" if existing else brief(role, goal)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
@@ -930,14 +963,23 @@ def status(rex, record, assignment):
                 block_id=assignment["block_id"], exit=last_exit)
 
 
-def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600):
+def check_commit_message(message, *, write):
+    if message is not None and (not write or not isinstance(message, str) or not message.strip()
+            or not message.splitlines()[0].strip() or len(message.splitlines()[0]) > 72 or "\0" in message):
+        raise FactoryError("Use --commit-message only with --write and supply a nonempty commit subject of at most 72 characters")
+
+
+def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
     if not Path(codex).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS:
         raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
+    check_commit_message(commit_message, write=write)
     binary = Path(codex).resolve()
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None and write:
+        check_role_write(role)
     if existing is None:
         try:
             binary = Path(codex).resolve(strict=True)
@@ -965,12 +1007,20 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         if position >= len(saved) or not Path(saved[position]).is_absolute():
             raise FactoryError("Saved worktree argument is damaged; restore the original assignment before reconnecting")
         command.extend(["--worktree-git-dir", saved[position]])
-    return command + (["--write"] if write else [])
+    if existing is not None and "--role" in existing["request"]["command"]:
+        saved = existing["request"]["command"]
+        position = saved.index("--role") + 1
+        if position >= len(saved) or saved[position] != existing["request"]["role"]:
+            raise FactoryError("Saved role argument is damaged; restore the original assignment before reconnecting")
+        role = saved[position]
+    elif existing is not None:
+        role = None  # Preserve historical worker commands unchanged.
+    return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
 def collect_codex(path, assignment_id, rex, record, assignment):
     """Register a finished native report; this never accepts the whole task."""
-    from codex_worker import parse_events, parser, read_events
+    from codex_worker import check_commit_receipt, parse_events, parser, read_events
 
     command = assignment["request"]["command"]
     if command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
@@ -987,6 +1037,8 @@ def collect_codex(path, assignment_id, rex, record, assignment):
         args = parser().parse_args(command[offset:])
     except SystemExit:
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
+    if args.role is not None and args.role != assignment["request"]["role"]:
+        raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
     observed = status(rex, record, assignment)
     if observed["state"] != "exited":
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
@@ -999,7 +1051,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != 4
+            or receipt["schema_version"] not in (4, 5)
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
             or any(type(receipt.get(key)) not in (int, float)
                    or not 0 <= receipt[key] <= sys.float_info.max
@@ -1028,6 +1080,8 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     native = parse_events(read_events(args.events))
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
+    args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
+    check_commit_receipt(receipt, args, record["admission"]["repository"])
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
     return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
                          requirements=receipt["inputs"]["requirements"],
@@ -1057,6 +1111,7 @@ def main(argv=None):
             start.add_argument("--model", required=True)
             start.add_argument("--effort", required=True)
             start.add_argument("--write", action="store_true")
+            start.add_argument("--commit-message", help="With --write, the factory commits a completed writer result")
             start.add_argument("--seconds", type=int, default=600)
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
@@ -1094,6 +1149,8 @@ def main(argv=None):
             raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
         if args.action == "codex-start" and (not Path(args.codex).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
+        if args.action == "codex-start":
+            check_commit_message(args.commit_message, write=args.write)
         with task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result"}:
                 if args.action == "admit":
@@ -1119,7 +1176,7 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Codex assignment")
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
-                                         write=args.write, seconds=args.seconds)
+                                         write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,

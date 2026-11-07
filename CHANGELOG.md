@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.0 — 2026-11-06
+
+### Factory-owned writer commits
+
+Let explicit `--write --commit-message` assignments leave Git staging/commit to
+the runtime. Retain before-effect intent and staged tree in version-5 receipts,
+respect configured hooks/filters/signing and preserve failures without retries.
+Materialize shared regular output files before Git without changing their aliases.
+The operator-approved exception permits those helpers to load edited source.
+Run Git and final checkout checks in a local-only native sandbox, with restricted
+filesystem access and no publication-token environment or host fallback. Native
+model sandbox permissions remain unchanged. Collect
+valid version-4 receipts without rewriting them. Produced commits still require
+independent verification and the repository's review/CI gates.
+Keep all launch guards callback-free by comparing the index and raw candidate
+bytes, and read only the selected Codex executable/required vendor files.
+Respect explicit catalog writer permissions before new launch effects and use
+the macOS socket flag only on macOS; historical reconnects remain unchanged.
+Separate pre-commit into a private Git view with sanitized configuration, a
+disposable index and no signing socket. Deny original configuration and shared
+metadata; enforce writer roles inside the worker before execution. Stage/commit
+without callbacks; unsupported hook/filter/signer configurations fail visibly
+without bypassing checks or signatures.
+Require an offline Gitleaks scan of staged paths, raw blobs and commit messages
+even without a hook; refuse
+missing scanners, scan errors and findings before signing or committing.
+Recheck the retained checkout's repository marker and exact Git directory during
+collection, including legacy version-4 receipts. Bind every writer candidate to
+its retained worktree HEAD, including writers without a factory commit.
+Verify the scanner's pinned version before a native writer starts, including
+embedded Go module metadata for unstamped builds. Structure the factory skill
+as separate coordinate and inspect actions.
+Scan effective author and committer identities resolved under the final commit's
+Git configuration and environment before copying inputs into the private scan view.
+Refuse in-progress Git operations before native launch and staging; a clean
+resolved cherry-pick cannot supply an unscanned author. Use UTF-8 for factory
+commits without copying a configured encoding header. Cover the explicit Git
+smoke command's orchestration and failure cleanup with offline fake transports.
+Report malformed or unreadable SSH public keys with focused signing-recovery
+guidance before starting the private signing agent.
+
 ## 0.1.0 — 2026-11-05
 
 ### Safe Codex capacity snapshot

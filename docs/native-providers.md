@@ -174,12 +174,120 @@ native child and records failure. An uncertain attempt never retries itself.
 The adapter rejects API-key environment overrides and preserves native config;
 it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
-Host wrappers/workers disable bytecode writes, and the native child inherits
-`PYTHONDONTWRITEBYTECODE=1`. Other disposable outputs belong outside the checkout.
-New host worker commands ignore Python environment/startup overrides. Historical
-commands reconnect and collect without rewriting their arguments or receipts.
+The native child receives only the locale/path/temp and subscription-configuration
+settings allowed by `native_environment()`; host credential variables are not forwarded.
 
-`codex_worker.py` owns version-4 `*.codex.json` execution receipts and their
+Writer CLI installations must remain outside the assigned checkout and Git
+metadata; the resolved executable is reused for later sandbox commands. Writer
+mode requires a native CLI binary, a Python runtime outside writer-controlled
+paths, and no checkout/Git metadata entries in PATH. Script-form CLI wrappers
+refuse; select their installed native binary directly.
+
+New writer assignments require the selected role catalog entry's `write_allowed`
+permission. The worker checks the role and bound brief before creating artifacts
+or starting the native CLI, including with an alternate Python interpreter.
+Read-only verification roles refuse writer execution; historical read-only
+assignments retain their original reconnect and collection behavior.
+
+For a factory-owned writer commit, supply `--write --commit-message` with the
+intended commit message. The specialist edits/tests within its workspace sandbox
+and leaves Git staging/commit to the runtime. Only a successful native run with a
+`completed` report can enter this step. The runtime retains an intent before
+status/staging can execute a configured filter, copies shared regular outputs to
+independent files without changing their other links, rejects non-regular files,
+records the staged tree, scans its filenames, raw blobs, commit message and
+effective author/committer identities with native Gitleaks, then runs one
+local Git commit with the repository's supported hooks, signing and author settings.
+Install Gitleaks outside the checkout, Git metadata and temporary directories.
+Use the version pinned in `.pre-commit-config.yaml`; refresh the native tool when
+the weekly Dependabot hook update changes that pin.
+Preflight verifies that version before launching the writer. Unstamped upstream
+Go builds require native Go to verify the embedded module/version metadata.
+The mandatory scan uses built-in rules through a generated configuration; source
+configuration, ignore files and `gitleaks:allow` comments cannot disable it.
+It runs even without a pre-commit hook. Missing tools, scanner errors or findings
+retain the intent and refuse the commit. Scanner output is redacted and never
+copied into the receipt. Ordinary tests inject a fake scanner.
+Validated inherited Git configuration also applies to status/staging/commit.
+The operator-approved exception in `AGENTS.md` permits configured helpers to load
+writer-edited source. The initial automatic mode supports an optional pre-commit
+hook in the common/worktree Git hooks directory, unsigned commits or file-based
+SSH signing with the operating system's signer. Active external hook directories,
+clean/smudge/process filters, other executable hook types, custom
+signing programs and partial clones refuse visibly; use an inspected explicit
+local commit for those configurations. Required checks/signatures are never
+silently disabled.
+Factory commits use UTF-8 and refuse in-progress merges, cherry-picks, reverts,
+rebases and bisects before native launch and again before staging. Finish or
+abort the existing Git operation in the assigned checkout before retrying.
+
+Staging and the final signed commit run with executable Git callbacks disabled.
+Pre-commit runs separately with no signing agent or inherited Git auth settings.
+It receives a disposable Git view with a private staged index and sanitized
+configuration. Original Git configuration and shared metadata are denied; shared
+objects and hook programs are readable. Only its own temporary directory is
+writable under Git metadata. Changes to that private index refuse rather than
+silently bypassing a hook's staging decision. Hook source edits remain subject to
+final candidate validation. Only the callback-free commit phase receives the
+short-lived signer; callback processes cannot connect even to a known socket.
+The agent holds only the configured key, expires it after five minutes, closes
+with its owner and cannot load PKCS#11/FIDO libraries. The user's agent is unchanged.
+
+Each Git invocation uses a fresh native CLI permission profile, with network
+access disabled, an allowlisted validated environment and read-only configuration
+and caches. The standalone CLI itself and required npm vendor files are readable;
+its arbitrary parent directory is not granted. Pre-commit uses a dedicated virtual
+environment or the factory Python installation and a dedicated cache named
+`pre-commit`. Supplemental grants reject broad home/temp roots and source/Git
+metadata overlap. Other Python runtimes expose only their executable, standard
+library and libpython files. Unsupported access fails with
+retained intent and no host fallback. Launch/verification guards compare the index
+and raw source bytes without worktree status, filters, external diffs or text
+conversion. macOS additionally receives its native socket option for the signer;
+Linux uses the filesystem socket grant without that macOS option.
+
+Run the separate local conformance fixture explicitly:
+
+```sh
+python3 scripts/smoke_git.py --codex '/absolute/path/to/codex'
+```
+
+It creates only temporary repositories and test signing keys, verifies a real
+signed commit, tests arbitrary signing, sibling-index mutation and Git auth
+exposure attempts in the callback phase, and refuses a generated credential fixture
+without a hook. It then removes its fixtures. It makes no model turn or Rex call
+and does not qualify a native assignment.
+`tests/test_smoke_git.py` covers orchestration, JSON output and failure cleanup
+with fake native transports and disposable Git repositories. The live command
+remains a separate explicit check.
+
+Native model commands retain their declared sandbox. Writers may
+start from an admitted subdirectory; source checks still use the worktree root.
+No changes produce no empty commit. Commit errors or lost responses preserve the
+intent and worktree for inspection; they never retry the native job or commit.
+The worker disables Python bytecode generation for its child and Git helpers. Other disposable
+test/build outputs belong outside the source checkout. This step never pushes,
+accepts the task or satisfies independent verification/release requirements.
+Host wrappers/workers disable bytecode writes; new worker commands also ignore
+Python environment/startup overrides. Historical
+commands and version-4 receipts remain reconnectable/collectable without rewriting.
+
+For an admitted writer task, replace the paths and discovered model/effort below
+(see [operator-approved exceptions](../AGENTS.md#operator-approved-exceptions)):
+
+```sh
+python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  codex-start --task example --id writer-1 --role documentation \
+  --goal 'Update the admitted documentation and report original evidence' \
+  --cwd '/absolute/path/to/isolated/writer/worktree' --purpose work \
+  --codex '/absolute/path/to/discovered/codex' --model 'discovered-model-id' \
+  --effort 'discovered-supported-effort' --write --commit-message 'docs: clarify writer invocation'
+python3 factory.py codex-collect --task example --id writer-1
+```
+
+Inspect the retained receipt, stream and worktree before authorizing any retry.
+
+`codex_worker.py` owns version-5 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
@@ -213,12 +321,29 @@ evidence; unrelated telemetry cannot supply a report or completion.
 The observed CLI also emits nonfatal `item.completed` error diagnostics between
 thread start and turn start. These are retained telemetry and supply no lifecycle
 or report evidence; top-level errors and failed turns still refuse collection.
+Version 5 adds nullable `commit` evidence. A factory-owned commit records `state`
+(`preparing`, `committing`, `created` or `unchanged`), input `parent`, requested
+`message`, nullable `staged_tree` and nullable produced `candidate`. Intent is saved
+before staging and again before committing. Pre-commit runs against a disposable
+index; changes to that private index refuse the commit. The candidate stays bound
+to the factory-recorded staged tree, and the clean source check binds the output
+assessed by later verification. A completed receipt requires a terminal commit state matching
+its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
+for a new commit, the actual Git parent. Collection revalidates the retained
+assigned checkout's repository marker and frozen worktree Git directory for both
+receipt versions, and requires its exact HEAD to equal the candidate for every
+writer, including writers without a factory commit. Keep that checkout until
+collection completes.
+
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
-code. Schema changes belong to the worker. Receipt readers accept only version 4;
+code. Schema changes belong to the worker. Receipt readers accept versions 4 and 5;
+version 4 has no factory-owned commit and remains collectable unchanged with its
+original command. Version 5 requires the nullable `commit` field. Neither version
+is migrated or rewritten by collection. Versions below 4 remain inspection-only:
 version 1 lacks the repository pin and version 2 uses a reusable filesystem pin.
-Version 3 binds the repository but not the individual worktree. These versions
-remain inspection-only, without migration or a new launch. Existing commands reconnect unchanged; they cannot acquire
+Version 3 binds the repository but not the individual worktree.
+Existing commands reconnect unchanged; they cannot acquire
 retroactive execution evidence.
 New native commands freeze the worktree Git directory in their existing command
 arguments before launch. Preflight, actual-directory checks, postflight and

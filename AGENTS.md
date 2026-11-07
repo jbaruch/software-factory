@@ -10,4 +10,11 @@ Keep instructions short and role-specific. Store operational facts once and gene
 
 For Software Factory's runtime and explicitly invoked conformance checks, native provider CLIs may execute operator-authorized specialist assignments through the factory's Rex adapter. This does not authorize the coding agent's own native subagents, team tools or delegation wrappers outside those factory runtime checks. User scope, task limits, isolated worktrees, permissions and release gates remain binding.
 
+For this repository's operator-admitted writer tasks, explicitly selecting
+`--write --commit-message` also authorizes factory-owned local Git staging/commit
+and the repository's configured hooks, filters and signing helpers with normal
+host access, including when they load writer-edited source. This exception does
+not expand native model command permissions or authorize pushes, merges,
+publication, task acceptance or bypassed CI/review gates.
+
 The operator temporarily waives waiting for Claude quality review while its subscription capacity is unavailable, expected to return Saturday afternoon, 2026-11-07 (America/Chicago). Current-head policy review and required CI still gate merges. Restore the Claude review requirement when capacity returns; never record the waived review as an approval.
