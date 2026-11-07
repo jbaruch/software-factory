@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased (unpublished)
+
+### Team view and owned Rex pane reads
+
+Show original specialist assignments, source/result freshness, supported native
+worker request metadata and saved Rex identities in the authenticated operator
+view. Keep requested model/effort/route separate from unknown observed model,
+readiness and capacity. Link to a read-only pane detail that revalidates the saved
+scope before process/output reads, with actual observation timestamps, escaped
+terminal text and explicit partial-output markers. Preserve pause/resume and
+task schema 7; transient dashboard facts advance to version 3 while older static
+render callers remain compatible. Fake records/transports and socket-free
+handler tests cover the addition; host/browser/live acceptance remains separate.
+Release version/base reconciliation remains with the foreman.
+
 ## 0.9.0 — 2026-11-07 (unpublished)
 
 ### Opt-in writer candidate handoff
