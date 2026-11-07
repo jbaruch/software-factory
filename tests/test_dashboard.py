@@ -73,10 +73,10 @@ class OperatorView(unittest.TestCase):
             raise AssertionError("Unexpected Rex operation")
         return Mock(call=Mock(side_effect=call)), session
 
-    def get_without_socket(self, path, *, auth=True, host="127.0.0.1:8090", method="GET", body=b"", headers=None):
+    def get_without_socket(self, path, *, auth=True, host="127.0.0.1:8090", method="GET", body=b"", headers=None, decision_store=None):
         # Exercise the actual HTTP handler without binding a socket in the native sandbox.
         with patch.object(dashboard, "ThreadingHTTPServer", return_value=Mock(server_port=8090)) as server:
-            dashboard.make_server(self.root, access_key="fixture-key")
+            dashboard.make_server(self.root, access_key="fixture-key", decision_store=decision_store)
         handler_type = server.call_args.args[1]
         handler = handler_type.__new__(handler_type)
         handler.path = path
@@ -104,7 +104,7 @@ class OperatorView(unittest.TestCase):
                 before = self.path.read_bytes()
                 view = self.snapshot()
                 assignment = view["tasks"][0]["assignments"][0]
-                self.assertEqual(view["schema_version"], 3)
+                self.assertEqual(view["schema_version"], 4)
                 self.assertEqual(assignment["requested_native"], dict(adapter=harness + "_worker", harness=harness,
                     route=harness + "-native", model="requested-model", effort="high"))
                 self.assertIsNone(assignment["observed_model"])

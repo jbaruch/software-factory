@@ -19,6 +19,8 @@ import uuid
 from urllib.parse import parse_qs, urlsplit
 
 import factory
+import jev
+import coordination_evidence
 
 ASSETS = Path(__file__).resolve().parent / "web"
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
@@ -174,7 +176,133 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
     return detail
 
 
-def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time, timer=time.monotonic) -> dict:
+def decision_inbox(state_dir, decision_store, tasks):
+    """Allowlisted owner views; no state-supplied paths, routing or effects."""
+    inbox: dict = dict(status="not_configured", error=None, items=[], resolutions=[])
+    if decision_store is None:
+        return inbox
+    try:
+        original = jev.pending_decisions(decision_store)
+    except (jev.JevError, OSError, ValueError):
+        inbox.update(status="unavailable", error="Decision evidence unavailable. Restore the selected private Jev store; refresh does not retry requests.")
+        return inbox
+    inbox["status"] = "available"
+    try:
+        current = jev.pending_decisions(decision_store, task_state_dir=state_dir)
+    except (jev.JevError, factory.FactoryError, OSError, ValueError):
+        current = None
+        inbox.update(status="unavailable", error="Native answer evidence unavailable. Restore original task/brief/receipt/events before deciding recovery.")
+    pending = {(item["decision"], item["question"]): item for item in current["items"]} if current else {}
+    resolved = {(item["decision"], item["question"]): item for item in current["resolutions"]} if current else {}
+    task_ids = {task["id"] for task in tasks}
+    try:
+        for proposal in original["items"]:
+            identity, question = proposal["decision"], proposal["question"]
+            # IDs originate in the validating owner, never in arbitrary state paths.
+            record = jev.read_decision(decision_store / (identity + ".json"))
+            request = record["request"]
+            key = (identity, question)
+            active = pending.get(key)
+            resolution = resolved.get(key)
+            item: dict = dict(decision=identity, question=question,
+                question_version=request["question_versions"].get(question),
+                proposal_owner=proposal["owner"], proposal_reason=proposal["reason"],
+                owner=active["owner"] if active else proposal["owner"],
+                condition=active["reason"] if active else proposal["reason"],
+                evidence=proposal["evidence"], evidence_revision=proposal["evidence_revision"],
+                evidence_freshness="unknown", task=None, options={}, dispute_question=None,
+                evaluation_questions=({name: dict(version=request["question_versions"][name], options=spec["criteria"])
+                                       for name, spec in request["payload"]["questions"].items()} if question is None else {}),
+                attempts=[], recorded_answer=None, availability="Planning only; no dispatch control")
+            if question is not None:
+                item["options"] = request["payload"]["questions"][question]["criteria"]
+            sources = active.get("attempts", []) if active else ([resolution] if resolution else [])
+            # Only explicit native bindings or the investigator owner's binding name a task.
+            bindings = {source["task"] for source in sources}
+            state = request["payload"]["state"]
+            investigation = state.get("investigation") if isinstance(state, dict) else None
+            if proposal["owner"] == "judge" and isinstance(investigation, dict):
+                bound = investigation.get("task")
+                if isinstance(bound, str) and re.fullmatch(SLUG, bound):
+                    bindings.add(bound)
+            if len(bindings) == 1 and next(iter(bindings)) in task_ids:
+                item["task"] = next(iter(bindings))
+            for source in sources:
+                answer = source.get("answer")
+                item["attempts"].append(dict(task=source["task"], assignment=source["assignment"],
+                    state=source["state"], evidence=source["evidence"],
+                    answer=({field: answer[field] for field in ("choice", "ruling", "consequences", "missing_input") if field in answer}
+                            if isinstance(answer, dict) else None)))
+            if resolution:
+                item.update(condition="recorded_current_answer", recorded_answer=item["attempts"][0]["answer"],
+                            evidence_freshness="current native task inputs; original Jev evidence freshness remains unverified")
+            if current is None:
+                item.update(owner="operator", condition="native_evidence_unavailable")
+            if proposal["owner"] == "judge":
+                try:
+                    case = coordination_evidence.dispute(request)
+                    item.update(dispute_question=case["question"], options=case["options"])
+                    if item["task"] is None:
+                        raise factory.FactoryError("Unbound investigation")
+                    with factory.task_lock(state_dir, item["task"]) as path:
+                        task_record = factory.load_task(path)
+                        coordination_evidence.check_investigation(request, task_record)
+                    item["availability"] = "Investigation binding verified; native eligibility and authority still require owner checks"
+                except (factory.FactoryError, OSError, ValueError):
+                    item.update(owner="operator", condition="investigation_unavailable_or_stale",
+                                availability="Blocked: requires the exact current completed investigation and original dispute")
+                    # A collected answer remains visible, but cannot clear a newly invalid investigation.
+                    resolution = None
+            if item["task"] is None:
+                item["availability"] += "; Unbound: operator must establish task/scope; no task or allowance is inferred"
+                if not resolution:
+                    item["owner"] = "operator"
+            elif next(task for task in tasks if task["id"] == item["task"])["hold"] is not None:
+                item["availability"] += "; Held: operator hold remains binding; no dispatch control"
+            item["decision_needed"] = (
+                "Inspect the recorded answer and original evidence; acceptance remains separate" if resolution else
+                "Inspect retained request/service status and decide recovery; no automatic retry" if question is None else
+                "Supply missing evidence, binding or authority and decide the next bounded assignment" if item["owner"] == "operator" else
+                "Answer the original bounded question using only its supported options, or identify missing input")
+            inbox["resolutions" if resolution else "items"].append(item)
+    except (jev.JevError, factory.FactoryError, OSError, ValueError):
+        # A source changing/failing during collection is never an all-resolved inbox.
+        inbox.update(status="unavailable", error="Original decision evidence changed or became unavailable. Restore the selected store and refresh.")
+    return inbox
+
+
+def task_conditions(tasks, errors):
+    items = []
+    for task in tasks:
+        common = dict(task=task["id"], evidence=task["id"] + ".json", attempts=task["allowances"])
+        if task["hold"] is not None:
+            items.append(dict(**common, owner="operator", condition="operator_hold", detail=task["hold"],
+                              decision_needed="Decide whether to retain or explicitly resume the hold"))
+        if task["allowances"] is None:
+            items.append(dict(**common, owner="operator", condition="allowances_unknown", detail="Task not admitted",
+                              decision_needed="Establish authorized scope/admission before assigning work"))
+        else:
+            for purpose, values in task["allowances"].items():
+                if values["remaining"] <= 0:
+                    items.append(dict(**common, owner="investigator" if purpose == "correction" else "operator",
+                        condition=purpose + "_exhausted", detail=purpose + " allowance exhausted",
+                        decision_needed=("Gather evidence for the failed correction loop; operator must select any assignment"
+                            if purpose == "correction" else "Decide whether to approve one additional investigation attempt or stop/wait")))
+        for assignment in task["assignments"]:
+            report = assignment["result"]
+            if assignment["result_current"] and report["outcome"] in {"blocked", "findings"}:
+                items.append(dict(**common, owner="operator", condition="current_" + report["outcome"],
+                    assignment=assignment["id"], artifacts=report["artifacts"],
+                    detail=assignment["role"] + " reported " + report["outcome"],
+                    decision_needed="Inspect original report/artifacts and plan the responsible specialist; recipient/options are not inferred"))
+    for error in errors:
+        items.append(dict(owner="operator", task=error["task"], condition="task_unavailable", detail=error["error"],
+                          evidence=error["task"] + ".json", attempts=None,
+                          decision_needed="Restore the original task record/access before planning"))
+    return items
+
+
+def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.connect, clock=time.time, timer=time.monotonic) -> dict:
     started = timer()
     try:
         paths = sorted(path for path in state_dir.iterdir() if path.suffix == ".json")
@@ -223,6 +351,9 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
             tasks.append(dict(id=record["task"], goal=(record["admission"] or {}).get("goal"),
                               hold=record["hold"], inputs=record["inputs"],
                               control_events=record["control_events"],
+                              allowance_events=record["allowance_events"],
+                              admission=({key: record["admission"][key] for key in
+                                          ("goal", "initial_candidate", "acceptance", "limits")} if record["admission"] else None),
                               allowances=view["allowances"], assignments=assignments))
         except (factory.FactoryError, OSError) as exc:
             errors.append(dict(task=path.stem, error=str(exc)))
@@ -234,8 +365,10 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
             not isinstance(route.get(key), str) or not route[key].strip()
             for key in ("id", "harness", "readiness")) for route in catalog["routes"]):
         raise factory.FactoryError("Incomplete provider catalog; restore its route identities and observations")
-    return dict(schema_version=3, observed_at=clock(), collection_seconds=timer() - started,
-                live=live, tasks=tasks, errors=errors, routes=catalog["routes"])
+    inbox = decision_inbox(state_dir, decision_store, tasks)
+    inbox["conditions"] = task_conditions(tasks, errors)
+    return dict(schema_version=4, observed_at=clock(), collection_seconds=timer() - started,
+                live=live, tasks=tasks, errors=errors, routes=catalog["routes"], decision_inbox=inbox)
 
 
 def text(value):
@@ -278,6 +411,106 @@ def render_pane(detail):
             f'<p>Last actual process observation: <time>{text(when(process.get("observed_at")))}</time></p>'
             f'{error}{output}<footer>Read-only observation. Refresh reads again; reports and acceptance stay separate.</footer>'
             '</main></body></html>')
+
+
+def allowance_text(allowances):
+    if allowances is None:
+        return "Attempts unknown — no admitted task binding"
+    return "; ".join(f'{purpose}: {values["used"]} used, {values["remaining"]} remaining of {values["limit"]}'
+                     for purpose, values in allowances.items())
+
+
+def allowance_controls(task, csrf_token):
+    history = ''.join(
+        f'<li>{text(event["purpose"])}: +{text(event["additional"])} from {text(event["previous_limit"])}. '
+        f'{text(event["reason"])} <time>{text(when(event["at"]))}</time><small>Request {text(event["id"])}</small></li>'
+        for event in task.get("allowance_events", []))
+    result = ('<details class="control-history"><summary>Original allowance decisions</summary><ol>'
+              + history + '</ol></details>' if history else '')
+    admission = task.get("admission")
+    if admission:
+        result += ('<details class="control-history"><summary>Original admission</summary>'
+                   f'<p>Candidate <code>{text(admission["initial_candidate"])}</code></p>'
+                   f'<p>Original limits: {text(admission["limits"])}</p><ul>'
+                   + ''.join(f'<li><code>{text(ref)}</code></li>' for ref in admission["acceptance"]) + '</ul></details>')
+    if csrf_token is None or task["allowances"] is None:
+        return result
+    identity = task["id"]
+    for purpose, values in task["allowances"].items():
+        field = text(f'approval-{identity}-{purpose}')
+        result += (f'<details class="task-controls"><summary>Approve one additional {text(purpose)} attempt</summary>'
+                   f'<p>{text(allowance_text({purpose: values}))}. This adds exactly one attempt; it starts no work and preserves holds.</p>'
+                   f'<form method="post" action="/tasks/{text(identity)}/allowance">'
+                   f'<input type="hidden" name="csrf" value="{text(csrf_token)}">'
+                   f'<input type="hidden" name="request_id" value="{secrets.token_hex(16)}">'
+                   f'<input type="hidden" name="purpose" value="{text(purpose)}">'
+                   f'<input type="hidden" name="expected_limit" value="{values["limit"]}">'
+                   f'<label for="{field}">Operator approval reason (required, at most 512 characters)</label>'
+                   f'<input id="{field}" name="reason" maxlength="512" required>'
+                   f'<button>Approve +1 {text(purpose)} attempt</button></form></details>')
+    return result
+
+
+def render_inbox(view):
+    inbox: dict = view.get("decision_inbox") or dict(status="not_configured", items=[], resolutions=[], conditions=[])
+    status = {"not_configured": "Unknown — Jev decision store not configured",
+              "available": "Selected Jev store read; proposals remain shadow judgments",
+              "unavailable": "Decision evidence unavailable — this is not an empty or resolved inbox"}[inbox["status"]]
+    queues = []
+    tasks = {task["id"]: task for task in view["tasks"]}
+    for owner in ("operator", "standby-reasoner", "investigator", "judge"):
+        cards = []
+        for item in inbox.get("conditions", []):
+            if item["owner"] != owner:
+                continue
+            refs = ''.join(f'<li><code>{text(ref)}</code></li>' for ref in item.get("artifacts", []))
+            cards.append(f'<article class="decision"><h4>{text(item["condition"])}</h4>'
+                f'<p><a href="#task-{text(item["task"])}">Task {text(item["task"])}</a>: {text(item["detail"])}</p>'
+                f'<p>{text(allowance_text(item["attempts"]))}</p><p>Source <code>{text(item["evidence"])}</code>'
+                f' {text(item.get("assignment", ""))}</p><ul>{refs}</ul>'
+                f'<p><strong>Decision needed:</strong> {text(item["decision_needed"])}</p>'
+                '<p>Supported controls are in task detail. No semantic recipient or ruling is inferred.</p></article>')
+        for item in inbox["items"]:
+            if item["owner"] == owner:
+                cards.append(render_decision(item, tasks))
+        queues.append(f'<section class="decision-queue" aria-labelledby="queue-{owner}"><h3 id="queue-{owner}">'
+                      f'{text(owner.capitalize())} proposals ({len(cards)})</h3>'
+                      + (''.join(cards) or '<p>No known proposals in this queue. Source availability is shown above.</p>') + '</section>')
+    resolutions = ''.join(render_decision(item, tasks) for item in inbox["resolutions"])
+    return ('<section class="inbox" id="decisions"><h2>Decision inbox</h2>'
+            '<p>Proposals, available human controls and accepted outcomes stay separate. No automatic dispatch or budget grants.</p>'
+            f'<p class="source-status">{text(status)}</p><p>{text(inbox.get("error") or "")}</p>'
+            + ''.join(queues) + '<details><summary>Recorded current native answers (' + str(len(inbox["resolutions"]))
+            + ')</summary><p>These answers close matching owner questions only; they do not accept tasks or release work.</p>'
+            + resolutions + '</details><p><a href="/api/state">View inbox source facts</a></p></section>')
+
+
+def render_decision(item, tasks):
+    bound = tasks.get(item["task"])
+    task = (f'<a href="#task-{text(item["task"])}">Task {text(item["task"])}</a>' if bound else 'Task binding unknown')
+    options = ''.join(f'<li><code>{text(key)}</code>: {text(value)}</li>' for key, value in item["options"].items())
+    evaluation = ''.join(
+        f'<details><summary>Original question {text(name)} / version {text(spec["version"])}</summary><ul>'
+        + ''.join(f'<li><code>{text(key)}</code>: {text(value)}</li>' for key, value in spec["options"].items())
+        + '</ul></details>' for name, spec in item["evaluation_questions"].items())
+    answers = []
+    for attempt in item["attempts"]:
+        answer = attempt["answer"]
+        detail = ''.join(f'<dt>{text(key)}</dt><dd>{text(value)}</dd>' for key, value in (answer or {}).items())
+        answers.append(f'<li>{text(attempt["task"])}/{text(attempt["assignment"])} — {text(attempt["state"])}'
+                       f'<p>Original evidence <code>{text(attempt["evidence"])}</code></p><dl>{detail}</dl></li>')
+    return (f'<article class="decision"><h4>{text(item["question"] or "Retained evaluation")}</h4><p>{task}</p>'
+            f'<p><strong>Original shadow proposal:</strong> {text(item["proposal_owner"])} / {text(item["proposal_reason"])}</p>'
+            f'<p><strong>Current condition:</strong> {text(item["condition"])}</p><p>{text(item["availability"])}</p>'
+            f'<p>{text(allowance_text(bound["allowances"] if bound else None))}</p>'
+            f'<p>Original decision <code>{text(item["decision"])}</code>; source <code>{text(item["evidence"])}</code></p>'
+            f'<p>Evidence revision <code>{text(item["evidence_revision"])}</code>; freshness: {text(item["evidence_freshness"])}</p>'
+            f'<p>Original question ID/version: {text(item["question"])} / {text(item["question_version"])}</p>'
+            f'<p>{text(item["dispute_question"] or "Question identified by its original ID; instruction contents are private.")}</p>'
+            f'<details><summary>Original supported options</summary><ul>{options}</ul></details>'
+            f'{evaluation}'
+            f'<p><strong>Decision needed:</strong> {text(item["decision_needed"])}</p>'
+            '<details><summary>Recorded native attempts/answers</summary><ul>' + ''.join(answers) + '</ul></details></article>')
 
 
 def render(view, *, csrf_token=None):
@@ -350,10 +583,7 @@ def render(view, *, csrf_token=None):
             history.append(f'<li>{text(label)} <time>{text(event_time)}</time><small>Request {text(event["id"])}</small></li>')
         trace = ('<details class="control-history"><summary>Recent control requests</summary><ol>'
                  + "".join(history) + '</ol></details>' if history else "")
-        limits = "Allowances unknown (task not admitted)"
-        if task["allowances"] is not None:
-            limits = "; ".join(f'{name.capitalize()}: {values["remaining"]} remaining of {values["limit"]}'
-                               for name, values in task["allowances"].items())
+        limits = allowance_text(task["allowances"])
         inputs = task["inputs"]
         revisions = (f'<details class="revisions"><summary>Selected inputs</summary><dl><dt>Candidate</dt>'
                      f'<dd><code>{text(inputs["candidate"])}</code></dd><dt>Requirements</dt>'
@@ -361,7 +591,8 @@ def render(view, *, csrf_token=None):
         tasks.append(f'<section class="task" aria-labelledby="task-{text(task["id"])}">'
                      f'<div class="task-heading"><div><h2 id="task-{text(task["id"])}">{text(task["id"])}</h2>'
                      f'<p class="goal">{text(task["goal"] or "Scope not admitted")}</p></div>{revisions}</div>'
-                     f'{hold}{controls}{trace}{table}<p class="allowances">{text(limits)}</p></section>')
+                     f'{hold}{controls}{trace}{table}<p class="allowances">{text(limits)}</p>'
+                     f'{allowance_controls(task, csrf_token)}</section>')
     errors = "".join(f'<li><strong>{text(item["task"])}</strong>: {text(item["error"])}</li>' for item in view["errors"])
     unavailable = f'<aside class="errors"><h2>Records needing attention</h2><ul>{errors}</ul></aside>' if errors else ""
     routes = "".join(f'<tr><th scope="row">{text(route["id"])}</th><td>{text(route["harness"])}</td>'
@@ -375,7 +606,8 @@ def render(view, *, csrf_token=None):
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<title>Software Factory</title><link rel="stylesheet" href="/dashboard.css"></head><body>'
             f'<header><div class="brand">Software Factory</div><div class="observation">{text(mode)}<br><time>{text(timestamp)}</time></div></header>'
-            '<main><nav aria-label="Dashboard"><a href="#team">Team</a> <a href="#routes">Subscription routes</a></nav>'
+            '<main><nav aria-label="Dashboard"><a href="#decisions">Decision inbox</a> <a href="#team">Team</a> <a href="#routes">Subscription routes</a></nav>'
+            f'{render_inbox(view)}'
             '<div class="toolbar"><div><h1 id="team">Team</h1><p>Process observations and specialist reports stay separate. Header time is record collection time.</p></div>'
             '<form method="get"><a class="button secondary" href="/">Refresh records</a><button name="live" value="1">Check live processes</button></form></div>'
             f'{unavailable}{content}<section class="routes" id="routes"><h2>Subscription routes</h2><p>Configured readiness; capacity has not been refreshed here.</p>'
@@ -404,7 +636,7 @@ def access_file(access_key, url):
         yield path
 
 
-def make_server(state_dir, port=8090, *, access_key):
+def make_server(state_dir, port=8090, *, access_key, decision_store=None):
     if not isinstance(access_key, str) or not access_key:
         raise ValueError("Supply a nonempty private per-process access capability")
     csrf_token = secrets.token_urlsafe(32)
@@ -460,7 +692,7 @@ def make_server(state_dir, port=8090, *, access_key):
                     if detail["error"]:
                         status = 503
                 else:
-                    view = snapshot(state_dir, live=bool(target.query))
+                    view = snapshot(state_dir, decision_store=decision_store, live=bool(target.query))
                     if target.path == "/api/state":
                         body, content_type = json.dumps(view, allow_nan=False), "application/json"
                     else:
@@ -468,7 +700,7 @@ def make_server(state_dir, port=8090, *, access_key):
             except (factory.FactoryError, OSError, ValueError) as exc:
                 status = 503
                 if target.path == "/api/state":
-                    body, content_type = json.dumps(dict(schema_version=3, error=str(exc))), "application/json"
+                    body, content_type = json.dumps(dict(schema_version=4, error=str(exc))), "application/json"
                 else:
                     body = f'<h1>Factory records unavailable</h1><p>{text(exc)}</p><p>Restore the source, then refresh.</p>'
                 print("dashboard: Restore the source, then refresh. " + str(exc), file=sys.stderr)
@@ -486,12 +718,13 @@ def make_server(state_dir, port=8090, *, access_key):
             if not self.check_access():
                 return
             target = urlsplit(self.path)
-            match = re.fullmatch(r"/tasks/([a-z0-9][a-z0-9-]{0,63})/hold", target.path)
-            if target.netloc or target.query or target.fragment or match is None:
-                self.send_error(404, "Use a task's pause/resume form")
+            match = re.fullmatch(r"/tasks/(" + SLUG + r")/(hold|allowance)", self.path)
+            if target.scheme or target.netloc or target.query or target.fragment or match is None:
+                self.send_error(404, "Use a task's control form")
                 return
             origin = self.headers.get("Origin")
-            if origin is not None and origin != "http://" + self.headers.get("Host", ""):
+            if ((origin is not None or match[2] == "allowance")
+                    and origin != "http://" + self.headers.get("Host", "")):
                 self.send_error(403, "Submit controls from this dashboard's own page")
                 return
             try:
@@ -500,30 +733,46 @@ def make_server(state_dir, port=8090, *, access_key):
                         or not 0 < int(length) <= 8192
                         or self.headers.get("Content-Type", "").split(";", 1)[0] != "application/x-www-form-urlencoded"):
                     raise ValueError("Use a bounded form body")
-                fields = parse_qs(self.rfile.read(int(length)).decode("utf-8"), keep_blank_values=True,
-                                  strict_parsing=True, errors="strict")
-                if (set(fields) != {"csrf", "request_id", "expected_revision", "action", "reason"}
+                body = self.rfile.read(int(length))
+                if len(body) != int(length):
+                    raise ValueError("Incomplete form body")
+                fields = parse_qs(body.decode("utf-8"), keep_blank_values=True,
+                                  strict_parsing=True, errors="strict", max_num_fields=5)
+                expected = ({"csrf", "request_id", "expected_revision", "action", "reason"} if match[2] == "hold"
+                            else {"csrf", "request_id", "expected_limit", "purpose", "reason"})
+                if (set(fields) != expected
                         or any(len(values) != 1 for values in fields.values())):
                     raise ValueError("Use the complete task form without duplicate fields")
                 values = {key: items[0] for key, items in fields.items()}
                 if not secrets.compare_digest(values["csrf"].encode(), csrf_token.encode()):
                     self.send_error(403, "Refresh the dashboard before submitting controls")
                     return
-                if (values["action"] not in {"pause", "resume"}
-                        or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", values["request_id"])
-                        or not re.fullmatch(r"[0-9]+", values["expected_revision"])
-                        or len(values["reason"]) > 512
-                        or (values["action"] == "pause" and not values["reason"].strip())
-                        or (values["action"] == "resume" and values["reason"] != "")):
-                    raise ValueError("Supply a valid action, request ID, revision and pause reason")
-                revision = int(values["expected_revision"])
+                if not re.fullmatch(SLUG, values["request_id"]) or len(values["reason"]) > 512:
+                    raise ValueError("Supply a valid request ID and bounded reason")
+                if match[2] == "hold":
+                    if (values["action"] not in {"pause", "resume"}
+                            or not re.fullmatch(r"[0-9]+", values["expected_revision"])
+                            or (values["action"] == "pause" and not values["reason"].strip())
+                            or (values["action"] == "resume" and values["reason"] != "")):
+                        raise ValueError("Supply an action, revision and pause reason")
+                    revision = int(values["expected_revision"])
+                elif (values["purpose"] not in {"correction", "investigation"}
+                      or not re.fullmatch(r"[0-9]+", values["expected_limit"])
+                      or not values["reason"].strip()):
+                    raise ValueError("Supply a purpose, observed limit and approval reason")
+                if match[2] == "allowance":
+                    expected_limit = int(values["expected_limit"])
             except (ValueError, UnicodeDecodeError):
-                self.send_error(400, "Invalid control request; refresh the form and supply a pause reason of at most 512 characters")
+                self.send_error(400, "Invalid control request; refresh the form and supply a reason of at most 512 characters")
                 return
             try:
                 with factory.task_lock(state_dir, match[1]) as path:
-                    factory.hold_task(path, values["reason"] if values["action"] == "pause" else None,
-                                      request_id=values["request_id"], expected_revision=revision)
+                    if match[2] == "hold":
+                        factory.hold_task(path, values["reason"] if values["action"] == "pause" else None,
+                                          request_id=values["request_id"], expected_revision=revision)
+                    else:
+                        factory.extend_allowance(path, purpose=values["purpose"], additional=1,
+                            expected_limit=expected_limit, request_id=values["request_id"], reason=values["reason"])
             except factory.ControlConflict as exc:
                 self.send_error(409, str(exc))
                 return
@@ -555,11 +804,13 @@ def port_number(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=factory.ROOT / ".factory-state")
+    parser.add_argument("--decision-store", type=Path, help="Existing private Jev store; omitted means unknown/not configured")
     parser.add_argument("--port", type=port_number, default=8090)
     args = parser.parse_args(argv)
     try:
         access_key = secrets.token_urlsafe(32)
-        with make_server(args.state_dir.resolve(), args.port, access_key=access_key) as server:
+        with make_server(args.state_dir.resolve(), args.port, access_key=access_key,
+                         decision_store=args.decision_store.absolute() if args.decision_store is not None else None) as server:
             url = f"http://127.0.0.1:{server.server_port}"
             with access_file(access_key, url) as path:
                 print(json.dumps(dict(schema_version=1, url=url, username="operator", access_file=str(path),

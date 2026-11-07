@@ -195,10 +195,16 @@ def collected_attempts(directory):
     """Generate answer views from task/receipt owners, without contacting Rex."""
     import codex_worker
     attempts = {}
-    if not directory.exists():
-        return attempts
     try:
-        paths = sorted(path for path in directory.iterdir() if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}\.json", path.name))
+        try:
+            paths = sorted(path for path in directory.iterdir() if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}\.json", path.name))
+        except FileNotFoundError:
+            # Only an absent directory has the owner's first-use meaning.
+            try:
+                directory.lstat()  # A dangling link is damaged, not first use.
+            except FileNotFoundError:
+                return attempts
+            raise factory.FactoryError("Restore the original task directory before reading bounded answers")
         for path in paths:
             with factory.task_lock(directory, path.stem):
                 record = factory.load_task(path)
@@ -207,10 +213,15 @@ def collected_attempts(directory):
                 if (len(command) < 4 or command[1:3] != ["-E", "-s"]
                         or Path(command[3]).name != "codex_worker.py" or "--decision" not in command):
                     continue
-                try:
-                    args = codex_worker.parser().parse_args(command[4:])
-                except SystemExit:
-                    raise factory.FactoryError("Restore the original bounded reasoner command before reading its answer") from None
+                parser = codex_worker.parser()
+                parser.allow_abbrev = False
+                def invalid(message=None):
+                    raise factory.FactoryError("Restore the original bounded reasoner command before reading its answer")
+                parser.error = invalid
+                parser.exit = lambda status=0, message=None: invalid(message)
+                if "-h" in command[4:] or "--help" in command[4:]:
+                    invalid()
+                args = parser.parse_args(command[4:])
                 binding(args.decision, args.question, assignment["request"]["role"], write=args.write)
                 item = dict(task=record["task"], assignment=identity, evidence=str(path), state="awaiting_collection", answer=None)
                 if command[:4] != [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]:

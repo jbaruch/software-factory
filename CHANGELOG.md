@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.0 — 2026-11-07 (unpublished)
+
+### Source-derived Decision Inbox and human allowance control
+
+Add four owner queues to the authenticated loopback view, using task/Jev owners
+and optional `--decision-store`. Keep original shadow proposals, current native
+answers, current task reports, holds and exhausted allowances distinct. Show
+original references/options/revisions without exposing classifier state or native
+commands. Unconfigured, damaged, stale, unbound, conflicting and unavailable
+evidence remain explicit; judging requires the original exact current completed
+investigation. No automatic dispatch, semantic finding routing or acceptance.
+
+An authenticated same-origin valid-CSRF operator form can approve exactly one
+additional correction/investigation attempt through `factory.extend_allowance`,
+with bounded reason, observed limit and replay-safe request ID. Preserve original
+admission, usage, reports, holds and decision history. Static renderers remain
+read-only; transient dashboard facts advance to schema 4, task schema remains 7.
+Fixed offline source/render/handler/concurrency/replay cases use isolated records
+and fake transports. Host/browser checks, independent QA/security, policy review
+and CI remain separate gates. No real held task was granted an attempt. No
+publisher is configured or authorized.
+
 ## 0.11.0 — 2026-11-07 (unpublished)
 
 ### Retained Antigravity result decoding
