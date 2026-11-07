@@ -198,7 +198,7 @@ def private_signer(key, python):
 
 
 @contextmanager
-def isolated_git(args, identity, *, signing=False):
+def isolated_git(args, identity, *, signing=False, read_only=False, config_paths=()):
     """Run Git and all its callbacks with local writes and no network access."""
     if factory.repository_identity(".") != identity or factory.git_dir(".") != args.worktree_git_dir:
         raise factory.FactoryError("Writer checkout changed; restore its original repository before local Git execution")
@@ -210,9 +210,20 @@ def isolated_git(args, identity, *, signing=False):
                    if key in {"PATH", "HOME", "LANG"}
                    or key.startswith("LC_") or key.startswith("GIT_CONFIG")
                    or key in factory.GIT_IDENTITY_VARIABLES}
-    environment.update(PYTHONDONTWRITEBYTECODE="1", GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
+    if signing and read_only:
+        raise factory.FactoryError("A callback scope cannot expose the signing agent")
+    environment.update(PYTHONDONTWRITEBYTECODE="1", GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0",
+                       GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1")
+    if read_only:
+        environment = {key: value for key, value in environment.items() if not key.startswith("GIT_CONFIG")}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     files = {":root": "deny", ":minimal": "read", str(root): "write",
-             str(factory.git_common_dir(".")): "write", str(args.worktree_git_dir): "write"}
+             str(factory.git_common_dir(".")): "deny" if read_only else "write",
+             str(args.worktree_git_dir): "deny" if read_only else "write"}
+    if read_only:
+        files[str(factory.git_common_dir(".") / "objects")] = "read"
+    if (root / ".git").is_file() or (root / ".git").is_symlink():
+        files[str(root / ".git")] = "read"
     files.setdefault(str(Path(sys.base_prefix).resolve()), "read")
     native = args.codex.resolve()
     files.setdefault(str(native), "read")
@@ -220,12 +231,15 @@ def isolated_git(args, identity, *, signing=False):
     if native.parent.name == "bin" and package.is_file():
         try:
             if json.loads(package.read_text()).get("name") == "@openai/codex":
+                if any((package.parent / "vendor").resolve().is_relative_to(path)
+                       for path in (root, factory.git_common_dir("."), args.worktree_git_dir)):
+                    raise factory.FactoryError("Keep the selected Codex runtime outside writer-writable paths")
                 files.setdefault(str(package.parent / "vendor"), "read")
         except (OSError, ValueError, AttributeError):
             raise factory.FactoryError("Cannot inspect selected Codex package; restore its installation before local Git execution") from None
     for directory in {factory.git_common_dir("."), args.worktree_git_dir}:
         for name in ("config", "config.worktree", "commondir", "hooks", "info", factory.REPOSITORY_MARKER):
-            files[str(directory / name)] = "read"
+            files[str(directory / name)] = "deny" if read_only and name != "hooks" else "read"
     files[str(root / ".codex")] = "read"
     for name in ("bin", "Cellar", "opt", "lib"):
         runtime = Path("/opt/homebrew") / name
@@ -233,7 +247,11 @@ def isolated_git(args, identity, *, signing=False):
             files[str(runtime)] = "read"
     for path in [home / ".gitconfig", *(home / ".config/git" / name for name in ("config", "ignore", "attributes")),
                  *(Path(inherited[key]) for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM") if key in inherited)]:
-        files[str(path.resolve())] = "read"
+        files[str(path.resolve())] = "deny" if read_only else "read"
+    if read_only:
+        for path in config_paths:
+            files[str(path)] = "deny"
+        files[os.devnull] = "read"
     # The configured local hook tool may use its already-installed offline cache.
     precommit = shutil.which("pre-commit")
     if precommit:
@@ -267,6 +285,38 @@ def isolated_git(args, identity, *, signing=False):
                 runtime, json.dumps(sorted(environment)), digest]
     with tempfile.TemporaryDirectory(prefix="factory-git-", dir=args.worktree_git_dir) as temporary, ExitStack() as stack:
         environment["TMPDIR"] = temporary
+        files[temporary] = "write"
+        if read_only:
+            private_git = Path(temporary) / "git"
+            (private_git / "objects/info").mkdir(parents=True)
+            (private_git / "objects/info/alternates").write_text(str(factory.git_common_dir(".") / "objects") + "\n")
+            hooks = factory.git_run(".", "rev-parse", "--path-format=absolute", "--git-path", "hooks", environment=inherited)
+            if hooks.returncode:
+                raise factory.FactoryError("Cannot prepare the private pre-commit view; restore hook configuration")
+            config = ("[core]\nrepositoryformatversion = " + ("1" if len(args.candidate) == 64 else "0")
+                + "\nbare = false\nworktree = " + json.dumps(str(root), ensure_ascii=False)
+                + "\nhooksPath = " + json.dumps(hooks.stdout.removesuffix("\n"), ensure_ascii=False)
+                + "\nfsmonitor = false\nsplitIndex = false\n")
+            if len(args.candidate) == 64:
+                config += "[extensions]\nobjectFormat = sha256\n"
+            (private_git / "config").write_text(config)
+            (private_git / "HEAD").write_text(args.candidate + "\n")
+            head = (args.worktree_git_dir / "HEAD").read_text().removesuffix("\n")
+            if head.startswith("ref: refs/heads/"):
+                reference = private_git / head[5:]
+                if not reference.resolve().is_relative_to(private_git):
+                    raise factory.FactoryError("Invalid assignment branch; inspect HEAD before another attempt")
+                reference.parent.mkdir(parents=True, exist_ok=True)
+                reference.write_text(args.candidate + "\n")
+                (private_git / "HEAD").write_text(head + "\n")
+            index = args.worktree_git_dir / "index"
+            private_index = private_git / "index"
+            if index.exists():
+                if index.is_symlink() or not index.is_file():
+                    raise factory.FactoryError("Restore a regular assignment index before invoking pre-commit")
+                shutil.copyfile(index, private_index)
+            environment["GIT_INDEX_FILE"] = str(private_index)
+            environment.update(GIT_DIR=str(private_git), GIT_WORK_TREE=str(root))
         if signing and enabled.stdout.strip() == "true" and method.stdout.strip() == "ssh":
             public_key = Path(selected.stdout.strip()).expanduser()
             if public_key.suffix != ".pub" or not public_key.is_file():
@@ -290,7 +340,66 @@ def isolated_git(args, identity, *, signing=False):
             raise factory.FactoryError(str(exc) + "; inspect native Git sandbox support and offline hook/signing access before another attempt; no host fallback was used") from None
 
 
-def commit_changes(args, receipt):
+def commit_policy(args, environment):
+    """Keep executable callbacks out of metadata-writing and signing phases."""
+    observed = factory.git_run(".", "config", "--null", "--list", "--show-origin", "--includes", environment=environment)
+    fields = observed.stdout.split("\0")
+    if observed.returncode or fields[-1] or len(fields) % 2 != 1:
+        raise factory.FactoryError("Cannot inspect configured hooks/signing; restore Git configuration before another attempt")
+    root, common = Path(factory.git_worktree(".")), factory.git_common_dir(".")
+    allowed = {common / "config", common / "config.worktree", args.worktree_git_dir / "config.worktree"}
+    values, drivers, filter_flags, config_paths = {}, set(), [], set()
+    for origin, row in zip(fields[0:-1:2], fields[1:-1:2]):
+        key, _, value = row.partition("\n")
+        values[key.lower()] = value
+        if origin.startswith("file:"):
+            path = (root / Path(origin[5:])).resolve()
+            config_paths.add(path)
+            if path.is_relative_to(root) and path not in allowed:
+                raise factory.FactoryError("Unsupported configured hooks/signing: keep Git configuration outside writer-controlled source")
+            if key.lower() == "include.path" or key.lower().startswith("includeif.") and key.lower().endswith(".path"):
+                target = (path.parent / Path(value).expanduser()).resolve()
+                config_paths.add(target)
+                if "%" in value or target.is_relative_to(root) and target not in allowed:
+                    raise factory.FactoryError("Unsupported configured hooks/signing: includes cannot load writer-controlled configuration")
+        if (key.lower().startswith("filter.") and key.lower().endswith((".clean", ".smudge", ".process")) and value.strip()):
+            drivers.add(key.rsplit(".", 1)[0][7:])
+            filter_flags.extend(["-c", key + "="])
+        if (key.lower() == "core.alternaterefscommand" and value.strip()
+                or key.lower() == "extensions.partialclone" and value.strip()
+                or key.lower().startswith("remote.") and key.lower().endswith(".promisor") and value.lower() in {"true", "yes", "on", "1"}):
+            raise factory.FactoryError("Unsupported configured hooks/signing: use complete local objects without executable alternate-ref helpers")
+    hooks = factory.git_run(".", "rev-parse", "--path-format=absolute", "--git-path", "hooks", environment=environment)
+    if hooks.returncode:
+        raise factory.FactoryError("Cannot inspect configured hooks/signing; restore hook configuration before another attempt")
+    directory = Path(hooks.stdout.removesuffix("\n"))
+    active = sorted(path.name for path in directory.iterdir() if path.is_file() and os.access(path, os.X_OK)
+                    and not path.name.endswith(".sample")) if directory.is_dir() else []
+    if any(name != "pre-commit" for name in active):
+        raise factory.FactoryError("Unsupported configured hooks/signing: only the separately confined pre-commit hook is supported")
+    enabled = factory.git_run(".", "config", "--bool", "--get", "commit.gpgsign", environment=environment)
+    if enabled.returncode not in (0, 1):
+        raise factory.FactoryError("Cannot inspect configured hooks/signing; repair commit.gpgsign before another attempt")
+    flags = ["-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
+             "-c", "core.splitIndex=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *filter_flags]
+    if enabled.stdout.strip() == "true":
+        keygen = shutil.which("ssh-keygen", path=os.defpath)
+        program = values.get("gpg.ssh.program", "ssh-keygen")
+        selected = shutil.which(program, path=os.defpath)
+        if (values.get("gpg.format") != "ssh" or not keygen or not selected
+                or Path(selected).resolve() != Path(keygen).resolve()):
+            raise factory.FactoryError("Unsupported configured hooks/signing: signed factory commits require the operating system's SSH signer")
+        flags.extend(["-c", "gpg.format=ssh", "-c", "commit.gpgsign=true",
+                      "-c", "gpg.ssh.program=" + keygen])
+        if values.get("user.signingkey"):
+            flags.extend(["-c", "user.signingkey=" + values["user.signingkey"]])
+    else:
+        flags.extend(["-c", "commit.gpgsign=false"])
+    return dict(fingerprint=hashlib.sha256(observed.stdout.encode()).hexdigest(),
+                precommit="pre-commit" in active, flags=flags, drivers=drivers, config_paths=config_paths)
+
+
+def commit_changes(args, receipt, *, git_scope=isolated_git):
     """Commit an opted-in writer's finished work in the factory Git sandbox."""
     if factory.git_commit(".", "HEAD") != args.candidate:
         raise factory.FactoryError("Writer changed Git HEAD before the factory commit; inspect the original candidate and retained work without retrying")
@@ -299,10 +408,22 @@ def commit_changes(args, receipt):
     root = Path(factory.git_worktree("."))
     environment = factory.command_environment()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    policy = commit_policy(args, environment)
+    def git(*command, **options):
+        return factory.git_run(".", *policy["flags"], *command, **options)
+    def check_filters(names):
+        for start in range(0, len(names), 100):
+            attributes = git("check-attr", "-z", "filter", "--", *names[start:start + 100])
+            fields = attributes.stdout.split("\0")
+            if attributes.returncode or fields[-1] or len(fields) % 3 != 1:
+                raise factory.FactoryError("Cannot inspect configured hooks/signing; repair Git attribute access before another attempt")
+            if any(value in policy["drivers"] for value in fields[2:-1:3]):
+                raise factory.FactoryError("Unsupported configured hooks/signing: active Git filters require an inspected explicit local commit")
     # Even status can execute configured clean filters; retain intent first.
-    paths = factory.git_run(".", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    paths = git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
     if paths.returncode:
         raise factory.FactoryError("Cannot inspect writer source paths; restore Git access before staging changes")
+    check_filters([name for name in paths.stdout.split("\0") if name])
     for name in paths.stdout.split("\0"):
         if not name:
             continue
@@ -321,13 +442,15 @@ def commit_changes(args, receipt):
                 independent = Path(temporary) / "source"
                 shutil.copy2(source, independent, follow_symlinks=False)
                 os.replace(independent, source)
-    status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
+    status = git("status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
     if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
         raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
-    staged = factory.git_run(".", "add", "--all", "--", ".", environment=environment)
+    staged = git("add", "--all", "--", ".", environment=environment)
     if staged.returncode:
         raise factory.FactoryError("Cannot stage writer changes; inspect the retained commit intent, index and worktree before correcting it")
-    entries = factory.git_run(".", "ls-files", "--stage", "-z")
+    if git("update-index", "--no-split-index", environment=environment).returncode:
+        raise factory.FactoryError("Cannot prepare the assignment index; inspect its retained staged work before another attempt")
+    entries = git("ls-files", "--stage", "-z")
     if entries.returncode:
         raise factory.FactoryError("Cannot inspect staged writer paths; restore Git access and inspect the retained attempt")
     try:
@@ -344,30 +467,46 @@ def commit_changes(args, receipt):
                 raise factory.FactoryError("Writer staged linked or non-regular source; inspect the retained changes and use independent regular files")
     except ValueError:
         raise factory.FactoryError("Cannot decode the writer index; inspect Git compatibility and the retained changes before committing") from None
-    tree = factory.git_run(".", "write-tree", environment=environment)
+    tree = git("write-tree", environment=environment)
     if tree.returncode:
         raise factory.FactoryError("Cannot record the staged writer tree; inspect the retained index and commit intent")
     receipt["commit"].update(state="committing", staged_tree=tree.stdout.strip())
     factory.save(args.receipt, receipt)
-    unchanged = factory.git_run(".", "diff", "--cached", "--quiet", "--exit-code", args.candidate)
+    unchanged = git("diff", "--cached", "--quiet", "--exit-code", "--no-ext-diff", "--no-textconv", args.candidate)
     if unchanged.returncode == 0:
         receipt["commit"].update(state="unchanged", candidate=args.candidate)
         factory.save(args.receipt, receipt)
         return
     if unchanged.returncode != 1:
         raise factory.FactoryError("Cannot compare staged writer changes; inspect the retained index before another action")
+    hooked = None
+    if policy["precommit"]:
+        with git_scope(args, receipt["repository_identity"], read_only=True, config_paths=policy["config_paths"]):
+            hooked = factory.git_run(".", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
+                "-c", "maintenance.auto=false", "-c", "core.splitIndex=false",
+                "hook", "run", "--ignore-missing", "pre-commit", environment=environment)
+            checked = factory.git_run(".", "-c", "core.fsmonitor=false", "diff-index", "--cached", "--quiet",
+                "--no-ext-diff", "--no-textconv", receipt["commit"]["staged_tree"])
+            if checked.returncode:
+                raise factory.FactoryError("Pre-commit changed its private index; inspect staged inputs before an explicit local commit")
+        if hooked.returncode:
+            raise factory.FactoryError("Writer commit failed; inspect the retained commit intent, Git HEAD and configured hooks/signing. No commit was retried")
+    if commit_policy(args, environment) != policy:
+        raise factory.FactoryError("Git configuration changed during pre-commit; inspect the retained work before another attempt")
     try:
-        committed = factory.git_run(".", "commit", "--message", args.commit_message, environment=environment)
+        with git_scope(args, receipt["repository_identity"], signing=True):
+            committed = git("commit", "--message", args.commit_message, environment=environment)
     except factory.FactoryError:
         raise factory.FactoryError("Writer commit outcome is uncertain; inspect the retained commit intent, Git HEAD and hooks before another action. No commit was retried") from None
     if committed.returncode:
         raise factory.FactoryError("Writer commit failed; inspect the retained commit intent, Git HEAD and configured hooks/signing before authorizing a correction. No commit was retried")
     candidate = factory.git_commit(".", "HEAD")
-    parent = factory.git_run(".", "show", "-s", "--format=%P", candidate)
+    parent = git("show", "-s", "--format=%P", candidate)
     if parent.returncode or parent.stdout.strip() != args.candidate:
         raise factory.FactoryError("Writer commit parent differs; inspect the original worktree and commit intent before continuing")
     receipt["commit"].update(state="created", candidate=candidate)
     factory.save(args.receipt, receipt)
+    return hooked
 
 
 def check_commit_receipt(receipt, args, repository):
@@ -420,6 +559,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     digest = hashlib.sha256(instructions.encode()).hexdigest()
     if digest != args.brief_sha256:
         raise factory.FactoryError("Assignment brief changed; inspect the original task before launching")
+    if args.write:
+        factory.check_role_write(args.role)
+    if args.role is not None and instructions.split("\n", 1)[0] != "# Assignment: " + args.role:
+        raise factory.FactoryError("Worker role differs from the bound assignment brief; inspect the original request")
     try:
         identity = factory.decode_json(args.repo_identity)
     except (ValueError, TypeError):
@@ -509,9 +652,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                      staged_tree=None, candidate=None)
             factory.save(args.receipt, receipt)
         git_args = argparse.Namespace(**{**vars(args), "codex": binary})
-        with git_scope(git_args, identity, signing=committing) if args.commit_message is not None else nullcontext():
+        with git_scope(git_args, identity) if args.commit_message is not None else nullcontext():
             if committing:
-                commit_changes(args, receipt)
+                commit_changes(git_args, receipt, git_scope=git_scope)
             candidate = factory.git_commit(".", "HEAD")
             factory.check_checkout(".", ".", candidate, expected_identity=identity,
                                    expected_git_dir=args.worktree_git_dir)
@@ -539,6 +682,7 @@ def parser():
         command.add_argument("--" + field, type=Path, required=True)
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
+    command.add_argument("--role", help="Owner-selected role; required for writer execution")
     command.add_argument("--write", action="store_true")
     command.add_argument("--commit-message", help="With --write, let the factory stage/commit a completed result using this message")
     command.add_argument("--seconds", type=int, default=600, help="Initial execution allowance; no automatic retry")

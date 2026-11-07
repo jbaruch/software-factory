@@ -18,6 +18,10 @@ Keep all launch guards callback-free by comparing the index and raw candidate
 bytes, and read only the selected Codex executable/required vendor files.
 Respect explicit catalog writer permissions before new launch effects and use
 the macOS socket flag only on macOS; historical reconnects remain unchanged.
+Separate pre-commit into a private Git view with sanitized configuration, a
+disposable index and no signing socket. Deny original configuration and shared
+metadata; enforce writer roles inside the worker before execution. Stage/commit without callbacks; unsupported hook/filter/signer
+configurations fail visibly without bypassing checks or signatures.
 
 ### Safe Codex capacity snapshot
 
