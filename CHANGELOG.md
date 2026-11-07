@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.0 — 2026-11-07 (unpublished)
+
+### Retained Antigravity result decoding
+
+Add a pure decoder for original 1.5.3 init/step_update/result JSON lines with
+frozen model/cwd/schema, consistent conversation identity, ordered single-turn
+lifecycle and strict terminal report/response agreement. Preserve nullable native
+usage/duration as observations. Fixed offline fixtures cover integrity failures;
+no execution, settings, stored formats or usage CLI change. Execution permission,
+live lifecycle/full-factory qualification, independent verification and current-head
+policy/CI remain separate gates. No publisher is configured or authorized.
+
 ## 0.10.0 — 2026-11-07 (unpublished)
 
 ### Team view and owned Rex pane reads

@@ -134,6 +134,37 @@ The native [headless command guide](https://antigravity.google/docs/cli/headless
 describes standalone slash-command reports; the
 [usage guide](https://antigravity.google/docs/cli/commands/usage/) describes quota groups.
 
+## Antigravity retained execution decoder
+
+`native_antigravity.parse_execution(events, expected_model=..., expected_cwd=...,
+expected_schema=...)` consumes original JSON lines without I/O. Supply an explicit
+model, absolute cwd and frozen schema for exactly `{outcome, artifacts}`: required
+string outcome enum (a nonempty subset of factory outcomes), string-array artifacts
+and `additionalProperties: false`. It supports the retained CLI 1.5.3 shapes only.
+
+Require one first `init`, one last `result`, matching conversation IDs, init
+model/cwd/schema, terminal schema, `SUCCESS`, one DONE user-input step, ordered
+contiguous steps ending in DONE finish, and a supported `structured_output`.
+When present, `response` must strictly decode to the same report. Duplicate JSON
+keys, invalid/nonfinite numbers, failed/malformed/reordered/duplicate events and
+trailing data refuse with inspection guidance. Warnings are never stripped.
+Text, tool parameters and permission labels supply no report or authority.
+
+The derived result contains `report`, `conversation_id`, `init_model`, `cwd`,
+`turns`, terminal `usage` and `duration_seconds`. Missing/null usage or duration
+stays null; absent counters stay unknown. Token counters must be nonnegative
+integers or null; duration must be finite and nonnegative or null. Step usage is
+validated but never summed into terminal usage. Init model is an echo, not actual
+inference identity. No dollars, quota, entitlement, confinement, acceptance or
+launch/process success is inferred. The caller must retain immutable original
+streams/provenance and independently require the original process exit.
+
+This additive parser changes no CLI, usage snapshot, task or receipt format and
+migrates no stored data. Rollback is removal of the decoder/version change by the
+integration owner; no irreversible data effects occur. Keep historical failures
+unchanged. The canonical [inventory](implementation.md) records qualification
+limits; execution remains held pending the separate security/lifecycle work.
+
 ## Grok authenticated metadata
 
 The ACP metadata command is currently held before any native child starts. The
