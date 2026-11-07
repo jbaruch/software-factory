@@ -12,6 +12,9 @@ import time
 import urllib.error
 import urllib.request
 
+if __name__ == "__main__":
+    sys.modules.setdefault("jev", sys.modules[__name__])
+
 import factory
 from factory import decode_json
 
@@ -150,6 +153,35 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def validate_request(request):
+    """Validate stored and frozen requests through one contract."""
+    if (not isinstance(request, dict) or set(request) != {"endpoint", "evidence_revision", "question_versions", "model_version", "payload"}
+            or request["endpoint"] != API + "systemone"
+            or not isinstance(request["evidence_revision"], str) or not request["evidence_revision"].strip()
+            or not isinstance(request["question_versions"], dict)
+            or not isinstance(request["payload"], dict)
+            or set(request["payload"]) != {"model", "state", "questions"}
+            or not isinstance(request["payload"]["model"], str)
+            or not request["payload"]["model"].strip()
+            or not isinstance(request["model_version"], str)
+            or not re.fullmatch(r"jev-[0-9]+\.[0-9]+\.[0-9]+", request["model_version"])
+            or not isinstance(request["payload"]["state"], (str, dict, list))
+            or not isinstance(request["payload"]["questions"], dict)
+            or not request["payload"]["questions"]
+            or set(request["question_versions"]) != set(request["payload"]["questions"])
+            or any(type(version) is not int or version < 1 for version in request["question_versions"].values())):
+        raise JevError("Invalid retained request")
+    for question in request["payload"]["questions"].values():
+        if (not isinstance(question, dict) or question.get("type") != "choice"
+                or not isinstance(question.get("instructions"), (str, dict, list))
+                or not question["instructions"] or not isinstance(question.get("criteria"), dict)
+                or not 2 <= len(question["criteria"]) <= 255
+                or not question["criteria"].get("uncertain")
+                or any(not key.strip() or not isinstance(value, str) or not value.strip()
+                       for key, value in question["criteria"].items())):
+            raise JevError("Invalid retained question")
+
+
 def read_decision(path) -> dict:
     """Read the owner's version-1 decision record; unknown versions hold retries."""
     try:
@@ -166,31 +198,7 @@ def read_decision(path) -> dict:
                 or type(record.get("created_at")) not in (int, float) or not 0 <= record["created_at"] <= sys.float_info.max):
             raise ValueError("Unsupported decision record")
         request = record["request"]
-        if (set(request) != {"endpoint", "evidence_revision", "question_versions", "model_version", "payload"}
-                or request["endpoint"] != API + "systemone"
-                or not isinstance(request["evidence_revision"], str) or not request["evidence_revision"].strip()
-                or not isinstance(request["question_versions"], dict)
-                or not isinstance(request["payload"], dict)
-                or set(request["payload"]) != {"model", "state", "questions"}
-                or not isinstance(request["payload"]["model"], str)
-                or not request["payload"]["model"].strip()
-                or not isinstance(request["model_version"], str)
-                or not re.fullmatch(r"jev-[0-9]+\.[0-9]+\.[0-9]+", request["model_version"])
-                or not isinstance(request["payload"]["state"], (str, dict, list))
-                or not isinstance(request["payload"]["questions"], dict)
-                or not request["payload"]["questions"]
-                or set(request["question_versions"]) != set(request["payload"]["questions"])
-                or any(type(version) is not int or version < 1 for version in request["question_versions"].values())):
-            raise ValueError("Invalid retained request")
-        for question in request["payload"]["questions"].values():
-            if (not isinstance(question, dict) or question.get("type") != "choice"
-                    or not isinstance(question.get("instructions"), (str, dict, list))
-                    or not question["instructions"] or not isinstance(question.get("criteria"), dict)
-                    or not 2 <= len(question["criteria"]) <= 255
-                    or not question["criteria"].get("uncertain")
-                    or any(not key.strip() or not isinstance(value, str) or not value.strip()
-                           for key, value in question["criteria"].items())):
-                raise ValueError("Invalid retained question")
+        validate_request(request)
         if record["state"] == "pending":
             if any(record.get(key) is not None for key in ("finished_at", "request_seconds", "response", "error")):
                 raise ValueError("Pending record has a result")
@@ -261,10 +269,14 @@ def evaluate_stored(directory, *, state, specs, model, evidence_revision, candid
         raise JevError(str(exc)) from None
 
 
-def pending_decisions(directory) -> dict:
+def pending_decisions(directory, *, task_state_dir=None) -> dict:
     """Derive the shadow inbox from original records; this never dispatches work."""
     try:
         paths = sorted(path for path in directory.iterdir() if path.suffix == ".json") if directory.exists() else []
+        attempts, resolutions = {}, []
+        if task_state_dir is not None:
+            import coordination_evidence
+            attempts = coordination_evidence.collected_attempts(task_state_dir)
         items = []
         for path in paths:
             record = read_decision(path)
@@ -276,10 +288,25 @@ def pending_decisions(directory) -> dict:
             for question, answer in record["response"]["answers"].items():
                 choice = answer["choice"]
                 if choice == "uncertain" or question == "investigation-resolution" and choice == "unresolved":
-                    items.append(dict(decision=record["id"], question=question,
+                    item: dict = dict(decision=record["id"], question=question,
                         owner="judge" if question == "investigation-resolution" else "standby-reasoner",
-                        reason=choice, evidence=str(path), evidence_revision=record["request"]["evidence_revision"]))
-        return dict(schema_version=1, kind="jev-inbox", mode="shadow", items=items)
+                        reason=choice, evidence=str(path), evidence_revision=record["request"]["evidence_revision"])
+                    sources = attempts.get((record["id"], question), [])
+                    current = [source for source in sources if source["state"] != "stale"]
+                    sources = current or sources
+                    if len(sources) == 1 and sources[0]["state"] == "completed":
+                        resolutions.append(dict(decision=record["id"], question=question, **sources[0]))
+                        continue
+                    if sources:
+                        item.update(owner="operator", reason="conflicting_attempts" if len(sources) > 1 else sources[0]["state"],
+                                    attempts=sources)
+                    items.append(item)
+        result = dict(schema_version=2 if task_state_dir is not None else 1, kind="jev-inbox", mode="shadow", items=items)
+        if task_state_dir is not None:
+            result["resolutions"] = resolutions
+        return result
+    except factory.FactoryError as exc:
+        raise JevError("Cannot read bounded reasoner evidence; inspect its original task and artifacts. " + str(exc)) from None
     except OSError:
         raise JevError("Cannot list decision records; restore access to the selected --store before reading the inbox") from None
 
@@ -331,6 +358,7 @@ def main(argv=None):
     sub.add_parser("models", help="Discover models on the authenticated TypeSafe account")
     pending = sub.add_parser("pending", help="Read retained uncertain/failed shadow decisions without calling providers")
     pending.add_argument("--store", type=Path, required=True)
+    pending.add_argument("--task-state-dir", type=Path, help="Include already collected bounded native answers; no Rex queries")
     for action in ("compile", "evaluate"):
         command = sub.add_parser(action)
         command.add_argument("--question", action="append", required=True)
@@ -344,7 +372,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == "pending":
-            result = pending_decisions(args.store)
+            result = pending_decisions(args.store, task_state_dir=args.task_state_dir)
         elif args.action == "models":
             result = {"models": Jev().models()}
         else:

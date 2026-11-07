@@ -10,6 +10,8 @@
     "global_task_wip": 4,
     "limits_status": "initial_tunable_defaults",
     "judge_effort": "maximum_supported",
+    "judge_model": "gpt-6-astra",
+    "judge_model_note": "Initial native Codex judge selection; refresh monthly against the live catalog and judgment evaluations. Model quality remains unverified.",
     "generic_uncertainty_owner": "standby-reasoner",
     "post_investigation_uncertainty_owner": "judge",
     "confidence_thresholds": "evaluate_per_question_on_factory_data",

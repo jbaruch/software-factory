@@ -11,7 +11,7 @@ the command guides describe operation rather than maintain separate status lists
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
 | Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots and fresh quota gating | Fixed fake-process tests and the bounded live controller evidence below. Candidate handoff/worktree provisioning and complete delivery remain incomplete |
-| Jev adapter | Choice compilation, dynamic candidates, model discovery, shadow evaluation, exact-input decision reuse and a durable derived uncertainty inbox | Recorded HTTP/restart/concurrency tests plus earlier live two-question evaluation on jev-1.14.0. Pending/failed requests do not repeat automatically; proposed standby/judge owners do not dispatch workers. Calibration, consequential routing and queue resolution remain incomplete |
+| Jev adapter | Choice compilation, dynamic candidates, model discovery, shadow evaluation, exact-input reuse, a derived uncertainty inbox and explicitly bound native standby/judge answers | Recorded HTTP/restart/concurrency and native-carrier tests plus earlier live evaluation/replay on jev-1.14.0. Collected current answers close only their matching question; missing inputs remain operator requests. Automatic dispatch, calibration, consequential routing and failed-request recovery remain incomplete |
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection and opt-in factory-owned writer commits | Native subscription sign-in, revision-bound collection/reconnect and scoped source approvals; writer/Git qualification is described below. Broader automatic delivery and judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
 | Native Grok/Antigravity catalogs | Versioned metadata observations with actual model IDs, CLI identity, original stdout and collection duration | Native catalog commands establish model lists. Separate rows cover subsequent quota and lifecycle observations |
@@ -93,6 +93,19 @@ unchanged. No worker, grant or acceptance effect followed. This verifies one
 stored evaluation/replay, not representative routing quality, live uncertainty
 resolution or total coordination overhead; catalog probes and local work are
 additional overhead.
+
+On 2026-11-07, engine `fa816bf` delivered a live bounded standby answer through
+Codex 0.166.0 in its own Rex fixture. Jev returned `uncertain` for an unspecified
+underlying assignment. The first native turn identified the missing input but
+used the wrong report outcome and remains failed. One allowed correction, with
+clarified report guidance and an explicit requirements revision, returned
+`blocked` with a concrete request for assignment/scope/acceptance in 12.7 seconds
+(25,402 input/330 output tokens). Collection placed that answer in the operator
+inbox. Fresh-process reconnect/recollection launched nothing and left task,
+receipt and event bytes unchanged. The fixture and existing provisioning task
+stayed unchanged; the correction count remains 1/1 used. This qualifies that
+carrier/replay path, not judge quality, automatic dispatch, accepted delivery or
+cross-engine-path adoption.
 
 Metadata discovery on 2026-11-06 confirmed installed Claude Code 2.1.319,
 Grok Build 1.0.70 and Antigravity CLI (`agy`). Claude's `auth status --json`

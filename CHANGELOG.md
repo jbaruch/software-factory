@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0 — 2026-11-07
+
+### Bounded native reasoner answers
+
+Bind explicit read-only Codex standby/judge assignments to one retained uncertain
+question. Freeze its original request/response in the existing brief and return
+a selected answer or concrete missing input in the native report. Require the
+exact current investigator result for post-investigation judging. Ordinary
+reports stay unchanged; bounded reports use version-6 receipts. The offline inbox
+can use collected current evidence to close only its matching question; missing
+inputs, stale results, uncollected effects and conflicts remain operator-visible.
+No extra resolution store, automatic dispatch, acceptance authority or retry
+allowance is introduced.
+
 ## 0.7.0 — 2026-11-07
 
 ### Retained Jev decisions

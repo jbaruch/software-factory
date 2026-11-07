@@ -53,14 +53,21 @@ def native_object(pairs):
     return factory.unique_object(pairs)
 
 
-def outcome_schema():
-    return dict(type="object", additionalProperties=False,
+def outcome_schema(coordination=None):
+    schema: dict = dict(type="object", additionalProperties=False,
                 properties=dict(outcome=dict(type="string", enum=sorted(factory.RESULT_OUTCOMES)),
                                 artifacts=dict(type="array", items=dict(type="string"))),
                 required=["outcome", "artifacts"])
+    if coordination is not None:
+        import coordination_evidence
+        schema["properties"]["outcome"]["enum"] = ["blocked", "completed"]
+        schema["properties"]["outcome"]["description"] = coordination_evidence.report_guidance(coordination)
+        schema["properties"]["answer"] = coordination_evidence.answer_schema(coordination)
+        schema["required"].append("answer")
+    return schema
 
 
-def parse_events(events) -> dict:
+def parse_events(events, coordination=None) -> dict:
     """A native completion is a carrier for a specialist report, never task acceptance."""
     thread, phase, message, usage = None, "before-thread", None, None
     for event in events:
@@ -104,11 +111,14 @@ def parse_events(events) -> dict:
         report = factory.decode_json(message)
     except (ValueError, TypeError):
         raise WorkerError("Native final message is not a structured result; inspect its original events") from None
-    if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
+    if (not isinstance(report, dict) or set(report) != ({"outcome", "artifacts", "answer"} if coordination else {"outcome", "artifacts"})
             or not isinstance(report["outcome"], str) or report["outcome"] not in factory.RESULT_OUTCOMES
             or not isinstance(report["artifacts"], list) or not report["artifacts"]
             or any(not isinstance(ref, str) or not ref.strip() for ref in report["artifacts"])):
         raise WorkerError("Native result needs a supported outcome and original evidence references")
+    if coordination is not None:
+        import coordination_evidence
+        coordination_evidence.validate_answer(report["answer"], coordination, report["outcome"])
     if usage is not None and (not isinstance(usage, dict)
             or any(type(usage.get(key)) is not int or usage[key] < 0
                    for key in ("input_tokens", "output_tokens"))):
@@ -722,6 +732,16 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         factory.check_role_write(args.role)
     if args.role is not None and instructions.split("\n", 1)[0] != "# Assignment: " + args.role:
         raise factory.FactoryError("Worker role differs from the bound assignment brief; inspect the original request")
+    coordination = None
+    if any(getattr(args, key, None) is not None for key in ("decision_store", "decision", "question")):
+        import coordination_evidence
+        if not coordination_evidence.binding(args.decision, args.question, args.role, write=args.write):
+            raise factory.FactoryError("Bind the original decision and question before a coordination worker starts")
+        coordination = coordination_evidence.read(instructions, args.decision,
+            args.question, args.role, dict(candidate=args.candidate, requirements=args.requirements), write=args.write)
+        if args.role == "judge":
+            coordination_evidence.validate_judge_capacity(coordination.get("judge_capacity"), binary,
+                args.model, args.effort, coordination.get("judge_model"), clock())
     try:
         identity = factory.decode_json(args.repo_identity)
     except (ValueError, TypeError):
@@ -745,7 +765,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                            expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
-    receipt = dict(schema_version=5, kind="codex-execution", job=args.job, state="starting",
+    receipt = dict(schema_version=6 if coordination else 5, kind="codex-execution", job=args.job, state="starting",
                    inputs=dict(candidate=args.candidate, requirements=args.requirements),
                    repository_identity=identity,
                    worktree_git_dir=str(args.worktree_git_dir),
@@ -757,7 +777,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     # Claim the effect before writing any artifact; a concurrent caller cannot replace this receipt.
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        factory.save(schema, outcome_schema())
+        factory.save(schema, outcome_schema(coordination))
         factory.save(args.receipt, receipt)
     except OSError:
         os.close(fd)
@@ -810,7 +830,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
-        receipt.update(parse_events(events))
+        receipt.update(parse_events(events, coordination))
         committing = args.commit_message is not None and receipt["report"]["outcome"] == "completed"
         if committing:
             receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
@@ -848,6 +868,9 @@ def parser():
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
     command.add_argument("--role", help="Owner-selected role; required for writer execution")
+    command.add_argument("--decision-store", type=Path, help="Original Jev decision store; frozen before the native launch")
+    command.add_argument("--decision", help="Exact original Jev decision ID")
+    command.add_argument("--question", help="One unresolved question from that decision")
     command.add_argument("--write", action="store_true")
     command.add_argument("--commit-message", help="With --write, let the factory stage/commit a completed result using this message")
     command.add_argument("--seconds", type=int, default=600, help="Initial execution allowance; no automatic retry")
