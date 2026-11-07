@@ -6,7 +6,14 @@
 
 Add `factory.py integrate`, a mechanical head-conditional merge adapter and
 frozen original canonical feedback for selected native specialist/release
-judgments. Reuse schema-7 intents/results, locks, holds and cumulative attempts.
+judgments. Run the original mechanical adapter through `factory.launch` with real
+Rex pane identities and a version-1 receipt; retain ordinary schema-7 readers.
+Release task/ready-work locks during watcher waits, serialize repository integration,
+reload pre-effect controls, and collect into current owner state. Reuse intents,
+results, holds and cumulative attempts. Require the full review packet only for
+release judgment, preserving ordinary exact-input QA/security approvals and failed
+writers' original contributor identities. Version frozen payloads and support the
+protected ignored managed `.codex` helper installation through canonical bash.
 Require unchanged canonical watcher readiness, original exact-input independent
 approvals, actual repository gates, source-bound merge ancestry, terminal current-
 attempt push CI and issue checks. Replays reconcile read-only without resending

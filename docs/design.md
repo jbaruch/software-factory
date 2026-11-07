@@ -84,10 +84,20 @@ Use learned outcomes to rank suitable candidates and controlled rotation to expl
 ## Integration and recovery
 
 Bind review evidence to the inputs it assessed, including candidate commit and requirements revision. A changed input invalidates only dependent work; a new source commit must not inherit an old approval. Integration ownership covers shared interfaces, merge ordering, conflicts and required revalidation.
+The release judgment alone consumes the complete frozen external-review packet;
+ordinary exact-input specialist approvals remain valid when only review prose changes.
+Failed native writers retain their original contributor identity for independence,
+without promoting failed execution or blocked results into successful evidence.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
+Mechanical integration uses the same schema-7 `factory.launch` lifecycle and real
+window/block identities. Its original worker owns a versioned execution receipt;
+repeats and cold recovery reconcile existing effects read-only. A repository-scoped
+mutex serializes integration without occupying unrelated ready-work capacity. Task
+locks never span canonical watcher/network waits; controls and selected inputs are
+reloaded immediately before effects and current owner state before result collection.
 
 ## Measurement and self-improvement
 

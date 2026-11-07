@@ -112,11 +112,17 @@ class GitHub:
 
 class EvidenceRex(FakeRex):
     running = False
+    integration_running = False
 
     def call(self, *args, **kwargs):
         if args[:2] == ("block", "call") and args[-1] == "process":
             type(self).calls.append(args)
-            return dict(child=dict(pid=123)) if self.running else dict(last_exit=dict(exit_code=0))
+            block_id = args[args.index("-b") + 1]
+            integration_pane = any(window["label"].startswith("integration-") and
+                any(block["block_id"] == block_id for layer in window["layers"] for block in layer["blocks"])
+                for session in self.sessions for window in session["windows"])
+            running = self.integration_running if integration_pane else self.running
+            return dict(child=dict(pid=123)) if running else dict(last_exit=dict(exit_code=0))
         return super().call(*args, **kwargs)
 
 
@@ -151,10 +157,10 @@ class Integration(unittest.TestCase):
         rex_patch = patch.object(factory, "Rex", EvidenceRex)
         rex_patch.start()
         self.addCleanup(rex_patch.stop)
-        self.review("qa", "qa")
+        self.review("qa", "qa", frozen=False)
         self.review("release", "release")
 
-    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work"):
+    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False):
         command = factory.codex_command(self.path, task="deliver", assignment_id=key, codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(self.repo), role=role, write=writer,
             release_evidence=self.frozen if frozen and delivery is None else None,
@@ -169,8 +175,13 @@ class Integration(unittest.TestCase):
         self.native.args = codex_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
         events = fixtures.events(outcome)
         events[0]["thread_id"] = context or ("context-" + key)
-        self.native.process = fixtures.FakeProcess(events)
+        self.native.process = fixtures.FakeProcess(events[:2] if failed else events, timeout=failed, exit_code=-2 if failed else 0)
         receipt = self.native.execute()
+        if failed:
+            self.assertEqual(receipt["state"], "failed")
+            factory.record_result(self.path, assignment_id=key, candidate=self.head,
+                requirements=record["inputs"]["requirements"], outcome="blocked", artifacts=[str(self.native.args.receipt)])
+            return factory.load_task(self.path)["assignments"][key]
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         with patch.object(factory, "status", return_value=dict(state="exited")):
             self.record = factory.collect_codex(self.path, key, None, record, assignment)
@@ -180,8 +191,200 @@ class Integration(unittest.TestCase):
         args = dict(assignment_id="merge", pr=self.transport.identity["url"], review="release", required=["qa"],
                     gh=Path("/installed/gh"), scripts=Path("/installed/acr__jbaruch__coding-policy__release"), transport=self.transport)
         args.update(options)
-        with factory.execution_lock(self.tasks), factory.task_lock(self.tasks, "deliver"):
-            return integration.integrate(self.path, **args)
+        result = integration.integrate(self.path, **args)
+        if result["state"] == "launched":
+            record = factory.load_task(self.path)
+            intent = integration.intent_of(record["assignments"][args["assignment_id"]])
+            EvidenceRex.integration_running = True
+            try:
+                return integration.execute(self.path, intent, transport=self.transport, start=True)
+            finally:
+                EvidenceRex.integration_running = False
+        return result
+
+    def launch_integration(self):
+        return integration.integrate(self.path, assignment_id="merge", pr=self.transport.identity["url"],
+            review="release", required=["qa"], gh=Path("/installed/gh"),
+            scripts=Path("/installed/acr__jbaruch__coding-policy__release"), transport=self.transport)
+
+    def test_real_pane_lifecycle_and_ordinary_schema_seven_readers(self):
+        started = self.launch_integration()
+        self.assertEqual(started["state"], "launched")
+        record = factory.load_task(self.path)
+        assignment = record["assignments"]["merge"]
+        self.assertEqual(assignment["state"], "launched")
+        self.assertIsNone(assignment["result"])
+        self.assertEqual((started["window_id"], started["block_id"]),
+                         (assignment["window_id"], assignment["block_id"]))
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
+        self.assertEqual(factory.task_view(record)["schema_version"], 7)
+        rex = factory.connect(record)
+        EvidenceRex.integration_running = True
+        try:
+            self.assertEqual(factory.status(rex, record, assignment)["state"], "running")
+            self.assertEqual(self.launch_integration()["state"], "launched")
+            command = assignment["request"]["command"]
+            with patch.object(release_evidence, "GitHub", return_value=self.transport), redirect_stdout(StringIO()):
+                self.assertEqual(integration.main(command[4:]), 0)
+        finally:
+            EvidenceRex.integration_running = False
+        self.assertEqual(self.launch_integration()["state"], "delivered")
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
+        damaged = factory.load_task(self.path)
+        del damaged["assignments"]["merge"]["block_id"]
+        factory.save(self.path, damaged)
+        with self.assertRaisesRegex(factory.FactoryError, "Missing launched pane identity"):
+            factory.load_task(self.path)
+
+    def test_lost_rex_launch_reply_reconnects_original_pane_without_second_merge(self):
+        FakeRex.fail_after_create = True
+        try:
+            with self.assertRaisesRegex(factory.FactoryError, "Launch outcome uncertain"):
+                self.launch_integration()
+        finally:
+            FakeRex.fail_after_create = False
+        self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["state"], "launching")
+        # Cold recovery never starts a second execution even if no receipt survived.
+        self.assertEqual(self.launch_integration()["state"], "merge_outcome_unknown")
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
+        self.assertEqual(self.transport.merges, [])
+
+    def test_pause_and_inputs_remain_usable_during_watcher_and_are_not_overwritten(self):
+        def control():
+            with factory.execution_lock(self.tasks):
+                with factory.task_lock(self.tasks, "unrelated"):
+                    pass
+            with factory.task_lock(self.tasks, "deliver"):
+                factory.hold_task(self.path, "Operator paused during wait", request_id="watch-pause")
+                factory.set_inputs(self.path, candidate=self.head, requirements="changed-during-watch")
+        self.transport.on_watch = control
+        receipt = self.integrate()
+        self.assertEqual(receipt["state"], "held")
+        self.assertEqual(self.transport.merges, [])
+        record = factory.load_task(self.path)
+        self.assertEqual(record["hold"], "Operator paused during wait")
+        self.assertEqual(record["inputs"]["requirements"], "changed-during-watch")
+        self.assertEqual(record["control_events"][-1]["id"], "watch-pause")
+        self.assertEqual(record["assignments"]["merge"]["result"]["inputs"], self.record["inputs"])
+
+    def test_integration_mutex_leaves_other_ready_work_and_controls_available(self):
+        self.launch_integration()
+        record = factory.load_task(self.path)
+        intent = integration.intent_of(record["assignments"]["merge"])
+        with integration.integration_lock(self.path, intent):
+            with self.assertRaisesRegex(factory.FactoryError, "Another integration"):
+                integration.execute(self.path, intent, transport=self.transport)
+            with factory.execution_lock(self.tasks), factory.task_lock(self.tasks, "deliver"):
+                factory.hold_task(self.path, "Operator controls remain available")
+        self.assertEqual(self.transport.merges, [])
+
+    def test_pre_effect_reload_catches_control_after_network_checks(self):
+        original = self.transport.api
+        def changed(endpoint):
+            result = original(endpoint)
+            if self.transport.watches and endpoint.endswith("pulls/7"):
+                with factory.task_lock(self.tasks, "deliver"):
+                    factory.hold_task(self.path, "Late hold", request_id="late")
+            return result
+        self.transport.api = changed
+        self.assertEqual(self.integrate()["state"], "held")
+        self.assertEqual(self.transport.merges, [])
+        self.assertEqual(factory.load_task(self.path)["hold"], "Late hold")
+
+    def test_result_collection_preserves_controls_changed_during_postmerge_wait(self):
+        def pause():
+            with factory.task_lock(self.tasks, "deliver"):
+                factory.hold_task(self.path, "Postmerge pause", request_id="postmerge")
+        self.transport.on_run_watch = pause
+        self.assertEqual(self.integrate()["state"], "delivered")
+        record = factory.load_task(self.path)
+        self.assertEqual(record["hold"], "Postmerge pause")
+        self.assertEqual(record["control_events"][-1]["id"], "postmerge")
+
+    def test_failed_contributor_keeps_original_failure_and_context(self):
+        failed = self.review("failed-writer", "backend", writer=True, frozen=False, failed=True)
+        command = failed["request"]["command"]
+        paths = [Path(command[command.index(flag) + 1]) for flag in ("--receipt", "--events")]
+        originals = [path.read_bytes() for path in paths]
+        self.assertEqual(self.integrate()["state"], "delivered")
+        self.assertEqual(factory.load_task(self.path)["assignments"]["failed-writer"], failed)
+        self.assertEqual([path.read_bytes() for path in paths], originals)
+        self.assertEqual(json.loads(paths[0].read_text())["state"], "failed")
+
+    def test_failed_writer_recovers_thread_from_supported_original_partial_events(self):
+        failed = self.review("failed-writer", "backend", writer=True, frozen=False, failed=True)
+        command = failed["request"]["command"]
+        path = Path(command[command.index("--receipt") + 1])
+        receipt = json.loads(path.read_text())
+        receipt.update(schema_version=4, thread_id=None)
+        factory.save(path, receipt)
+        before = path.read_bytes()
+        self.assertEqual(self.integrate()["state"], "delivered")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(factory.load_task(self.path)["assignments"]["failed-writer"], failed)
+
+    def test_assignment_source_cannot_supply_installed_release_commands(self):
+        self.transport.binding = lambda: {str(self.repo / "watch-pr-reviews.sh"): "writer-source"}
+        with self.assertRaisesRegex(factory.FactoryError, "assignment checkout"):
+            self.integrate()
+        self.assertEqual(self.transport.merges, [])
+
+    def test_failed_writer_cannot_review_itself_and_unknown_identity_refuses(self):
+        failed = self.review("failed-writer", "backend", context="context-qa", writer=True, frozen=False, failed=True)
+        with self.assertRaisesRegex(factory.FactoryError, "independent of contributors"):
+            self.integrate()
+        command = failed["request"]["command"]
+        events = Path(command[command.index("--events") + 1])
+        events.write_text("")
+        with self.assertRaisesRegex(factory.FactoryError, "Unknown or ambiguous"):
+            self.integrate()
+        self.assertEqual(self.transport.merges, [])
+
+    def test_prior_ordinary_qa_does_not_require_new_external_review_prose(self):
+        qa = copy.deepcopy(factory.load_task(self.path)["assignments"]["qa"])
+        self.assertNotIn("--release-evidence", qa["request"]["command"])
+        self.transport.snapshot_value["review_bodies"][0]["body"] += " New advisory prose."
+        self.frozen = release_evidence.capture(factory.load_task(self.path), self.transport.identity["url"], self.transport)
+        self.review("new-release", "release")
+        self.assertEqual(self.integrate(review="new-release")["state"], "delivered")
+        self.assertEqual(factory.load_task(self.path)["assignments"]["qa"], qa)
+
+    def test_unsupported_or_corrupt_receipts_never_resend(self):
+        self.assertEqual(self.integrate()["state"], "delivered")
+        path = self.tasks / "deliver.merge.integration.json"
+        original = json.loads(path.read_text())
+        for version in (None, 0, 2, True, "1"):
+            value = {**original, "schema_version": version}
+            factory.save(path, value)
+            with self.assertRaisesRegex(factory.FactoryError, "Unsupported or corrupt"):
+                self.integrate()
+            with self.assertRaisesRegex(factory.FactoryError, "Unsupported or corrupt"):
+                release_evidence.delivery(factory.load_task(self.path), "merge")
+        for change in ({"observations": None}, {"state": "approved"}, {"delivery": None}):
+            factory.save(path, {**original, **change})
+            with self.assertRaisesRegex(factory.FactoryError, "Unsupported or corrupt"):
+                self.integrate()
+        self.assertEqual(len(self.transport.merges), 1)
+
+    def test_bad_frozen_packet_versions_and_original_worker_binding_refuse(self):
+        record = factory.load_task(self.path)
+        for version in (None, 0, 2, True, "1"):
+            with self.assertRaises(factory.FactoryError):
+                release_evidence.validate({**self.frozen, "schema_version": version}, record)
+            with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
+                release_evidence.render_delivery({"schema_version": version})
+            with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
+                release_evidence.render({**self.frozen, "schema_version": version})
+        self.launch_integration()
+        record = factory.load_task(self.path)
+        intent = integration.intent_of(record["assignments"]["merge"])
+        for change in ({"assignment": "qa"}, {"task": "another"}, {"schema_version": 2}):
+            with self.assertRaises(factory.FactoryError):
+                integration.execute(self.path, {**intent, **change}, transport=self.transport, start=True)
+        Path(record["assignments"]["merge"]["brief"]).write_text("Changed frozen brief")
+        with self.assertRaisesRegex(factory.FactoryError, "brief differs"):
+            integration.execute(self.path, intent, transport=self.transport, start=True)
+        self.assertEqual(self.transport.merges, [])
 
     def test_delivery_uses_original_intent_and_selected_reports_without_accepting_task(self):
         original = copy.deepcopy(self.record)
@@ -454,7 +657,7 @@ class Integration(unittest.TestCase):
         with patch.object(factory, "save", side_effect=fail_collection):
             with self.assertRaises(OSError):
                 self.integrate()
-        self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["state"], "launching")
+        self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["state"], "launched")
         self.assertEqual(self.integrate()["state"], "delivered")
         self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["result"]["outcome"], "completed")
         self.assertEqual(len(self.transport.merges), 1)
@@ -542,6 +745,38 @@ class CommandAuthority(unittest.TestCase):
             self.assertEqual(environment["GH_HOST"], "github.com")
             self.assertEqual(environment["GH_CONFIG_DIR"], str(root / "auth"))
             self.assertEqual(transport.binding(), before)
+
+    def test_managed_ignored_helpers_are_allowed_but_source_and_replacements_refuse(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            repo = root / "repo"
+            subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+            factory.git_run(str(repo), "config", "core.excludesFile", "/dev/null")
+            scripts = repo / ".codex" / "skills" / "acr__jbaruch__coding-policy__release"
+            scripts.mkdir(parents=True)
+            (repo / ".git" / "info" / "exclude").write_text(".codex/\n")
+            gh = root / "gh"
+            gh.write_text("fixture binary")
+            gh.chmod(0o700)
+            for name in ("watch-pr-reviews.sh", "poll-pr-reviews.sh", "review-lanes.sh", "check-closing-issues.py"):
+                (scripts / name).write_text("installed helper")
+                (scripts / name).chmod(0o600)
+            transport = release_evidence.GitHub(gh, scripts, repo)
+            self.assertIn(str(scripts / "watch-pr-reviews.sh"), transport.binding())
+            target = scripts / "watch-pr-reviews.sh"
+            target.chmod(0o666)
+            with self.assertRaisesRegex(factory.FactoryError, "owner-controlled"):
+                transport.binding()
+            target.chmod(0o600)
+            target.unlink()
+            target.symlink_to(scripts / "poll-pr-reviews.sh")
+            with self.assertRaises(factory.FactoryError):
+                transport.binding()
+            target.unlink()
+            target.write_text("installed helper")
+            factory.git_run(str(repo), "add", "-f", ".codex")
+            with self.assertRaisesRegex(factory.FactoryError, "protected .codex"):
+                transport.binding()
 
     def test_unvalidated_paths_and_urls_refuse(self):
         for url in ("https://evil.example/x/y/pull/1", "https://github.com/x/y/pull/1;echo", "https://github.com/x/y/pull/0"):

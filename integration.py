@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import uuid
+from contextlib import contextmanager
+import fcntl
+import os
 
 if __name__ == "__main__":
     sys.modules.setdefault("integration", sys.modules[__name__])
@@ -27,7 +29,8 @@ def intent_of(assignment):
         raise factory.FactoryError("Not an original mechanical integration assignment")
     value = factory.decode_json(command[5])
     if (not isinstance(value, dict)
-            or set(value) != {"task", "assignment", "state_dir", "admission", "inputs", "pr", "review", "required", "review_digest", "issues", "gh", "scripts", "commands", "approvals"}
+            or set(value) != {"schema_version", "task", "assignment", "state_dir", "admission", "inputs", "pr", "review", "required", "review_digest", "issues", "gh", "scripts", "commands", "approvals"}
+            or type(value.get("schema_version")) is not int or value["schema_version"] != 1
             or any(not isinstance(value.get(key), str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", value[key])
                    for key in ("task", "assignment"))
             or not isinstance(value.get("state_dir"), str) or not Path(value["state_dir"]).is_absolute()
@@ -56,6 +59,24 @@ def collected_native(assignment_id, record, assignment, *, current=True):
         raise factory.FactoryError("Cannot validate original native integration evidence: " + str(exc)) from None
 
 
+def contributor_context(key, record, assignment):
+    # A failed writer remains a contributor; never require or invent a success.
+    import codex_worker
+    command = assignment["request"]["command"]
+    try:
+        args = codex_worker.parser().parse_args(command[4:] if command[1:3] == ["-E", "-s"] else command[2:])
+        receipt = factory.decode_json(factory.read_record(args.receipt, private=True))
+    except (SystemExit, OSError, ValueError):
+        raise factory.FactoryError("Missing original contributor execution metadata") from None
+    if isinstance(receipt, dict) and receipt.get("state") == "failed":
+        rex = factory.connect(record)
+        _, _, native = factory.codex_evidence(key, record, assignment, failed_identity=True,
+            observe=lambda: factory.status(rex, record, assignment))
+        return native["thread_id"]
+    _, receipt, _ = collected_native(key, record, assignment, current=False)
+    return receipt["thread_id"]
+
+
 def approvals(record, review, required):
     """Re-read collected original native reports/events, never generic dependencies."""
     if (not required or len(set(required)) != len(required) or review in required
@@ -66,14 +87,12 @@ def approvals(record, review, required):
         if mechanical(assignment):
             continue
         command = assignment["request"]["command"]
-        native = command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
+        native = (command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
+                  or command[:2] == [sys.executable, str(factory.ROOT / "codex_worker.py")])
         if not native:
             raise factory.FactoryError("Cannot establish contributor independence for an unverified command adapter: " + key)
         if "--write" in command:
-            args, receipt, _ = collected_native(key, record, assignment, current=False)
-            if not isinstance(receipt.get("thread_id"), str) or not receipt["thread_id"]:
-                raise factory.FactoryError("Missing native contributor context")
-            contributors.add(receipt["thread_id"])
+            contributors.add(contributor_context(key, record, assignment))
     contexts = set()
     for key in [*required, review]:
         assignment = record["assignments"].get(key)
@@ -88,20 +107,30 @@ def approvals(record, review, required):
         if not isinstance(context, str) or not context or context in contributors or context in contexts:
             raise factory.FactoryError("Selected approvals need distinct original native contexts independent of contributors")
         contexts.add(context)
-        frozen = evidence.from_assignment(record, assignment)
+        frozen = evidence.from_assignment(record, assignment) if key == review else None
         selected[key] = dict(context=context, receipt=evidence.digest(receipt),
                              result=evidence.digest(assignment["result"]), evidence=frozen)
-    release = selected[review]["evidence"]
-    if any(item["evidence"]["pr"] != release["pr"] or item["evidence"]["review_digest"] != release["review_digest"] or item["evidence"]["issues"] != release["issues"]
-           for item in selected.values()):
-        raise factory.FactoryError("Selected approvals need reassessment of the same source/base/review inputs")
     return selected
 
 
-def verify(record, intent, transport, *, watch=False):
+def command_binding(record, transport):
+    binding = transport.binding()
+    managed = Path(record["admission"]["repository"]) / ".codex" / "skills" / "acr__jbaruch__coding-policy__release"
+    for filename in binding:
+        path = Path(filename)
+        if not path.is_absolute():
+            continue  # Offline transports use symbolic command identities.
+        if path.parent == managed:
+            continue  # GitHub.binding validates this protected installed directory.
+        if any(path.is_relative_to(Path(item["request"]["cwd"])) for item in record["assignments"].values()):
+            raise factory.FactoryError("Installed release commands cannot come from an assignment checkout")
+    return binding
+
+
+def verify(record, intent, transport, *, watch=False, reload=None):
     if record["hold"] is not None:
         raise factory.FactoryError("Integration held: " + record["hold"])
-    if transport.binding() != intent["commands"]:
+    if command_binding(record, transport) != intent["commands"]:
         raise factory.FactoryError("Installed command/policy bytes changed; obtain a current integration intent")
     factory.check_repository(record["admission"])
     if record["admission"] != intent["admission"] or record["inputs"] != intent["inputs"]:
@@ -129,7 +158,7 @@ def verify(record, intent, transport, *, watch=False):
             raise factory.FactoryError("Review changed during canonical watch; reassess all original bodies")
         # The canonical watcher owns CI and native review readiness. Re-read source
         # binding and actual repository merge state after waiting, immediately pre-effect.
-        current = verify(record, intent, transport)
+        current = verify(reload() if reload else record, intent, transport)
         if any(current["snapshot"].get(key) != snapshot.get(key) for key in ("ci", "merge_state")):
             raise factory.FactoryError("CI or merge state changed after canonical readiness; recheck with a new intent")
         rules = transport.requirements(intent["pr"])
@@ -231,11 +260,92 @@ def check_run(run, workflow, intent, merge):
         raise factory.FactoryError("Post-merge CI lacks exact repository/source/workflow/push/target/attempt binding")
 
 
-def integrate(path, *, assignment_id, pr, review, required, gh, scripts, transport=None):
-    """Caller holds execution + task locks. Replays observe only; no merge retry."""
+GOAL = "Integrate the admitted exact candidate"
+
+
+def render_intent(intent):
+    return "\n## Factory mechanical integration intent\n\n" + json.dumps(intent, sort_keys=True) + "\n"
+
+
+def validate_launch(record, request, task, assignment_id, path):
+    intent = intent_of({"request": request})
+    if (intent["task"] != task or intent["assignment"] != assignment_id
+            or intent["state_dir"] != str(path.parent.resolve())
+            or record["admission"] != intent["admission"] or record["inputs"] != intent["inputs"]
+            or request.get("purpose") != "work" or request.get("goal") != GOAL
+            or request.get("dependencies") != sorted([intent["review"], *intent["required"]])
+            or intent["review"] not in record["assignments"]
+            or request["cwd"] != record["assignments"][intent["review"]]["request"]["cwd"]):
+        raise factory.FactoryError("Integration command differs from original task/assignment binding")
+    return intent
+
+
+def bound_assignment(path, record, intent):
+    assignment = record["assignments"].get(intent["assignment"])
+    if assignment is None or intent_of(assignment) != intent or record["task"] != intent["task"]:
+        raise factory.FactoryError("Worker needs the existing exact original integration intent")
+    # Selected inputs may change during recovery; immutable request/admission must not.
+    original = {**record, "inputs": intent["inputs"]}
+    validate_launch(original, assignment["request"], record["task"], intent["assignment"], path)
+    try:
+        instructions = Path(assignment["brief"]).read_text()
+    except (OSError, UnicodeError):
+        raise factory.FactoryError("Restore the original frozen integration brief") from None
+    if (evidence.digest_text(instructions) != assignment["request"]["instructions_sha256"]
+            or not instructions.endswith(render_intent(intent))):
+        raise factory.FactoryError("Original integration brief differs from its immutable command")
+    return assignment
+
+
+def read_owner(path):
+    with factory.task_lock(path.parent, path.stem, wait=True):
+        return factory.load_task(path)
+
+
+@contextmanager
+def integration_lock(path, intent, *, wait=False):
+    """One repository effect at a time; unrelated ready work keeps its capacity."""
+    identity = intent["admission"]["repository_identity"]["repository_id"]
+    lock = path.parent / (".integration-" + identity + ".lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise factory.FactoryError("Another integration owns this repository; reconnect after it finishes") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def receipt_file(path, intent):
+    return path.parent / (intent["task"] + "." + intent["assignment"] + ".integration.json")
+
+
+def validate_receipt(receipt, intent):
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != 1 or receipt.get("kind") != "integration-execution"
+            or receipt.get("intent") != intent
+            or not isinstance(receipt.get("state"), str)
+            or receipt.get("state") not in {"executing", "merge_outcome_unknown", "held", "rejected", "delivered"}
+            or not isinstance(receipt.get("process"), dict)
+            or any(not isinstance(receipt["process"].get(key), str) or not receipt["process"][key]
+                   for key in ("session_id", "window_id", "block_id"))
+            or not isinstance(receipt.get("observations"), list)
+            or any(not isinstance(item, dict) for item in receipt["observations"])
+            or (receipt["state"] in {"held", "rejected"} and not isinstance(receipt.get("reason"), str))
+            or (receipt["state"] == "delivered" and (not isinstance(receipt.get("delivery"), dict)
+                or receipt["delivery"].get("head") != intent["inputs"]["candidate"]
+                or not isinstance(receipt["delivery"].get("ci"), dict)))):
+        raise factory.FactoryError("Unsupported or corrupt original integration receipt; preserve it for inspection")
+    return receipt
+
+
+def integrate(path, *, assignment_id, pr, review, required, gh, scripts, transport=None) -> dict:
+    """Launch/reconnect the original Rex worker; existing effects only reconcile."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id):
         raise factory.FactoryError("Integration ID must be a lowercase slug")
-    record = factory.load_task(path)
+    record = read_owner(path)
     if record["admission"] is None:
         raise factory.FactoryError("Admit the task before integration")
     transport = transport or evidence.GitHub(gh, scripts, record["admission"]["repository"])
@@ -244,100 +354,131 @@ def integrate(path, *, assignment_id, pr, review, required, gh, scripts, transpo
     if fresh:
         if record["hold"] is not None:
             raise factory.FactoryError("Integration held: " + record["hold"])
-        for other in record["assignments"].values():
-            if mechanical(other) and other["result"] is None:
-                raise factory.FactoryError("Reconcile the existing pending integration before a new effect")
+        if any(mechanical(other) and other["result"] is None for other in record["assignments"].values()):
+            raise factory.FactoryError("Reconcile the existing pending integration before a new effect")
         selected = approvals(record, review, required)
         frozen = selected[review]["evidence"]
-        intent: dict = dict(task=record["task"], assignment=assignment_id, state_dir=str(path.parent.resolve()), admission=record["admission"], inputs=dict(record["inputs"]), pr=frozen["pr"],
-            review=review, required=sorted(required), review_digest=frozen["review_digest"], issues=frozen["issues"], gh=str(gh), scripts=str(scripts), commands=transport.binding(),
+        intent = dict(schema_version=1, task=record["task"], assignment=assignment_id,
+            state_dir=str(path.parent.resolve()), admission=record["admission"], inputs=dict(record["inputs"]), pr=frozen["pr"],
+            review=review, required=sorted(required), review_digest=frozen["review_digest"], issues=frozen["issues"],
+            gh=str(gh), scripts=str(scripts), commands=command_binding(record, transport),
             approvals={key: {k: v for k, v in item.items() if k != "evidence"} for key, item in selected.items()})
         if pr != frozen["pr"]["url"]:
             raise factory.FactoryError("Integration PR differs from selected original release review")
         verify(record, intent, transport)
-        instructions = factory.brief("integration", "Execute only the frozen mechanical release intent") + json.dumps(intent, sort_keys=True) + "\n"
-        brief = path.parent / (record["task"] + "." + assignment_id + ".md")
-        receipt_path = path.parent / (record["task"] + "." + assignment_id + ".integration.json")
-        if brief.exists() or receipt_path.exists():
-            raise factory.FactoryError("Original integration artifacts already exist; restore/reconcile their assignment")
-        factory.save(brief, instructions, exclusive=True)
-        assignment: dict = dict(request=dict(role="integration", purpose="work", goal="Integrate the admitted exact candidate",
-            cwd=record["admission"]["repository"], inputs=dict(record["inputs"]), dependencies=sorted([review, *required]),
-            command=[*PREFIX, json.dumps(intent, sort_keys=True)], instructions_sha256=evidence.digest_text(instructions)),
-            state="launching", result=None, brief=str(brief), window_label="integration-" + assignment_id + "-" + uuid.uuid4().hex[:8])
-        record["assignments"][assignment_id] = assignment
-        factory.save(path, record)  # Before any external mutation; a crash here is read-only reconciliation.
+        command = [*PREFIX, json.dumps(intent, sort_keys=True)]
+        cwd = record["assignments"][review]["request"]["cwd"]
     else:
         intent = intent_of(assignment)
+        bound_assignment(path, record, intent)
         if (pr != intent["pr"]["url"] or review != intent["review"] or sorted(required) != intent["required"]
                 or str(gh) != intent["gh"] or str(scripts) != intent["scripts"]):
             raise factory.FactoryError("Existing integration ID has different immutable inputs")
-    try:
-        instructions = Path(assignment["brief"]).read_text()
-    except (OSError, UnicodeError):
-        raise factory.FactoryError("Restore the original frozen integration brief") from None
-    if (evidence.digest_text(instructions) != assignment["request"]["instructions_sha256"]
-            or not instructions.endswith(json.dumps(intent, sort_keys=True) + "\n")):
-        raise factory.FactoryError("Original integration brief differs from its immutable command")
-    receipt_path = path.parent / (record["task"] + "." + assignment_id + ".integration.json")
-    if receipt_path.exists():
-        receipt: dict = factory.decode_json(factory.read_record(receipt_path, private=True))
-        if not isinstance(receipt, dict) or receipt.get("intent") != intent:
-            raise factory.FactoryError("Original integration result differs from its intent")
-        if receipt.get("state") in {"delivered", "rejected", "held"}:
-            # Collect a crash-surviving success only after fresh read-only confirmation.
+        command, cwd = assignment["request"]["command"], assignment["request"]["cwd"]
+    # Ordinary launch lock covers only brief submission and Rex launch/reconnect.
+    with factory.execution_lock(path.parent), factory.task_lock(path.parent, record["task"]):
+        current = factory.load_task(path)
+        if fresh:
+            if current != record:
+                raise factory.FactoryError("Task changed during integration preparation; reassess current inputs")
+            if (path.parent / (record["task"] + "." + assignment_id + ".md")).exists() or receipt_file(path, intent).exists():
+                raise factory.FactoryError("Original integration artifacts already exist; restore their assignment")
+        record, assignment = factory.launch(path, task=record["task"], assignment_id=assignment_id,
+            role="integration", goal=GOAL, cwd=cwd, command=command, purpose="work", dependencies=sorted([review, *required]))
+    if fresh:
+        return dict(state="launched", assignment=assignment_id, session_id=record["session_id"],
+                    window_id=assignment["window_id"], block_id=assignment["block_id"])
+    process = factory.status(factory.connect(record), record, assignment)
+    if process["state"] in {"running", "unknown"}:
+        return dict(state="launched", assignment=assignment_id, process=process)
+    return execute(path, intent, transport=transport, start=False)
+
+
+def execute(path, intent, *, transport=None, start=False) -> dict:
+    """Only the original pane may start once; every existing receipt is read-only recovery."""
+    with integration_lock(path, intent, wait=start):
+        record = read_owner(path)
+        assignment = bound_assignment(path, record, intent)
+        if assignment["state"] != "launched":
+            raise factory.FactoryError("Reconcile the original Rex launch before execution")
+        rex = factory.connect(record)
+        process = factory.status(rex, record, assignment)
+        transport = transport or evidence.GitHub(intent["gh"], intent["scripts"], record["admission"]["repository"])
+        receipt_path = receipt_file(path, intent)
+        fresh = not os.path.lexists(receipt_path)
+        if (not fresh or not start) and command_binding(record, transport) != intent["commands"]:
+            raise factory.FactoryError("Installed command/policy bytes changed; restore the original helpers before recovery")
+        if assignment["result"] is not None and fresh:
+            raise factory.FactoryError("Restore the original terminal integration receipt; never replace its evidence")
+        if fresh:
+            receipt: dict = dict(schema_version=1, kind="integration-execution", intent=intent,
+                state="executing" if start else "merge_outcome_unknown", observations=[], process=process)
+            if start and process["state"] != "running":
+                raise factory.FactoryError("Initial integration execution requires its running original Rex pane")
+            factory.save(receipt_path, receipt, exclusive=True)
+        else:
+            receipt = validate_receipt(factory.decode_json(factory.read_record(receipt_path, private=True)), intent)
+            if any(receipt.get("process", {}).get(key) != process.get(key)
+                   for key in ("session_id", "window_id", "block_id")):
+                raise factory.FactoryError("Original integration receipt differs from its Rex pane")
+        if receipt["state"] in {"delivered", "rejected", "held"}:
             if assignment["result"] is None and receipt["state"] == "delivered":
                 current = postmerge(intent, transport)
-                confirmed = receipt.get("delivery")
-                if (not isinstance(confirmed, dict) or not isinstance(confirmed.get("ci"), dict)
-                        or current["merge_commit"] != confirmed.get("merge_commit")
+                confirmed = receipt["delivery"]
+                if (current["merge_commit"] != confirmed.get("merge_commit")
                         or any(current["ci"][key] != confirmed["ci"].get(key) for key in ("id", "run_attempt"))):
                     raise factory.FactoryError("Crash-surviving delivery evidence is missing or changed")
-            finish(path, record, assignment, intent, receipt_path, receipt)
+            finish(path, intent, receipt_path, receipt)
             return receipt
-        if receipt.get("state") != "merge_outcome_unknown" or not isinstance(receipt.get("observations"), list):
-            raise factory.FactoryError("Malformed original pending integration result")
-    else:
-        if assignment["result"] is not None:
-            raise factory.FactoryError("Restore the original terminal integration receipt; never replace its evidence")
-        receipt = dict(intent=intent, state="merge_outcome_unknown", observations=[])
-    if fresh:
-        try:
-            receipt["gates"] = verify(record, intent, transport, watch=True)
-        except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
-            receipt.update(state="held", reason=str(exc))
-        else:
-            factory.save(receipt_path, receipt)  # Unknown outcome is durable before sending.
+        if fresh and start:
             try:
-                response = transport.merge(intent["pr"])
-                receipt["observations"].append(dict(merge_response=response))
-                if isinstance(response, dict) and response.get("merged") is False:
-                    receipt.update(state="rejected", reason="GitHub rejected merge")
-            except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
-                receipt["observations"].append(dict(merge_error=str(exc)))
-    if receipt["state"] == "merge_outcome_unknown":
-        try:
-            delivered = postmerge(intent, transport)
-            receipt.update(state="delivered", delivery=delivered)
-        except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
-            receipt["observations"].append(dict(pending=str(exc)))
-    factory.save(receipt_path, receipt)
-    finish(path, record, assignment, intent, receipt_path, receipt)
-    return receipt
+                receipt["gates"] = verify(record, intent, transport, watch=True, reload=lambda: read_owner(path))
+                # No network waits under the task lock. Reload immediately before
+                # recording the external attempt; never save an old owner snapshot.
+                with factory.task_lock(path.parent, intent["task"], wait=True):
+                    current = factory.load_task(path)
+                    bound_assignment(path, current, intent)
+                    if current != record or current["hold"] is not None:
+                        raise factory.FactoryError("Task controls or inputs changed before integration effect")
+                    if command_binding(current, transport) != intent["commands"]:
+                        raise factory.FactoryError("Installed command/policy bytes changed before integration effect")
+                    receipt["state"] = "merge_outcome_unknown"
+                    factory.save(receipt_path, receipt)
+            except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
+                receipt.update(state="held", reason=str(exc))
+            else:
+                try:
+                    response = transport.merge(intent["pr"])
+                    receipt["observations"].append(dict(merge_response=response))
+                    if isinstance(response, dict) and response.get("merged") is False:
+                        receipt.update(state="rejected", reason="GitHub rejected merge")
+                except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                    receipt["observations"].append(dict(merge_error=str(exc)))
+        if receipt["state"] in {"executing", "merge_outcome_unknown"}:
+            receipt["state"] = "merge_outcome_unknown"
+            try:
+                receipt.update(state="delivered", delivery=postmerge(intent, transport))
+            except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
+                receipt["observations"].append(dict(pending=str(exc)))
+        factory.save(receipt_path, receipt)
+        finish(path, intent, receipt_path, receipt)
+        return receipt
 
 
-def finish(path, record, assignment, intent, receipt_path, receipt):
+def finish(path, intent, receipt_path, receipt):
     if receipt["state"] in {"delivered", "rejected", "held"}:
-        assignment["state"] = "launched"
-        result = dict(inputs=intent["inputs"], candidate=intent["inputs"]["candidate"],
-            outcome="completed" if receipt["state"] == "delivered" else "blocked",
-            artifacts=[str(receipt_path), "sha256:" + evidence.digest(receipt)])
-        if assignment["result"] is not None:
-            if assignment["result"] != result:
-                raise factory.FactoryError("Original integration result content changed")
-            return
-        assignment["result"] = result
-        factory.save(path, record)
+        with factory.task_lock(path.parent, intent["task"], wait=True):
+            record = factory.load_task(path)
+            assignment = bound_assignment(path, record, intent)
+            result = dict(inputs=intent["inputs"], candidate=intent["inputs"]["candidate"],
+                outcome="completed" if receipt["state"] == "delivered" else "blocked",
+                artifacts=[str(receipt_path), "sha256:" + evidence.digest(receipt)])
+            if assignment["result"] is not None:
+                if assignment["result"] != result:
+                    raise factory.FactoryError("Original integration result content changed")
+                return
+            assignment["result"] = result
+            factory.save(path, record)
 
 
 def accepted(record, integration_id, acceptance_id, transport):
@@ -354,25 +495,29 @@ def accepted(record, integration_id, acceptance_id, transport):
     if evidence.from_delivery_assignment(record, assignment) != original:
         raise factory.FactoryError("Final acceptance assessed different delivered evidence")
     intent = original["receipt"]["intent"]
+    if command_binding(record, transport) != intent["commands"]:
+        raise factory.FactoryError("Installed command/policy bytes changed before acceptance; restore the original helpers")
     selected = approvals(record, intent["review"], intent["required"])
     if {key: {k: v for k, v in item.items() if k != "evidence"} for key, item in selected.items()} != intent["approvals"]:
         raise factory.FactoryError("Original selected native approvals changed before final acceptance")
     for key, item in record["assignments"].items():
         if "--write" in item["request"]["command"]:
-            _, contributor, _ = collected_native(key, record, item, current=False)
-            if receipt["thread_id"] == contributor["thread_id"]:
+            if receipt["thread_id"] == contributor_context(key, record, item):
                 raise factory.FactoryError("A contributor cannot judge final acceptance")
     current = postmerge(intent, transport)
     confirmed = original["receipt"]["delivery"]
     if (current["merge_commit"] != confirmed["merge_commit"] or current["issues"] != confirmed["issues"]
             or any(current["ci"][key] != confirmed["ci"][key] for key in ("id", "run_attempt"))):
         raise factory.FactoryError("Delivery evidence changed; obtain a current final native reassessment")
+    current_owner = read_owner(Path(intent["state_dir"]) / (intent["task"] + ".json"))
+    if current_owner != record:
+        raise factory.FactoryError("Task changed during final acceptance observation; reload current controls/inputs")
     return dict(outcome="approved", assignment=acceptance_id, integration=integration_id,
                 native_receipt=str(args.receipt), delivery_receipt_digest=original["receipt_digest"])
 
 
 def main(argv=None):
-    """The persisted command can reconcile its existing effect, never send anew."""
+    """Original pane entrypoint; a retained execution receipt permits only observation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--intent", required=True)
     args = parser.parse_args(argv)
@@ -381,15 +526,10 @@ def main(argv=None):
         directory = Path(intent["state_dir"])
         if not directory.is_absolute() or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", intent["task"]):
             raise factory.FactoryError("Reconciliation needs the original absolute state directory and task slug")
-        with factory.execution_lock(directory), factory.task_lock(directory, intent["task"]) as path:
-            record = factory.load_task(path)
-            assignment = record["assignments"].get(intent["assignment"])
-            if assignment is None or intent_of(assignment) != intent:
-                raise factory.FactoryError("Reconciliation needs the existing exact original integration intent")
-            receipt = integrate(path, assignment_id=intent["assignment"], pr=intent["pr"]["url"],
-                review=intent["review"], required=intent["required"], gh=intent["gh"], scripts=intent["scripts"])
-            print(json.dumps(receipt, indent=2))
-            return 0 if receipt["state"] == "delivered" else 1
+        path = directory / (intent["task"] + ".json")
+        receipt = execute(path, intent, start=True)
+        print(json.dumps(receipt, indent=2))
+        return 0 if receipt["state"] == "delivered" else 1
     except (factory.FactoryError, OSError, ValueError, KeyError, TypeError) as exc:
         print("integration: " + str(exc), file=sys.stderr)
         return 1

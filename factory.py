@@ -140,14 +140,14 @@ def execution_lock(directory):
 
 
 @contextmanager
-def task_lock(directory, task):
+def task_lock(directory, task, *, wait=False):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", task):
         raise FactoryError("Task ID must be a lowercase slug, at most 64 characters")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(directory / (task + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise FactoryError("Another command is working on this task; retry later") from exc
         yield directory / (task + ".json")
@@ -283,13 +283,6 @@ def load_task(path) -> dict:
                 or any(not isinstance(item, str) or item not in earlier
                        for item in request["dependencies"])):
             raise FactoryError("Invalid assignment dependencies; restore the original task record")
-        if integration_request(request):
-            import integration
-            integration.intent_of(assignment)
-            if any(key in assignment for key in ("window_id", "block_id")):
-                raise FactoryError("Mechanical integration cannot own Rex panes")
-            earlier.add(assignment_id)
-            continue
         if assignment["state"] == "launched" and (record["session_id"] is None
                 or any(not isinstance(assignment.get(key), str) or not assignment[key]
                        for key in ("window_id", "block_id"))):
@@ -845,7 +838,7 @@ def connect(record, binary=None, server=None):
     if record["session_id"] is not None:
         view = check_session(rex, record, record["session_id"])
         for assignment in record["assignments"].values():
-            if assignment["state"] == "launched" and not integration_request(assignment["request"]):
+            if assignment["state"] == "launched":
                 window_id, block_id = assignment_pane(view, assignment)
                 if (window_id, block_id) != (assignment["window_id"], assignment["block_id"]):
                     raise FactoryError("Rex pane identity differs from the task; inspect the original assignment before continuing")
@@ -873,8 +866,8 @@ def check_session(rex, record, session_id):
                 if block["block_id"] in blocks:
                     raise FactoryError("Duplicate Rex block identity; inspect the original session before continuing")
                 blocks.add(block["block_id"])
-    expected = {item["window_label"] for item in record["assignments"].values() if not integration_request(item["request"])}
-    required = {item["window_label"] for item in record["assignments"].values() if item["state"] == "launched" and not integration_request(item["request"])}
+    expected = {item["window_label"] for item in record["assignments"].values()}
+    required = {item["window_label"] for item in record["assignments"].values() if item["state"] == "launched"}
     if not required <= labels <= expected:
         raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
     return view
@@ -903,8 +896,6 @@ def assignment_pane(view, assignment):
 
 def reconcile(rex, record, assignment):
     """Read back a uniquely labeled pending launch; never relaunch an unknown one."""
-    if integration_request(assignment["request"]):
-        raise FactoryError("Use factory integrate with the original inputs to reconcile the pending merge read-only")
     session_id = record.get("session_id")
     if not session_id:
         sessions = rex_object(rex.call("ls", "--json"), lists=("sessions",))["sessions"]
@@ -1005,6 +996,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("Frozen release evidence requires a matching read-only specialist")
         frozen = release_evidence.validate(decode_json(native_args.release_evidence), record)
         instructions += release_evidence.render(frozen)
+    if not existing and integration_request(request):
+        import integration
+        integration.validate_launch(record, request, task, assignment_id, path)
+        instructions += integration.render_intent(decode_json(command[5]))
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
@@ -1108,9 +1103,6 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
 
 
 def status(rex, record, assignment):
-    if integration_request(assignment["request"]):
-        return dict(state="exited" if assignment["result"] is not None else "unknown",
-                    owner="integration", action="Repeat factory integrate with the original inputs to reconcile read-only")
     process = rex.call("block", "call", "-s", record["session_id"],
                        "-b", assignment["block_id"], "process")
     rex_object(process)
@@ -1191,7 +1183,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
-def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False):
     """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import check_commit_receipt, parse_events, parser, read_events
 
@@ -1212,9 +1204,9 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
-    if observe is None and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
+    if not failed_identity and observe is None and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
         raise FactoryError("Collect a current native result before using its answer as coordination evidence")
-    if observe is not None and observe()["state"] != "exited":
+    if observe is not None and observe()["state"] not in ({"failed", "exited"} if failed_identity else {"exited"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -1226,14 +1218,14 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
             or receipt["schema_version"] not in (4, 5, 6)
-            or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
+            or receipt.get("kind") != "codex-execution" or receipt.get("state") != ("failed" if failed_identity else "completed")
             or any(type(receipt.get(key)) not in (int, float)
                    or not 0 <= receipt[key] <= sys.float_info.max
                    for key in ("created_at", "finished_at", "elapsed_seconds"))
             or receipt["finished_at"] < receipt["created_at"]
-            or "error" not in receipt or receipt["error"] is not None
+            or (not isinstance(receipt.get("error"), str) if failed_identity else ("error" not in receipt or receipt["error"] is not None))
             or any(key not in receipt for key in ("thread_id", "report", "usage"))
-            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or (not failed_identity and (type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0))
             or receipt.get("job") != record["task"] + "/" + assignment_id
             or not valid_inputs(receipt.get("inputs"))
             or receipt.get("inputs") != assignment["request"].get("inputs")
@@ -1246,11 +1238,29 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or receipt.get("binary") != str(args.codex) or not args.codex.is_absolute()
             or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
-            or not isinstance(receipt.get("candidate"), str)
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
-            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
+            or (not failed_identity and (not isinstance(receipt.get("candidate"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
+                or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])))
             or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
+    if failed_identity:
+        # Identity-only recovery of a failed contributor. This is never a report,
+        # success receipt, dependency or approval, even if partial events contain one.
+        events = read_events(args.events)
+        threads = [event.get("thread_id") for event in events
+                   if isinstance(event, dict) and event.get("type") == "thread.started"]
+        if (not args.write or not events or not isinstance(events[0], dict)
+                or events[0].get("type") != "thread.started" or len(threads) != 1
+                or not isinstance(threads[0], str) or not threads[0]
+                or receipt.get("thread_id") not in (None, threads[0])):
+            raise FactoryError("Unknown or ambiguous original failed contributor context")
+        try:
+            instructions = Path(assignment["brief"]).read_text()
+        except (OSError, UnicodeError):
+            raise FactoryError("Restore the original failed contributor brief") from None
+        if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
+            raise FactoryError("Original failed contributor brief changed")
+        return args, receipt, dict(thread_id=threads[0])
     import coordination_evidence
     coordination = None
     if args.decision is not None or args.question is not None:
@@ -1520,22 +1530,25 @@ def main(argv=None):
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
             raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "integrate"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
-            if args.action == "integrate":
-                import integration
-                if args.acceptance is not None:
+        if args.action == "integrate":
+            import integration
+            path = args.state_dir.resolve() / (args.task + ".json")
+            if args.acceptance is not None:
+                with task_lock(path.parent, args.task):
                     original = load_task(path)["assignments"].get(args.id)
                     if original is None or original["result"] is None:
                         raise FactoryError("Final acceptance only observes an existing terminal integration")
-                receipt = integration.integrate(path, assignment_id=args.id, pr=args.pr, review=args.review,
-                    required=args.after, gh=args.gh, scripts=args.release_scripts)
-                if args.acceptance is not None:
-                    import release_evidence
+            receipt = integration.integrate(path, assignment_id=args.id, pr=args.pr, review=args.review,
+                required=args.after, gh=args.gh, scripts=args.release_scripts)
+            if args.acceptance is not None:
+                import release_evidence
+                with task_lock(path.parent, args.task):
                     record = load_task(path)
-                    transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
-                    receipt = {**receipt, "acceptance": integration.accepted(record, args.id, args.acceptance, transport)}
-                print(json.dumps(receipt, indent=2))
-                return 0 if receipt["state"] == "delivered" else 1
+                transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
+                receipt = {**receipt, "acceptance": integration.accepted(record, args.id, args.acceptance, transport)}
+            print(json.dumps(receipt, indent=2))
+            return 0 if receipt["state"] in {"launched", "delivered"} else 1
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
