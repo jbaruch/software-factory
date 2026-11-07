@@ -186,6 +186,21 @@ class WorktreeProvisioning(unittest.TestCase):
             self.provision(destination=str(self.root / "other"))
         self.assertIsNone(factory.load_task(self.path)["provisioning"])
 
+    def test_destination_cannot_overlap_the_task_owner_store(self):
+        nested = self.state / "nested"
+        nested.mkdir()
+        before = self.path.read_bytes()
+        for destination in (self.state / "writer", nested / "writer", self.root):
+            with self.subTest(destination=destination):
+                result, _, errors = self.cli("provision", "--task", "fixture", "--id", "backend",
+                                             "--path", str(destination))
+                self.assertEqual(result, 1)
+                self.assertIn("outside the task owner store", errors)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertFalse((self.state / "writer").exists())
+                self.assertFalse((nested / "writer").exists())
+        self.assertEqual(self.git("branch", "--list", "factory/fixture/backend"), "")
+
     def test_hold_input_changes_and_request_changes_preserve_original_intent_and_limits(self):
         factory.hold_task(self.path, "Wait")
         with self.assertRaisesRegex(factory.FactoryError, "paused"):

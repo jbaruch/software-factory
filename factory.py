@@ -828,7 +828,8 @@ def provision_worktree(path, *, worktree_id, destination):
             if (os.path.lexists(parent / ".git") or
                     (parent / "HEAD").exists() and (parent / "objects").is_dir()):
                 raise FactoryError("Provision outside existing checkouts and Git directories")
-        if path.resolve().is_relative_to(destination):
+        if (destination.is_relative_to(path.parent.resolve())
+                or path.resolve().is_relative_to(destination)):
             raise FactoryError("Provision outside the task owner store")
         if os.path.lexists(destination):
             raise FactoryError("Worktree path already exists; never reuse or delete conflicting resources")

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 — 2026-11-07
+
+### Task-owned writer worktrees
+
+Provision one explicitly named writer branch and path from an admitted task's
+selected candidate. Save the immutable request and effect intent in the existing
+task store before Git mutation. Create independent regular files from raw blobs
+without checkout hooks or filters, preserving existing source checkout edits.
+Reuse completed requests after lost replies; reconcile pending effects only when
+the uniquely owned checkout is already complete and clean. Retain missing,
+partial, dirty or conflicting outcomes for inspection without retries or repair.
+Reject unsupported trees/configuration and destinations overlapping the task store.
+Schema 6 preserves legacy holds, inputs and cumulative allowances without adopting
+worktrees. Expose provisioning through the existing owner view. No automatic
+candidate handoff, task acceptance or release authority is added.
+
 ## 0.3.0 — 2026-11-06
 
 ### Explicit ready-work execution
