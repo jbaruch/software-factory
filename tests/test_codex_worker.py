@@ -287,24 +287,70 @@ class NativeResults(unittest.TestCase):
                 self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_unconfirmed_termination_retains_directory_and_primary_failure(self):
-        for stop_error in (OSError("fixture stop failure"), TimeoutError("fixture stop timeout"), None):
-            with self.subTest(stop_error=stop_error):
+        self.writer()
+        self.spawn = NativeResults.spawn.__get__(self)
+        for failure, expected in (("signal", ["signal"]), ("wait", ["signal", "wait"]),
+                                  ("kill", ["signal", "wait", "kill"]),
+                                  ("final-wait", ["signal", "wait", "kill", "wait"]),
+                                  ("unconfirmed", ["signal", "wait"])):
+            with self.subTest(failure=failure):
                 suffix = str(len(self.spawns))
                 self.args.events, self.args.receipt = self.root / (suffix + ".jsonl"), self.root / (suffix + ".json")
-                self.process = FakeProcess([], timeout=True)
-                with patch.object(worker, "stop_child", side_effect=stop_error), \
-                        patch.object(worker.shutil, "rmtree") as remove:
+                observed = []
+                owner = self
+                class Process(FakeProcess):
+                    def send_signal(self, signal):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("signal")
+                        if failure == "signal":
+                            raise PermissionError("fixture signal denied")
+                    async def wait(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("wait")
+                        if failure == "wait":
+                            raise OSError("fixture wait failure")
+                        if failure in ("kill", "final-wait"):
+                            raise TimeoutError("fixture stop deadline")
+                        return 0  # Deliberately leave returncode unconfirmed.
+                    def kill(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("kill")
+                        if failure == "kill":
+                            raise PermissionError("fixture kill denied")
+                self.process = Process([], timeout=True)
+                with patch.object(worker.shutil, "rmtree") as remove, \
+                        patch.object(worker, "commit_changes") as commit:
                     receipt = self.execute()
                 directory = self.shell_directories[-1]
                 self.addCleanup(shutil.rmtree, directory)
+                self.assertEqual(observed, expected)
                 self.assertTrue(directory.is_dir())
                 remove.assert_not_called()
+                commit.assert_not_called()
+                self.assertIsNone(receipt["commit"])
                 self.assertEqual(receipt["state"], "failed")
                 self.assertTrue(receipt["error"].startswith("Native execution allowance expired"))
+                self.assertEqual("Cannot stop the owned native child" in receipt["error"], failure != "unconfirmed")
                 self.assertIn("termination is unconfirmed", receipt["error"])
                 self.assertIn(repr(str(directory)), receipt["error"])
                 self.assertIsNone(receipt["exit_code"])
                 self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_unexpected_cleanup_errors_propagate_without_factory_git(self):
+        self.writer()
+        self.spawn = NativeResults.spawn.__get__(self)
+        for target, method in ((worker, "stop_child"), (worker.shutil, "rmtree")):
+            with self.subTest(method=method):
+                self.args.events, self.args.receipt = self.root / (method + ".jsonl"), self.root / (method + ".json")
+                self.process = FakeProcess(events("completed"))
+                with patch.object(target, method, side_effect=RuntimeError("fixture unexpected error")), \
+                        patch.object(worker, "commit_changes") as commit:
+                    with self.assertRaisesRegex(RuntimeError, "fixture unexpected error"):
+                        self.execute()
+                directory = self.shell_directories[-1]
+                self.addCleanup(shutil.rmtree, directory)
+                self.assertTrue(directory.is_dir())
+                commit.assert_not_called()
 
     def test_fixed_native_config_rejection_keeps_failed_receipt_and_original_stream(self):
         # Fixed outcomes only: this does not simulate Codex environment-policy precedence.

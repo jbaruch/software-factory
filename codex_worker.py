@@ -853,7 +853,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             if process is not None:
                 try:
                     await stop_child(process)
-                except Exception:
+                except OSError:
                     cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
                 receipt["exit_code"] = process.returncode
             if directory is not None:
@@ -862,7 +862,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 else:
                     try:
                         shutil.rmtree(directory)
-                    except Exception:
+                    except OSError:
                         cleanup_errors.append(f"Cannot remove owned native shell directory {str(directory)!r}; restore access and remove only this directory after reconciling the attempt")
         if cleanup_errors:
             raise factory.FactoryError("Native resource cleanup failed; factory Git was not started")
