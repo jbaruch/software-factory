@@ -1,7 +1,5 @@
 # Changelog
 
-## 0.1.0 — 2026-11-05
-
 ### Factory-owned writer commits
 
 Let explicit `--write --commit-message` assignments leave Git staging/commit to
@@ -20,8 +18,11 @@ Respect explicit catalog writer permissions before new launch effects and use
 the macOS socket flag only on macOS; historical reconnects remain unchanged.
 Separate pre-commit into a private Git view with sanitized configuration, a
 disposable index and no signing socket. Deny original configuration and shared
-metadata; enforce writer roles inside the worker before execution. Stage/commit without callbacks; unsupported hook/filter/signer
-configurations fail visibly without bypassing checks or signatures.
+metadata; enforce writer roles inside the worker before execution. Stage/commit
+without callbacks; unsupported hook/filter/signer configurations fail visibly
+without bypassing checks or signatures.
+
+## 0.1.0 — 2026-11-05
 
 ### Safe Codex capacity snapshot
 
