@@ -1,10 +1,12 @@
 """View tests use fixed task records and fake observations; never live Rex or providers."""
 import copy
 import base64
-from contextlib import redirect_stderr, redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from http.client import HTTPConnection
 from io import BytesIO, StringIO
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -116,6 +118,115 @@ class OperatorView(unittest.TestCase):
                 self.assertNotIn("rex://", page)
                 self.assertNotIn("/fixture/native", page)
                 self.assertEqual(self.path.read_bytes(), before)
+
+    def application_checkouts(self):
+        # Real local Git bindings, with inert worker files that must never execute.
+        original = self.root.resolve() / "application"
+        isolated = self.root.resolve() / "isolated"
+        original.mkdir()
+        environment = dict(factory.git_environment(), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_AUTHOR_DATE="2000-01-01T00:00:00+00:00", GIT_COMMITTER_DATE="2000-01-01T00:00:00+00:00")
+        def git(root, *args):
+            return subprocess.run([factory.git_binary(), "-C", str(root), "-c", "core.hooksPath=" + os.devnull,
+                "-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                *args], env=environment, check=True, capture_output=True, text=True)
+        git(original, "init")
+        for harness in ("codex", "grok"):
+            (original / (harness + "_worker.py")).write_text('raise AssertionError("Never execute another checkout")\n')
+        (original / "config").mkdir()
+        (original / "config/providers.json").write_bytes((factory.ROOT / "config/providers.json").read_bytes())
+        git(original, "add", ".")
+        git(original, "commit", "-m", "Fixed application fixture")
+        git(original, "worktree", "add", "--detach", str(isolated))
+        return original, isolated, git
+
+    def test_original_owner_requests_bind_across_isolated_application_checkout(self):
+        original, isolated, git = self.application_checkouts()
+        project = self.root.resolve() / "unrelated-project"
+        project.mkdir()
+        git(project, "init")
+        self.record["admission"]["repository"] = str(project)
+        self.record["admission"]["repository_identity"]["common_dir"] = str(project / ".git")
+        with patch.object(factory, "ROOT", isolated), \
+             patch.object(factory, "repository_identity", side_effect=AssertionError("No marker access")):
+            for harness, historical in (("codex", False), ("codex", True), ("grok", False)):
+                with self.subTest(harness=harness, historical=historical):
+                    command = self.native_command(harness, historical=historical)
+                    command[1 if historical else 3] = str(original / (harness + "_worker.py"))
+                    self.record["assignments"]["backend"]["request"]["command"] = command
+                    factory.save(self.path, self.record)
+                    before = self.path.read_bytes()
+                    view = self.snapshot()
+                    assignment = view["tasks"][0]["assignments"][0]
+                    self.assertEqual(assignment["requested_native"], dict(adapter=harness + "_worker", harness=harness,
+                        route=harness + "-native", model="requested-model", effort="high"))
+                    self.assertIsNone(assignment["observed_model"])
+                    page = dashboard.render(view)
+                    self.assertIn("requested-model", page)
+                    self.assertIn("Observed model: Unknown", page)
+                    self.assertNotIn(str(original), page)
+                    self.assertEqual(self.path.read_bytes(), before)
+        for root in (original, isolated, project):
+            self.assertFalse((factory.git_common_dir(root) / factory.REPOSITORY_MARKER).exists())
+
+    def test_cross_checkout_binding_rejects_impostor_foreign_retired_and_damaged_paths(self):
+        original, isolated, git = self.application_checkouts()
+        foreign = self.root.resolve() / "foreign-clone"
+        git(original, "clone", "--no-hardlinks", str(original), str(foreign))
+        retired = self.root.resolve() / "retired"
+        git(original, "worktree", "add", "--detach", str(retired))
+        (retired / ".git").unlink()
+        git(original, "worktree", "prune", "--expire", "now")
+        damaged = self.root.resolve() / "damaged"
+        git(original, "worktree", "add", "--detach", str(damaged))
+        (damaged / ".git").write_text("gitdir: " + str(foreign / ".git") + "\n")
+        impostor = original / "nested"
+        impostor.mkdir()
+        worker = original / "codex_worker.py"
+        (impostor / worker.name).write_bytes(worker.read_bytes())
+        alias = self.root.resolve() / "alias"
+        alias.symlink_to(original, target_is_directory=True)
+        with patch.object(factory, "ROOT", isolated):
+            good = self.native_command()
+            def unknown(command):
+                self.record["assignments"]["backend"]["request"]["command"] = command
+                result = dashboard.requested_native(self.record, "backend", self.record["assignments"]["backend"])
+                self.assertTrue(all(value is None for value in result.values()), command[:4])
+            for root in (foreign, retired, damaged, impostor, alias, self.root / "missing"):
+                with self.subTest(root=root.name):
+                    unknown([*good[:3], str(root / worker.name), *good[4:]])
+            # A task's arbitrary project/repository labels cannot grant application ownership.
+            self.record["admission"]["repository"] = str(foreign)
+            self.record["admission"]["repository_identity"]["common_dir"] = str(foreign / ".git")
+            unknown([*good[:3], str(foreign / worker.name), *good[4:]])
+            owned = [*good[:3], str(worker), *good[4:]]
+            for prefix in ([sys.executable, "-I"], ["/foreign/python", "-E", "-s"], [sys.executable, "-m"]):
+                unknown([*prefix, str(worker), *good[4:]])
+            for option, value in (("--job", "other/backend"), ("--role", "frontend"), ("--cwd", "/other"),
+                                  ("--repo", "/other"), ("--brief", "/other"), ("--brief-sha256", "b" * 64),
+                                  ("--candidate", "b" * 40), ("--requirements", "other"), ("--repo-identity", "{}")):
+                command = owned.copy()
+                command[command.index(option) + 1] = value
+                unknown(command)
+            # Exact known filenames still refuse missing, linked and non-file paths.
+            saved = worker.read_bytes()
+            worker.unlink()
+            unknown(owned)
+            worker.symlink_to(foreign / worker.name)
+            unknown(owned)
+            worker.unlink()
+            worker.hardlink_to(foreign / worker.name)
+            unknown(owned)
+            worker.unlink()
+            worker.mkdir()
+            unknown(owned)
+            worker.rmdir()
+            worker.write_bytes(saved)
+            with patch.object(factory, "git_run", side_effect=factory.FactoryError("Damaged Git metadata")):
+                unknown(owned)
+            # The damaged checkout is still registered, but belongs to a foreign Git directory.
+            inventory = git(isolated, "worktree", "list", "--porcelain", "-z").stdout
+            self.assertIn("worktree " + str(damaged) + "\0", inventory)
 
     def test_misleading_generic_unsupported_and_damaged_commands_stay_unknown(self):
         good = self.native_command()
@@ -249,6 +360,83 @@ class OperatorView(unittest.TestCase):
         transport.assert_called_with(sys.executable, "unix:///fixture.sock")
         self.assertEqual(rex.call.call_count, 8)
         self.assertEqual(self.path.read_bytes(), before)
+
+    @contextmanager
+    def pending_pane(self, operation):
+        entered, release = threading.Event(), threading.Event()
+        rex, _ = self.fake_rex()
+        original = rex.call.side_effect
+        def call(*args, **kwargs):
+            if args[0] == operation:
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError("Test did not release fake Rex")
+            return original(*args, **kwargs)
+        rex.call.side_effect = call
+        with patch.object(factory, "Rex", return_value=rex), ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(dashboard.pane_detail, self.root, "fixture", "backend", clock=lambda: 900)
+            try:
+                self.assertTrue(entered.wait(timeout=5), "Pane read did not reach fake Rex")
+                yield pending
+            finally:
+                release.set()
+
+    def test_stalled_capture_allows_valid_operator_hold_and_preserves_it(self):
+        self.record["hold"] = None
+        factory.save(self.path, self.record)
+        original = factory.hold_task
+        def fixed_clock(*args, **kwargs):
+            return original(*args, **kwargs, clock=lambda: 800)
+        with self.pending_pane("capture") as pending:
+            with patch.object(dashboard.secrets, "token_urlsafe", return_value="fixed-csrf"), \
+                 patch.object(factory, "hold_task", side_effect=fixed_clock):
+                page = self.get_without_socket("/").wfile.getvalue().decode()
+                self.assertIn('name="csrf" value="fixed-csrf"', page)
+                body = urlencode(dict(csrf="fixed-csrf", request_id="pause-during-capture", expected_revision="0",
+                                      action="pause", reason="Operator hold during capture")).encode()
+                handler = self.get_without_socket("/tasks/fixture/hold", method="POST", body=body,
+                    headers={"Origin": "http://127.0.0.1:8090", "Content-Length": str(len(body)),
+                             "Content-Type": "application/x-www-form-urlencoded"})
+                handler.send_error.assert_not_called()
+                handler.send_response.assert_called_with(303)
+            # The same lock used by launchers is available while capture still waits.
+            with factory.task_lock(self.root, "fixture") as path:
+                saved = factory.load_task(path)
+                self.assertEqual(saved["hold"], "Operator hold during capture")
+                self.assertEqual(saved["control_events"], [dict(id="pause-during-capture", expected_revision=0,
+                    previous_hold=None, hold="Operator hold during capture", at=800)])
+                held_bytes = path.read_bytes()
+            self.assertFalse(pending.done())
+        detail = pending.result(timeout=5)
+        self.assertIsNone(detail["error"])
+        self.assertEqual(detail["output"], "Original <terminal> & output\n")
+        self.assertEqual(self.path.read_bytes(), held_bytes)
+        self.assertIn("Operator hold during capture", dashboard.render(self.snapshot()))
+
+    def test_saved_scope_changes_never_retarget_pending_ownership_checks_or_reads(self):
+        for operation in ("whoami", "session", "block", "capture"):
+            with self.subTest(operation=operation):
+                factory.save(self.path, self.record)
+                with self.pending_pane(operation) as pending:
+                    with factory.task_lock(self.root, "fixture") as path:
+                        changed = factory.load_task(path)
+                        changed["rex"].update(host_id="replacement-host", server="unix:///replacement.sock")
+                        changed.update(session_id="replacement-session", session_label="factory-fixture-11111111")
+                        changed["inputs"]["candidate"] = "b" * 40
+                        changed["assignments"]["backend"].update(window_id="replacement-window", block_id="replacement-block",
+                            window_label="backend-backend-11111111")
+                        factory.save(path, changed)
+                        self.assertEqual(factory.load_task(path), changed)
+                        changed_bytes = path.read_bytes()
+                    self.assertFalse(pending.done())
+                detail = pending.result(timeout=5)
+                self.assertIsNone(detail["error"])
+                self.assertEqual(detail["pane"], dict(host_id="fixture-host", session_id="fixture-session",
+                    window_id="fixture-window", block_id="fixture-block"))
+                self.assertEqual(detail["process"], dict(state="running", observed_at=900, exit_code=None))
+                self.assertEqual(detail["output"], "Original <terminal> & output\n")
+                self.assertNotIn("replacement", dashboard.render_pane(detail))
+                self.assertEqual(self.path.read_bytes(), changed_bytes)
 
     def test_pane_missing_damaged_and_launching_records_never_connect(self):
         connect = Mock(side_effect=AssertionError("No transport for missing identity"))

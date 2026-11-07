@@ -41,6 +41,12 @@ harness, requested model/effort and requested subscription route are derived onl
 from supported factory-owned Codex/Grok worker envelopes using the owner's argument
 parsers and original whole-argument substitutions. Generic commands, unsupported
 harnesses, damaged arguments and mismatched assignment bindings remain unknown.
+The exact canonical regular worker file must belong to this application root or
+a currently registered worktree of its actual Git repository. A read-only Git
+inventory binds original-owner commands when the view runs from another application
+checkout; arbitrary project repositories, unrelated clones, retired worktrees and
+missing/linked worker paths confer no ownership. Rendering executes no other
+checkout's code and neither reads nor initializes repository identity markers.
 This metadata establishes neither runtime readiness nor subscription eligibility.
 Observed model remains unknown; process reads do not establish it. No provider
 metadata is refreshed or written by this view.
@@ -48,10 +54,14 @@ metadata is refreshed or written by this view.
 Saved Rex host/session/window/block IDs remain visible independently of process
 state. **Read owned Rex pane** opens an authenticated relative dashboard URL,
 `/tasks/<task-slug>/assignments/<assignment-slug>/pane`, with no query parameters.
-It reloads the saved record through the owner loader/lock, validates the pinned
-host, session marker and saved window/block pair through `factory.connect`, then
+It loads and validates one saved record through the owner loader/lock, releases
+the lock before any Rex call, validates that snapshot's pinned host, session
+marker and saved window/block pair through `factory.connect`, then
 reads only that block's process and original terminal capture through the existing
-Rex adapter. Each Rex call retains its existing 20-second deadline. There is no
+Rex adapter. Concurrent controls and same-task launchers can acquire the task lock
+while Rex responds. Saved-state changes cannot retarget this observation; it uses
+the same loaded assignment/IDs throughout and never saves that snapshot back.
+Each Rex call retains its existing 20-second deadline. There is no
 native URL scheme, arbitrary Rex target, focus, input, interrupt, launch or recovery
 effect. Refresh repeats only reads. Missing, damaged, launching, foreign or missing
 live identities and unavailable transport produce an actionable unavailable page

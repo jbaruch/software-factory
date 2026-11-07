@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,33 @@ def invalid_worker(message=None):
     raise ValueError("Unknown saved worker envelope")
 
 
+def application_worker(path):
+    """Bind an exact worker file to this application or its registered Git worktrees."""
+    worker = Path(path)
+    try:
+        info = worker.lstat()
+        if (not worker.is_absolute() or str(worker.resolve(strict=True)) != path
+                or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+            return False
+        root = worker.parent
+        if root == factory.ROOT:
+            return True
+        # Inventory comes from the trusted application, never the task's repository
+        # label or the caller's path. No repository markers are created/read here.
+        inventory = factory.git_run(factory.ROOT, "worktree", "list", "--porcelain", "-z")
+        if inventory.returncode:
+            return False
+        registered = any(
+            fields[0] == "worktree " + str(root)
+            and not any(field == "bare" or field.startswith("prunable") for field in fields)
+            for entry in inventory.stdout.split("\0\0") if entry
+            for fields in [entry.split("\0")])
+        return (registered and factory.git_worktree(root) == str(root)
+                and factory.git_common_dir(root) == factory.git_common_dir(factory.ROOT))
+    except (factory.FactoryError, OSError, ValueError, RuntimeError):
+        return False
+
+
 def requested_native(record, identity, assignment):
     """Decode only owner-supported worker envelopes, without executing a worker/probe."""
     unknown = dict(adapter=None, harness=None, route=None, model=None, effort=None)
@@ -44,13 +72,20 @@ def requested_native(record, identity, assignment):
     command = [replacements.get(part, part) for part in request["command"]]
     import codex_worker
     import grok_worker
-    if command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]:
-        parser, offset, harness = codex_worker.parser(), 4, "codex"
-    elif command[:2] == [sys.executable, str(factory.ROOT / "codex_worker.py")]:
-        parser, offset, harness = codex_worker.parser(), 2, "codex"
-    elif command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "grok_worker.py")]:
-        parser, offset, harness = grok_worker.parser(), 4, "grok"
+    if command[:3] == [sys.executable, "-E", "-s"] and len(command) > 3:
+        offset = 4
+    elif command[:1] == [sys.executable] and len(command) > 1:
+        offset = 2
     else:
+        return unknown
+    worker = Path(command[offset - 1])
+    if worker.name == "codex_worker.py":
+        parser, harness = codex_worker.parser(), "codex"
+    elif worker.name == "grok_worker.py" and offset == 4:
+        parser, harness = grok_worker.parser(), "grok"
+    else:
+        return unknown
+    if not application_worker(command[offset - 1]):
         return unknown
     # argparse's abbreviations and repeated options are not factory-generated envelopes.
     parser.allow_abbrev = False
@@ -123,15 +158,17 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
             if assignment["state"] != "launched":
                 detail["error"] = "Pane unavailable: launch needs reconciliation. Use factory status for this task, then refresh."
                 return detail
-            # connect validates host, session marker and every saved window/block pair.
-            rex = connect(record)
-            detail["process"] = observe_process(rex, record, assignment, clock)
-            output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
-                              "--trim", "--unwrap", raw=True)
-            if not isinstance(output, str):
-                raise factory.FactoryError("Invalid capture")
-            detail.update(output=output[-PANE_LIMIT:], partial=len(output) > PANE_LIMIT,
-                          captured_at=clock(), error=None)
+        # Release the lock before transport waits; this loaded scope stays fixed
+        # through every ownership check/read and is never saved back to the task.
+        # connect validates host, session marker and every saved window/block pair.
+        rex = connect(record)
+        detail["process"] = observe_process(rex, record, assignment, clock)
+        output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
+                          "--trim", "--unwrap", raw=True)
+        if not isinstance(output, str):
+            raise factory.FactoryError("Invalid capture")
+        detail.update(output=output[-PANE_LIMIT:], partial=len(output) > PANE_LIMIT,
+                      captured_at=clock(), error=None)
     except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         detail["error"] = "Pane unavailable. Inspect the pinned Rex host/session and original pane identity; restore access or use factory status, then refresh."
     return detail

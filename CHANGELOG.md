@@ -15,6 +15,13 @@ render callers remain compatible. Fake records/transports and socket-free
 handler tests cover the addition; host/browser/live acceptance remains separate.
 Release version/base reconciliation remains with the foreman.
 
+Pane observations release the task lock before Rex waits, preserving concurrent
+operator controls and their saved history without retargeting an in-progress read.
+Native request metadata recognizes exact original-owner worker paths across
+registered worktrees of the application repository, using read-only Git binding.
+Fixed fake-Rex concurrency and cross-checkout owner tests cover these corrections;
+direct-candidate host/live checks and independent re-review remain separate gates.
+
 ## 0.9.0 — 2026-11-07 (unpublished)
 
 ### Opt-in writer candidate handoff
