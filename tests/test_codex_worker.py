@@ -395,6 +395,39 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
         self.assertEqual(outside.read_text(), "original\n")
 
+    def test_replaced_source_directory_cannot_materialize_an_external_hard_link(self):
+        self.writer()
+        (self.repo / ".gitignore").write_text("docs\n")
+        directory = self.repo / "docs"
+        directory.mkdir()
+        (directory / "source.py").write_text("value = 1\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "add", "--force", "docs/source.py").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-m", "Add directory fixture").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        outside = self.root / "host-directory"
+        outside.mkdir()
+        target = outside / "source.py"
+        target.write_text("host value\n")
+        alias = self.root / "host-alias"
+        os.link(target, alias)
+        inode = target.stat().st_ino
+        async def replaced(*command, **options):
+            (directory / "source.py").unlink()
+            directory.rmdir()
+            directory.symlink_to(outside, target_is_directory=True)
+            return self.process
+        self.spawn = replaced
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("symlinked source directory", receipt["error"])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.stat().st_nlink, 2)
+        self.assertEqual(alias.read_text(), "host value\n")
+        self.assertEqual(list(outside.iterdir()), [target])
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
+
     def test_bad_commit_message_refuses_before_task_locks_or_execution_artifacts(self):
         for write, message in ((False, "A message"), (True, " "), (True, "\nNo subject"),
                                (True, "x" * 73), (True, "bad\0message")):
