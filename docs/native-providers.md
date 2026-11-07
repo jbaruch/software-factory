@@ -195,12 +195,14 @@ and leaves Git staging/commit to the runtime. Only a successful native run with 
 `completed` report can enter this step. The runtime retains an intent before
 status/staging can execute a configured filter, copies shared regular outputs to
 independent files without changing their other links, rejects non-regular files,
-records the staged tree, scans its filenames, raw blobs and commit message with
-native Gitleaks, then runs one
+records the staged tree, scans its filenames, raw blobs, commit message and
+effective author/committer identities with native Gitleaks, then runs one
 local Git commit with the repository's supported hooks, signing and author settings.
 Install Gitleaks outside the checkout, Git metadata and temporary directories.
 Use the version pinned in `.pre-commit-config.yaml`; refresh the native tool when
 the weekly Dependabot hook update changes that pin.
+Preflight verifies that version before launching the writer. Unstamped upstream
+Go builds require native Go to verify the embedded module/version metadata.
 The mandatory scan uses built-in rules through a generated configuration; source
 configuration, ignore files and `gitleaks:allow` comments cannot disable it.
 It runs even without a pre-commit hook. Missing tools, scanner errors or findings

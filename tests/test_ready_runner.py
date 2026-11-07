@@ -43,6 +43,8 @@ class ReadyRunner(unittest.TestCase):
         self.root = Path(directory.name).resolve()
         self.directory, self.repo = self.root / "state", self.root / "repo"
         subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        for key, value in (("user.name", "Fixture"), ("user.email", "fixture@example.invalid")):
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
         subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=Fixture",
             "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
             "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--allow-empty", "-m", "Fixture"],

@@ -60,6 +60,8 @@ class NativeResults(unittest.TestCase):
         self.root = Path(directory.name)
         self.repo = self.root / "repo"
         subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+        for key, value in (("user.name", "Fixture"), ("user.email", "fixture@example.invalid")):
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
         subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=Fixture",
                         "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
                         "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--allow-empty", "-m", "Fixture"],
@@ -202,6 +204,18 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.spawns, [])
         self.assertFalse(self.args.receipt.exists())
 
+    def test_zero_exit_native_impostor_is_not_a_secret_scanner(self):
+        self.writer()
+        self.scan = worker.scan_staged
+        which = shutil.which
+        def impostor(name, *args, **kwargs):
+            return which("true", path=os.defpath) if name == "gitleaks" else which(name, *args, **kwargs)
+        with patch.object(worker.shutil, "which", side_effect=impostor):
+            with self.assertRaisesRegex(factory.FactoryError, "Scanner identity/version"):
+                self.execute()
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.receipt.exists())
+
     def test_scanner_errors_cannot_report_a_clean_staged_tree(self):
         (self.repo / "source.txt").write_bytes(b"staged fixture bytes\r\n")
         self.assertEqual(factory.git_run(".", "-c", "core.autocrlf=false", "add", "--all").returncode, 0)
@@ -225,14 +239,14 @@ class NativeResults(unittest.TestCase):
                         worker.scan_staged(self.args, dict(repository_identity=self.identity,
                             commit=dict(staged_tree=tree)), git_scope=scope)
 
-    def test_secret_scan_includes_filenames_and_commit_message(self):
+    def test_secret_scan_includes_paths_message_and_git_identities(self):
         self.args._gitleaks = Path(sys.executable)
         @contextmanager
         def scope(*args, **kwargs):
             with factory.git_execution(lambda: [], {**factory.git_environment(), "TMPDIR": str(self.root)}):
                 yield
         run = subprocess.run
-        for location in ("filename", "message"):
+        for location in ("filename", "message", "author", "committer"):
             with self.subTest(location=location):
                 sentinel = "ghp_" + hashlib.sha256(location.encode()).hexdigest()[:36]
                 name = sentinel if location == "filename" else "ordinary.txt"
@@ -245,7 +259,9 @@ class NativeResults(unittest.TestCase):
                         return run(command, **options)
                     present = sentinel.encode() in options["stdin"].read()
                     return subprocess.CompletedProcess(command, int(present), stdout=b"", stderr=b"")
-                with patch.object(worker.subprocess, "run", side_effect=scanner):
+                identity = ({"GIT_AUTHOR_NAME": sentinel} if location == "author" else
+                            {"GIT_COMMITTER_EMAIL": sentinel + "@fixture.invalid"} if location == "committer" else {})
+                with patch.dict(os.environ, identity), patch.object(worker.subprocess, "run", side_effect=scanner):
                     with self.assertRaisesRegex(factory.FactoryError, "Secret scan refused"):
                         worker.scan_staged(self.args, dict(repository_identity=self.identity,
                             commit=dict(staged_tree=tree)), git_scope=scope)
@@ -1204,8 +1220,10 @@ class NativeResults(unittest.TestCase):
         original = json.loads(self.args.receipt.read_text())
         self.assertIsNone(original["commit"])
         tree = factory.git_run(".", "rev-parse", self.candidate + "^{tree}").stdout.strip()
-        sibling = factory.git_run(".", "commit-tree", tree, "-p", self.candidate, "-m", "Substituted candidate")
-        self.assertEqual(sibling.returncode, 0)
+        sibling = factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                  "-c", "commit.gpgsign=false", "commit-tree", tree,
+                                  "-p", self.candidate, "-m", "Substituted candidate")
+        self.assertEqual(sibling.returncode, 0, sibling.stderr)
         before = self.path.read_bytes()
         for version in (4, 5):
             with self.subTest(version=version):

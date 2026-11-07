@@ -457,24 +457,52 @@ def commit_policy(args, environment):
 
 
 def scanner_binary(args):
-    selected = shutil.which("gitleaks")
-    if not selected:
-        raise factory.FactoryError("Install a native Gitleaks executable before automatic writer commits")
-    binary = Path(selected).resolve()
     roots = (Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir,
              Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
-    if not binary.is_file() or any(binary.is_relative_to(root) for root in roots):
-        raise factory.FactoryError("Install native Gitleaks outside writer-controlled and temporary paths before automatic commits")
-    with binary.open("rb") as stream:
-        if stream.read(2) == b"#!":
-            raise factory.FactoryError("Use a native Gitleaks binary rather than a script wrapper for automatic commits")
+    def tool(name):
+        selected = shutil.which(name)
+        if not selected:
+            raise factory.FactoryError("Install a native Gitleaks release, or Go for an unstamped Go build, before automatic writer commits")
+        path = Path(selected).resolve()
+        if not path.is_file() or any(path.is_relative_to(root) for root in roots):
+            raise factory.FactoryError("Install scanner tools outside writer-controlled and temporary paths before automatic commits")
+        with path.open("rb") as stream:
+            if stream.read(2) == b"#!":
+                raise factory.FactoryError("Use native scanner tools rather than script wrappers for automatic commits")
+        return path
+    binary = tool("gitleaks")
+    try:
+        config = (factory.ROOT / ".pre-commit-config.yaml").read_text()
+        pin = re.search(r"(?m)^  - repo: https://github.com/gitleaks/gitleaks\n    rev: v([0-9]+\.[0-9]+\.[0-9]+)\s*$", config)
+        if pin is None:
+            raise factory.FactoryError("Restore the pinned Gitleaks entry in .pre-commit-config.yaml before automatic commits")
+        version = subprocess.run([str(binary), "version"], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=10, check=False, env=native_environment())
+        verified = not version.returncode and not version.stderr and version.stdout.strip() == pin[1]
+        if not version.returncode and not version.stderr and version.stdout.strip() == "version is set by build process":
+            metadata = subprocess.run([str(tool("go")), "version", "-m", str(binary)], stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=10, check=False, env=native_environment())
+            module = "\tmod\tgithub.com/zricethezav/gitleaks/v8\tv" + pin[1] + "\t"
+            verified = not metadata.returncode and not metadata.stderr and any(
+                line.startswith(module) for line in metadata.stdout.splitlines())
+        if not verified:
+            raise factory.FactoryError("Scanner identity/version does not match the Gitleaks pin; install the pinned native release before starting a writer")
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        raise factory.FactoryError("Cannot verify the pinned scanner; restore its native installation and manifest before starting a writer") from None
     return binary
 
 
 def scan_staged(args, receipt, *, git_scope=isolated_git):
-    """Scan staged names, raw blobs and the message without a signer."""
+    """Scan staged data and resolved commit metadata without a signer."""
     if getattr(args, "_gitleaks", None) is None:
         args._gitleaks = scanner_binary(args)
+    # Resolve identities against the same original config/environment used by
+    # the final commit; the private scanner view omits that configuration.
+    with git_scope(args, receipt["repository_identity"]):
+        identities = [factory.git_run(".", "var", name) for name in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT")]
+        if any(value.returncode for value in identities):
+            raise factory.FactoryError("Cannot resolve commit identities for secret scanning; configure valid Git author/committer identities before another attempt")
+        identity_text = "\n".join(value.stdout for value in identities)
     with git_scope(args, receipt["repository_identity"], read_only=True):
         scope = factory.GIT_EXECUTION.get()
         if scope is None:
@@ -494,7 +522,7 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
             # Avoid the scanner's Git-diff parser: some versions report success
             # after Git stderr errors without scanning its additions.
             with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as blobs:
-                blobs.write((args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
+                blobs.write((identity_text + "\n" + args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
                 blobs.flush()
                 copied = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects",
                     "cat-file", "--batch"], input=objects.stdout.encode(), stdout=blobs,
