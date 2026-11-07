@@ -185,8 +185,20 @@ records the staged tree, then runs one local
 Git commit with the repository's existing hooks, signing and author settings.
 Validated inherited Git configuration also applies to status/staging/commit.
 The operator-approved exception in `AGENTS.md` permits configured hooks, filters
-and signing helpers to run writer-edited source with normal host access. Native
-model commands retain their declared sandbox. Writers may
+and signing helpers to load writer-edited source. The factory additionally runs
+Git and its final checkout checks through the selected native CLI's local sandbox;
+this makes no model or provider call. Its invocation-only profile disables network
+access and limits writes to this worktree and its Git metadata. Other filesystem
+access is denied except read access to common runtimes, Git configuration, the
+installed hook tool/cache and a configured public signing key.
+Publication-token environment variables are absent, and protected Git environment
+values are checked after native CLI startup. File-based SSH signing uses a private
+agent holding only the configured key; callbacks can read its public key but not
+the private file. The agent closes with the owner and gives keys a five-minute
+lifetime. It cannot load PKCS#11/FIDO libraries. The user's agent stays unchanged.
+Hooks need offline inputs. Unsupported sandbox or noninteractive
+hook/signing access fails visibly with retained intent and no host fallback.
+Native model commands retain their declared sandbox. Writers may
 start from an admitted subdirectory; source checks still use the worktree root.
 No changes produce no empty commit. Commit errors or lost responses preserve the
 intent and worktree for inspection; they never retry the native job or commit.

@@ -1,9 +1,9 @@
 """Native result/lifecycle tests use fake processes and Rex, never model calls."""
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 import copy
 import hashlib
-from io import StringIO
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -11,8 +11,10 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import codex_worker as worker
 import factory
@@ -83,6 +85,7 @@ class NativeResults(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.spawns = []
         self.process = FakeProcess(events())
+        self.git_scope = lambda *args, **kwargs: nullcontext()
 
     async def spawn(self, *command, **options):
         self.spawns.append(command)
@@ -91,7 +94,8 @@ class NativeResults(unittest.TestCase):
     def execute(self):
         with redirect_stdout(StringIO()):
             return asyncio.run(worker.execute(self.args, spawn=self.spawn,
-                                               clock=lambda: 1000.0, timer=lambda: 10.0))
+                                               clock=lambda: 1000.0, timer=lambda: 10.0,
+                                               git_scope=self.git_scope))
 
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
@@ -165,6 +169,143 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
+
+    def test_git_callbacks_and_postflight_use_the_closed_local_execution_scope(self):
+        self.writer()
+        self.git_scope = worker.isolated_git
+        hook = self.repo / ".git/hooks/pre-commit"
+        hook.write_text(f"#!{sys.executable}\nimport os\nfrom pathlib import Path\nassert 'GH_TOKEN' not in os.environ\nPath('.git/environment-checked').write_text('passed')\n")
+        hook.chmod(0o700)
+        self.assertEqual(factory.git_run(".", "config", "core.hooksPath", ".git/hooks").returncode, 0)
+        run = subprocess.run
+        calls = []
+        def sandbox_transport(command, **options):
+            if len(command) > 1 and command[1] == "sandbox":
+                calls.append((command, dict(options["env"])))
+                # Fake only OS isolation; Git, hooks and receipt checks stay real.
+                command = command[command.index("--") + 1:]
+                options["env"] = {**options["env"], "GH_TOKEN": "fixture-cli-injected-token"}
+            return run(command, **options)
+        with patch.dict(os.environ, GH_TOKEN="fixture-token", GITHUB_TOKEN="fixture-token",
+                        AWS_SECRET_ACCESS_KEY="fixture-token"), \
+                patch.object(factory.subprocess, "run", side_effect=sandbox_transport):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((self.repo / ".git/environment-checked").read_text(), "passed")
+        self.assertIsNone(factory.GIT_EXECUTION.get())
+        commands = [command[command.index("--") + 1:] for command, _ in calls]
+        self.assertTrue(any("add" in command for command in commands))
+        self.assertTrue(any("commit" in command for command in commands))
+        self.assertTrue(any("status" in command for command in commands))
+        self.assertGreater(len(commands), 6)  # Includes the final checkout verification.
+        names = [command[command.index("--permission-profile") + 1] for command, _ in calls]
+        self.assertEqual(len(set(names)), len(calls))
+        for command, environment in calls:
+            name = command[command.index("--permission-profile") + 1]
+            profile = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]
+            self.assertIs(profile["network"]["enabled"], False)
+            self.assertEqual(profile["filesystem"][":root"], "deny")
+            self.assertEqual(profile["filesystem"][str(self.repo.resolve())], "write")
+            self.assertEqual(profile["filesystem"][str(self.repo.resolve() / ".git")], "write")
+            self.assertTrue(Path(environment["TMPDIR"]).is_relative_to(self.repo.resolve() / ".git"))
+            self.assertFalse(any(key in environment for key in (
+                "GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY")))
+
+    def test_native_sandbox_cannot_rewrite_configured_git_policy(self):
+        self.writer()
+        self.git_scope = worker.isolated_git
+        run = subprocess.run
+        def rewritten(command, **options):
+            if len(command) > 1 and command[1] == "sandbox":
+                command = command[command.index("--") + 1:]
+                options["env"] = {**options["env"], "GIT_CONFIG_VALUE_0": "fixture-rewritten-hooks"}
+            return run(command, **options)
+        with patch.dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath",
+                        GIT_CONFIG_VALUE_0="/dev/null"), \
+                patch.object(factory.subprocess, "run", side_effect=rewritten):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("rewrote protected Git environment", receipt["error"])
+        self.assertIsNone(factory.GIT_EXECUTION.get())
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
+    def test_unavailable_git_isolation_never_falls_back_to_host_execution(self):
+        self.writer()
+        self.git_scope = worker.isolated_git
+        run = subprocess.run
+        attempts = []
+        def unavailable(command, **options):
+            if len(command) > 1 and command[1] == "sandbox":
+                attempts.append(command)
+                raise FileNotFoundError("fixture sandbox unavailable")
+            return run(command, **options)
+        with patch.object(factory.subprocess, "run", side_effect=unavailable):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(len(attempts), 1)
+        self.assertIsNone(factory.GIT_EXECUTION.get())
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+
+    def test_private_signer_retires_its_socket_on_success_or_rejected_key(self):
+        original_agent = os.environ.get("SSH_AUTH_SOCK")
+        for outcome in (0, 1):
+            observed = {}
+            def start(command, **options):
+                socket = Path(command[command.index("-a") + 1])
+                socket.touch()  # Fake agent transport; no keys or services.
+                observed.update(command=command, socket=socket, options=options, pipe=BytesIO(), waited=False)
+                def wait(**kwargs):
+                    observed["waited"] = True
+                    return 0
+                return SimpleNamespace(stdin=observed["pipe"], poll=lambda: None, wait=wait)
+            with patch.object(worker.shutil, "which", side_effect=lambda name, **kwargs: "/usr/bin/" + name), \
+                    patch.object(worker.subprocess, "Popen", side_effect=start), \
+                    patch.object(worker.subprocess, "run", return_value=subprocess.CompletedProcess([], outcome)) as load:
+                if outcome:
+                    with self.assertRaisesRegex(factory.FactoryError, "noninteractive signing"):
+                        with worker.private_signer(self.root / "fixture-key", sys.executable):
+                            self.fail("Rejected key must not yield signing access")
+                else:
+                    with worker.private_signer(self.root / "fixture-key", sys.executable) as socket:
+                        self.assertFalse(Path(socket).is_relative_to(self.repo))
+                        self.assertEqual(load.call_args.kwargs["env"]["SSH_AUTH_SOCK"], socket)
+                self.assertIn("", observed["command"])
+                self.assertIn("300", observed["command"])
+                self.assertTrue(observed["pipe"].closed)
+                self.assertTrue(observed["waited"])
+                self.assertFalse(observed["socket"].exists())
+                self.assertEqual(os.environ.get("SSH_AUTH_SOCK"), original_agent)
+
+    def test_missing_private_signer_tools_refuse_before_starting_a_process(self):
+        with patch.object(worker.shutil, "which", return_value=None), \
+                patch.object(worker.subprocess, "Popen") as start, \
+                self.assertRaisesRegex(factory.FactoryError, "Install OpenSSH"):
+            with worker.private_signer(self.root / "fixture-key", sys.executable):
+                self.fail("Missing signer must not yield")
+        start.assert_not_called()
+
+    def test_ssh_signing_grants_public_material_and_a_private_socket_only(self):
+        public = self.root / "fixture-key.pub"
+        public.write_text("ssh-ed25519 AAAAFIXTURE fixture\n")
+        private = public.with_suffix("")
+        private.write_text("test-only placeholder")
+        for key, value in {"user.signingkey": str(public), "gpg.format": "ssh", "commit.gpgsign": "true"}.items():
+            self.assertEqual(factory.git_run(".", "config", key, value).returncode, 0)
+        @contextmanager
+        def signer(key, python):
+            self.assertEqual(key, private.resolve())
+            yield str(self.root / "private-signer-socket")
+        with patch.object(worker, "private_signer", signer), worker.isolated_git(self.args, self.identity, signing=True):
+            prefix, environment = factory.GIT_EXECUTION.get()
+            command = prefix()
+            name = command[command.index("--permission-profile") + 1]
+            files = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]["filesystem"]
+            self.assertEqual(files[str(public.resolve())], "read")
+            self.assertEqual(files[str(private.resolve())], "deny")
+            self.assertEqual(files[environment["SSH_AUTH_SOCK"]], "read")
+            self.assertEqual(files[str(self.repo.resolve() / ".git/config")], "read")
+            self.assertEqual(files[str(self.repo.resolve() / ".git/hooks")], "read")
 
     def test_factory_commit_detaches_finished_output_without_changing_its_alias(self):
         self.writer()
@@ -263,7 +404,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
         self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
 
-    def test_authorized_hook_imports_writer_edited_source_with_normal_host_access(self):
+    def test_configured_hook_imports_writer_edited_source(self):
         self.writer()
         helper = self.repo / "hook_helper.py"
         helper.write_text("def effect():\n    pass\n")

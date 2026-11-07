@@ -8,8 +8,10 @@ Let explicit `--write --commit-message` assignments leave Git staging/commit to
 the runtime. Retain before-effect intent and staged tree in version-5 receipts,
 respect configured hooks/filters/signing and preserve failures without retries.
 Materialize shared regular output files before Git without changing their aliases.
-The operator-approved exception permits those helpers to run edited source with
-normal host access; native model sandbox permissions remain unchanged. Collect
+The operator-approved exception permits those helpers to load edited source.
+Run Git and final checkout checks in a local-only native sandbox, with restricted
+filesystem access and no publication-token environment or host fallback. Native
+model sandbox permissions remain unchanged. Collect
 valid version-4 receipts without rewriting them. Produced commits still require
 independent verification and the repository's review/CI gates.
 
