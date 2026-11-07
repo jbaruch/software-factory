@@ -108,6 +108,10 @@ Correction/investigation attempts and read-only QA, code-review, investigator,
 judge and standby-reasoner roles can use the reserved worker slots. Ordinary work
 cannot consume that reserve. Active readers and writers never share a checkout
 with a new writer; unknown command adapters are conservatively treated as writers.
+Checkout exclusion compares Git worktree identities, including subdirectory
+assignments. Verified regular files with shared hard links are materialized as
+independent copies before execution and after native work; source bytes and
+modes still have to match the candidate. Other aliases remain unchanged.
 Writers still require isolated worktrees. Worktree creation and candidate
 handoff are explicit in this slice.
 

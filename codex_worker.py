@@ -6,11 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import signal
 import stat
 import sys
-import tempfile
 import time
 
 sys.dont_write_bytecode = True
@@ -164,11 +162,7 @@ def commit_changes(args, receipt):
             raise factory.FactoryError("Writer contains linked or non-regular source; inspect the retained changes and use independent regular files")
         if info.st_nlink > 1:
             # Materialize finished output without changing its other hard links.
-            source = root / name
-            with tempfile.TemporaryDirectory(prefix=".factory-source-", dir=source.parent) as temporary:
-                independent = Path(temporary) / "source"
-                shutil.copy2(source, independent, follow_symlinks=False)
-                os.replace(independent, source)
+            factory.independent_source(root / name)
     status = factory.git_run(".", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
     if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
         raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")

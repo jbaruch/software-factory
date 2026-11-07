@@ -216,8 +216,10 @@ to the same unreplaced source used by verification.
 Filesystem enumeration permits only candidate files and their implied directories,
 excluding the root Git metadata entry. Empty untracked directories refuse launch
 even when Git status reports a clean checkout.
-This runtime requires independent regular source files: tracked symlinks and
-shared hard links refuse launch. Materialize linked inputs into the assigned
+This runtime requires independent regular source files. Tracked symlinks refuse
+launch. Shared hard links are copied into independent regular files before launch,
+without changing their aliases. Source bytes and modes must still match the
+candidate. Materialize symlinked inputs into the assigned
 checkout before admitting work that needs them.
 Linked worktrees are supported. Reconnection does not restart or rebind existing work.
 Requirements revisions are explicit nonempty identifiers; the operator must

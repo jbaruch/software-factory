@@ -535,6 +535,14 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None, expect
         raise FactoryError("Assignment worktree differs; restore its original Git directory and use the assigned checkout")
 
 
+def independent_source(path):
+    """Copy a shared regular source file without changing any of its aliases."""
+    with tempfile.TemporaryDirectory(prefix=".factory-source-", dir=path.parent) as temporary:
+        independent = Path(temporary) / "source"
+        shutil.copy2(path, independent, follow_symlinks=False)
+        os.replace(independent, path)
+
+
 def check_tracked_bytes(cwd, candidate):
     """Check source bytes/modes against the commit without trusting index stat hints."""
     tree = git_run(cwd, "ls-tree", "-r", "-z", "--full-tree", candidate)
@@ -559,7 +567,8 @@ def check_tracked_bytes(cwd, candidate):
                 raise FactoryError("Assignment source contains symlinks; use a full checkout of independent regular files before launching")
             elif stat.S_ISREG(info.st_mode):
                 if info.st_nlink > 1:
-                    raise FactoryError("Assignment source contains shared hard links; use a full checkout of independent regular files before launching")
+                    independent_source(path)
+                    info = path.lstat()
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
                 data = path.read_bytes()
             else:

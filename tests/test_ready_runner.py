@@ -229,18 +229,34 @@ class ReadyRunner(unittest.TestCase):
         self.assertIn("task limit", result["jobs"][2]["reason"])
 
     def test_native_writer_prevents_concurrent_verification_in_its_checkout(self):
-        jobs = [self.job(role="backend", write=True), self.job("second")]
+        docs = self.document_subdirectory()
+        jobs = [self.job(role="backend", write=True, cwd=str(docs)), self.job("second")]
         result = self.tick(self.controller(self.plan(jobs)))
         self.assertEqual(result["jobs"][0]["state"], "running")
         self.assertEqual(result["jobs"][1]["state"], "waiting")
         self.assertIn("checkout", result["jobs"][1]["reason"])
 
     def test_active_native_reader_prevents_a_writer_in_the_same_checkout(self):
-        jobs = [self.job(), self.job("second", role="backend", write=True)]
+        docs = self.document_subdirectory()
+        jobs = [self.job(), self.job("second", role="backend", write=True, cwd=str(docs))]
         result = self.tick(self.controller(self.plan(jobs)))
         self.assertEqual(result["jobs"][0]["state"], "running")
         self.assertEqual(result["jobs"][1]["state"], "waiting")
         self.assertIn("checkout", result["jobs"][1]["reason"])
+
+    def document_subdirectory(self):
+        docs = self.repo / "docs"
+        docs.mkdir()
+        (docs / "contract.md").write_text("Fixture contract\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "docs"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+            "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "Fixture docs"], check=True,
+            env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        self.candidate = factory.git_commit(str(self.repo), "HEAD")
+        with factory.task_lock(self.directory, "task") as path:
+            factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")
+        return docs
 
     def test_unmanaged_unknown_process_counts_and_unknown_adapter_is_a_writer(self):
         self.admit("other")
@@ -411,7 +427,7 @@ class ReadyRunner(unittest.TestCase):
         def sleep(seconds):
             sleeps.append(seconds)
             self.finish("task", "first" if len(sleeps) == 1 else "second")
-        times = iter([0.0, 0.0, 5.0, 10.0])
+        times = iter([0.0, 0.0, 5.0, 5.0, 10.0, 10.0])
         result = runner.run(controller, seconds=30, timer=lambda: next(times), sleep=sleep)
         self.assertEqual(result["result"], "complete")
         self.assertEqual(sleeps, [5, 5])
@@ -421,6 +437,18 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(pending["result"], "pending_at_budget")
         self.assertEqual(pending["jobs"][0]["state"], "running")
         self.assertEqual(pending["active_workers"], 1)
+
+    def test_budget_expiry_never_dispatches_a_newly_ready_dependency(self):
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
+        now = [0.0]
+        def sleep(seconds):
+            now[0] += seconds
+            self.finish("task", "first")
+        pending = runner.run(controller, seconds=5, timer=lambda: now[0], sleep=sleep)
+        self.assertEqual(pending["result"], "pending_at_budget")
+        saved = factory.load_task(self.directory / "task.json")
+        self.assertEqual(list(saved["assignments"]), ["first"])
+        self.assertEqual(pending["metrics"]["launched"], 1)
 
 
 if __name__ == "__main__":

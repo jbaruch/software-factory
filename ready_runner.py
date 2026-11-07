@@ -264,9 +264,19 @@ class Runner:
                             + (["--write"] if job["write"] else []))
                 if not reserved(request) and sum(not reserved(item) for _, item in active) >= limits["workers"] - limits["reserve_workers"]:
                     reason = "Ordinary worker slots are occupied; verification/recovery reserve remains available"
-                elif any(Path(item["cwd"]).resolve() == Path(job["cwd"]).resolve()
-                         and (job["write"] or writer(item)) for _, item in active):
-                    reason = "An active writer/reader owns this checkout; use an independent worktree"
+                else:
+                    try:
+                        checkout = factory.git_dir(job["cwd"])
+                    except factory.FactoryError as exc:
+                        self.launch_errors[key] = str(exc)
+                        phases[key] = dict(state="blocked", reason=str(exc))
+                        continue
+                    try:
+                        if any((job["write"] or writer(item)) and factory.git_dir(item["cwd"]) == checkout
+                               for _, item in active):
+                            reason = "An active writer/reader owns this checkout; use an independent worktree"
+                    except factory.FactoryError as exc:
+                        reason = "Worktree occupancy is unavailable: " + str(exc)
             if reason is None:
                 self.refresh_capacity()
                 reason = self.capacity_error or (capacity_reason(self.capacity, self.binary, self.clock(),
@@ -327,6 +337,10 @@ def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) 
                 result["result"] = "pending_at_budget"
                 return result
             sleep(min(POLL_SECONDS, seconds - elapsed))
+            elapsed = timer() - started
+            if elapsed >= seconds:
+                result.update(result="pending_at_budget", elapsed_seconds=elapsed)
+                return result
 
 
 def main(argv=None):
