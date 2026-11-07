@@ -29,6 +29,9 @@ missing scanners, scan errors and findings before signing or committing.
 Recheck the retained checkout's repository marker and exact Git directory during
 collection, including legacy version-4 receipts. Bind every writer candidate to
 its retained worktree HEAD, including writers without a factory commit.
+Verify the scanner's pinned version before a native writer starts, including
+embedded Go module metadata for unstamped builds. Structure the factory skill
+as separate coordinate and inspect actions.
 
 ## 0.1.0 — 2026-11-05
 

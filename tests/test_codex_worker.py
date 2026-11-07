@@ -202,6 +202,18 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.spawns, [])
         self.assertFalse(self.args.receipt.exists())
 
+    def test_zero_exit_native_impostor_is_not_a_secret_scanner(self):
+        self.writer()
+        self.scan = worker.scan_staged
+        which = shutil.which
+        def impostor(name, *args, **kwargs):
+            return which("true", path=os.defpath) if name == "gitleaks" else which(name, *args, **kwargs)
+        with patch.object(worker.shutil, "which", side_effect=impostor):
+            with self.assertRaisesRegex(factory.FactoryError, "Scanner identity/version"):
+                self.execute()
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.receipt.exists())
+
     def test_scanner_errors_cannot_report_a_clean_staged_tree(self):
         (self.repo / "source.txt").write_bytes(b"staged fixture bytes\r\n")
         self.assertEqual(factory.git_run(".", "-c", "core.autocrlf=false", "add", "--all").returncode, 0)
@@ -1204,8 +1216,10 @@ class NativeResults(unittest.TestCase):
         original = json.loads(self.args.receipt.read_text())
         self.assertIsNone(original["commit"])
         tree = factory.git_run(".", "rev-parse", self.candidate + "^{tree}").stdout.strip()
-        sibling = factory.git_run(".", "commit-tree", tree, "-p", self.candidate, "-m", "Substituted candidate")
-        self.assertEqual(sibling.returncode, 0)
+        sibling = factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                  "-c", "commit.gpgsign=false", "commit-tree", tree,
+                                  "-p", self.candidate, "-m", "Substituted candidate")
+        self.assertEqual(sibling.returncode, 0, sibling.stderr)
         before = self.path.read_bytes()
         for version in (4, 5):
             with self.subTest(version=version):
