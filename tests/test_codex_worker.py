@@ -354,6 +354,21 @@ class NativeResults(unittest.TestCase):
                     with self.assertRaisesRegex(factory.FactoryError, "dedicated tool/cache"):
                         with worker.isolated_git(self.args, self.identity):
                             self.fail("Broad callback grant was accepted")
+        runtime = self.root / "other-python"
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "lib/python3.99").mkdir(parents=True)
+        (runtime / "lib/python3.99/os.py").write_text("Fixture standard library\n")
+        executable = runtime / "bin/python"
+        executable.write_text("Fixture interpreter\n")
+        secret = self.root / "credential"
+        secret.write_text("fixture credential sentinel\n")
+        (runtime / "lib/libpython.so").symlink_to(secret)
+        (tool / "bin/python").unlink()
+        (tool / "bin/python").symlink_to(executable)
+        with patch.object(worker.shutil, "which", side_effect=selected):
+            with self.assertRaisesRegex(factory.FactoryError, "runtime library outside"):
+                with worker.isolated_git(self.args, self.identity):
+                    self.fail("A library symlink granted an unrelated credential")
         def home_launcher(name, *args, **kwargs):
             return str(self.root / "bin/pre-commit") if name == "pre-commit" else which(name, *args, **kwargs)
         with patch.object(worker.Path, "home", return_value=self.root), \
