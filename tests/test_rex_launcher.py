@@ -308,6 +308,121 @@ class TaskAdmission(unittest.TestCase):
         return [args for args in FakeRex.calls
                 if args[0] == "new" or args[:2] == ("window", "new")]
 
+    def extend(self, **changes):
+        return factory.extend_allowance(self.path, **{**dict(purpose="correction", additional=1,
+            expected_limit=1, request_id="approved-one", reason="Operator approved one additional correction",
+            clock=lambda: 1000), **changes})
+
+    def test_allowance_addition_preserves_scope_history_and_hold(self):
+        self.admit()
+        self.start(purpose="correction")
+        self.report()
+        factory.hold_task(self.path, "Keep this operator hold", request_id="pause-one", clock=lambda: 1000)
+        original, calls = factory.load_task(self.path), list(FakeRex.calls)
+        extended = self.extend()
+        self.assertEqual(extended["admission"], original["admission"])
+        for field in ("assignments", "inputs", "hold", "control_events", "rex", "session_id"):
+            self.assertEqual(extended[field], original[field])
+        self.assertEqual(factory.task_view(extended)["allowances"]["correction"], dict(limit=2, used=1, remaining=1))
+        self.assertEqual(extended["allowance_events"], [dict(id="approved-one", purpose="correction",
+            previous_limit=1, additional=1, reason="Operator approved one additional correction", at=1000)])
+        self.assertEqual(FakeRex.calls, calls)
+        self.assertEqual(self.admit()["admission"], original["admission"])
+        with self.assertRaisesRegex(factory.FactoryError, "Task is paused"):
+            self.start(assignment_id="correction-two", purpose="correction")
+        factory.hold_task(self.path, None, request_id="resume-one", clock=lambda: 1000)
+        self.start(assignment_id="correction-two", purpose="correction")
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "allowance exhausted"):
+            self.start(assignment_id="correction-three", purpose="correction")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(factory.task_view(factory.load_task(self.path))["allowances"]["correction"],
+                         dict(limit=2, used=2, remaining=0))
+
+    def test_allowance_replay_after_lost_reply_and_later_decisions_never_adds_twice(self):
+        self.admit()
+        original_save = factory.save
+        def lost_reply(*args, **kwargs):
+            original_save(*args, **kwargs)
+            raise OSError("Reply lost after the saved addition")
+        with patch.object(factory, "save", side_effect=lost_reply), self.assertRaises(OSError):
+            self.extend()
+        self.extend(request_id="approved-two", expected_limit=2)
+        self.extend(purpose="investigation", request_id="investigation-one")
+        before = self.path.read_bytes()
+        replay = self.extend()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(len(replay["allowance_events"]), 3)
+        self.assertEqual(factory.task_view(replay)["allowances"],
+                         dict(correction=dict(limit=3, used=0, remaining=3), investigation=dict(limit=2, used=0, remaining=2)))
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_allowance_invalid_stale_and_conflicting_requests_leave_history_unchanged(self):
+        self.admit()
+        self.extend()
+        before = self.path.read_bytes()
+        for change in (dict(request_id="stale"), dict(additional=2), dict(reason="Other decision"),
+                       dict(purpose="work"), dict(purpose=[]), dict(additional=True), dict(additional=0),
+                       dict(additional=-1), dict(expected_limit=True), dict(expected_limit=-1),
+                       dict(request_id="../other"), dict(reason=" "), dict(clock=lambda: float("inf"))):
+            request: dict = dict(change)
+            if "clock" in request:
+                request.update(request_id="clock-test", expected_limit=2)
+            with self.subTest(change=change), self.assertRaises(factory.FactoryError):
+                self.extend(**request)
+            self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, [])
+
+    def test_allowance_damaged_or_downgraded_history_refuses_without_rewriting(self):
+        self.admit()
+        original = self.extend()
+        variants = []
+        for change in (dict(previous_limit=0), dict(additional=True), dict(additional=-1), dict(purpose="work"),
+                       dict(id="../other"), dict(reason=""), dict(at=float("nan")), dict(extra=True)):
+            record = copy.deepcopy(original)
+            record["allowance_events"][0].update(change)
+            variants.append(record)
+        record = copy.deepcopy(original)
+        record["allowance_events"].append(copy.deepcopy(record["allowance_events"][0]))
+        variants.extend([record, {**original, "allowance_events": None}, {**original, "schema_version": 5},
+                         {key: value for key, value in original.items() if key != "allowance_events"}])
+        for record in variants:
+            with self.subTest(record=record):
+                factory.save(self.path, record)
+                before = self.path.read_bytes()
+                with self.assertRaises(factory.FactoryError):
+                    factory.load_task(self.path)
+                self.assertEqual(self.path.read_bytes(), before)
+
+    def test_allowance_migration_preserves_exhaustion_and_refuses_provisioning_schema(self):
+        self.admit()
+        self.start(purpose="correction")
+        original = factory.load_task(self.path)
+        legacy = {key: value for key, value in original.items() if key != "allowance_events"}
+        legacy["schema_version"] = 5
+        factory.save(self.path, legacy)
+        migrated = factory.load_task(self.path)
+        self.assertEqual(migrated, original)
+        self.assertEqual(factory.task_view(migrated)["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
+        with self.assertRaisesRegex(factory.FactoryError, "allowance exhausted"):
+            self.start(assignment_id="another", purpose="correction")
+        prototype = {**legacy, "schema_version": 6, "provisioning": None}
+        factory.save(self.path, prototype)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "Unsupported task schema"):
+            self.extend()
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_allowance_cli_returns_effective_limits_without_a_provider_or_rex(self):
+        self.admit()
+        code, output, errors = self.cli("extend-allowance", "--task", "task", "--purpose", "correction",
+            "--additional", "1", "--expected-limit", "1", "--request-id", "operator-one", "--reason", "Approved by operator")
+        self.assertEqual((code, errors), (0, ""))
+        result = json.loads(output)
+        self.assertEqual(result["admission"]["limits"]["correction"], 1)
+        self.assertEqual(result["allowances"]["correction"], dict(limit=2, used=0, remaining=2))
+        self.assertEqual(FakeRex.calls, [])
+
     def cli(self, *arguments):
         output, errors = StringIO(), StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
@@ -1151,13 +1266,13 @@ class TaskAdmission(unittest.TestCase):
     def test_legacy_record_migrates_without_relaunch_or_inferred_allowances(self):
         _, original = self.start(purpose=None)
         record = json.loads(self.path.read_text())
-        for key in ("schema_version", "admission", "hold", "inputs", "control_events"):
+        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events"):
             del record[key]
         for assignment in record["assignments"].values():
             del assignment["result"]
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
                          {key: {**item, "result": None} for key, item in record["assignments"].items()})
@@ -1268,13 +1383,14 @@ class TaskAdmission(unittest.TestCase):
         record = json.loads(self.path.read_text())
         record["schema_version"] = 1
         record.pop("control_events", None)
+        record.pop("allowance_events", None)
         del record["admission"]["repository_identity"]
         del record["inputs"]
         del record["assignments"]["qa"]["request"]["inputs"]
         del record["assignments"]["qa"]["result"]
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 5)
+        self.assertEqual(upgraded["schema_version"], 7)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
@@ -1289,11 +1405,12 @@ class TaskAdmission(unittest.TestCase):
         legacy = copy.deepcopy(original)
         legacy["schema_version"] = 2
         legacy.pop("control_events", None)
+        legacy.pop("allowance_events", None)
         del legacy["admission"]["repository_identity"]
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 5)
+        self.assertEqual(upgraded["schema_version"], 7)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["assignments"], original["assignments"])
         self.assertEqual(upgraded["hold"], original["hold"])
@@ -1332,12 +1449,13 @@ class TaskAdmission(unittest.TestCase):
         legacy = factory.load_task(self.path)
         legacy["schema_version"] = 3
         legacy.pop("control_events", None)
+        legacy.pop("allowance_events", None)
         pin = dict(common_dir=str(self.repo / ".git"), device=42, inode=17)
         legacy["admission"]["repository_identity"] = pin
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No inferred historical identity")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 5)
+        self.assertEqual(upgraded["schema_version"], 7)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["admission"]["legacy_repository_identity"], pin)
         self.assertEqual(upgraded["assignments"], legacy["assignments"])

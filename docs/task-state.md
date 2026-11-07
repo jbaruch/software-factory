@@ -24,6 +24,23 @@ Changed inputs are refused; admission never resets usage. An existing task with
 unclassified launches cannot acquire guessed budgets.
 Use a new task ID to admit explicitly scoped work.
 
+For an operator-approved addition to an existing task, use:
+
+```sh
+python3 factory.py extend-allowance --task example --purpose correction \
+  --additional 1 --expected-limit 1 --request-id approved-correction-one \
+  --reason 'Operator approved one additional correction for the existing scope'
+```
+
+This command records an approval already obtained; a worker or classifier cannot
+grant itself more attempts. It adds a positive number of correction or
+investigation attempts to the current limit. The supplied expected limit must
+match. Original admission, consumed attempts, selected revisions, reports and holds
+stay unchanged. It neither retries a failed assignment nor starts a worker.
+Repeat the same request ID and inputs after a lost reply; the replay adds nothing,
+even after subsequent decisions. A reused ID with changed inputs or a stale
+expected limit refuses. Changed scope still needs a new explicit admission.
+
 ## Launches and holds
 
 For an admitted task, add `--purpose work`, `--purpose correction` or
@@ -59,16 +76,18 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. Task records must be regular files; links, directories and FIFOs
 refuse without resetting holds or history. External consumers must not edit or migrate these records. The
-runtime's `new_task`, `admit`, `launch`, `hold_task` and `record_result` functions define schema version 5:
+runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance` and
+`record_result` functions define schema version 7:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `5` on every task record |
+| `schema_version` | Integer `7` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
 | `hold` | `null`, or the operator's nonempty pause reason |
 | `control_events` | Ordered pause/resume requests; each has a unique `id`, nullable integer `expected_revision`, `previous_hold`, resulting `hold`, and `at` in UTC epoch seconds |
+| `allowance_events` | Ordered operator additions; each has a unique `id`, `purpose`, `previous_limit`, positive integer `additional`, nonempty `reason` and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
 | `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker and returned pane IDs |
@@ -79,6 +98,12 @@ snapshot and any declared dependencies. Each assignment has a nullable `result`.
 States are
 `launching` or `launched`, describing the effect, not completion of engineering work.
 Allowance totals are generated output; no second usage ledger is stored.
+Effective limits start at the immutable admission limits. Each allowance event's
+`previous_limit` equals the effective limit for its correction/investigation
+purpose at that position, then `additional` is added. Event IDs are unique within
+allowance history; timestamps use the same finite year-9999 bound as hold events.
+Malformed or missing history refuses without resetting it. Admission-free tasks
+have an empty allowance history and unknown allowance totals.
 Control revision is generated from the event count. A supplied expected revision
 equals the event's position; `null` records a request without that precondition.
 Hold values in an event are null or nonempty strings. Timestamps are finite,
@@ -88,6 +113,12 @@ event agrees with the current hold. Duplicate IDs or damaged history refuse read
 An identical request replay returns the current record without another write,
 even when a subsequent decision has changed the hold. These records trace control
 effects; they do not interrupt workers or change scope, reports or allowances.
+
+The owner upgrades supported versions 0–5 to version 7 with `allowance_events: []`.
+Original admission, used attempts, control requests and assignment history remain
+unchanged. Version 6 belongs to the retained, unmerged provisioning prototype and
+is unsupported here: use its compatible factory owner rather than editing or
+downgrading the record. This runtime never guesses a migration for that format.
 
 The original unversioned launcher record is legacy version 0. Version 1 added
 admission and holds. The owner migrates either on read, preserving requests,

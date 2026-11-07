@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 — 2026-11-07
+## 0.6.0 — 2026-11-07
 
 ### Explicit read-only Grok execution
 
@@ -26,6 +26,18 @@ native discovery validation at both execution and collection boundaries.
 Supply candidate path inventories in the existing frozen brief and require an
 explicit base for code reviews, with revision-bound changed paths and full diffs.
 Use native prompt-file input; keep older reviews without a range inspection-only.
+
+## 0.5.0 — 2026-11-07
+
+### Operator allowance additions
+
+Add `extend-allowance` for explicitly approved correction/investigation additions.
+Keep original admission limits and assignment history unchanged; derive effective
+limits from ordered, reasoned additions in the task record. Require a request ID
+and expected current limit. Replaying a saved decision grants nothing twice and
+preserves subsequent decisions. Task schema 7 migrates supported earlier records
+with no invented grants; schema 6 provisioning-prototype records remain held for
+their compatible owner. Holds, task acceptance and execution are unchanged.
 
 ## 0.4.0 — 2026-11-07
 
