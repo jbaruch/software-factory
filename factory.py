@@ -886,6 +886,20 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if record["admission"] is None:
             raise FactoryError("Admit a task before declaring assignment dependencies")
         request["dependencies"] = sorted(set(dependencies))
+    if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
+        import grok_worker
+        import review_evidence
+        try:
+            native_args = grok_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Grok command is damaged; restore its arguments before creating an assignment") from None
+        if record["admission"] is None or not valid_inputs(record["inputs"]) or native_args.role != role:
+            raise FactoryError("Admit the Grok task and select matching role/revision inputs before launching")
+        check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
+                       expected_identity=record["admission"]["repository_identity"],
+                       expected_git_dir=native_args.worktree_git_dir)
+        instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
+            requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
@@ -1112,7 +1126,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
                          outcome=native["report"]["outcome"], artifacts=artifacts)
 
 
-def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30):
+def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None):
     """Freeze one explicit read-only Grok effect, including its native session."""
     if (not model.strip() or not effort.strip() or not Path(grok).is_absolute()
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
@@ -1120,6 +1134,9 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         raise FactoryError("Supply an absolute native Grok executable, discovered model/effort and bounded seconds/turns")
     worker = [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None or base is not None:
+        from review_evidence import valid_base
+        valid_base(base, role)
     binary = Path(grok).resolve()
     if existing is None:
         try:
@@ -1141,7 +1158,7 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         except (ValueError, IndexError):
             raise FactoryError("Saved Grok binding is damaged; restore the original command without relaunching") from None
     prefix = path.parent / (task + "." + assignment_id + ".grok")
-    return worker + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
+    return worker + ([] if base is None else ["--base", base]) + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
@@ -1161,6 +1178,10 @@ def collect_grok(path, assignment_id, rex, record, assignment):
         args = grok_worker.parser().parse_args(command[4:])
     except SystemExit:
         raise FactoryError("Saved Grok command is damaged; restore its original arguments before collection") from None
+    from review_evidence import valid_base
+    if args.role == "code-review" and args.base is None:
+        raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
+    valid_base(args.base, args.role)
     if status(rex, record, assignment)["state"] != "exited":
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
     try:
@@ -1243,6 +1264,7 @@ def main(argv=None):
             start.add_argument("--effort", required=True)
             start.add_argument("--seconds", type=int, default=600)
             start.add_argument("--turns", type=int, default=30)
+            start.add_argument("--base", help="Full base commit ID; required for code-review")
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -1316,7 +1338,7 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Grok assignment")
                     argv = grok_command(path, task=args.task, assignment_id=args.id, grok=args.grok,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
-                        seconds=args.seconds, turns=args.turns)
+                        seconds=args.seconds, turns=args.turns, base=args.base)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,

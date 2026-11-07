@@ -13,6 +13,7 @@ sys.dont_write_bytecode = True
 
 import factory
 import native_grok
+import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, outcome_schema, stop_child
 
 
@@ -58,6 +59,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or not factory.valid_repository_identity(identity) or not args.worktree_git_dir.is_absolute()):
         raise factory.FactoryError("Grok assignment binding changed; inspect its original brief, role and repository pin")
     factory.role_spec(args.role)
+    review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
+                             base=args.base, role=args.role)
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
@@ -99,7 +102,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                 "--permission-mode", "dontAsk", "--sandbox", "strict", *native_grok.read_options(args.cwd), "--max-turns", str(args.turns),
                 "--model", args.model, "--reasoning-effort", args.effort, "--session-id", args.native_session,
                 "--output-format", "streaming-json", "--json-schema", json.dumps(outcome_schema()),
-                "--single", instructions, cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
+                "--prompt-file", str(args.brief), cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
             async def consume():
                 while True:
@@ -152,6 +155,7 @@ def parser():
         command.add_argument("--" + field, required=True)
     command.add_argument("--seconds", type=int, default=600)
     command.add_argument("--turns", type=int, default=30)
+    command.add_argument("--base")
     return command
 
 

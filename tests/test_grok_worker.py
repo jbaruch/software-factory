@@ -126,6 +126,8 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(command[command.index("--tools") + 1], "read_file")
         self.assertIn("MCPTool(*)", command)
         self.assertIn("Bash", command)
+        self.assertEqual(command[command.index("--prompt-file") + 1], str(self.args.brief))
+        self.assertNotIn("--single", command)
         self.assertNotIn("GH_TOKEN", options["env"])
         self.assertEqual(options["cwd"], ".")
         result = self.collect()
@@ -138,6 +140,57 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.make_command(), self.command)
         self.assertEqual(len(self.probes), 1)
+
+    def test_new_brief_contains_candidate_path_inventory(self):
+        import review_evidence
+        instructions = self.args.brief.read_text()
+        evidence = json.loads(instructions.partition(review_evidence.MARKER)[2])
+        self.assertEqual(evidence["candidate"], self.candidate)
+        self.assertEqual(evidence["requirements"], "requirements-1")
+        self.assertEqual(evidence["paths"], ["README.md"])
+        self.assertIsNone(evidence["base"])
+        self.assertEqual(hashlib.sha256(instructions.encode()).hexdigest(), self.args.brief_sha256)
+
+    def test_legacy_code_review_without_a_range_stays_inspection_only(self):
+        historical = copy.deepcopy(self.assignment)
+        historical["request"]["role"] = "code-review"
+        command = historical["request"]["command"]
+        command[command.index("--role") + 1] = "code-review"
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "remains inspection-only"):
+            factory.collect_grok(self.path, "inspect", self.rex, self.record, historical)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.spawns, [])
+
+    def test_code_review_requires_an_explicit_range_before_launch(self):
+        with self.assertRaisesRegex(factory.FactoryError, "Supply --base"):
+            self.make_command(assignment_id="review", role="code-review")
+        bypass = self.make_command(assignment_id="review")
+        bypass[bypass.index("--role") + 1] = "code-review"
+        before, calls = self.path.read_bytes(), list(FakeRex.calls)
+        with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "Supply --base"):
+            factory.launch(self.path, task="task", assignment_id="review", role="code-review",
+                goal="Review the selected diff", cwd=str(self.repo), command=bypass, purpose="work")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(FakeRex.calls, calls)
+        command = self.make_command(assignment_id="review", role="code-review", base=self.candidate)
+        with patch.object(factory, "Rex", FakeRex):
+            record, assignment = factory.launch(self.path, task="task", assignment_id="review", role="code-review",
+                goal="Review the selected diff", cwd=str(self.repo), command=command, purpose="work")
+        self.assertIn('--base', assignment["request"]["command"])
+        instructions = Path(assignment["brief"]).read_text()
+        import review_evidence
+        evidence = json.loads(instructions.partition(review_evidence.MARKER)[2])
+        self.assertEqual(evidence["base"], self.candidate)
+        self.assertEqual(evidence["candidate"], self.candidate)
+        self.assertEqual(evidence["changed_paths"], [])
+        self.assertEqual(evidence["diff"], "")
+        before, launches = self.path.read_bytes(), len(FakeRex.calls)
+        with patch.object(factory, "Rex", FakeRex):
+            factory.launch(self.path, task="task", assignment_id="review", role="code-review",
+                goal="Review the selected diff", cwd=str(self.repo), command=command, purpose="work")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(len([call for call in FakeRex.calls[launches:] if call[0] in {"new", "window"}]), 0)
 
     def test_failed_native_process_cannot_supply_a_result(self):
         self.process = FakeProcess(self.events, exit_code=1)

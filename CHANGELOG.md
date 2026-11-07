@@ -23,6 +23,9 @@ strict sandbox; refuse inherited route/profile environment overrides. Earlier
 configuration-1 evidence remains inspection-only under the tightened reader.
 Validate nested configuration layers, CLI identity and timing, and reuse the
 native discovery validation at both execution and collection boundaries.
+Supply candidate path inventories in the existing frozen brief and require an
+explicit base for code reviews, with revision-bound changed paths and full diffs.
+Use native prompt-file input; keep older reviews without a range inspection-only.
 
 ## 0.4.0 — 2026-11-07
 
