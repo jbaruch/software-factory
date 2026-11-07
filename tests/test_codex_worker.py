@@ -166,6 +166,25 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
 
+    def test_factory_commit_detaches_finished_output_without_changing_its_alias(self):
+        self.writer()
+        original = self.spawn
+        backup = self.root / "native-output-backup"
+        async def linked_output(*command, **options):
+            process = await original(*command, **options)
+            os.link(self.repo / "feature.py", backup)
+            return process
+        self.spawn = linked_output
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "created")
+        source = self.repo / "feature.py"
+        self.assertNotEqual(source.stat().st_ino, backup.stat().st_ino)
+        self.assertEqual(source.stat().st_nlink, 1)
+        self.assertEqual(backup.read_text(), "answer = 42\n")
+        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
+        self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
+
     def test_factory_commit_with_no_changes_does_not_create_an_empty_commit(self):
         self.args.write = True
         self.args.commit_message = "feat(example): Keep existing behavior"
@@ -361,28 +380,20 @@ class NativeResults(unittest.TestCase):
     def test_global_file_supplied_signing_is_enforced(self):
         self.inherited_policy("signing", "global")
 
-    def test_factory_commit_refuses_source_links_before_creating_a_commit(self):
+    def test_factory_commit_refuses_source_symlinks_before_creating_a_commit(self):
         outside = self.root / "outside.txt"
         outside.write_text("original\n")
-        for kind in ("symlink", "hardlink"):
-            self.writer()
-            self.args.events = self.root / f"link-{kind}.jsonl"
-            self.args.receipt = self.root / f"link-{kind}.json"
-            source = self.repo / "source-link"
-            async def spawn(*command, **options):
-                if kind == "symlink":
-                    source.symlink_to(outside)
-                else:
-                    os.link(outside, source)
-                return self.process
-            self.spawn = spawn
-            receipt = self.execute()
-            self.assertEqual(receipt["state"], "failed")
-            self.assertIn("linked or non-regular source", receipt["error"])
-            self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
-            self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
-            self.assertEqual(outside.read_text(), "original\n")
-            source.unlink()
+        self.writer()
+        async def spawn(*command, **options):
+            (self.repo / "source-link").symlink_to(outside)
+            return self.process
+        self.spawn = spawn
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("linked or non-regular source", receipt["error"])
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(factory.git_run(".", "diff", "--cached", "--quiet").returncode, 0)
+        self.assertEqual(outside.read_text(), "original\n")
 
     def test_bad_commit_message_refuses_before_task_locks_or_execution_artifacts(self):
         for write, message in ((False, "A message"), (True, " "), (True, "\nNo subject"),

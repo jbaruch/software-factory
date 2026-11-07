@@ -179,7 +179,8 @@ For a factory-owned writer commit, supply `--write --commit-message` with the
 intended commit message. The specialist edits/tests within its workspace sandbox
 and leaves Git staging/commit to the runtime. Only a successful native run with a
 `completed` report can enter this step. The runtime retains an intent before
-status/staging can execute a configured filter, checks regular source files,
+status/staging can execute a configured filter, copies shared regular outputs to
+independent files without changing their other links, rejects non-regular files,
 records the staged tree, then runs one local
 Git commit with the repository's existing hooks, signing and author settings.
 Validated inherited Git configuration also applies to status/staging/commit.
@@ -195,6 +196,21 @@ accepts the task or satisfies independent verification/release requirements.
 Host wrappers/workers disable bytecode writes; new worker commands also ignore
 Python environment/startup overrides. Historical
 commands and version-4 receipts remain reconnectable/collectable without rewriting.
+
+For an admitted writer task, replace the paths and discovered model/effort below
+(see [operator-approved exceptions](../AGENTS.md#operator-approved-exceptions)):
+
+```sh
+python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  codex-start --task example --id writer-1 --role documentation \
+  --goal 'Update the admitted documentation and report original evidence' \
+  --cwd '/absolute/path/to/isolated/writer/worktree' --purpose work \
+  --codex '/absolute/path/to/discovered/codex' --model 'discovered-model-id' \
+  --effort 'discovered-supported-effort' --write --commit-message 'docs: clarify writer invocation'
+python3 factory.py codex-collect --task example --id writer-1
+```
+
+Inspect the retained receipt, stream and worktree before authorizing any retry.
 
 `codex_worker.py` owns version-5 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
