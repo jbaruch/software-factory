@@ -217,6 +217,9 @@ clean/smudge/process filters, other executable hook types, custom
 signing programs and partial clones refuse visibly; use an inspected explicit
 local commit for those configurations. Required checks/signatures are never
 silently disabled.
+Factory commits use UTF-8 and refuse in-progress merges, cherry-picks, reverts,
+rebases and bisects before native launch and again before staging. Finish or
+abort the existing Git operation in the assigned checkout before retrying.
 
 Staging and the final signed commit run with executable Git callbacks disabled.
 Pre-commit runs separately with no signing agent or inherited Git auth settings.
@@ -254,6 +257,9 @@ signed commit, tests arbitrary signing, sibling-index mutation and Git auth
 exposure attempts in the callback phase, and refuses a generated credential fixture
 without a hook. It then removes its fixtures. It makes no model turn or Rex call
 and does not qualify a native assignment.
+`tests/test_smoke_git.py` covers orchestration, JSON output and failure cleanup
+with fake native transports and disposable Git repositories. The live command
+remains a separate explicit check.
 
 Native model commands retain their declared sandbox. Writers may
 start from an admitted subdirectory; source checks still use the worktree root.
