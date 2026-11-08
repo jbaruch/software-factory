@@ -99,8 +99,8 @@ class Rex:
         if raw:
             return result.stdout
         try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
+            return decode_json(result.stdout)
+        except ValueError:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 

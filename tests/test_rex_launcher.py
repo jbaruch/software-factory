@@ -1807,6 +1807,14 @@ class RexTransport(unittest.TestCase):
                     with self.assertRaisesRegex(factory.FactoryError, "inspect the pinned binary/server API compatibility"):
                         rex.call("whoami", "--json", raw=raw)
 
+    def test_ambiguous_json_replies_report_compatibility_recovery(self):
+        rex = factory.Rex(sys.executable, "unix:///fixture")
+        for reply in ('{"host_id": "a", "host_id": "b"}', '{"exit_code": NaN}', "not json"):
+            completed = subprocess.CompletedProcess([], 0, stdout=reply, stderr="")
+            with self.subTest(reply=reply), patch.object(factory.subprocess, "run", return_value=completed):
+                with self.assertRaisesRegex(factory.FactoryError, "inspect the pinned binary/server API compatibility"):
+                    rex.call("whoami", "--json")
+
 
 if __name__ == "__main__":
     unittest.main()
