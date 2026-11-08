@@ -387,7 +387,6 @@ def integrate(path, *, assignment_id, pr, review, required, gh, scripts, transpo
         if (pr != intent["pr"]["url"] or review != intent["review"] or sorted(required) != intent["required"]
                 or str(gh) != intent["gh"] or str(scripts) != intent["scripts"]):
             raise factory.FactoryError("Existing integration ID has different immutable inputs")
-        command, cwd = assignment["request"]["command"], assignment["request"]["cwd"]
     # Ordinary launch lock covers only brief submission and Rex launch/reconnect.
     with factory.execution_lock(path.parent), factory.task_lock(path.parent, record["task"]):
         current = factory.load_task(path)
@@ -396,8 +395,15 @@ def integrate(path, *, assignment_id, pr, review, required, gh, scripts, transpo
                 raise factory.FactoryError("Task changed during integration preparation; reassess current inputs")
             if (path.parent / (record["task"] + "." + assignment_id + ".md")).exists() or receipt_file(path, intent).exists():
                 raise factory.FactoryError("Original integration artifacts already exist; restore their assignment")
-        record, assignment = factory.launch(path, task=record["task"], assignment_id=assignment_id,
-            role="integration", goal=GOAL, cwd=cwd, command=command, purpose="work", dependencies=sorted([review, *required]))
+            record, assignment = factory.launch(path, task=record["task"], assignment_id=assignment_id,
+                role="integration", goal=GOAL, cwd=cwd, command=command, purpose="work", dependencies=sorted([review, *required]))
+        else:
+            record = current
+            assignment = bound_assignment(path, record, intent)
+            rex = factory.connect(record)
+            if assignment["state"] == "launching":
+                factory.reconcile(rex, record, assignment)
+                factory.save(path, record)
     if fresh:
         return dict(state="launched", assignment=assignment_id, session_id=record["session_id"],
                     window_id=assignment["window_id"], block_id=assignment["block_id"])

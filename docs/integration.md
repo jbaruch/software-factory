@@ -62,7 +62,7 @@ The CLI prepares evidence outside task locks, then uses the ordinary execution/t
 locks only for brief submission and `factory.launch`. The worker runs in the release
 review's original clean checkout and owns real Rex window/block identities. Before
 mutation, its
-schema-8 assignment command fixes admission/repository identity, exact GitHub PR,
+[task-owner assignment](task-state.md#schema-and-ownership) command fixes admission/repository identity, exact GitHub PR,
 head, base, target, requirements, selected IDs, original report/receipt digests,
 review/issue inputs and installed executable/helper paths and hashes. No ledger,
 migration or mutable approval flags are added. Original native requests, results,
@@ -206,7 +206,7 @@ before waits), `merge_outcome_unknown` (durable before merge, or recovery), `hel
 source-bound delivery/CI evidence. Gate snapshots and external replies/errors are
 execution evidence, not another queue. `execute` owns writes; `validate_receipt`,
 result collection and `release_evidence.delivery` read. Terminal results bind the
-receipt digest, and terminal receipt bytes are never replaced. Task schema remains 8.
+receipt digest, and terminal receipt bytes are never replaced. The [task owner defines the task schema](task-state.md#schema-and-ownership).
 
 These are gate artifacts under the Stateful Artifacts exception. Missing required
 fields, corrupt data, absent/noninteger/unsupported versions refuse; no guessed

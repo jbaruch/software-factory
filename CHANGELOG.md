@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.3 — 2026-11-08 (unpublished)
+
+### Public CLI reconnect after worktree cleanup
+
+Reconnect existing integrations through their frozen assignment and original Rex
+pane after checkout removal, without new launch validation or resending effects.
+Keep first-launch checks and original intent, brief and pane validation intact.
+Exercise public CLI acceptance replay and lost-launch recovery with collected native
+fixtures and temporary Git; preserve original evidence and cumulative allowances.
+Replace stale secondary task-schema literals with links to the owner schema.
+
 ## 0.14.2 — 2026-11-07 (unpublished)
 
 ### Acceptance replay after worktree cleanup
