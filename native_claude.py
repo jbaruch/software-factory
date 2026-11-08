@@ -229,6 +229,11 @@ def parse_execution(events, *, session_id, cwd, model, max_turns):
             if not isinstance(event.get("rate_limit_info"), dict):
                 refuse()
             rates.append(event["rate_limit_info"])
+        elif kind == "system" and event.get("subtype") == "thinking_tokens":
+            # Inspection-only estimates; final actual usage remains authoritative.
+            if any(type(event.get(key)) is not int or event[key] < 0
+                   for key in ("estimated_tokens", "estimated_tokens_delta")):
+                refuse()
         elif kind == "system" and event.get("subtype") == "permission_denied":
             identity = event.get("tool_use_id")
             if (event.get("tool_name") != "Read" or not isinstance(identity, str)

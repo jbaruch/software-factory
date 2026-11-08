@@ -691,8 +691,22 @@ rate-limit observations retain unknowns and never establish shared pools.
 brief and events without migration. Init cwd/model/session/tool controls, assistant
 model/session, matched tool results, one structured report and successful final
 result/usage must agree. Unsupported/malformed/ambiguous lifecycles, tool escapes,
-missing reports, conflicting reports, non-success and timeouts refuse. Unknown or
-legacy receipt/event versions remain inspection-only. First collection additionally
+missing reports, conflicting reports, non-success and timeouts refuse. Unknown
+system subtypes and malformed telemetry still refuse. The observed 2.1.319 `system/thinking_tokens`
+events (50/delta 50 and 234/delta 184, with session_id and uuid) are accepted only
+within the initialized session before the final result. Both `estimated_tokens`
+and `estimated_tokens_delta` must be nonnegative integers, excluding booleans;
+no arithmetic continuity or reset semantics are assumed. Events stay unchanged
+in the raw stream. Estimates supply no usage, quota, spend, permission or report
+authority; final actual usage remains required. The original failed
+[operational-loop architecture receipt](../../software-factory/.factory-state/operational/operational-loop.architecture.claude.json),
+[stream](../../software-factory/.factory-state/operational/operational-loop.architecture.claude.jsonl)
+and [brief](../../software-factory/.factory-state/operational/operational-loop.architecture.md)
+remain unchanged and uncollected; offline decoding does not qualify that assignment
+as successful. A fresh strict assignment and the full operational-loop task remain
+separate pending work.
+
+Unknown or legacy receipt/event versions remain inspection-only. First collection additionally
 requires the original checkout/context and actual successful owned Rex exit.
 Only strict collection sets the existing schema-9 `native_collected` provenance;
 manual results never grant it. Historical validation retains original artifacts,
