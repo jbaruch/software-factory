@@ -672,13 +672,20 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
 
 def check_commit_receipt(receipt, args, repository, *, historical=False):
     """Version 4 has no factory commit; version 5 declares its nullable intent."""
-    if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
+    if factory.repository_identity(repository) != receipt["repository_identity"]:
+        raise factory.FactoryError("Admitted repository identity changed; restore its original repository marker before validating provenance")
+    if not historical and (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
             or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
         raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
     if args.write and not historical and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
         raise factory.FactoryError("Writer candidate differs from the assigned worktree HEAD; inspect its retained checkout before collection")
     if factory.git_commit(repository, receipt["candidate"]) != receipt["candidate"]:
         raise factory.FactoryError("Restore the original writer candidate objects before validating historical provenance")
+    if factory.git_commit(repository, receipt["inputs"]["candidate"]) != receipt["inputs"]["candidate"]:
+        raise factory.FactoryError("Restore the original assignment parent objects before validating provenance")
+    tree_object = factory.git_run(repository, "cat-file", "-e", receipt["candidate"] + "^{tree}")
+    if tree_object.returncode:
+        raise factory.FactoryError("Restore the original candidate tree objects before validating provenance")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:

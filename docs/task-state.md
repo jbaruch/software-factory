@@ -103,11 +103,11 @@ The runtime owner is `factory.py`; all CLI readers and writers use its loader un
 the task lock. Task records must be regular files; links, directories and FIFOs
 refuse without resetting holds or history. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree` and `record_result` functions define schema version 8:
+`provision_worktree`, `record_result` and `collect_codex` functions define schema version 9:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `8` on every task record |
+| `schema_version` | Integer `9` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
@@ -121,10 +121,15 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input
-snapshot and any declared dependencies. Each assignment has a nullable `result`.
+snapshot and any declared dependencies. Each assignment has a nullable `result` and boolean `native_collected`, initially
+false. Only `collect_codex`, after strict successful original Rex, receipt, events,
+brief, repository, worktree/Git-directory and HEAD validation and immutable result
+registration, sets it true. Generic `record_result` never grants collection proof.
+Historical native replay requires this proof and still verifies the complete
+original result/evidence against the admitted repository and retained Git objects.
 States are
 `launching` or `launched`, describing the effect, not completion of engineering work.
-The [mechanical integration adapter](integration.md) uses the same schema-8
+The [mechanical integration adapter](integration.md) uses the same schema-9
 request/result shape with a frozen `integration.py --intent` command. It launches through `factory.launch` and owns an actual Rex window/block.
 `launching` and `launched` retain their ordinary launch meanings; neither describes
 merge completion. `status` inspects the real process and reconciles lost launch
@@ -149,6 +154,16 @@ event agrees with the current hold. Duplicate IDs or damaged history refuse read
 An identical request replay returns the current record without another write,
 even when a subsequent decision has changed the hold. These records trace control
 effects; they do not interrupt workers or change scope, reports or allowances.
+
+Schema 9 adds only per-assignment `native_collected` provenance. Versions 0–8
+migrate with this flag false, preserving original assignments/results, admission,
+selected inputs, controls, holds, allowance history and used attempts. Migration
+never infers collection from a matching report or invents historical proof.
+Legacy results remain available for inspection but cannot supply historical native
+approval/delivery until explicitly recollected through `collect_codex` with their
+original checkout, Git directory and required HEAD still available. If cleanup or
+later work has removed that strict original context, retained artifacts alone
+cannot recover collection proof; do not backfill it or use a replacement checkout.
 
 Schema 8 combines the earlier schema-6 provisioning owner and schema-7 allowance
 owner. A schema-6 record retains its provisioning intent and gains only an empty
@@ -177,8 +192,8 @@ historical control requests. Existing holds without events remain valid. Version
 consumers must update before using version-5 task files; they refuse newer gates.
 Version 6 introduced nullable `provisioning` in the retained prototype. Version 7
 introduced operator allowance additions on main without interpreting that
-prototype's records. Both formats now migrate through the schema-8 contract above.
-Older readers must update before opening schema-8 task files.
+prototype's records. Both formats now migrate through the schema-9 contract above.
+Older readers must update before opening schema-9 task files.
 Before repository-backed mutations the owner verifies this identity and the
 initial commit. Revision reads verify the marker before and after Git resolves the commit. Launch
 passes the saved identity through checkout validation; `checkout_exec.py` checks

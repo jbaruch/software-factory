@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.14.2 — 2026-11-07 (unpublished)
+
+### Acceptance replay after worktree cleanup
+
+Replay complete collected native evidence against the admitted repository and
+retained Git objects after normal worktree removal. Keep first collection strict,
+original artifacts immutable, and input currency and final acceptance gates intact.
+Cover linked-worktree delivery/acceptance replay, missing first-collection checkouts,
+damaged results/provenance and changed repository identity with temporary Git and
+fake native transports. Schema 9 records one per-assignment strict native-collection
+flag; manual results cannot authorize historical replay. Older records migrate
+without collection proof and need explicit strict recollection with the original
+checkout still available; removed legacy checkouts cannot be backfilled.
+
 ## 0.14.1 — 2026-11-07 (unpublished)
 
 ### Progress-based fix-loop protection

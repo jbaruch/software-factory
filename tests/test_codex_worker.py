@@ -1896,6 +1896,7 @@ class NativeResults(unittest.TestCase):
         index = command.index("--repo-identity")
         del command[index:index + 2]
         record["schema_version"] = 2
+        del assignment["native_collected"]
         del record["control_events"]
         del record["provisioning"]
         del record["allowance_events"]

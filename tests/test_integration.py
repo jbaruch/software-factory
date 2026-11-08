@@ -182,11 +182,12 @@ class Integration(unittest.TestCase):
         self.review("qa", "qa", frozen=False)
         self.review("release", "release")
 
-    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None, legacy=False):
+    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None, legacy=False, cwd=None, collect=True):
+        cwd = self.repo if cwd is None else cwd
         frozen_release = self.frozen if frozen and delivery is None else None
         frozen_delivery = release_evidence.capture_delivery(factory.load_task(self.path), delivery, self.transport) if delivery else None
         command = factory.codex_command(self.path, task="deliver", assignment_id=key, codex=sys.executable,
-            model="fixture-model", effort="high", cwd=str(self.repo), role=role, write=writer,
+            model="fixture-model", effort="high", cwd=str(cwd), role=role, write=writer,
             commit_message="fix(fixture): Apply correction\n\nExercise sequential writer provenance." if change else None,
             release_evidence=frozen_release, delivery_evidence=frozen_delivery)
         if legacy:
@@ -195,10 +196,10 @@ class Integration(unittest.TestCase):
             command[index:index + 2] = ["--" + kind + "-evidence", json.dumps(payload, sort_keys=True)]
         with patch.object(factory, "Rex", FakeRex):
             record, assignment = factory.launch(self.path, task="deliver", assignment_id=key, role=role,
-                goal="Judge the original complete evidence", cwd=str(self.repo), command=command, purpose=purpose,
+                goal="Judge the original complete evidence", cwd=str(cwd), command=command, purpose=purpose,
                 binary=sys.executable, server="unix:///fixture.sock",
                 frozen_release=frozen_release, frozen_delivery=frozen_delivery)
-        replacements = {"{repository}": str(self.repo), "{cwd}": str(self.repo), "{brief}": assignment["brief"],
+        replacements = {"{repository}": str(self.repo), "{cwd}": str(cwd), "{brief}": assignment["brief"],
             "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": self.head,
             "{requirements}": record["inputs"]["requirements"], "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         self.native.args = codex_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
@@ -208,16 +209,23 @@ class Integration(unittest.TestCase):
         spawn = self.native.spawn
         async def edit(*args, **kwargs):
             if change is not None:
-                (self.repo / "feature.txt").write_text(change)
+                (cwd / "feature.txt").write_text(change)
             return await spawn(*args, **kwargs)
-        with patch.object(self.native, "spawn", side_effect=edit):
-            receipt = self.native.execute()
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(cwd)
+            with patch.object(self.native, "spawn", side_effect=edit):
+                receipt = self.native.execute()
+        finally:
+            os.chdir(previous_cwd)
         if failed:
             self.assertEqual(receipt["state"], "failed")
             factory.record_result(self.path, assignment_id=key, candidate=self.head,
                 requirements=record["inputs"]["requirements"], outcome="blocked", artifacts=[str(self.native.args.receipt)])
             return factory.load_task(self.path)["assignments"][key]
         self.assertEqual(receipt["state"], "completed", receipt["error"])
+        if not collect:
+            return assignment
         with patch.object(factory, "status", return_value=dict(state="exited")):
             self.record = factory.collect_codex(self.path, key, None, record, assignment)
         return self.record["assignments"][key]
@@ -258,7 +266,7 @@ class Integration(unittest.TestCase):
         self.assertIn("--release-evidence", original["request"]["command"])
         self.assertEqual(release_evidence.from_assignment(self.record, original), self.frozen)
 
-    def test_real_pane_lifecycle_and_ordinary_schema_eight_readers(self):
+    def test_real_pane_lifecycle_and_ordinary_schema_nine_readers(self):
         started = self.launch_integration()
         self.assertEqual(started["state"], "launched")
         record = factory.load_task(self.path)
@@ -268,7 +276,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((started["window_id"], started["block_id"]),
                          (assignment["window_id"], assignment["block_id"]))
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
-        self.assertEqual(factory.task_view(record)["schema_version"], 8)
+        self.assertEqual(factory.task_view(record)["schema_version"], 9)
         rex = factory.connect(record)
         EvidenceRex.integration_running = True
         try:
@@ -576,7 +584,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(result["delivery"]["acceptance"], "pending_native_judgment")
         self.assertEqual(result["delivery"]["publication"], "inapplicable")
         saved = factory.load_task(self.path)
-        self.assertEqual(saved["schema_version"], 8)
+        self.assertEqual(saved["schema_version"], 9)
         self.assertEqual(saved["assignments"]["qa"], original["assignments"]["qa"])
         self.assertEqual(saved["assignments"]["release"], original["assignments"]["release"])
         self.assertEqual(factory.task_view(saved)["allowances"], allowance)
@@ -835,6 +843,186 @@ class Integration(unittest.TestCase):
         self.assertEqual(record["assignments"]["accept"], original_acceptance)
         self.assertEqual(receipt_path.read_bytes(), original_receipt)
         self.assertEqual(len(self.transport.merges), 1)
+
+    def test_acceptance_replays_original_evidence_after_linked_worktree_cleanup(self):
+        checkout = self.root / "completed-worktree"
+        added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        for key, value in (("commit.gpgsign", "false"), ("core.hooksPath", "/dev/null")):
+            factory.git_run(str(self.repo), "config", key, value)
+        writer = self.review("cleanup-writer", "backend", frozen=False, writer=True,
+            outcome="completed", change="retained candidate\n", cwd=checkout)
+        self.head = writer["result"]["candidate"]
+        factory.set_inputs(self.path, candidate=self.head, requirements=self.record["inputs"]["requirements"])
+        tree = factory.git_run(str(self.repo), "rev-parse", self.head + "^{tree}").stdout.strip()
+        merge = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "commit-tree", tree,
+            "-p", self.base, "-p", self.head, "-m", "Cleanup merge").stdout.strip()
+        self.transport = GitHub(self.base, self.head, merge)
+        self.frozen = release_evidence.capture(factory.load_task(self.path), self.transport.identity["url"], self.transport)
+        self.review("cleanup-qa", "qa", frozen=False, cwd=checkout)
+        self.review("cleanup-release", "release", cwd=checkout)
+        self.assertEqual(self.integrate(review="cleanup-release", required=["cleanup-qa"])["state"], "delivered")
+        self.review("cleanup-accept", "release", delivery="merge", cwd=checkout)
+        record = factory.load_task(self.path)
+        verdict = integration.accepted(record, "merge", "cleanup-accept", self.transport)
+        self.assertEqual(verdict["outcome"], "approved")
+        originals = {self.path: self.path.read_bytes()}
+        for assignment in record["assignments"].values():
+            paths = [assignment["brief"], *assignment["result"]["artifacts"]]
+            command = assignment["request"]["command"]
+            if "--events" in command:
+                paths.append(command[command.index("--events") + 1])
+            for name in paths:
+                path = Path(name)
+                if path.is_file():
+                    originals[path] = path.read_bytes()
+        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse(checkout.exists())
+        self.assertEqual(integration.accepted(record, "merge", "cleanup-accept", self.transport), verdict)
+        # An unrelated checkout at the old path supplies no historical authority.
+        subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+        self.assertEqual(integration.accepted(record, "merge", "cleanup-accept", self.transport), verdict)
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original, str(path))
+        self.assertEqual(len(self.transport.merges), 1)
+
+        damaged = copy.deepcopy(record["assignments"]["cleanup-accept"])
+        damaged["result"]["artifacts"].append("invented")
+        with self.assertRaisesRegex(factory.FactoryError, "complete original"):
+            integration.collected_native("cleanup-accept", record, damaged)
+        damaged["result"] = None
+        with self.assertRaises(factory.FactoryError):
+            factory.codex_evidence("cleanup-accept", record, damaged, collected=True,
+                observe=lambda: dict(state="exited"))
+        receipt_path = Path(writer["result"]["artifacts"][0])
+        original = receipt_path.read_bytes()
+        for field, wrong in (("parent", self.base), ("staged_tree", "0" * 40), ("candidate", self.base)):
+            with self.subTest(provenance=field):
+                receipt = json.loads(original)
+                receipt["commit"][field] = wrong
+                try:
+                    receipt_path.write_text(json.dumps(receipt))
+                    with self.assertRaises(factory.FactoryError):
+                        integration.accepted(record, "merge", "cleanup-accept", self.transport)
+                finally:
+                    receipt_path.write_bytes(original)
+        receipt = json.loads(receipt_path.read_bytes())
+        common = Path(record["admission"]["repository_identity"]["common_dir"])
+        for object_id in (receipt["candidate"], receipt["commit"]["parent"], receipt["commit"]["staged_tree"]):
+            with self.subTest(missing_object=object_id):
+                object_path = common / "objects" / object_id[:2] / object_id[2:]
+                original_object = object_path.read_bytes()
+                try:
+                    object_path.unlink()
+                    with self.assertRaises(factory.FactoryError):
+                        integration.accepted(record, "merge", "cleanup-accept", self.transport)
+                finally:
+                    object_path.write_bytes(original_object)
+        marker = Path(record["admission"]["repository_identity"]["common_dir"]) / factory.REPOSITORY_MARKER
+        original = marker.read_bytes()
+        try:
+            identity = json.loads(original)
+            identity["repository_id"] = "0" * 32
+            marker.write_text(json.dumps(identity))
+            with self.assertRaises(factory.FactoryError):
+                integration.accepted(record, "merge", "cleanup-accept", self.transport)
+        finally:
+            marker.write_bytes(original)
+        factory.set_inputs(self.path, candidate=self.head, requirements="changed-requirements")
+        with self.assertRaises(factory.FactoryError):
+            integration.accepted(factory.load_task(self.path), "merge", "cleanup-accept", self.transport)
+        self.assertEqual(len(self.transport.merges), 1)
+
+    def test_manual_native_result_cannot_supply_historical_approval_or_acceptance(self):
+        for final in (False, True):
+            with self.subTest(final_acceptance=final):
+                checkout = self.root / ("manual-final" if final else "manual-release")
+                added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+                self.assertEqual(added.returncode, 0, added.stderr)
+                if final:
+                    self.assertEqual(self.integrate()["state"], "delivered")
+                key = "manual-final" if final else "manual-release"
+                assignment = self.review(key, "release", delivery="merge" if final else None,
+                    cwd=checkout, collect=False)
+                command = assignment["request"]["command"]
+                receipt_path = command[command.index("--receipt") + 1]
+                receipt = json.loads(Path(receipt_path).read_text())
+                report = receipt["report"]
+                record = factory.record_result(self.path, assignment_id=key, candidate=receipt["candidate"],
+                    requirements=receipt["inputs"]["requirements"], outcome=report["outcome"],
+                    artifacts=list(dict.fromkeys([receipt_path, *report["artifacts"]])))
+                removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+                before = self.path.read_bytes()
+                merges = len(self.transport.merges)
+                with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+                    if final:
+                        integration.accepted(record, "merge", key, self.transport)
+                    else:
+                        integration.approvals(record, key, ["qa"])
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(len(self.transport.merges), merges)
+
+    def test_legacy_collection_needs_explicit_strict_recollection(self):
+        checkout = self.root / "legacy-worktree"
+        added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        for key in ("legacy-recollected", "legacy-unproven"):
+            self.review(key, "qa", frozen=False, cwd=checkout)
+        original = factory.load_task(self.path)
+        legacy = copy.deepcopy(original)
+        legacy["schema_version"] = 8
+        for assignment in legacy["assignments"].values():
+            del assignment["native_collected"]
+        factory.save(self.path, legacy)
+        artifacts = {}
+        for assignment in original["assignments"].values():
+            command = assignment["request"]["command"]
+            for ref in [assignment["brief"], command[command.index("--events") + 1],
+                    *assignment["result"]["artifacts"]]:
+                path = Path(ref)
+                if path.is_file():
+                    artifacts[path] = path.read_bytes()
+        with patch.object(factory, "status", side_effect=AssertionError("Migration cannot infer collection")):
+            migrated = factory.load_task(self.path)
+        self.assertEqual(migrated["schema_version"], 9)
+        self.assertEqual({key: value for key, value in migrated.items() if key not in ("schema_version", "assignments")},
+            {key: value for key, value in legacy.items() if key not in ("schema_version", "assignments")})
+        for key, assignment in migrated["assignments"].items():
+            self.assertEqual(assignment, {**legacy["assignments"][key], "native_collected": False})
+        with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+            integration.collected_native("legacy-recollected", migrated, migrated["assignments"]["legacy-recollected"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            recollected = factory.collect_codex(self.path, "legacy-recollected", None, migrated,
+                migrated["assignments"]["legacy-recollected"])
+        self.assertEqual(recollected["assignments"]["legacy-recollected"],
+            original["assignments"]["legacy-recollected"])
+        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        integration.collected_native("legacy-recollected", recollected, recollected["assignments"]["legacy-recollected"])
+        with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+            integration.collected_native("legacy-unproven", recollected, recollected["assignments"]["legacy-unproven"])
+        before = self.path.read_bytes()
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            with self.assertRaises(factory.FactoryError):
+                factory.collect_codex(self.path, "legacy-unproven", None, recollected,
+                    recollected["assignments"]["legacy-unproven"])
+        self.assertEqual(self.path.read_bytes(), before)
+        for path, content in artifacts.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_first_collection_refuses_removed_original_checkout(self):
+        checkout = self.root / "uncollected-worktree"
+        added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        assignment = self.review("uncollected-qa", "qa", frozen=False, cwd=checkout, collect=False)
+        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            with self.assertRaises(factory.FactoryError):
+                factory.collect_codex(self.path, "uncollected-qa", None, factory.load_task(self.path), assignment)
+        self.assertIsNone(factory.load_task(self.path)["assignments"]["uncollected-qa"]["result"])
 
     def test_pending_delivery_cannot_become_final_acceptance(self):
         self.transport.lost, self.transport.merge_lands = True, False

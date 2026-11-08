@@ -156,7 +156,7 @@ def task_lock(directory, task, *, wait=False):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=8, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
+    return dict(schema_version=9, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -191,7 +191,7 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (version < 6 or version == 7) and "provisioning" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
@@ -311,6 +311,12 @@ def load_task(path) -> dict:
     for assignment in record["assignments"].values():
         if "result" not in assignment:
             raise FactoryError("Missing assignment result field; restore the original state before continuing")
+        if version < 9:
+            if "native_collected" in assignment:
+                raise FactoryError("Legacy assignment has newer fields; restore its schema version before continuing")
+            assignment["native_collected"] = False
+        if type(assignment.get("native_collected")) is not bool or (assignment["native_collected"] and assignment["result"] is None):
+            raise FactoryError("Invalid native collection provenance; restore the original task record")
         result = assignment["result"]
         if result is not None and (not isinstance(result, dict)
                 or assignment["state"] != "launched"
@@ -350,8 +356,8 @@ def load_task(path) -> dict:
     if version < 7:
         record["allowance_events"] = []
     allowance_limits(record)
-    if version < 8:
-        record["schema_version"] = 8
+    if version < 9:
+        record["schema_version"] = 9
         try:
             save(path, record)
         except OSError:
@@ -1324,7 +1330,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         argv = [sys.executable, "-E", "-s", str(ROOT / "checkout_exec.py"), "--identity",
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
-    assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
+    assignment: dict = dict(request=request, state="launching", result=None, native_collected=False, brief=str(brief_path),
                             window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
     record["assignments"][assignment_id] = assignment
     save(path, record)
@@ -1467,8 +1473,10 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
-    if not failed_identity and observe is None and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
+    if not failed_identity and (observe is None or collected) and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
         raise FactoryError("Collect a current native result before using its answer as coordination evidence")
+    if collected and assignment.get("native_collected") is not True:
+        raise FactoryError("Native evidence lacks proven strict collection; explicitly collect it with its original checkout available")
     if observe is not None and observe()["state"] not in ({"failed", "exited"} if failed_identity else {"exited"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
@@ -1547,10 +1555,10 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
     if observe is not None or collected:
-        # Only a fully collected historical result may outlive its checkout HEAD.
+        # Only a fully collected result may outlive its original checkout.
         # Initial collection (including stale work) keeps the strict HEAD check.
         check_commit_receipt(receipt, args, record["admission"]["repository"],
-                             historical=collected and not current)
+                             historical=collected)
     elif (coordination is None or args.write or receipt.get("commit") is not None
             or repository_identity(record["admission"]["repository"]) != receipt["repository_identity"]):
         raise FactoryError("Offline coordination needs collected read-only evidence from the original repository")
@@ -1563,6 +1571,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
             outcome=native["report"]["outcome"], artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
         if assignment["result"] != expected:
             raise FactoryError("Collected result differs from the complete original native report")
+    if observe is not None or collected:
         try:
             instructions = Path(assignment["brief"]).read_text()
         except (OSError, UnicodeError):
@@ -1576,9 +1585,12 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     """Register a finished native report; this never accepts the whole task."""
     args, receipt, native = codex_evidence(assignment_id, record, assignment, observe=lambda: status(rex, record, assignment))
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
-    return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
-                         requirements=receipt["inputs"]["requirements"],
-                         outcome=native["report"]["outcome"], artifacts=artifacts)
+    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+                           requirements=receipt["inputs"]["requirements"],
+                           outcome=native["report"]["outcome"], artifacts=artifacts)
+    record["assignments"][assignment_id]["native_collected"] = True
+    save(path, record)
+    return record
 
 
 def require_grok_execution():
