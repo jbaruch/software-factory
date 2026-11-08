@@ -266,7 +266,7 @@ class Integration(unittest.TestCase):
         self.assertIn("--release-evidence", original["request"]["command"])
         self.assertEqual(release_evidence.from_assignment(self.record, original), self.frozen)
 
-    def test_real_pane_lifecycle_and_ordinary_schema_eight_readers(self):
+    def test_real_pane_lifecycle_and_ordinary_schema_nine_readers(self):
         started = self.launch_integration()
         self.assertEqual(started["state"], "launched")
         record = factory.load_task(self.path)
@@ -276,7 +276,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((started["window_id"], started["block_id"]),
                          (assignment["window_id"], assignment["block_id"]))
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
-        self.assertEqual(factory.task_view(record)["schema_version"], 8)
+        self.assertEqual(factory.task_view(record)["schema_version"], 9)
         rex = factory.connect(record)
         EvidenceRex.integration_running = True
         try:
@@ -584,7 +584,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(result["delivery"]["acceptance"], "pending_native_judgment")
         self.assertEqual(result["delivery"]["publication"], "inapplicable")
         saved = factory.load_task(self.path)
-        self.assertEqual(saved["schema_version"], 8)
+        self.assertEqual(saved["schema_version"], 9)
         self.assertEqual(saved["assignments"]["qa"], original["assignments"]["qa"])
         self.assertEqual(saved["assignments"]["release"], original["assignments"]["release"])
         self.assertEqual(factory.task_view(saved)["allowances"], allowance)
@@ -933,6 +933,84 @@ class Integration(unittest.TestCase):
         with self.assertRaises(factory.FactoryError):
             integration.accepted(factory.load_task(self.path), "merge", "cleanup-accept", self.transport)
         self.assertEqual(len(self.transport.merges), 1)
+
+    def test_manual_native_result_cannot_supply_historical_approval_or_acceptance(self):
+        for final in (False, True):
+            with self.subTest(final_acceptance=final):
+                checkout = self.root / ("manual-final" if final else "manual-release")
+                added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+                self.assertEqual(added.returncode, 0, added.stderr)
+                if final:
+                    self.assertEqual(self.integrate()["state"], "delivered")
+                key = "manual-final" if final else "manual-release"
+                assignment = self.review(key, "release", delivery="merge" if final else None,
+                    cwd=checkout, collect=False)
+                command = assignment["request"]["command"]
+                receipt_path = command[command.index("--receipt") + 1]
+                receipt = json.loads(Path(receipt_path).read_text())
+                report = receipt["report"]
+                record = factory.record_result(self.path, assignment_id=key, candidate=receipt["candidate"],
+                    requirements=receipt["inputs"]["requirements"], outcome=report["outcome"],
+                    artifacts=list(dict.fromkeys([receipt_path, *report["artifacts"]])))
+                removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+                before = self.path.read_bytes()
+                merges = len(self.transport.merges)
+                with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+                    if final:
+                        integration.accepted(record, "merge", key, self.transport)
+                    else:
+                        integration.approvals(record, key, ["qa"])
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(len(self.transport.merges), merges)
+
+    def test_legacy_collection_needs_explicit_strict_recollection(self):
+        checkout = self.root / "legacy-worktree"
+        added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        for key in ("legacy-recollected", "legacy-unproven"):
+            self.review(key, "qa", frozen=False, cwd=checkout)
+        original = factory.load_task(self.path)
+        legacy = copy.deepcopy(original)
+        legacy["schema_version"] = 8
+        for assignment in legacy["assignments"].values():
+            del assignment["native_collected"]
+        factory.save(self.path, legacy)
+        artifacts = {}
+        for assignment in original["assignments"].values():
+            command = assignment["request"]["command"]
+            for ref in [assignment["brief"], command[command.index("--events") + 1],
+                    *assignment["result"]["artifacts"]]:
+                path = Path(ref)
+                if path.is_file():
+                    artifacts[path] = path.read_bytes()
+        with patch.object(factory, "status", side_effect=AssertionError("Migration cannot infer collection")):
+            migrated = factory.load_task(self.path)
+        self.assertEqual(migrated["schema_version"], 9)
+        self.assertEqual({key: value for key, value in migrated.items() if key not in ("schema_version", "assignments")},
+            {key: value for key, value in legacy.items() if key not in ("schema_version", "assignments")})
+        for key, assignment in migrated["assignments"].items():
+            self.assertEqual(assignment, {**legacy["assignments"][key], "native_collected": False})
+        with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+            integration.collected_native("legacy-recollected", migrated, migrated["assignments"]["legacy-recollected"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            recollected = factory.collect_codex(self.path, "legacy-recollected", None, migrated,
+                migrated["assignments"]["legacy-recollected"])
+        self.assertEqual(recollected["assignments"]["legacy-recollected"],
+            original["assignments"]["legacy-recollected"])
+        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        integration.collected_native("legacy-recollected", recollected, recollected["assignments"]["legacy-recollected"])
+        with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+            integration.collected_native("legacy-unproven", recollected, recollected["assignments"]["legacy-unproven"])
+        before = self.path.read_bytes()
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            with self.assertRaises(factory.FactoryError):
+                factory.collect_codex(self.path, "legacy-unproven", None, recollected,
+                    recollected["assignments"]["legacy-unproven"])
+        self.assertEqual(self.path.read_bytes(), before)
+        for path, content in artifacts.items():
+            self.assertEqual(path.read_bytes(), content)
 
     def test_first_collection_refuses_removed_original_checkout(self):
         checkout = self.root / "uncollected-worktree"

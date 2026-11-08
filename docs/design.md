@@ -92,7 +92,11 @@ Collected successful writers also retain their original provenance when a later
 correction advances or cleanup removes the checkout. Collected evidence validates
 against the admitted repository identity and retained candidate/parent/tree objects;
 initial collection still requires the original checkout, Git directory and HEAD.
-Collection history does not relax task-input currency or final acceptance gates.
+Schema-9 assignment `native_collected` records only successful strict native
+collection; generic result registration and legacy migration never grant it.
+Legacy evidence needs explicit strict recollection while its original checkout
+remains available. Collection history does not relax task-input currency or final
+acceptance gates.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
@@ -105,7 +109,7 @@ authority. The [owner contract](task-state.md#writer-worktree-provisioning) defi
 the supported tree/configuration inputs and conservative reconciliation.
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
-Mechanical integration uses the same schema-8 `factory.launch` lifecycle and real
+Mechanical integration uses the same schema-9 `factory.launch` lifecycle and real
 window/block identities. Its original worker owns a versioned execution receipt;
 repeats and cold recovery reconcile existing effects read-only. A repository-scoped
 mutex serializes integration without occupying unrelated ready-work capacity. Task
