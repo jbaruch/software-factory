@@ -389,6 +389,11 @@ class ClaudeWorker(unittest.TestCase):
 
 class ClaudeApprovals(unittest.TestCase):
     def setUp(self):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(native_claude.OVERRIDE_PREFIXES)}
+        cleanup = patch.dict(os.environ, environment, clear=True)
+        cleanup.start()
+        self.addCleanup(cleanup.stop)
         from test_integration import Integration
         self.fixture = Integration()
         self.fixture.setUp()
