@@ -346,7 +346,10 @@ def load_task(path) -> dict:
     allowance_limits(record)
     if version < 8:
         record["schema_version"] = 8
-        save(path, record)
+        try:
+            save(path, record)
+        except OSError:
+            raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
     return record
 
 
