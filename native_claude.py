@@ -219,6 +219,7 @@ def parse_execution(events, *, session_id, cwd, model, max_turns):
                         refuse()
                     path = result["file"].get("filePath")
                     if (not isinstance(path, str) or not Path(path).is_absolute()
+                            or path != call["input"]["file_path"]
                             or any(not Path(os.path.normpath(p)).is_relative_to(cwd)
                                    for p in (path, call["input"]["file_path"]))):
                         refuse()

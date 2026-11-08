@@ -87,6 +87,35 @@ class Decoder(unittest.TestCase):
             else:
                 self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
 
+    def read_data(self, requested, returned):
+        data = events("/fixture")
+        data[1:1] = [
+            dict(type="assistant", session_id=SESSION, parent_tool_use_id=None,
+                 message=dict(model=MODEL, content=[dict(type="tool_use", id="read-1", name="Read",
+                                                       input=dict(file_path=requested))])),
+            dict(type="user", session_id=SESSION, parent_tool_use_id=None,
+                 message=dict(content=[dict(type="tool_result", tool_use_id="read-1", content="fixture")]),
+                 tool_use_result=dict(type="text", file=dict(filePath=returned, content="fixture")))]
+        return data
+
+    def test_read_result_rejects_different_in_scope_path(self):
+        data = self.read_data("/fixture/.factory-state/inside-canary.txt",
+                              "/fixture/.factory-state/DIFFERENT-FILE.txt")
+        original = copy.deepcopy(data)
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
+        self.assertEqual(data, original)
+
+    def test_matching_read_paths_validate_without_filesystem_resolution(self):
+        for path in ("/fixture/file", "/fixture/.factory-state/inside-canary.txt",
+                     "/fixture/nested/../file", "/fixture/./file", "/fixture/space and ü.txt"):
+            with self.subTest(path=path):
+                data = self.read_data(path, path)
+                original = copy.deepcopy(data)
+                with patch.object(Path, "resolve", side_effect=AssertionError("Decoder must stay offline")):
+                    self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
+                self.assertEqual(data, original)
+
     def test_malformed_unused_fields_and_usage_refuse(self):
         for index, key, value in [(4, "subagent_stats", []), (4, "usage", dict(input_tokens=True, output_tokens=20))]:
             data = events("/fixture"); data[index][key] = value
