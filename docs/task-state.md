@@ -98,6 +98,15 @@ hash. New admitted assignments also contain the declared purpose, an input
 snapshot and any declared dependencies. Each assignment has a nullable `result`.
 States are
 `launching` or `launched`, describing the effect, not completion of engineering work.
+The [mechanical integration adapter](integration.md) uses the same schema-8
+request/result shape with a frozen `integration.py --intent` command. It launches through `factory.launch` and owns an actual Rex window/block.
+`launching` and `launched` retain their ordinary launch meanings; neither describes
+merge completion. `status` inspects the real process and reconciles lost launch
+replies normally. `integrate` reconnects that same worker and reconciles an
+existing execution receipt read-only; it never restarts the command.
+Its original execution receipt is an artifact, digest-bound on terminal collection,
+not a second release ledger. Final acceptance is generated from selected original
+native delivered-evidence reports; no model report alone establishes delivery.
 Allowance totals are generated output; no second usage ledger is stored.
 Effective limits start at the immutable admission limits. Each allowance event's
 `previous_limit` equals the effective limit for its correction/investigation

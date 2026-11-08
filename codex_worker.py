@@ -670,13 +670,15 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     return hooked
 
 
-def check_commit_receipt(receipt, args, repository):
+def check_commit_receipt(receipt, args, repository, *, historical=False):
     """Version 4 has no factory commit; version 5 declares its nullable intent."""
     if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
             or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
         raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
-    if args.write and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
+    if args.write and not historical and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
         raise factory.FactoryError("Writer candidate differs from the assigned worktree HEAD; inspect its retained checkout before collection")
+    if factory.git_commit(repository, receipt["candidate"]) != receipt["candidate"]:
+        raise factory.FactoryError("Restore the original writer candidate objects before validating historical provenance")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:
@@ -732,6 +734,24 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         factory.check_role_write(args.role)
     if args.role is not None and instructions.split("\n", 1)[0] != "# Assignment: " + args.role:
         raise factory.FactoryError("Worker role differs from the bound assignment brief; inspect the original request")
+    if args.delivery_evidence is not None or args.delivery_evidence_digest is not None:
+        import release_evidence
+        if args.release_evidence is not None or args.release_evidence_digest is not None:
+            raise factory.FactoryError("Select one original release or delivery payload before launching")
+        frozen = (factory.decode_json(args.delivery_evidence) if args.delivery_evidence is not None else
+                  release_evidence.brief_payload(instructions, "delivery", args.delivery_evidence_digest))
+        if args.write or args.role != "release" or not instructions.endswith(release_evidence.render_delivery(frozen)):
+            raise factory.FactoryError("Final acceptance needs its original frozen read-only release brief")
+        if frozen["receipt"]["intent"]["inputs"] != dict(candidate=args.candidate, requirements=args.requirements):
+            raise factory.FactoryError("Final acceptance inputs differ from confirmed delivery")
+    if args.release_evidence is not None or args.release_evidence_digest is not None:
+        import release_evidence
+        frozen = (factory.decode_json(args.release_evidence) if args.release_evidence is not None else
+                  release_evidence.brief_payload(instructions, "release", args.release_evidence_digest))
+        if args.write or not instructions.endswith(release_evidence.render(frozen)):
+            raise factory.FactoryError("Original release evidence differs from the frozen read-only brief")
+        if frozen.get("inputs") != dict(candidate=args.candidate, requirements=args.requirements):
+            raise factory.FactoryError("Release evidence inputs differ from native assignment")
     coordination = None
     if any(getattr(args, key, None) is not None for key in ("decision_store", "decision", "question")):
         import coordination_evidence
@@ -801,7 +821,12 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 # keep non-BMP Unicode literal rather than JSON surrogate pairs.
                 shell_path = json.dumps(str(directory), ensure_ascii=False).replace("\x7f", "\\u007f")
                 try:
-                    process = await spawn(str(binary), "--no-daemon", "--strict-config", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                    # A seekable private stdin avoids argv limits and pipe backpressure.
+                    # The child owns its inherited descriptor; the parent closes its copy.
+                    with tempfile.TemporaryFile() as prompt:
+                        prompt.write(instructions.encode("utf-8"))
+                        prompt.seek(0)
+                        process = await spawn(str(binary), "--no-daemon", "--strict-config", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
                                           "--json", "--color", "never",
                                           "--output-schema", str(schema), "--model", args.model,
                                           "--sandbox", "workspace-write" if args.write else "read-only",
@@ -810,10 +835,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           "-c", "features.shell_snapshot=false",
                                           "-c", "shell_environment_policy.experimental_use_profile=false",
                                           "-c", "shell_environment_policy.set.ZDOTDIR=" + shell_path,
-                                          "--cd", ".", instructions,
+                                          "--cd", ".", "-",
                                           env=environment,
                                           limit=NATIVE_LINE_LIMIT,
-                                          stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+                                          stdin=prompt, stdout=asyncio.subprocess.PIPE)
                 except OSError:
                     raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
 
@@ -901,6 +926,10 @@ def parser():
         command.add_argument("--" + field, type=Path, required=True)
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
+    for kind in ("delivery", "release"):
+        evidence = command.add_mutually_exclusive_group()
+        evidence.add_argument("--" + kind + "-evidence", help="Historical inline frozen evidence")
+        evidence.add_argument("--" + kind + "-evidence-digest", help="Digest of original evidence in the saved brief")
     command.add_argument("--role", help="Owner-selected role; required for writer execution")
     command.add_argument("--decision-store", type=Path, help="Original Jev decision store; frozen before the native launch")
     command.add_argument("--decision", help="Exact original Jev decision ID")

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.14.0 — 2026-11-07 (unpublished)
+
+### Exact-candidate integration and original release evidence
+
+Add `factory.py integrate`, a mechanical head-conditional merge adapter and
+frozen original canonical feedback for selected native specialist/release
+judgments. Run the original mechanical adapter through `factory.launch` with real
+Rex pane identities and a version-1 receipt; retain ordinary schema-8 readers.
+Release task/ready-work locks during watcher waits, serialize repository integration,
+reload pre-effect controls, and collect into current owner state. Reuse intents,
+results, holds and cumulative attempts. Require the full review packet only for
+release judgment, preserving ordinary exact-input QA/security approvals and failed
+writers' original contributor identities. Version frozen payloads and support the
+protected ignored managed `.codex` helper installation through canonical bash.
+Require unchanged canonical watcher readiness, original exact-input independent
+approvals, actual repository gates, source-bound merge ancestry, terminal current-
+attempt push CI and issue checks. Replays reconcile read-only without resending
+unknown effects. Final acceptance requires a separate native delivered-evidence
+judgment. Keep PR preparation and cleanup with release, add no automatic quality
+waiver or publication claim. Fixed offline transports and temporary Git cover
+refusals, lost replies and recovery; live delivery and judgment remain unqualified.
+
+Preserve collected successful writer provenance across subsequent corrections.
+Move release/delivery capture outside execution/task locks and revalidate the owner
+before submission. Freeze fresh successful CI rerun observations into version-2
+native delivery briefs while retaining original receipts/results. Reject helpers
+from sibling worktrees and newly selected checkouts before execution, remove
+exported Bash functions, and make process failures actionable. Require verified
+strict required `verify` CI protection with administrator enforcement before the
+head-conditional merge; unsafe/unknown server guards hold without mutation. Offline
+race and recovery fixtures do not establish live enforcement or release readiness.
+Malformed helper JSON or text now reports an actionable restoration and same-intent
+reconciliation diagnostic without exposing the response body; a pre-effect hold
+still requires reassessment, and post-submission recovery never resends the merge.
+Keep full release/delivery evidence in the existing brief with digest-only command
+arguments, and pass native prompts through private temporary stdin. Preserve legacy
+inline evidence. Check GitHub issue links directly with a versioned factory-owned
+checker; refuse incomplete or unsupported observations without invoking an
+undocumented cross-plugin issue-helper interface.
+Classify native nonzero HTTP 405/409 merge responses as rejected, while preserving
+unknown outcomes and reconciliation for transport or malformed-response failures.
+Finish interrupted pre-submission waits as held, and allow unrelated assignment
+and allowance updates during the watcher while retaining selected-evidence guards.
+
+
 ## 0.13.0 — 2026-11-07 (unpublished)
 
 ### Task-owned writer worktrees
