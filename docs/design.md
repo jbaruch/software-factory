@@ -89,7 +89,10 @@ ordinary exact-input specialist approvals remain valid when only review prose ch
 Failed native writers retain their original contributor identity for independence,
 without promoting failed execution or blocked results into successful evidence.
 Collected successful writers also retain their original provenance when a later
-correction advances the same checkout; initial collection still checks its HEAD.
+correction advances or cleanup removes the checkout. Collected evidence validates
+against the admitted repository identity and retained candidate/parent/tree objects;
+initial collection still requires the original checkout, Git directory and HEAD.
+Collection history does not relax task-input currency or final acceptance gates.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 

@@ -1467,7 +1467,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
-    if not failed_identity and observe is None and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
+    if not failed_identity and (observe is None or collected) and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
         raise FactoryError("Collect a current native result before using its answer as coordination evidence")
     if observe is not None and observe()["state"] not in ({"failed", "exited"} if failed_identity else {"exited"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
@@ -1547,10 +1547,10 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
     if observe is not None or collected:
-        # Only a fully collected historical result may outlive its checkout HEAD.
+        # Only a fully collected result may outlive its original checkout.
         # Initial collection (including stale work) keeps the strict HEAD check.
         check_commit_receipt(receipt, args, record["admission"]["repository"],
-                             historical=collected and not current)
+                             historical=collected)
     elif (coordination is None or args.write or receipt.get("commit") is not None
             or repository_identity(record["admission"]["repository"]) != receipt["repository_identity"]):
         raise FactoryError("Offline coordination needs collected read-only evidence from the original repository")
