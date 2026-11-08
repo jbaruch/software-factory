@@ -32,7 +32,11 @@ never mean an empty/all-resolved inbox.
 The only added budget control is an explicit human approval of exactly one
 correction/investigation attempt, with a reason and observed limit. It uses the
 task owner's existing lock/history/replay semantics, preserves holds and starts
-no work. See [operator view](operator-view.md) for authentication and schema details.
+no work. Default counts are progress-review checkpoints; recorded limits remain
+enforced until an explicit extension. The foreman may use existing standing
+operator authorization without asking again; real user budgets, scope and holds
+bind. See [the owner guidance](task-state.md#review-checkpoints-and-allowance-extensions)
+and [operator view](operator-view.md) for authentication and schema details.
 
 Team distinguishes requested native identity from observed model and runtime
 readiness. Show original assignment inputs/result freshness, saved Rex

@@ -185,7 +185,7 @@ def validate_request(request):
 def read_decision(path) -> dict:
     """Read the owner's version-1 decision record; unknown versions hold retries."""
     try:
-        record = decode_json(path.read_text())
+        record = decode_json(factory.read_record(path))
         json.dumps(record, allow_nan=False)
         if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
                 or record["schema_version"] != 1 or record.get("kind") != "jev-decision"

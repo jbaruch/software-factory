@@ -337,8 +337,8 @@ def task_conditions(tasks, errors):
                     item: dict = dict(**common, owner="operator",
                         condition=purpose + ("_exhausted" if values["used"] else "_not_authorized"),
                         detail=purpose + (" allowance exhausted" if values["used"] else " has no authorized attempts; no attempts made"),
-                        availability="No further " + purpose + " assignment is authorized",
-                        decision_needed="Decide whether to approve one additional " + purpose + " attempt or stop/wait")
+                        availability="Recorded limit reached; an explicit extension is required before another " + purpose + " assignment",
+                        decision_needed="Review progress and standing authorization for an explicit " + purpose + " extension, or decide stop/wait")
                     if purpose == "correction" and corrections and failures:
                         item["artifacts"] = [ref for assignment in failures for ref in assignment["result"]["artifacts"]]
                         item["detail"] += "; attempted correction work and current blocked/findings evidence remain"
@@ -354,7 +354,7 @@ def task_conditions(tasks, errors):
                                         decision_needed="Inspect the original investigation report and supply its missing input or decide stop/wait")
                             if task["allowances"]["investigation"]["remaining"] <= 0:
                                 item["availability"] += "; no investigation allowance remains"
-                                item["decision_needed"] += "; operator must explicitly approve one additional investigation attempt before further work"
+                                item["decision_needed"] += "; an authorized owner must record an explicit investigation extension before further work"
                         elif completed:
                             item.update(availability="Current completed investigation evidence exists; no repeat investigation proposed",
                                         decision_needed="Use the original completed investigation for bounded reassessment; do not repeat investigation or infer a ruling")
@@ -363,7 +363,7 @@ def task_conditions(tasks, errors):
                                         decision_needed="Wait for or reconcile the original investigation assignment")
                         elif task["allowances"]["investigation"]["remaining"] <= 0:
                             item.update(availability="Blocked: no investigation allowance remains",
-                                        decision_needed="Operator must explicitly approve an additional investigation attempt or decide stop/wait")
+                                        decision_needed="Review progress and standing authorization for an explicit investigation extension, or decide stop/wait")
                         else:
                             item.update(owner="investigator", availability="Investigation allowance remains; operator must select any assignment",
                                         decision_needed="Gather evidence for the failed correction loop using the original current reports; no automatic assignment")
@@ -534,6 +534,10 @@ def allowance_controls(task, csrf_token):
                    + ''.join(f'<li><code>{text(ref)}</code></li>' for ref in admission["acceptance"]) + '</ul></details>')
     if csrf_token is None or task["allowances"] is None:
         return result
+    result += ('<p class="muted">Default counts are progress-review checkpoints. The recorded limit remains enforced '
+               'until an explicit extension. The foreman can continue within existing standing authorization '
+               'without asking the operator again; user budgets, scope and holds remain binding. '
+               'Workers and classifiers cannot grant themselves attempts.</p>')
     identity = task["id"]
     for purpose, values in task["allowances"].items():
         field = text(f'approval-{identity}-{purpose}')

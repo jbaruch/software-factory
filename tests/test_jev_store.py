@@ -3,6 +3,7 @@ import copy
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -56,6 +57,52 @@ class DecisionStore(unittest.TestCase):
         self.assertEqual(self.client.request.call_count, 1)
         no_client.assert_not_called()
         self.assertEqual(jev.pending_decisions(self.root)["items"], [])
+
+    def test_regular_decision_states_and_rejections_close_owner_descriptors(self):
+        completed = self.evaluate()
+        path = self.path(completed)
+        for state in ("pending", "failed", "completed", "malformed", "fifo", "fifo-link"):
+            with self.subTest(state=state):
+                path.unlink(missing_ok=True)
+                if state in ("fifo", "fifo-link"):
+                    pipe = self.root / "pipe"
+                    if not pipe.exists():
+                        os.mkfifo(pipe)
+                    if state == "fifo":
+                        os.mkfifo(path)
+                    else:
+                        path.symlink_to(pipe)
+                elif state == "malformed":
+                    path.write_text("private malformed contents")
+                else:
+                    record = copy.deepcopy(completed)
+                    record["state"] = state
+                    if state != "completed":
+                        record.update(response=None, error="private failure" if state == "failed" else None)
+                    if state == "pending":
+                        record.update(finished_at=None, request_seconds=None)
+                    factory.save(path, record)
+                opened = []
+                open_file = os.open
+                def opening(source, flags, *args, **kwargs):
+                    self.assertTrue(flags & os.O_NONBLOCK)
+                    self.assertTrue(flags & os.O_NOFOLLOW)
+                    descriptor = open_file(source, flags, *args, **kwargs)
+                    opened.append(descriptor)
+                    return descriptor
+                with patch.object(os, "open", side_effect=opening), \
+                     patch.object(Path, "read_text", side_effect=AssertionError("Unsafe pathname reader")):
+                    if state in ("malformed", "fifo", "fifo-link"):
+                        with self.assertRaises(jev.JevError) as error:
+                            jev.read_decision(path)
+                        self.assertNotIn("private", str(error.exception))
+                        self.assertIn("restore", str(error.exception))
+                    else:
+                        self.assertEqual(jev.read_decision(path), record)
+                self.assertEqual(len(opened), 0 if state == "fifo-link" else 1)
+                for descriptor in opened:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
 
     def test_relevant_input_changes_do_not_reuse_old_judgment(self):
         original = self.evaluate()

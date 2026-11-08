@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlencode
@@ -128,6 +129,70 @@ class Inbox(unittest.TestCase):
                             self.assertIn("Restore the selected private Jev store", page)
                     finally:
                         source.rmdir() if kind == "directory" else source.unlink()
+
+    def test_owner_handoffs_reject_replacement_and_new_fifos_without_mixed_results(self):
+        decision = self.evaluate()
+        source = self.store / (decision["id"] + ".json")
+        original = source.read_bytes()
+        pipe = self.root / "private-pipe"
+        os.mkfifo(pipe)
+        for handoff in ("after-fingerprint", "between-owner-passes", "before-detail"):
+            for change in ("replacement-fifo", "replacement-link", "new-fifo", "new-link"):
+                with self.subTest(handoff=handoff, change=change):
+                    source.write_bytes(original)
+                    added = self.store / ("0" * 64 + ".json")
+                    pending, read, open_file = jev.pending_decisions, jev.read_decision, os.open
+                    read_text = Path.read_text
+                    passes, reads, descriptors = [], [], []
+                    def mutate():
+                        target = added if change.startswith("new") else source
+                        target.unlink(missing_ok=True)
+                        if change.endswith("link"):
+                            target.symlink_to(pipe)
+                        else:
+                            os.mkfifo(target)
+                    def collecting(*args, **kwargs):
+                        passes.append(kwargs)
+                        if (handoff == "after-fingerprint" and len(passes) == 1
+                                or handoff == "between-owner-passes" and len(passes) == 2):
+                            mutate()
+                        return pending(*args, **kwargs)
+                    def reading(path):
+                        reads.append(path)
+                        if handoff == "before-detail" and len(reads) == 3:
+                            mutate()
+                        return read(path)
+                    def pathname_read(path, *args, **kwargs):
+                        if path in (source, added):
+                            raise AssertionError("Unsafe owner pathname reopen")
+                        return read_text(path, *args, **kwargs)
+                    def opening(path, flags, *args, **kwargs):
+                        if Path(path) in (source, added):
+                            self.assertTrue(flags & os.O_NONBLOCK)
+                            self.assertTrue(flags & os.O_NOFOLLOW)
+                        descriptor = open_file(path, flags, *args, **kwargs)
+                        descriptors.append(descriptor)
+                        return descriptor
+                    try:
+                        started = time.monotonic()
+                        with patch.object(jev, "pending_decisions", side_effect=collecting), \
+                             patch.object(jev, "read_decision", side_effect=reading), \
+                             patch.object(os, "open", side_effect=opening), \
+                             patch.object(Path, "read_text", pathname_read):
+                            view = self.view()
+                        self.assertLess(time.monotonic() - started, 2)
+                        inbox = view["decision_inbox"]
+                        self.assertEqual((inbox["status"], inbox["items"], inbox["resolutions"]),
+                                         ("unavailable", [], []))
+                        self.assertNotIn("private-pipe", json.dumps(view))
+                        self.assertIn("not an empty or resolved inbox", dashboard.render(view))
+                        self.assertTrue(descriptors)
+                        for descriptor in descriptors:
+                            with self.assertRaises(OSError):
+                                os.fstat(descriptor)
+                    finally:
+                        source.unlink(missing_ok=True)
+                        added.unlink(missing_ok=True)
 
     def test_fingerprint_valid_descriptor_bytes_and_missing_first_use(self):
         decision = self.evaluate()
@@ -444,6 +509,9 @@ class Inbox(unittest.TestCase):
             self.assertIn('action="/tasks/fixture/allowance"', page)
             self.assertIn('name="expected_limit" value="1"', page)
             self.assertNotIn('name="additional"', page)
+            self.assertIn("Default counts are progress-review checkpoints", page)
+            self.assertIn("without asking the operator again", page)
+            self.assertIn("user budgets, scope and holds remain binding", page)
             self.post(fields).send_response.assert_called_with(303)
             second = dict(fields, request_id="second", expected_limit="2", reason="Another explicit approval")
             self.post(second).send_response.assert_called_with(303)
@@ -459,7 +527,7 @@ class Inbox(unittest.TestCase):
         saved = factory.load_task(self.fixture.path)
         for key in ("admission", "inputs", "assignments"):
             self.assertEqual(saved[key], original[key])
-        self.assertEqual(saved["schema_version"], 7)
+        self.assertEqual(saved["schema_version"], factory.new_task("fixture")["schema_version"])
         self.assertEqual(saved["hold"], "Intervening hold")
         self.assertEqual(factory.task_view(saved)["allowances"]["correction"], dict(used=1, limit=3, remaining=2))
         self.assertEqual([event["additional"] for event in saved["allowance_events"]], [1, 1])
@@ -583,6 +651,28 @@ class NativeInbox(unittest.TestCase):
         item, = self.view()["decision_inbox"]["items"]
         self.assertEqual((item["owner"], item["condition"]), ("operator", "stale"))
         self.assertIsNone(item["recorded_answer"])
+
+    def test_fifo_before_detail_discards_collected_native_resolution(self):
+        f = self.fixture
+        f.start()
+        f.answer()
+        f.collect()
+        read = jev.read_decision
+        calls = []
+        source = f.store / (f.decision["id"] + ".json")
+        def replacing(path):
+            calls.append(path)
+            if len(calls) == 3:
+                source.unlink()
+                os.mkfifo(source)
+            return read(path)
+        started = time.monotonic()
+        with patch.object(jev, "read_decision", side_effect=replacing):
+            view = self.view()
+        self.assertLess(time.monotonic() - started, 2)
+        inbox = view["decision_inbox"]
+        self.assertEqual((inbox["status"], inbox["items"], inbox["resolutions"]), ("unavailable", [], []))
+        self.assertIn("Recorded current native answers (0)", dashboard.render(view))
 
     def test_task_change_during_collection_cannot_claim_current_native_resolution(self):
         f = self.fixture

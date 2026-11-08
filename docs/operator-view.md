@@ -93,7 +93,11 @@ reason (nonempty, at most 512 characters). It adds exactly one attempt through
 `factory.extend_allowance` under the existing task lock. Original admission,
 consumed attempts, selected inputs, reports, holds and past events stay intact.
 Nothing starts work or grants acceptance. This control is not permission for an
-agent/classifier to grant itself budget.
+agent/classifier to grant itself budget. Default counts are progress-review
+checkpoints. The foreman may record an in-scope extension under existing standing
+authorization without asking the operator again; recorded limits stay enforced
+until that explicit owner operation. Real user budgets, scope and holds bind.
+See [review checkpoints](task-state.md#review-checkpoints-and-allowance-extensions).
 
 The **Decision inbox** groups operator, standby-reasoner, investigator and judge
 proposals. Task conditions come directly from `task_view`: holds, current
@@ -103,7 +107,7 @@ authorization condition, not a failed loop. Correction exhaustion proposes
 investigation only with attempted correction work relevant to current inputs and
 current blocked/findings evidence. Existing completed investigation evidence goes
 to reassessment; pending work is not duplicated. Blocked investigations or no
-remaining investigation allowance require an operator decision. Explicit holds
+remaining investigation allowance require an authorized recovery/extension decision. Explicit holds
 remain binding. These diagnostics dispatch nothing. Unknown finding
 recipients/options remain operator planning. Stale
 reports stay visible in Team and do not become current inbox findings.

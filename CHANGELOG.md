@@ -17,6 +17,13 @@ Require current failure evidence and relevant attempted corrections before
 proposing investigation; respect exhausted allowance, blocked/pending work and
 existing successful investigation evidence. Detect Jev/task source changes during
 collection and report unavailable instead of mixing empty/pending/current views.
+Close the owner handoff race identified by investigator `investigate-owner-read`
+at `a42524e` and retained shadow decision
+`726bf3919446bd91178306280e9662327d498a1069b0ad016a3d86eeb663dd0f`:
+Jev now uses the existing no-follow/nonblocking regular-file owner reader after
+fingerprinting. Preserve schema validation and final consistency checks; reject
+replacement/new FIFOs and FIFO links without partial proposals or resolutions.
+The shadow result is diagnostic evidence, not approval or execution authority.
 
 An authenticated same-origin valid-CSRF operator form can approve exactly one
 additional correction/investigation attempt through `factory.extend_allowance`,
@@ -25,7 +32,9 @@ admission, usage, reports, holds and decision history. Static renderers remain
 read-only; transient dashboard facts advance to schema 4; the existing task owner defines the task schema.
 Fixed offline source/render/handler/concurrency/replay cases use isolated records
 and fake transports. Host/browser checks, independent QA/security, policy review
-and CI remain separate gates. No real held task was granted an attempt. No
+and CI remain separate gates. Default counts are progress-review checkpoints; foreman extensions may use
+existing standing authorization while user budgets, scope and holds bind.
+No real held task was granted an attempt. No
 publisher is configured or authorized.
 
 ## 0.14.3 — 2026-11-08 (unpublished)
