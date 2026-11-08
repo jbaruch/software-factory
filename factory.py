@@ -35,8 +35,6 @@ GIT_ROUTING_VARIABLES = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDE
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
     "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_IMPLICIT_WORK_TREE",
     "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_QUARANTINE_PATH"}
-# Assignment window markers: "<role>-<assignment>-<8 hex>".
-FACTORY_WINDOW = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{8}")
 GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatversion",
     "extensions.objectformat", "extensions.refstorage", "extensions.worktreeconfig"}
 
@@ -1111,6 +1109,13 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
     return record
 
 
+def factory_marker(label):
+    """A window label the factory could have created: "<catalog role>-<assignment>-<8 hex>"."""
+    roles = json.loads((ROOT / "skills/factory/references/roles.json").read_text())["roles"]
+    return any(re.fullmatch(re.escape(item["id"]) + r"-[a-z0-9][a-z0-9-]{0,63}-[0-9a-f]{8}", label)
+               for item in roles)
+
+
 def role_spec(role_id):
     roles = json.loads((ROOT / "skills/factory/references/roles.json").read_text())["roles"]
     role = next((item for item in roles if item["id"] == role_id), None)
@@ -1202,7 +1207,7 @@ def check_session(rex, record, session_id):
             raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
         if window["window_id"] in ids or (label in owned and label in labels):
             raise FactoryError("Duplicate Rex window identity; inspect the original session before continuing")
-        if label is not None and label not in owned and FACTORY_WINDOW.fullmatch(label):
+        if label is not None and label not in owned and factory_marker(label):
             # Operator tabs are fine; an unrecorded factory marker means lost task history.
             raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
         labels.add(label)
