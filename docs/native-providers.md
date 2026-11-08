@@ -643,3 +643,70 @@ accept the task, establish independent verification or satisfy release gates.
 
 See the [implementation inventory](implementation.md) for mechanical integration
 observations and the remaining live specialist verification.
+
+## Explicit read-only Claude assignments
+
+`factory.py claude-start` and `claude-collect` use the existing admitted task,
+locks, cumulative attempts, frozen brief and Rex pane. Select `--claude` with an
+absolute installed executable, `--model claude-sonnet-5-5 --effort low`, explicit
+`--role`, `--goal`, `--cwd`, `--purpose` and stable task/assignment IDs. Optional
+`--seconds` (1–86400, default 600) and `--turns` (1–1000, default 30) bound the
+attempt. Code review requires a full `--base`; the existing revision-evidence
+owner embeds that exact range in the original brief. There is no automatic retry,
+scheduling route, writer, API fallback or release-judgment path.
+
+`claude_worker.py` preserves native HOME/config selection and checks the sanitized
+`native_claude.probe` before inference. Execution currently accepts the observed
+2.1.319 CLI and claude.ai/firstParty sign-in only. Changed CLI/model/effort needs
+explicit requalification. API/provider/auth environment overrides refuse even when
+empty. The private frozen brief goes to stdin with EOF. Safe-mode/restricted,
+Read-only tools plus internal StructuredOutput, empty strict MCP configuration,
+denied MCP tools, disabled slash commands/Chrome, dontAsk/no permission host and
+no session persistence are per-invocation controls. They do not establish general
+confinement or subscription eligibility.
+
+The worker owns private version-1 `<task>.<id>.claude.json` receipts and
+`<task>.<id>.claude.jsonl` events. Receipts require kind `claude-execution`, state
+`starting`, `completed` or `failed`, job, candidate/requirements inputs, repository
+marker, individual worktree Git directory, cwd, role, original brief hash, binary,
+requested model/effort, sanitized auth discovery, native session, seconds/max_turns,
+created/finished/elapsed times, exit code, report, usage/model_usage, turns,
+rate_limits, candidate, events path and error. Terminal fields start null;
+completion requires finite nonnegative timing, successful exit and null error.
+Each version-1 `claude-event-line` record carries `data`, the unchanged original
+native line including newline. `claude_worker.RETAINED_STREAM_LIMIT` bounds each
+attempt's cumulative retained stream to 16 MiB (16,777,216 bytes of serialized
+JSONL envelopes, including envelope newlines, not native payload bytes). The worker
+checks before writing each envelope or appending its decoded event; overflow stops
+the child and saves an actionable failed receipt with the original retained prefix.
+Collection applies the same byte bound through `factory.read_record(max_bytes=...)`
+before parsing or retaining decoded events; it never rewrites oversized evidence.
+This is a stream bound, not a task-attempt allowance. Native lines are bounded to 1 MiB; invalid UTF-8
+stays escaped inspection evidence and refuses collection. Original events retain
+native list-price equivalents, which are not actual monetary spend. Raw native
+rate-limit observations retain unknowns and never establish shared pools.
+
+`native_claude.parse_execution` is the pure strict decoder. The worker writes;
+`factory.claude_evidence`, collection and integration read the original receipt,
+brief and events without migration. Init cwd/model/session/tool controls, assistant
+model/session, matched tool results, one structured report and successful final
+result/usage must agree. Unsupported/malformed/ambiguous lifecycles, tool escapes,
+missing reports, conflicting reports, non-success and timeouts refuse. Unknown or
+legacy receipt/event versions remain inspection-only. First collection additionally
+requires the original checkout/context and actual successful owned Rex exit.
+Only strict collection sets the existing schema-9 `native_collected` provenance;
+manual results never grant it. Historical validation retains original artifacts,
+immutable complete result, admitted repository marker and candidate Git objects.
+It cannot refresh stale inputs or turn an old failure into approval.
+
+Original bounded shape evidence remains in
+[no-tools-observation.json](../../software-factory/.factory-state/claude-lifecycle/no-tools-observation.json),
+[read-only-observation.json](../../software-factory/.factory-state/claude-lifecycle/read-only-observation.json)
+and their original private
+[no-tools stream](../../software-factory/.factory-state/claude-lifecycle/claude-no-tools.stream.jsonl) /
+[Read stream](../../software-factory/.factory-state/claude-lifecycle/claude-read-only.stream.jsonl).
+The 6.943s supplied defect review and 4.812s canary Read check are observations,
+not quality/readiness claims: own Read succeeded; direct outside and symlink reads
+were denied; exact-pane reconnect preserved artifacts. Refused dirty/fixture
+repository launches remain unlaunched. Scratch conformance used the generic
+non-repository entry point. New managed live qualification remains foreman work.

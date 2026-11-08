@@ -220,3 +220,13 @@ recovery, final acceptance, provider readiness and general judgment quality need
 separate original evidence. Keep state, logs, caches and test output outside the
 source checkout; the minimal isolated worker needs the release modules only when
 these opt-in evidence arguments are present.
+
+Selected ordinary `qa`, `security` and `code-review` approvals may also come from
+strictly collected version-1 read-only Claude execution receipts and original
+version-1 event envelopes. Their native session is the independent context;
+original init/assistant/result identities and frozen task/brief/repository/worktree
+bindings are revalidated along with the successful original Rex pane. Contexts
+must differ from every contributor and other selected approval, including Codex.
+Manual/legacy/stale/failed/uncollected evidence refuses. Pre-release and final
+release judgments continue to require the existing Codex path and complete
+release/delivery evidence; Claude ordinary approvals grant no release authority.

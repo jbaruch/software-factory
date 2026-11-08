@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import NoReturn
 
 from codex_worker import native_environment
 from factory import decode_json
@@ -119,6 +120,155 @@ def main(argv=None):
         return 1
     print(output)
     return 0
+
+
+def environment():
+    """Retain native account selection; refuse routing/auth overrides even if empty."""
+    if any(name != CONFIG_DIRECTORY and name.startswith(OVERRIDE_PREFIXES) for name in os.environ):
+        raise ClaudeProbeError("Unset Claude API/provider/auth overrides; restore the intended native subscription")
+    result = native_environment()
+    if CONFIG_DIRECTORY in os.environ:
+        selected_path(os.environ[CONFIG_DIRECTORY], directory=True)
+        result[CONFIG_DIRECTORY] = os.environ[CONFIG_DIRECTORY]
+    return result
+
+
+def validate_auth(observation, binary, cwd):
+    if (not isinstance(observation, dict) or type(observation.get("schema_version")) is not int
+            or observation["schema_version"] != 1 or observation.get("kind") != "claude-native-auth"
+            or observation.get("harness") != "claude" or observation.get("binary") != str(binary)
+            or observation.get("cwd") != str(cwd)
+            or observation.get("auth") != dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty")
+            or observation.get("cli_version") != "2.1.319 (Claude Code)"
+            or any(type(observation.get(k)) not in (int, float) or not 0 <= observation[k] <= sys.float_info.max
+                   for k in ("started_at", "observed_at", "probe_seconds"))
+            or observation["observed_at"] < observation["started_at"]):
+        raise ClaudeProbeError("Restore observed Claude 2.1.319 native claude.ai/firstParty sign-in; requalify changed CLI behavior before execution")
+
+
+def read_command(model, effort, session, turns):
+    from codex_worker import outcome_schema
+    return ["--safe-mode", "--restricted", "--print", "--tools", "Read",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--disallowedTools", "mcp__*", "--disable-slash-commands", "--no-chrome",
+            "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--model", model, "--effort", effort, "--session-id", session,
+            "--max-turns", str(turns), "--no-session-persistence",
+            "--system-prompt", "You are an independent read-only specialist. Follow the supplied assignment. "
+            "Use only Read and StructuredOutput. Do not delegate, execute commands or change files.",
+            "--json-schema", json.dumps(outcome_schema()), "--output-format", "stream-json",
+            "--verbose", "--include-hook-events"]
+
+
+def parse_execution(events, *, session_id, cwd, model, max_turns):
+    """Decode the observed native lifecycle without supplying process/provenance authority."""
+    def refuse() -> NoReturn:
+        raise ClaudeProbeError("Unsupported or conflicting Claude lifecycle; inspect the original stream and pane without retrying")
+    report, final, pending, tools, rates = None, None, {}, {}, []
+    initialized, denied = False, {}
+    for event in events:
+        if (not isinstance(event, dict) or final is not None or event.get("session_id") != session_id):
+            refuse()
+        kind = event.get("type")
+        if not initialized:
+            if (kind != "system" or event.get("subtype") != "init" or event.get("cwd") != cwd
+                    or event.get("model") != model or event.get("tools") != ["Read", "StructuredOutput"]
+                    or event.get("mcp_servers") != [] or event.get("permissionMode") != "dontAsk"
+                    or event.get("slash_commands") != [] or event.get("apiKeySource") != "none"
+                    or event.get("claude_code_version") != "2.1.319"
+                    or event.get("additional_directories") != []):
+                refuse()
+            initialized = True
+        elif kind == "assistant":
+            message = event.get("message")
+            if (not isinstance(message, dict) or message.get("model") != model
+                    or event.get("parent_tool_use_id") is not None or not isinstance(message.get("content"), list)):
+                refuse()
+            for block in message["content"]:
+                if not isinstance(block, dict) or block.get("type") not in ("text", "thinking", "tool_use"):
+                    refuse()
+                if block["type"] == "tool_use":
+                    name, identity = block.get("name"), block.get("id")
+                    if name not in ("Read", "StructuredOutput") or not isinstance(identity, str) or not identity or identity in tools:
+                        refuse()
+                    tools[identity] = name
+                    pending[identity] = block
+                    if name == "Read" and (not isinstance(block.get("input"), dict)
+                            or not isinstance(block["input"].get("file_path"), str)
+                            or not Path(block["input"]["file_path"]).is_absolute()):
+                        refuse()
+                    if name == "StructuredOutput":
+                        if report is not None:
+                            refuse()
+                        report = block.get("input")
+        elif kind == "user":
+            message = event.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("content"), list) or event.get("parent_tool_use_id") is not None:
+                refuse()
+            for block in message["content"]:
+                if not isinstance(block, dict) or block.get("type") != "tool_result" or not isinstance(block.get("tool_use_id"), str) or block["tool_use_id"] not in pending:
+                    refuse()
+                call = pending.pop(block["tool_use_id"])
+                name = call["name"]
+                if (type(block.get("is_error", False)) is not bool
+                        or (block["tool_use_id"] in denied and block.get("is_error") is not True)):
+                    refuse()
+                if name == "Read" and block.get("is_error", False) is False:
+                    result = event.get("tool_use_result")
+                    if not isinstance(result, dict) or not isinstance(result.get("file"), dict):
+                        refuse()
+                    path = result["file"].get("filePath")
+                    if (not isinstance(path, str) or not Path(path).is_absolute()
+                            or path != call["input"]["file_path"]
+                            or any(not Path(os.path.normpath(p)).is_relative_to(cwd)
+                                   for p in (path, call["input"]["file_path"]))):
+                        refuse()
+                if name == "StructuredOutput" and block.get("is_error", False) is not False:
+                    refuse()
+        elif kind == "rate_limit_event":
+            if not isinstance(event.get("rate_limit_info"), dict):
+                refuse()
+            rates.append(event["rate_limit_info"])
+        elif kind == "system" and event.get("subtype") == "permission_denied":
+            identity = event.get("tool_use_id")
+            if (event.get("tool_name") != "Read" or not isinstance(identity, str)
+                    or tools.get(identity) != "Read" or identity not in pending or identity in denied):
+                refuse()
+            denied[identity] = dict(tool_name="Read", tool_use_id=identity, tool_input=pending[identity]["input"])
+        elif kind == "result":
+            if (pending or report is None or event.get("subtype") != "success" or event.get("is_error") is not False
+                    or event.get("terminal_reason") != "completed" or event.get("api_error_status") is not None
+                    or type(event.get("num_turns")) is not int or not 1 <= event["num_turns"] <= max_turns
+                    or type(event.get("safety_stops")) is not int or event["safety_stops"] != 0
+                    or not isinstance(event.get("subagent_stats"), dict)
+                    or type(event["subagent_stats"].get("spawned")) is not int or event["subagent_stats"]["spawned"] != 0
+                    or event.get("permission_denials") != list(denied.values())
+                    or event.get("structured_output") != report):
+                refuse()
+            try:
+                if decode_json(event.get("result")) != report:
+                    refuse()
+            except (ValueError, TypeError):
+                refuse()
+            final = event
+        else:
+            refuse()
+    if (final is None or not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
+            or report.get("outcome") not in ("approved", "completed", "findings", "blocked")
+            or not isinstance(report.get("artifacts"), list) or not report["artifacts"]
+            or any(not isinstance(ref, str) or not ref.strip() for ref in report["artifacts"])):
+        refuse()
+    usage, model_usage = final.get("usage"), final.get("modelUsage")
+    if (not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens"))
+            or not isinstance(model_usage, dict) or set(model_usage) != {model}
+            or not isinstance(model_usage[model], dict) or model_usage[model].get("provider") != "firstParty"
+            or model_usage[model].get("canonicalModel") != model
+            or any(type(model_usage[model].get(k)) is not int or model_usage[model][k] < 0
+                   for k in ("inputTokens", "outputTokens"))
+            or model_usage[model]["inputTokens"] != usage["input_tokens"]
+            or model_usage[model]["outputTokens"] != usage["output_tokens"]):
+        refuse()
+    return dict(report=report, usage=usage, model_usage=model_usage, turns=final["num_turns"], rate_limits=rates)
 
 
 if __name__ == "__main__":

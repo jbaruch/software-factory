@@ -73,9 +73,12 @@ def finite_json_integer(value):
 
 
 def decode_json(value, *, object_pairs_hook=unique_object):
-    return json.loads(value, object_pairs_hook=object_pairs_hook,
-                      parse_constant=reject_json_constant, parse_float=finite_json_float,
-                      parse_int=finite_json_integer)
+    try:
+        return json.loads(value, object_pairs_hook=object_pairs_hook,
+                          parse_constant=reject_json_constant, parse_float=finite_json_float,
+                          parse_int=finite_json_integer)
+    except RecursionError:
+        raise ValueError("JSON nesting exceeds the supported depth; reduce nesting before retrying") from None
 
 
 class Rex:
@@ -161,15 +164,22 @@ def new_task(task) -> dict:
                 session_id=None, assignments={})
 
 
-def read_record(path, *, private=False):
+def read_record(path, *, private=False, max_bytes=None):
     """Read a regular gate record without following links or blocking on FIFOs."""
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("Record byte limit must be a nonnegative integer")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor) as stream:
+    with os.fdopen(descriptor, "r" if max_bytes is None else "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or (private and (
                 info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077)):
             raise OSError("Gate record must be a regular file with its required ownership and permissions")
-        return stream.read()
+        if max_bytes is None:
+            return stream.read()
+        content = stream.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            raise OSError("Record exceeds its byte limit; inspect the original without rewriting it")
+        return content.decode("utf-8")
 
 
 def integration_request(request):
@@ -1210,6 +1220,20 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if record["admission"] is None:
             raise FactoryError("Admit a task before declaring assignment dependencies")
         request["dependencies"] = sorted(set(dependencies))
+    if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]:
+        import claude_worker
+        import review_evidence
+        try:
+            native_args = claude_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Claude command is damaged; restore its arguments before creating an assignment") from None
+        if record["admission"] is None or not valid_inputs(record["inputs"]) or native_args.role != role:
+            raise FactoryError("Admit the Claude task and select matching role/revision inputs before launching")
+        check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
+                       expected_identity=record["admission"]["repository_identity"],
+                       expected_git_dir=native_args.worktree_git_dir)
+        instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
+            requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
         require_grok_execution()
         import grok_worker
@@ -1593,12 +1617,150 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     return record
 
 
+def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+    """Strict original read-only evidence; history is granted only by actual collection."""
+    import claude_worker
+    import native_claude
+    import review_evidence
+    command, request = assignment["request"]["command"], assignment["request"]
+    if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]:
+        raise FactoryError("Not an original Claude worker; use the original provider collector")
+    options = [part.split("=", 1)[0] for part in command[4:] if part.startswith("--")]
+    if len(options) != len(set(options)) or any("=" in part for part in command[4:] if part.startswith("--")):
+        raise FactoryError("Restore the unambiguous original Claude command before collection")
+    try:
+        args = claude_worker.parser().parse_args(command[4:])
+    except SystemExit:
+        raise FactoryError("Restore original Claude worker arguments before collection") from None
+    if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
+        raise FactoryError("Claude evidence needs strict original collection, never manual result registration")
+    if collected and current and not result_current(record, assignment["result"]):
+        raise FactoryError("Claude result is stale; obtain a judgment of current inputs")
+    if observe is None and not collected:
+        raise FactoryError("First Claude collection requires original successful Rex exit")
+    if observe is not None and observe()["state"] != "exited":
+        raise FactoryError("Claude worker has not exited successfully; inspect its original Rex pane")
+    try:
+        receipt = decode_json(read_record(args.receipt, private=True))
+        instructions = read_record(Path(assignment["brief"]), private=True)
+    except (OSError, ValueError, UnicodeError):
+        raise FactoryError("Restore original private Claude receipt and brief before collection") from None
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
+            or receipt.get("kind") != "claude-execution" or receipt.get("state") != "completed"
+            or "error" not in receipt or receipt["error"] is not None
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or any(type(receipt.get(k)) not in (int, float) or not 0 <= receipt[k] <= sys.float_info.max
+                   for k in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"]
+            or args.job != record["task"] + "/" + assignment_id or receipt.get("job") != args.job
+            or receipt.get("inputs") != request.get("inputs") or not valid_inputs(receipt.get("inputs"))
+            or args.candidate != "{candidate}" or args.requirements != "{requirements}"
+            or receipt.get("candidate") != receipt["inputs"]["candidate"]
+            or receipt.get("role") != request["role"] or args.role != request["role"]
+            or receipt.get("brief_sha256") != request["instructions_sha256"]
+            or hashlib.sha256(instructions.encode()).hexdigest() != request["instructions_sha256"]
+            or args.brief_sha256 != "{brief_sha256}" or str(args.brief) != "{brief}"
+            or receipt.get("repository_identity") != record["admission"]["repository_identity"]
+            or args.repo_identity != "{repository_identity}" or str(args.repo) != "{repository}"
+            or str(args.cwd) != "{cwd}" or receipt.get("cwd") != request["cwd"]
+            or not args.worktree_git_dir.is_absolute() or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or not args.claude.is_absolute() or receipt.get("binary") != str(args.claude)
+            or args.model != "claude-sonnet-5-5" or args.effort != "low"
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or type(args.seconds) is not int or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
+            or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
+            or not 1 <= args.turns <= 1000 or type(receipt.get("max_turns")) is not int or receipt["max_turns"] != args.turns
+            or receipt.get("native_session") != args.native_session
+            or not args.events.is_absolute() or not args.receipt.is_absolute()
+            or receipt.get("events") != str(args.events)):
+        raise FactoryError("Claude receipt differs from its original bound assignment; restore original evidence without relaunching")
+    args.candidate, args.requirements = receipt["inputs"]["candidate"], receipt["inputs"]["requirements"]
+    try:
+        if str(uuid.UUID(args.native_session)) != args.native_session:
+            raise ValueError("Invalid session")
+        native_claude.validate_auth(receipt.get("discovery"), args.claude, Path(request["cwd"]))
+        review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
+        native = native_claude.parse_execution(claude_worker.read_events(args.events),
+            session_id=args.native_session, cwd=request["cwd"], model=args.model, max_turns=args.turns)
+    except (ValueError, native_claude.ClaudeProbeError) as exc:
+        raise FactoryError(str(exc)) from None
+    if any(receipt.get(k) != native[k] for k in ("report", "usage", "model_usage", "turns", "rate_limits")):
+        raise FactoryError("Claude receipt conflicts with original native events; restore original evidence")
+    args.cwd, args.write = Path(request["cwd"]), False
+    repository = record["admission"]["repository"]
+    if repository_identity(repository) != receipt["repository_identity"]:
+        raise FactoryError("Restore the admitted repository marker before validating Claude provenance")
+    if (git_commit(repository, args.candidate) != args.candidate
+            or git_run(repository, "cat-file", "-e", args.candidate + "^{tree}").returncode):
+        raise FactoryError("Restore original Claude candidate Git objects before validating historical provenance")
+    if not collected:
+        check_checkout(record["admission"]["repository"], request["cwd"], args.candidate,
+            expected_identity=receipt["repository_identity"], expected_git_dir=args.worktree_git_dir)
+    expected = dict(inputs=receipt["inputs"], candidate=args.candidate, outcome=native["report"]["outcome"],
+                    artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    if collected and assignment["result"] != expected:
+        raise FactoryError("Collected Claude result differs from the complete original report")
+    return args, receipt, native
+
+
+def collect_claude(path, assignment_id, rex, record, assignment):
+    args, receipt, native = claude_evidence(assignment_id, record, assignment,
+        collected=assignment.get("native_collected") is True, current=False,
+        observe=lambda: status(rex, record, assignment))
+    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
+        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    record["assignments"][assignment_id]["native_collected"] = True
+    save(path, record)
+    return record
+
+
 def require_grok_execution():
     import native_grok
     try:
         native_grok.require_execution_boundary()
     except native_grok.GrokProbeError as exc:
         raise FactoryError(str(exc)) from None
+
+
+def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None):
+    """Freeze one explicit read-only Claude effect, including its native session."""
+    if (model != "claude-sonnet-5-5" or effort != "low" or not Path(claude).is_absolute()
+            or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
+            or type(turns) is not int or not 1 <= turns <= 1000):
+        raise FactoryError("Supply an absolute native Claude executable, discovered model/effort and bounded seconds/turns")
+    worker = [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]
+    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None or base is not None:
+        from review_evidence import valid_base
+        valid_base(base, role)
+    binary = Path(claude).resolve()
+    if existing is None:
+        try:
+            binary = Path(claude).resolve(strict=True)
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                raise FactoryError("Supply an executable native Claude file before creating an assignment")
+        except OSError:
+            raise FactoryError("Restore the selected native Claude installation before creating an assignment") from None
+        native_session, gitdir = str(uuid.uuid4()), str(git_dir(cwd))
+    else:
+        saved = existing["request"]["command"]
+        if saved[:4] != worker:
+            raise FactoryError("Existing assignment uses another command; inspect its original effect without relaunching")
+        try:
+            native_session = saved[saved.index("--native-session") + 1]
+            gitdir = saved[saved.index("--worktree-git-dir") + 1]
+            if str(uuid.UUID(native_session)) != native_session or not Path(gitdir).is_absolute():
+                raise ValueError("Invalid frozen binding")
+        except (ValueError, IndexError):
+            raise FactoryError("Saved Claude binding is damaged; restore the original command without relaunching") from None
+    prefix = path.parent / (task + "." + assignment_id + ".claude")
+    return worker + ([] if base is None else ["--base", base]) + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
+        "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
+        "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
+        "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
+        "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
+        "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
 
 
 def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None):
@@ -1717,7 +1879,7 @@ def main(argv=None):
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
     parser.add_argument("--server", help="Explicit local unix:// Rex endpoint; pinned per task")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("start", "codex-start", "grok-start"):
+    for action in ("start", "codex-start", "grok-start", "claude-start"):
         start = sub.add_parser(action, help="Launch or reconnect to an explicit assignment")
         start.add_argument("--task", required=True)
         start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
@@ -1744,7 +1906,7 @@ def main(argv=None):
             start.add_argument("--gh", type=Path)
             start.add_argument("--release-scripts", type=Path)
         else:
-            start.add_argument("--grok", required=True)
+            start.add_argument("--claude" if action == "claude-start" else "--grok", required=True)
             start.add_argument("--model", required=True)
             start.add_argument("--effort", required=True)
             start.add_argument("--seconds", type=int, default=600)
@@ -1796,7 +1958,7 @@ def main(argv=None):
         if action in {"pause", "resume"}:
             command.add_argument("--request-id", help="Stable ID makes a repeated control request idempotent")
             command.add_argument("--expected-revision", type=int, help="Apply only to this control-history revision")
-    for action in ("status", "capture", "codex-collect", "grok-collect"):
+    for action in ("status", "capture", "codex-collect", "grok-collect", "claude-collect"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
@@ -1808,6 +1970,10 @@ def main(argv=None):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
         if args.action == "codex-start":
             check_commit_message(args.commit_message, write=args.write)
+        if args.action == "claude-start" and (args.model != "claude-sonnet-5-5" or args.effort != "low"
+                or not Path(args.claude).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
+                or not 1 <= args.turns <= 1000):
+            raise FactoryError("Select observed Claude model claude-sonnet-5-5/low, absolute binary and bounded seconds/turns; requalify other choices")
         if args.action == "grok-start" and (not args.model.strip() or not args.effort.strip()
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
@@ -1860,7 +2026,7 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if prepared is not None and load_task(path) != prepared:
                 raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance", "provision"}:
@@ -1886,7 +2052,7 @@ def main(argv=None):
                                        request_id=args.request_id, expected_revision=args.expected_revision)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
-            if args.action in {"start", "codex-start", "grok-start"}:
+            if args.action in {"start", "codex-start", "grok-start", "claude-start"}:
                 if args.action == "codex-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Codex assignment")
@@ -1894,6 +2060,12 @@ def main(argv=None):
                                          model=args.model, effort=args.effort, cwd=args.cwd,
                                          write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role,
                                          decision_store=args.decision_store, decision=args.decision, question=args.question, release_evidence=frozen_release, delivery_evidence=frozen_delivery)
+                elif args.action == "claude-start":
+                    if load_task(path)["admission"] is None:
+                        raise FactoryError("Admit a task before starting a native Claude assignment")
+                    argv = claude_command(path, task=args.task, assignment_id=args.id, claude=args.claude,
+                        model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
+                        seconds=args.seconds, turns=args.turns, base=args.base)
                 elif args.action == "grok-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")
@@ -1918,6 +2090,8 @@ def main(argv=None):
                     save(path, record)
             if args.action == "codex-collect":
                 print(json.dumps(task_view(collect_codex(path, args.id, rex, record, assignment)), indent=2))
+            elif args.action == "claude-collect":
+                print(json.dumps(task_view(collect_claude(path, args.id, rex, record, assignment)), indent=2))
             elif args.action == "grok-collect":
                 print(json.dumps(task_view(collect_grok(path, args.id, rex, record, assignment)), indent=2))
             elif args.action == "capture":

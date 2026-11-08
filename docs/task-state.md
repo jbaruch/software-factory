@@ -110,9 +110,14 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. Task records must be regular files; links, directories and FIFOs
-refuse without resetting holds or history. External consumers must not edit or migrate these records. The
+refuse without resetting holds or history. `factory.read_record` optionally accepts
+`max_bytes`, a nonnegative byte bound: it reads at most that bound plus one byte,
+refuses overflow and decodes UTF-8 only within the bound. It retains the same
+no-follow/nonblocking open and descriptor-based regular-file checks, plus owner,
+single-link and private-permission checks with `private=True`. The default reader
+behavior is unchanged. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree`, `record_result` and `collect_codex` functions define schema version 9:
+`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 9:
 
 | Field | Meaning |
 | --- | --- |
@@ -131,7 +136,7 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input
 snapshot and any declared dependencies. Each assignment has a nullable `result` and boolean `native_collected`, initially
-false. Only `collect_codex`, after strict successful original Rex, receipt, events,
+false. Only `collect_codex` or `collect_claude`, after strict successful original Rex, receipt, events,
 brief, repository, worktree/Git-directory and HEAD validation and immutable result
 registration, sets it true. Generic `record_result` never grants collection proof.
 Historical native replay requires this proof and still verifies the complete
@@ -169,7 +174,8 @@ migrate with this flag false, preserving original assignments/results, admission
 selected inputs, controls, holds, allowance history and used attempts. Migration
 never infers collection from a matching report or invents historical proof.
 Legacy results remain available for inspection but cannot supply historical native
-approval/delivery until explicitly recollected through `collect_codex` with their
+approval/delivery until explicitly recollected through the original provider's strict
+collector (`collect_codex` or `collect_claude`) with their
 original checkout, Git directory and required HEAD still available. If cleanup or
 later work has removed that strict original context, retained artifacts alone
 cannot recover collection proof; do not backfill it or use a replacement checkout.
@@ -408,3 +414,12 @@ launches require each dependency to have a current `completed` or `approved`
 result. Findings, blocked or stale reports cannot advance work. Referencing only
 earlier assignments keeps this launch graph acyclic without a planner. These are
 launch guards; no background scheduler or automatic acceptance is implemented.
+
+Explicit read-only Claude commands use the same schema-9 assignment owner,
+input invalidation, holds, dependencies, immutable results and cumulative attempt
+allowances. `claude_worker.py` owns its version-1 execution artifacts; the
+[receipt/event reader contract](native-providers.md#explicit-read-only-claude-assignments)
+requires original artifacts for every collection or historical approval. No
+additional task store or mutable approval record is introduced. Team requested
+metadata uses the worker's parser without provider probes; observed model and
+readiness remain unknown in that view.

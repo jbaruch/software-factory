@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.0 — Unpublished
+
+- Add explicit read-only native Claude execution/strict collection, original session-bound evidence, requested Team metadata and independent ordinary specialist approvals. Codex release behavior stays binding; managed live qualification remains separate.
+
 ## 0.15.0 — 2026-11-08 (unpublished)
 
 ### Source-derived Decision Inbox and human allowance control
