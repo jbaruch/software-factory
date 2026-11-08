@@ -193,6 +193,7 @@ class NativeResults(unittest.TestCase):
         processes = [FakeProcess(events()), FakeProcess(events())]
         async def run():
             both_started = asyncio.Event()
+            both_asserted = asyncio.Barrier(2)
             async def spawn(*command, **options):
                 index = len(self.spawns)
                 self.spawns.append(command)
@@ -202,6 +203,7 @@ class NativeResults(unittest.TestCase):
                 await both_started.wait()
                 self.assertEqual(len(set(self.shell_directories)), 2)
                 self.assertTrue(all(path.is_dir() for path in self.shell_directories))
+                await both_asserted.wait()
                 original_wait = processes[index].wait
                 async def wait():
                     self.assertTrue(directory.is_dir())
