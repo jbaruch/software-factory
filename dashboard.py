@@ -76,6 +76,7 @@ def requested_native(record, identity, assignment):
     command = [replacements.get(part, part) for part in request["command"]]
     import codex_worker
     import grok_worker
+    import claude_worker
     if command[:3] == [sys.executable, "-E", "-s"] and len(command) > 3:
         offset = 4
     elif command[:1] == [sys.executable] and len(command) > 1:
@@ -87,6 +88,8 @@ def requested_native(record, identity, assignment):
         parser, harness = codex_worker.parser(), "codex"
     elif worker.name == "grok_worker.py" and offset == 4:
         parser, harness = grok_worker.parser(), "grok"
+    elif worker.name == "claude_worker.py" and offset == 4:
+        parser, harness = claude_worker.parser(), "claude"
     else:
         return unknown
     if not application_worker(command[offset - 1]):

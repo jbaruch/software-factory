@@ -53,7 +53,8 @@ def collected_native(assignment_id, record, assignment, *, current=True):
         raise factory.FactoryError("Collect a current original native result before integration")
     try:
         rex = factory.connect(record)
-        return factory.codex_evidence(assignment_id, record, assignment, collected=True, current=current,
+        reader = factory.claude_evidence if assignment["request"]["command"][:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "claude_worker.py")] else factory.codex_evidence
+        return reader(assignment_id, record, assignment, collected=True, current=current,
             observe=lambda: factory.status(rex, record, assignment))
     except (OSError, ValueError) as exc:
         raise factory.FactoryError("Cannot validate original native integration evidence: " + str(exc)) from None
@@ -89,7 +90,8 @@ def approvals(record, review, required):
         command = assignment["request"]["command"]
         native = (command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
                   or command[:2] == [sys.executable, str(factory.ROOT / "codex_worker.py")])
-        if not native:
+        claude = command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "claude_worker.py")]
+        if not native and not claude:
             raise factory.FactoryError("Cannot establish contributor independence for an unverified command adapter: " + key)
         if "--write" in command:
             contributors.add(contributor_context(key, record, assignment))
@@ -101,9 +103,10 @@ def approvals(record, review, required):
         args, receipt, native = collected_native(key, record, assignment)
         if (args.write or args.role != assignment["request"]["role"]
                 or native["report"]["outcome"] != "approved"
-                or (key == review and args.role != "release")):
+                or (key == review and (args.role != "release" or not hasattr(args, "codex")))
+                or (hasattr(args, "claude") and args.role not in {"qa", "security", "code-review"})):
             raise factory.FactoryError("Selected relevant native judgments must be read-only approved reports, including release")
-        context = receipt.get("thread_id")
+        context = receipt.get("thread_id") if hasattr(args, "codex") else receipt.get("native_session")
         if not isinstance(context, str) or not context or context in contributors or context in contexts:
             raise factory.FactoryError("Selected approvals need distinct original native contexts independent of contributors")
         contexts.add(context)
@@ -514,7 +517,7 @@ def accepted(record, integration_id, acceptance_id, transport):
     if assignment is None:
         raise factory.FactoryError("Unknown selected final native acceptance judgment")
     args, receipt, native = collected_native(acceptance_id, record, assignment)
-    if args.role != "release" or args.write or native["report"]["outcome"] != "approved":
+    if not hasattr(args, "codex") or args.role != "release" or args.write or native["report"]["outcome"] != "approved":
         raise factory.FactoryError("Final acceptance requires an approved current native release judgment")
     assessed = evidence.from_delivery_assignment(record, assignment)
     if assessed["assignment"] != original["assignment"]:
