@@ -23,7 +23,23 @@ from test_rex_launcher import FakeRex
 
 MODEL = "claude-sonnet-5-5"
 SESSION = "00000000-0000-0000-0000-000000000001"
-DEEP_JSON = "[" * 2000 + "0" + "]" * 2000
+RECURSIVE_JSON = '{"recursive":"fixture"}'
+
+
+def recursion_on(payload):
+    original = factory.json.loads
+
+    def loads(value, **kwargs):
+        if value == payload:
+            raise RecursionError("injected decoder failure")
+        return original(value, **kwargs)
+
+    return patch.object(factory.json, "loads", side_effect=loads)
+
+
+def envelope_bytes(lines):
+    return b"".join((json.dumps(dict(schema_version=1, kind="claude-event-line", data=line)) + "\n").encode("ascii")
+                    for line in lines)
 
 
 def events(cwd, session=SESSION):
@@ -54,8 +70,8 @@ class Decoder(unittest.TestCase):
         self.assertEqual(data, original)
 
     def test_shared_json_depth_refuses_without_chained_traceback(self):
-        with self.assertRaisesRegex(ValueError, "nesting.*reduce") as error:
-            factory.decode_json(DEEP_JSON)
+        with recursion_on(RECURSIVE_JSON), self.assertRaisesRegex(ValueError, "nesting.*reduce") as error:
+            factory.decode_json(RECURSIVE_JSON)
         self.assertTrue(error.exception.__suppress_context__)
         self.assertIsNone(error.exception.__cause__)
 
@@ -66,22 +82,98 @@ class Decoder(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 factory.decode_json(payload)
 
+    def test_successfully_parsed_deep_json_and_custom_hook(self):
+        payload = "[" * 128 + '{"leaf":1}' + "]" * 128
+        decoded = factory.decode_json(payload, object_pairs_hook=lambda pairs: tuple(pairs))
+        for _ in range(128):
+            self.assertEqual(len(decoded), 1)
+            decoded = decoded[0]
+        self.assertEqual(decoded, (("leaf", 1),))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events"
+            path.write_bytes(envelope_bytes([payload + "\n"]))
+            path.chmod(0o600)
+            self.assertEqual(claude_worker.read_events(path), [json.loads(payload)])
+        data = events("/fixture")
+        data[-1]["result"] = payload
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
+
+    def test_bounded_record_uses_finite_read_even_if_file_grows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "record"
+            path.write_bytes(b"x")
+            path.chmod(0o600)
+            original_open = os.fdopen
+            counts = []
+
+            def open_stream(fd, mode):
+                stream = original_open(fd, mode)
+                original_read = stream.read
+
+                def read(count=-1):
+                    counts.append(count)
+                    self.assertEqual(count, 9)
+                    # Growth after descriptor validation defeats a pre-stat-only check.
+                    path.write_bytes(b"x" * 100)
+                    return original_read(count)
+
+                stream.read = read
+                return stream
+
+            with patch.object(os, "fdopen", side_effect=open_stream):
+                with self.assertRaises(OSError):
+                    factory.read_record(path, private=True, max_bytes=8)
+            self.assertEqual(counts, [9])
+            self.assertEqual(path.read_bytes(), b"x" * 100)
+
+    def test_retained_stream_boundary_and_private_reader(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events"
+            # Non-ASCII data also measures serialized bytes, rather than characters.
+            raw = envelope_bytes(['{"text":"ü"}\n'] * 100)
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw)):
+                self.assertEqual(claude_worker.read_events(path), [dict(text="ü")] * 100)
+            with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw) - 1):
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    claude_worker.read_events(path)
+            self.assertEqual(factory.read_record(path), raw.decode())
+            self.assertEqual(factory.read_record(path, private=True, max_bytes=len(raw)), raw.decode())
+            with self.assertRaises(OSError):
+                factory.read_record(path, private=True, max_bytes=len(raw) - 1)
+            with patch.object(os, "getuid", return_value=os.getuid() + 1):
+                with self.assertRaises(OSError):
+                    factory.read_record(path, private=True, max_bytes=len(raw))
+            path.chmod(0o644)
+            with self.assertRaises(OSError):
+                factory.read_record(path, private=True, max_bytes=len(raw))
+            path.chmod(0o600)
+            os.link(path, Path(temporary) / "link")
+            with self.assertRaises(OSError):
+                factory.read_record(path, private=True, max_bytes=len(raw))
+            self.assertEqual(path.read_bytes(), raw)
+
     def test_deep_embedded_final_result_refuses(self):
         data = events("/fixture")
-        data[-1]["result"] = DEEP_JSON
-        with self.assertRaises(native_claude.ClaudeProbeError):
+        data[-1]["result"] = RECURSIVE_JSON
+        with recursion_on(RECURSIVE_JSON), self.assertRaises(native_claude.ClaudeProbeError):
             self.parse(data)
 
     def test_retained_deep_envelope_and_data_refuse(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "events"
-            for text in (DEEP_JSON, json.dumps(dict(schema_version=1, kind="claude-event-line", data=DEEP_JSON))):
-                with self.subTest(envelope=text == DEEP_JSON):
+            for text in (RECURSIVE_JSON, json.dumps(dict(schema_version=1, kind="claude-event-line", data=RECURSIVE_JSON))):
+                with self.subTest(envelope=text == RECURSIVE_JSON):
                     path.write_text(text + "\n")
                     path.chmod(0o600)
                     original = path.read_bytes()
-                    with self.assertRaisesRegex(native_claude.ClaudeProbeError, "retained Claude events"):
-                        claude_worker.read_events(path)
+                    target = text + "\n" if text == RECURSIVE_JSON else RECURSIVE_JSON
+                    with recursion_on(target) as loads:
+                        with self.assertRaisesRegex(native_claude.ClaudeProbeError, "retained Claude events"):
+                            claude_worker.read_events(path)
+                        self.assertTrue(any(call.args[0] == target for call in loads.call_args_list))
                     self.assertEqual(path.read_bytes(), original)
 
     def test_conflicts_and_unsupported_lifecycles(self):
@@ -278,17 +370,53 @@ class ClaudeWorker(unittest.TestCase):
 
     def test_deep_native_event_saves_controlled_failed_receipt(self):
         self.process = FakeProcess([])
-        self.process.lines = iter([(DEEP_JSON + "\n").encode()])
-        receipt = self.execute()
+        line = RECURSIVE_JSON + "\n"
+        self.process.lines = iter([(json.dumps(self.events[0]) + "\n").encode(), line.encode()])
+        with recursion_on(line):
+            receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("Malformed Claude event", receipt["error"])
         self.assertIsNone(receipt["report"])
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
         retained = self.args.events.read_bytes()
-        self.assertEqual(json.loads(retained)["data"], DEEP_JSON + "\n")
+        self.assertEqual(json.loads(retained.splitlines()[-1])["data"], line)
+        self.assertTrue(self.process.signals)
         with self.assertRaises(factory.FactoryError):
             self.collect()
         self.assertEqual(self.args.events.read_bytes(), retained)
+
+    def test_cumulative_stream_exact_limit_and_collection_refusal(self):
+        self.events[1:1] = [self.events[3]] * 100
+        self.process = FakeProcess(self.events)
+        raw = envelope_bytes([json.dumps(event) + "\n" for event in self.events])
+        with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw)):
+            self.assertEqual(self.execute()["state"], "completed")
+            self.assertEqual(self.args.events.read_bytes(), raw)
+        before = (self.path.read_bytes(), self.args.receipt.read_bytes(), raw)
+        with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw) - 1):
+            with self.assertRaises(factory.FactoryError):
+                self.collect()
+        self.assertEqual((self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes()), before)
+        with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw)):
+            self.assertTrue(self.collect()["assignments"]["inspect"]["native_collected"])
+
+    def test_cumulative_stream_over_limit_stops_before_write(self):
+        self.events[1:1] = [self.events[3]] * 100
+        self.process = FakeProcess(self.events)
+        raw = envelope_bytes([json.dumps(event) + "\n" for event in self.events])
+        prefix = envelope_bytes([json.dumps(event) + "\n" for event in self.events[:-1]])
+        with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw) - 1):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("retained-stream byte limit", receipt["error"])
+        self.assertIsNone(receipt["report"])
+        self.assertTrue(self.process.signals)
+        self.assertEqual(self.args.events.read_bytes(), prefix)
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        before = (self.path.read_bytes(), self.args.receipt.read_bytes(), prefix)
+        with self.assertRaises(factory.FactoryError):
+            self.collect()
+        self.assertEqual((self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes()), before)
 
     def test_timeout_retains_original_stream(self):
         self.process=FakeProcess(self.events[:-1],timeout=True)

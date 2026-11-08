@@ -164,15 +164,22 @@ def new_task(task) -> dict:
                 session_id=None, assignments={})
 
 
-def read_record(path, *, private=False):
+def read_record(path, *, private=False, max_bytes=None):
     """Read a regular gate record without following links or blocking on FIFOs."""
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("Record byte limit must be a nonnegative integer")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor) as stream:
+    with os.fdopen(descriptor, "r" if max_bytes is None else "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or (private and (
                 info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077)):
             raise OSError("Gate record must be a regular file with its required ownership and permissions")
-        return stream.read()
+        if max_bytes is None:
+            return stream.read()
+        content = stream.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            raise OSError("Record exceeds its byte limit; inspect the original without rewriting it")
+        return content.decode("utf-8")
 
 
 def integration_request(request):

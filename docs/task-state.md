@@ -110,7 +110,12 @@ briefs; keep credentials out of those inputs and keep the state directory privat
 
 The runtime owner is `factory.py`; all CLI readers and writers use its loader under
 the task lock. Task records must be regular files; links, directories and FIFOs
-refuse without resetting holds or history. External consumers must not edit or migrate these records. The
+refuse without resetting holds or history. `factory.read_record` optionally accepts
+`max_bytes`, a nonnegative byte bound: it reads at most that bound plus one byte,
+refuses overflow and decodes UTF-8 only within the bound. It retains the same
+no-follow/nonblocking open and descriptor-based regular-file checks, plus owner,
+single-link and private-permission checks with `private=True`. The default reader
+behavior is unchanged. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 `provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 9:
 

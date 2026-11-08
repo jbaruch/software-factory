@@ -18,11 +18,13 @@ import native_claude
 import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, stop_child
 
+RETAINED_STREAM_LIMIT = 16 * 1024 * 1024  # Serialized envelope bytes, including newlines.
+
 
 def read_events(path):
     try:
         events = []
-        with StringIO(factory.read_record(path, private=True)) as stream:
+        with StringIO(factory.read_record(path, private=True, max_bytes=RETAINED_STREAM_LIMIT)) as stream:
             while True:
                 line = stream.readline(NATIVE_LINE_LIMIT * 6 + 1)
                 if not line:
@@ -38,7 +40,7 @@ def read_events(path):
                 events.append(factory.decode_json(record["data"]))
         return events
     except (OSError, UnicodeError, ValueError):
-        raise native_claude.ClaudeProbeError("Cannot decode retained Claude events; restore or inspect the original stream without relaunching") from None
+        raise native_claude.ClaudeProbeError("Cannot decode retained Claude events within the retained-stream byte limit; restore or inspect the original stream without relaunching") from None
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_claude.probe, clock=time.time, timer=time.monotonic):
@@ -103,6 +105,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                     args.native_session, args.turns), cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
                     stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
+                retained_bytes = 0
                 while True:
                     try:
                         line = await process.stdout.readline()
@@ -111,7 +114,12 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                     if not line:
                         break
                     text = line.decode("utf-8", errors="surrogateescape")
-                    stream.write(json.dumps(dict(schema_version=1, kind="claude-event-line", data=text)) + "\n")
+                    envelope = json.dumps(dict(schema_version=1, kind="claude-event-line", data=text)) + "\n"
+                    size = len(envelope.encode("ascii"))
+                    if size > RETAINED_STREAM_LIMIT - retained_bytes:
+                        raise factory.FactoryError("Claude retained-stream byte limit exceeded; inspect the original attempt and reduce output before a new attempt")
+                    stream.write(envelope)
+                    retained_bytes += size
                     stream.flush()
                     try:
                         line.decode("utf-8")

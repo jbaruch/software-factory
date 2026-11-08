@@ -674,7 +674,14 @@ created/finished/elapsed times, exit code, report, usage/model_usage, turns,
 rate_limits, candidate, events path and error. Terminal fields start null;
 completion requires finite nonnegative timing, successful exit and null error.
 Each version-1 `claude-event-line` record carries `data`, the unchanged original
-native line including newline. Native lines are bounded to 1 MiB; invalid UTF-8
+native line including newline. `claude_worker.RETAINED_STREAM_LIMIT` bounds each
+attempt's cumulative retained stream to 16 MiB (16,777,216 bytes of serialized
+JSONL envelopes, including envelope newlines, not native payload bytes). The worker
+checks before writing each envelope or appending its decoded event; overflow stops
+the child and saves an actionable failed receipt with the original retained prefix.
+Collection applies the same byte bound through `factory.read_record(max_bytes=...)`
+before parsing or retaining decoded events; it never rewrites oversized evidence.
+This is a stream bound, not a task-attempt allowance. Native lines are bounded to 1 MiB; invalid UTF-8
 stays escaped inspection evidence and refuses collection. Original events retain
 native list-price equivalents, which are not actual monetary spend. Raw native
 rate-limit observations retain unknowns and never establish shared pools.
