@@ -1093,6 +1093,10 @@ class CommandAuthority(unittest.TestCase):
     def test_nonzero_http_merge_rejection_is_definitive_but_transport_failure_is_unknown(self):
         with tempfile.TemporaryDirectory() as folder:
             transport = self.installed_transport(Path(folder).resolve())
+            success = dict(merged=True, sha="a" * 40)
+            result = subprocess.CompletedProcess([], 0, 'HTTP/2.0 200 OK\n\n' + json.dumps(success), "")
+            with patch.object(release_evidence.subprocess, "run", return_value=result):
+                self.assertEqual(transport.merge(dict(repository="fixture/project", number=7, head="a" * 40)), success)
             for status in (405, 409):
                 output = f'HTTP/2.0 {status} Rejected\nContent-Type: application/json\n\n{{"message":"Head/protection rejected"}}'
                 result = subprocess.CompletedProcess([], 1, output, "native HTTP rejection")
