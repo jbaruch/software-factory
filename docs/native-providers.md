@@ -417,6 +417,36 @@ Owned workers disable both native multi-agent features for these leaf assignment
 The native child receives only the locale/path/temp and subscription-configuration
 settings allowed by `native_environment()`; host credential variables are not forwarded.
 
+New Codex model children additionally use `--strict-config` and per-run
+`allow_login_shell=false`, `features.shell_snapshot=false` and
+`shell_environment_policy.experimental_use_profile=false`. Each child gets one
+private, initially empty absolute directory as `ZDOTDIR`, both in a fresh native
+environment copy and in the TOML-encoded `shell_environment_policy.set.ZDOTDIR`
+override. The [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+defines the controls: omitted login uses nonlogin execution, explicit login
+requests are rejected, and shell snapshots/profile loading are disabled. Native
+HOME/CODEX_HOME, authentication, sandbox, model, effort and deadlines are preserved.
+Shared environment consumers, other providers and factory Git helper environments
+are unchanged; existing receipts and reconnect/collection need no migration.
+
+The directory remains until the owned child's exit is confirmed. Native cleanup
+finishes before optional factory Git work. Allocation, spawn, configuration,
+stream and cleanup failures retain failed receipts without retry or fallback;
+cleanup diagnostics append to any earlier failure. Unconfirmed termination keeps
+the directory and its recovery path in the receipt. Reconcile that owned child
+before removing only its directory. Abrupt worker death can leave an orphan;
+there is no automatic sweeper.
+
+This targets unintended ordinary shell startup. Explicit environment values can
+still be removed by inclusion filters; strict config is not a universal survival
+check. Changed CLI, shell, filters or managed configuration require requalification,
+without clearing filters or adding automatic preflight. System startup and
+intentional sourcing remain outside this claim. The
+[security cookbook](https://learn.chatgpt.com/docs/enterprise/security-cookbook)
+describes why environment filtering is not credential confinement. See the
+[canonical inventory](implementation.md) for observed compatibility and remaining
+native qualification.
+
 Writer CLI installations must remain outside the assigned checkout and Git
 metadata; the resolved executable is reused for later sandbox commands. Writer
 mode requires a native CLI binary, a Python runtime outside writer-controlled

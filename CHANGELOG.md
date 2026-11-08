@@ -22,6 +22,24 @@ destination filesystem before saving intent, refusing case/Unicode aliases
 without creating a branch or worktree. Reject physical file aliases in source
 validation so an earlier partial checkout cannot be certified as complete.
 
+
+## 0.12.1 — 2026-11-07 (unpublished)
+
+### Native Codex shell startup
+
+New model children use strict per-run configuration to disable login shells,
+shell snapshots and profile loading, with an identical private empty ZDOTDIR in
+the native environment and TOML override. Retain the directory through confirmed
+child exit and finish cleanup before factory Git work. Preserve failed receipts
+and earlier errors when allocation, execution or cleanup fails; unconfirmed
+termination retains the owned directory for reconciliation, without retry.
+Native auth locations, permissions, other providers, factory Git environments and
+historical receipt/reconnect contracts remain unchanged. Fixed offline regressions
+cover controls, isolation, lifetime and failure paths. The canonical inventory
+records version/worktree compatibility and outstanding independent review, host
+checks and explicit owned native qualification. No publication or broader
+readiness claim is authorized.
+
 ## 0.12.0 — 2026-11-07 (unpublished)
 
 ### Sanitized native Claude auth metadata
