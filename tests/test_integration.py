@@ -182,16 +182,22 @@ class Integration(unittest.TestCase):
         self.review("qa", "qa", frozen=False)
         self.review("release", "release")
 
-    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None):
+    def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None, legacy=False):
+        frozen_release = self.frozen if frozen and delivery is None else None
+        frozen_delivery = release_evidence.capture_delivery(factory.load_task(self.path), delivery, self.transport) if delivery else None
         command = factory.codex_command(self.path, task="deliver", assignment_id=key, codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(self.repo), role=role, write=writer,
             commit_message="fix(fixture): Apply correction\n\nExercise sequential writer provenance." if change else None,
-            release_evidence=self.frozen if frozen and delivery is None else None,
-            delivery_evidence=release_evidence.capture_delivery(factory.load_task(self.path), delivery, self.transport) if delivery else None)
+            release_evidence=frozen_release, delivery_evidence=frozen_delivery)
+        if legacy:
+            kind, payload = ("delivery", frozen_delivery) if delivery else ("release", frozen_release)
+            index = command.index("--" + kind + "-evidence-digest")
+            command[index:index + 2] = ["--" + kind + "-evidence", json.dumps(payload, sort_keys=True)]
         with patch.object(factory, "Rex", FakeRex):
             record, assignment = factory.launch(self.path, task="deliver", assignment_id=key, role=role,
                 goal="Judge the original complete evidence", cwd=str(self.repo), command=command, purpose=purpose,
-                binary=sys.executable, server="unix:///fixture.sock")
+                binary=sys.executable, server="unix:///fixture.sock",
+                frozen_release=frozen_release, frozen_delivery=frozen_delivery)
         replacements = {"{repository}": str(self.repo), "{cwd}": str(self.repo), "{brief}": assignment["brief"],
             "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": self.head,
             "{requirements}": record["inputs"]["requirements"], "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
@@ -235,6 +241,22 @@ class Integration(unittest.TestCase):
         return integration.integrate(self.path, assignment_id="merge", pr=self.transport.identity["url"],
             review="release", required=["qa"], gh=Path("/installed/gh"),
             scripts=Path("/installed/acr__jbaruch__coding-policy__release"), transport=self.transport)
+
+    def test_large_frozen_evidence_stays_in_original_brief_and_legacy_commands_still_read(self):
+        self.frozen = copy.deepcopy(self.frozen)
+        self.frozen["snapshot"]["review_bodies"][0]["body"] = "Original feedback 雪\n" * 100000
+        self.frozen["review_digest"] = release_evidence.digest(release_evidence.feedback(self.frozen["snapshot"], self.frozen["pr"]))
+        assignment = self.review("large-release", "release")
+        self.assertLess(sum(len(part.encode()) for part in assignment["request"]["command"]), 8192)
+        self.assertGreater(Path(assignment["brief"]).stat().st_size, 2000000)
+        self.assertEqual(release_evidence.from_assignment(self.record, assignment), self.frozen)
+        instructions = Path(assignment["brief"]).read_text()
+        for damaged in (instructions + "tampered", instructions.replace("Original feedback", "Altered feedback", 1)):
+            with self.assertRaises(factory.FactoryError):
+                release_evidence.brief_payload(damaged, "release", release_evidence.digest(self.frozen))
+        original = self.review("legacy-release", "release", legacy=True)
+        self.assertIn("--release-evidence", original["request"]["command"])
+        self.assertEqual(release_evidence.from_assignment(self.record, original), self.frozen)
 
     def test_real_pane_lifecycle_and_ordinary_schema_seven_readers(self):
         started = self.launch_integration()
@@ -649,6 +671,23 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.integrate(), result)
         self.assertEqual(len(self.transport.merges), 1)
 
+    def test_nonzero_native_http_rejection_finishes_task_result_and_replays_without_resend(self):
+        native = object.__new__(release_evidence.GitHub)
+        native.gh, native.repository = "/installed/gh", str(self.repo)
+        native.binding, native.environment = lambda: {}, lambda: {}
+        def rejected(identity):
+            self.transport.merges.append(copy.deepcopy(identity))
+            response = subprocess.CompletedProcess([], 1,
+                'HTTP/2.0 409 Conflict\nContent-Type: application/json\n\n{"message":"Head changed"}', "HTTP 409")
+            with patch.object(release_evidence.subprocess, "run", return_value=response):
+                return native.merge(identity)
+        with patch.object(self.transport, "merge", side_effect=rejected):
+            result = self.integrate()
+            self.assertEqual(result["state"], "rejected")
+            self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["result"]["outcome"], "blocked")
+            self.assertEqual(self.integrate(), result)
+        self.assertEqual(len(self.transport.merges), 1)
+
     def test_lost_merge_reply_reconciles_confirmed_delivery(self):
         self.transport.lost = True
         self.assertEqual(self.integrate()["state"], "delivered")
@@ -834,6 +873,40 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.integrate()["state"], "merge_outcome_unknown")
         self.assertEqual(len(self.transport.merges), 1)
 
+    def test_malformed_output_holds_before_effect_and_reconciles_after_submission(self):
+        failure = release_evidence.output_failure("fixture-helper")
+        original = self.transport.snapshot
+        self.transport.snapshot = lambda *args, **kwargs: (_ for _ in ()).throw(failure)
+        with self.assertRaisesRegex(factory.FactoryError, "reconcile the same integration ID"):
+            self.integrate()
+        self.assertEqual(self.transport.merges, [])
+        self.transport.snapshot = original
+        original_issues = self.transport.issues
+        def issues(identity, *, merged=False):
+            if merged:
+                raise failure
+            return original_issues(identity, merged=merged)
+        self.transport.issues = issues
+        self.assertEqual(self.integrate()["state"], "merge_outcome_unknown")
+        self.transport.issues = original_issues
+        self.assertEqual(self.integrate()["state"], "delivered")
+        self.assertEqual(len(self.transport.merges), 1)
+
+    def test_malformed_watcher_output_is_a_terminal_pre_effect_hold(self):
+        original = self.transport.snapshot
+        def snapshot(identity, *, watch=False):
+            if watch:
+                raise release_evidence.output_failure("fixture-helper")
+            return original(identity, watch=watch)
+        self.transport.snapshot = snapshot
+        receipt = self.integrate()
+        self.assertEqual(receipt["state"], "held")
+        self.assertIn("pre-effect hold requires reassessment", receipt["reason"])
+        self.assertEqual(self.transport.merges, [])
+        self.transport.snapshot = original
+        self.assertEqual(self.integrate()["state"], "held")
+        self.assertEqual(self.transport.merges, [])
+
     def test_terminal_receipt_survives_crash_before_task_collection(self):
         original = factory.save
         def fail_collection(path, value, **kwargs):
@@ -986,14 +1059,53 @@ class CommandAuthority(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "restore.*reconcile the same integration ID"):
                 transport.api("repos/fixture/project")
 
+    def test_malformed_output_reports_contract_without_exposing_payload(self):
+        with tempfile.TemporaryDirectory() as folder:
+            transport = self.installed_transport(Path(folder).resolve())
+            for output in ("", '{"secret":', '{"a":1,"a":2}', '{"a":NaN}'):
+                result = subprocess.CompletedProcess([], 0, stdout=output, stderr="")
+                with self.subTest(output=output), patch.object(release_evidence.subprocess, "run", return_value=result):
+                    with self.assertRaises(factory.FactoryError) as caught:
+                        transport.api("repos/fixture/project")
+                    message = str(caught.exception)
+                    self.assertIn("output contract", message)
+                    self.assertIn("reconcile the same integration ID", message)
+                    self.assertIn("pre-effect hold requires reassessment", message)
+                    self.assertIn("never resend a merge", message)
+                    self.assertNotIn(output if output else "secret", message)
+            invalid = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+            for action in (lambda: transport.api("repos/fixture/project"),
+                           lambda: transport.watch_run("fixture/project", 81)):
+                with patch.object(release_evidence.subprocess, "run", side_effect=invalid):
+                    with self.assertRaisesRegex(factory.FactoryError, "output contract.*reconcile the same integration ID"):
+                        action()
+
     def test_fixed_transport_has_one_conditional_merge_no_admin_or_shell(self):
         transport = object.__new__(release_evidence.GitHub)
         transport.gh = "/installed/gh"
         calls = []
         transport.run = lambda argv, **kwargs: calls.append((argv, kwargs)) or dict(merged=True)
         transport.merge(dict(repository="fixture/project", number=7, head="a" * 40))
-        self.assertEqual(calls, [(["/installed/gh", "api", "--hostname", "github.com", "--method", "PUT",
-            "repos/fixture/project/pulls/7/merge", "-f", "sha=" + "a" * 40, "-f", "merge_method=merge"], {})])
+        self.assertEqual(calls, [(["/installed/gh", "api", "--hostname", "github.com", "--include", "--method", "PUT",
+            "repos/fixture/project/pulls/7/merge", "-f", "sha=" + "a" * 40, "-f", "merge_method=merge"],
+            dict(accepted=(0, 1), merge_response=True))])
+
+    def test_nonzero_http_merge_rejection_is_definitive_but_transport_failure_is_unknown(self):
+        with tempfile.TemporaryDirectory() as folder:
+            transport = self.installed_transport(Path(folder).resolve())
+            for status in (405, 409):
+                output = f'HTTP/2.0 {status} Rejected\nContent-Type: application/json\n\n{{"message":"Head/protection rejected"}}'
+                result = subprocess.CompletedProcess([], 1, output, "native HTTP rejection")
+                with self.subTest(status=status), patch.object(release_evidence.subprocess, "run", return_value=result):
+                    self.assertEqual(transport.merge(dict(repository="fixture/project", number=7, head="a" * 40)),
+                        dict(merged=False, http_status=status, message="Head/protection rejected"))
+            for output in ('', 'HTTP/2.0 500 Failed\n\n{"message":"unknown"}',
+                           'HTTP/2.0 403 Denied\n\n{"message":"permissions"}',
+                           'HTTP/2.0 409 Rejected\n\nmalformed'):
+                result = subprocess.CompletedProcess([], 1, output, "fixture")
+                with self.subTest(output=output), patch.object(release_evidence.subprocess, "run", return_value=result):
+                    with self.assertRaises(factory.FactoryError):
+                        transport.merge(dict(repository="fixture/project", number=7, head="a" * 40))
 
     def test_canonical_watch_is_unmodified_and_cannot_use_an_environment_fake(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1009,6 +1121,9 @@ class CommandAuthority(unittest.TestCase):
                 (scripts / name).write_text("fixture installed helper")
             transport = release_evidence.GitHub(gh, scripts, repo)
             before = transport.binding()
+            self.assertIn("factory-issue-checker:v1", before)
+            (scripts / "check-closing-issues.py").unlink()
+            self.assertEqual(transport.binding(), before)
             process = subprocess.CompletedProcess([], 0, json.dumps(dict(watch=dict(result="ready"))), "")
             overrides = dict(WATCH_PR_REVIEWS_POLL_CMD="/untrusted/fake", WATCH_PR_REVIEWS_BUDGET_SEC="1",
                 GH_HOST="evil.example", GH_REPO="evil/project", GH_CONFIG_DIR=str(root / "auth"), BASH_ENV="/untrusted/startup")
@@ -1065,6 +1180,67 @@ class CommandAuthority(unittest.TestCase):
         for binary in ("gh", "/bin/sh", "/not-installed/gh"):
             with self.assertRaises(factory.FactoryError):
                 release_evidence.GitHub(binary, Path("/not-installed/release"), "/tmp")
+
+
+class IssueDeclarations(unittest.TestCase):
+    def setUp(self):
+        self.identity = dict(repository="fixture/project", number=7,
+            url="https://github.com/fixture/project/pull/7", head="a" * 40)
+        self.pr = dict(number=7, url=self.identity["url"], headRefOid=self.identity["head"],
+            state="OPEN", body="No issue\n", closingIssuesReferences=dict(totalCount=0,
+                pageInfo=dict(hasNextPage=False), nodes=[]))
+        self.transport = object.__new__(release_evidence.GitHub)
+        self.transport.gh = "/installed/gh"
+        self.transport.run = lambda *args, **kwargs: dict(data=dict(repository=dict(
+            nameWithOwner="fixture/project", pullRequest=copy.deepcopy(self.pr))))
+        self.requests = []
+        def api(endpoint):
+            self.requests.append(endpoint)
+            repository, number = endpoint.removeprefix("repos/").rsplit("/issues/", 1)
+            return dict(number=int(number), html_url=f"https://github.com/{repository}/issues/{number}", state="open")
+        self.transport.api = api
+
+    def test_no_issue_and_complete_closing_links_are_source_bound(self):
+        self.assertTrue(self.transport.issues(self.identity)["no_issue"])
+        issue = dict(number=2, url="https://github.com/fixture/project/issues/2", state="OPEN",
+                     repository=dict(nameWithOwner="fixture/project"))
+        self.pr.update(body="Closes #2", closingIssuesReferences=dict(totalCount=1,
+            pageInfo=dict(hasNextPage=False), nodes=[issue]))
+        self.assertEqual(self.transport.issues(self.identity)["closing"], [issue])
+        self.pr["state"] = "MERGED"
+        with self.assertRaises(factory.FactoryError):
+            self.transport.issues(self.identity, merged=True)
+        issue["state"] = "CLOSED"
+        self.assertEqual(self.transport.issues(self.identity, merged=True)["state"], "MERGED")
+
+    def test_incomplete_or_changed_native_evidence_never_passes(self):
+        cases = [dict(headRefOid="b" * 40), dict(state="CLOSED"), dict(number=8),
+            dict(closingIssuesReferences=dict(totalCount=1, pageInfo=dict(hasNextPage=False), nodes=[])),
+            dict(closingIssuesReferences=dict(totalCount=0, pageInfo=dict(hasNextPage=True), nodes=[])),
+            dict(closingIssuesReferences=None)]
+        for changes in cases:
+            with self.subTest(changes=changes), patch.dict(self.pr, changes):
+                with self.assertRaisesRegex(factory.FactoryError, "complete source-bound"):
+                    self.transport.issues(self.identity)
+
+    def test_supported_partial_declarations_resolve_issues_without_closing_them(self):
+        self.pr["body"] = "Part of #2\nPart of https://github.com/other/project/issues/3\n"
+        value = self.transport.issues(self.identity)
+        self.assertEqual(value["partial_references"], ["https://github.com/fixture/project/issues/2",
+                                                       "https://github.com/other/project/issues/3"])
+        self.assertEqual(self.requests, ["repos/fixture/project/issues/2", "repos/other/project/issues/3"])
+        self.assertFalse(value["no_issue"])
+        with patch.object(self.transport, "api", return_value=dict(number=2,
+                html_url="https://github.com/fixture/project/issues/2", state="open", pull_request={})):
+            with self.assertRaisesRegex(factory.FactoryError, "accessible issue"):
+                self.transport.issues(self.identity)
+
+    def test_missing_conflicting_or_unsupported_declarations_refuse(self):
+        for body in ("", "We have No issue here", "Refs #2", "Part of #2 extra", "No issue\nPart of #2"):
+            with self.subTest(body=body):
+                self.pr["body"] = body
+                with self.assertRaises(factory.FactoryError):
+                    self.transport.issues(self.identity)
 
 
 if __name__ == "__main__":

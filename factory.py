@@ -913,7 +913,7 @@ def reconcile(rex, record, assignment):
 
 
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
-           binary=None, server=None, purpose=None, dependencies=()):
+           binary=None, server=None, purpose=None, dependencies=(), frozen_release=None, frozen_delivery=None):
     if not goal.strip():
         raise FactoryError("Supply a nonempty assignment goal before launching")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id):
@@ -968,7 +968,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                        expected_git_dir=native_args.worktree_git_dir)
         instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
             requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
-    if not existing and "--delivery-evidence" in command:
+    if not existing and any(flag in command for flag in ("--delivery-evidence", "--delivery-evidence-digest")):
         import codex_worker
         import release_evidence
         if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
@@ -977,12 +977,14 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             native_args = codex_worker.parser().parse_args(command[4:])
         except SystemExit:
             raise FactoryError("Damaged final native release command") from None
-        if native_args.write or native_args.role != "release" or role != "release" or "--release-evidence" in command:
+        if native_args.write or native_args.role != "release" or role != "release" or any(flag in command for flag in ("--release-evidence", "--release-evidence-digest")):
             raise FactoryError("Final acceptance evidence needs a distinct read-only release assignment")
-        frozen = decode_json(native_args.delivery_evidence)
+        frozen = decode_json(native_args.delivery_evidence) if native_args.delivery_evidence is not None else frozen_delivery
+        if native_args.delivery_evidence_digest is not None and release_evidence.digest(frozen) != native_args.delivery_evidence_digest:
+            raise FactoryError("Supply the original delivery evidence matching the command digest before launching")
         release_evidence.validate_delivery(frozen, record)
         instructions += release_evidence.render_delivery(frozen)
-    if not existing and "--release-evidence" in command:
+    if not existing and any(flag in command for flag in ("--release-evidence", "--release-evidence-digest")):
         import codex_worker
         import release_evidence
         if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
@@ -993,7 +995,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("Damaged native release-review command") from None
         if native_args.write or native_args.role != role:
             raise FactoryError("Frozen release evidence requires a matching read-only specialist")
-        frozen = release_evidence.validate(decode_json(native_args.release_evidence), record)
+        frozen = decode_json(native_args.release_evidence) if native_args.release_evidence is not None else frozen_release
+        if native_args.release_evidence_digest is not None and release_evidence.digest(frozen) != native_args.release_evidence_digest:
+            raise FactoryError("Supply the original release evidence matching the command digest before launching")
+        frozen = release_evidence.validate(frozen, record)
         instructions += release_evidence.render(frozen)
     if not existing and integration_request(request):
         import integration
@@ -1176,9 +1181,17 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
             raise FactoryError("Select the configured judge_model; arbitrary model choices cannot adjudicate this case")
         command.extend(["--decision-store", str(decision_store), "--decision", str(decision), "--question", str(question)])
     if delivery_evidence is not None:
-        command.extend(["--delivery-evidence", json.dumps(delivery_evidence, sort_keys=True)])
+        if existing is not None and "--delivery-evidence" in existing["request"]["command"]:
+            command.extend(["--delivery-evidence", json.dumps(delivery_evidence, sort_keys=True)])
+        else:
+            import release_evidence as evidence
+            command.extend(["--delivery-evidence-digest", evidence.digest(delivery_evidence)])
     if release_evidence is not None:
-        command.extend(["--release-evidence", json.dumps(release_evidence, sort_keys=True)])
+        if existing is not None and "--release-evidence" in existing["request"]["command"]:
+            command.extend(["--release-evidence", json.dumps(release_evidence, sort_keys=True)])
+        else:
+            import release_evidence as evidence
+            command.extend(["--release-evidence-digest", evidence.digest(release_evidence)])
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
@@ -1622,7 +1635,8 @@ def main(argv=None):
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
                     role=args.role, goal=args.goal, cwd=args.cwd, command=argv,
-                    binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after)
+                    binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after,
+                    frozen_release=frozen_release, frozen_delivery=frozen_delivery)
                 rex = connect(record)
             else:
                 record = load_task(path)

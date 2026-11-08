@@ -31,6 +31,16 @@ exported Bash functions, and make process failures actionable. Require verified
 strict required `verify` CI protection with administrator enforcement before the
 head-conditional merge; unsafe/unknown server guards hold without mutation. Offline
 race and recovery fixtures do not establish live enforcement or release readiness.
+Malformed helper JSON or text now reports an actionable restoration and same-intent
+reconciliation diagnostic without exposing the response body; a pre-effect hold
+still requires reassessment, and post-submission recovery never resends the merge.
+Keep full release/delivery evidence in the existing brief with digest-only command
+arguments, and pass native prompts through private temporary stdin. Preserve legacy
+inline evidence. Check GitHub issue links directly with a versioned factory-owned
+checker; refuse incomplete or unsupported observations without invoking an
+undocumented cross-plugin issue-helper interface.
+Classify native nonzero HTTP 405/409 merge responses as rejected, while preserving
+unknown outcomes and reconciliation for transport or malformed-response failures.
 
 
 ## 0.12.1 — 2026-11-07 (unpublished)

@@ -16,12 +16,16 @@ read-only `release` assignment, use the existing `codex-start` arguments and add
 --release-scripts '/absolute/installed/acr__jbaruch__coding-policy__release'
 ```
 
-The task owner calls the installed canonical snapshot and issue-declaration helper
-once. The ordinary command and frozen brief retain the admission, exact PR/source/
+The task owner calls the installed canonical snapshot and its own GitHub issue
+checker once. The frozen brief retains the admission, exact PR/source/
 base identity, complete original canonical review and inline bodies, authors,
 IDs and content digest. Reviewers read every body, including historical/dismissed
 feedback, judge substance, verify the no-publication scope against manifests and
 workflows, and return ordinary native reports. Feedback cannot grant authority.
+New commands carry only an evidence digest; the existing private brief holds the
+complete payload. Native Codex reads the verified prompt from a private temporary
+stdin file, avoiding command-line limits and pipe backpressure. Historical inline
+commands and their original briefs remain readable without rewriting them.
 Capture again under a new assignment ID when affected inputs change.
 
 Collect original results with `codex-collect`. Then invoke:
@@ -125,14 +129,26 @@ GitHub evidence establishes exact PR/head, merge commit parents and target ances
 Another ID cannot bypass a pending integration. A definitive rejection or a
 pre-effect hold retains its original blocked result; reassess before a new ID.
 There is no exactly-once claim.
+The merge call reads native HTTP status with its JSON body. Explicit HTTP 405/409
+rejections, including `gh` exit 1, finish as rejected; transport failures, malformed
+responses and other unconfirmed outcomes retain the same pending intent.
 
 Delivery additionally resolves one unambiguous `checks.yml` push run at that merge
 SHA and target branch, watches it to terminal success, rechecks its current attempt,
-and runs the installed merged-issue check. Missing, failed, changing-attempt,
+and repeats the factory-owned merged-issue check. Missing, failed, changing-attempt,
 unbound or ambiguous evidence remains pending. The original execution receipt
 retains observations; terminal collection binds its digest in the existing result.
 Partial issue references and cleanup stay with the release owner. Publication is
 inapplicable for this scoped path, never fabricated as successful.
+
+The issue checker uses GitHub's complete `closingIssuesReferences` connection and
+refuses truncated responses (including more than one 100-item page). It accepts
+whole-line `No issue`, GitHub-resolved closing references, and `Part of #N` or
+`Part of https://github.com/OWNER/REPO/issues/N`. Partial references must resolve
+to accessible issues that this PR does not close. Conflicting or unsupported
+declarations hold for reassessment. After merge every closing issue must be closed.
+The checker's version and source digest bind new intents; older intents cannot
+silently switch from the former installed helper to this checker.
 
 For final native acceptance, launch a new read-only `release` assignment with the
 usual arguments plus `--delivery INTEGRATION`, then collect it. Capture reads the
@@ -150,6 +166,9 @@ confirm a later successful attempt of the same native run, then collect the
 unchanged original receipt. Neither path resends a merge or rewrites prior results.
 Launch failures/timeouts name restoration steps and require reconciliation of the
 same integration ID; an unknown outcome never authorizes a new merge attempt.
+Malformed JSON and text from these commands likewise require restoration of the
+installed helper/output contract and reconciliation of that same intent. A
+terminal hold before an effect requires reassessment before another intent.
 
 ## Frozen payload and receipt contracts
 

@@ -87,6 +87,7 @@ class NativeResults(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.spawns = []
+        self.prompt_inputs = []
         self.shell_directories = []
         self.process = FakeProcess(events())
         self.git_scope = lambda *args, **kwargs: nullcontext()
@@ -113,7 +114,10 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(command.count("--strict-config"), 1)
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
         self.assertEqual(options["limit"], worker.NATIVE_LINE_LIMIT)
-        self.assertEqual(options["stdin"], asyncio.subprocess.DEVNULL)
+        prompt = options["stdin"]
+        self.prompt_inputs.append(prompt.read())
+        self.assertEqual(prompt.read(), b"")
+        prompt.seek(0)
         self.assertEqual(options["stdout"], asyncio.subprocess.PIPE)
         return directory
 
@@ -144,12 +148,29 @@ class NativeResults(unittest.TestCase):
         self.assertIn("read-only", self.spawns[0])
         self.assertEqual(self.spawns[0][4:8], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
-        self.assertEqual(self.spawns[0][-1], self.brief.read_text())
+        self.assertEqual(self.spawns[0][-1], "-")
+        self.assertEqual(self.prompt_inputs[0], self.brief.read_bytes())
         before = self.args.receipt.read_bytes()
         with self.assertRaisesRegex(factory.FactoryError, "never relaunch"):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.args.receipt.read_bytes(), before)
+
+    def test_large_prompt_uses_exact_private_stdin_and_eof_without_argv_payload(self):
+        payload = ("Large frozen evidence: 雪\n" * 100000).encode()
+        self.brief.write_bytes(payload)
+        self.args.brief_sha256 = hashlib.sha256(payload).hexdigest()
+        streams = []
+        original = self.spawn
+        async def spawn(*command, **options):
+            streams.append(options["stdin"])
+            self.assertLess(sum(len(part.encode()) for part in command), 8192)
+            self.assertEqual(os.fstat(options["stdin"].fileno()).st_mode & 0o777, 0o600)
+            return await original(*command, **options)
+        with patch.object(self, "spawn", side_effect=spawn):
+            self.assertEqual(self.execute()["state"], "completed")
+        self.assertEqual(self.prompt_inputs, [payload])
+        self.assertTrue(streams[0].closed)
 
     def test_shell_controls_round_trip_unusual_absolute_path_without_parent_changes(self):
         import native_antigravity

@@ -7,6 +7,7 @@ import re
 import subprocess
 import stat
 import sys
+from typing import Any
 
 import factory
 
@@ -62,7 +63,6 @@ class GitHub:
         self.poll = executable(root / "poll-pr-reviews.sh", "poll-pr-reviews.sh", repository, runnable=False)
         self.watch = executable(root / "watch-pr-reviews.sh", "watch-pr-reviews.sh", repository, runnable=False)
         self.lanes = executable(root / "review-lanes.sh", "review-lanes.sh", repository, runnable=False)
-        self.issue_helper = executable(root / "check-closing-issues.py", "check-closing-issues.py", repository, runnable=False)
         self.repository = repository
         self.checkouts = ()
 
@@ -70,12 +70,13 @@ class GitHub:
         # Installed helpers remain the policy authority. Pin their bytes, never
         # copy them into this package or silently change policy under an intent.
         try:
-            for name, runnable in ((self.gh, True), (self.bash, True), (self.issue_helper, False),
+            for name, runnable in ((self.gh, True), (self.bash, True),
                                    (self.poll, False), (self.watch, False), (self.lanes, False)):
                 executable(name, Path(name).name, self.repository, runnable=runnable, checkouts=self.checkouts)
             executable(sys.executable, Path(sys.executable).name, self.repository, checkouts=self.checkouts)
-            return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                    for path in map(Path, (self.gh, self.bash, sys.executable, self.issue_helper, self.poll, self.watch, self.lanes))}
+            return {**{str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                       for path in map(Path, (self.gh, self.bash, sys.executable, self.poll, self.watch, self.lanes))},
+                    "factory-issue-checker:v1": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise command_failure("installed release helper validation", exc) from None
 
@@ -91,7 +92,7 @@ class GitHub:
         environment.update(GH_HOST="github.com", GH_PROMPT_DISABLED="1")
         return environment
 
-    def run(self, argv, *, watch=False, accepted=(0,)):
+    def run(self, argv, *, watch=False, accepted=(0,), merge_response=False) -> Any:
         self.binding()  # Recheck protected paths before every helper/process execution.
         environment = self.environment()
         try:
@@ -99,10 +100,31 @@ class GitHub:
                                     text=True, check=False, timeout=None if watch else 60)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise command_failure(argv[0], exc) from None
+        except UnicodeError:
+            raise output_failure(argv[0]) from None
         if result.returncode not in accepted:
             raise factory.FactoryError("GitHub/release command failed: " + result.stderr
                 + "; restore command access/connectivity and reconcile the same integration ID; never resend a merge")
-        return factory.decode_json(result.stdout)
+        try:
+            output = result.stdout
+            status = None
+            if merge_response:
+                headers, separator, output = output.partition("\n\n")
+                match = re.match(r"HTTP/\S+ ([1-5][0-9]{2})(?:\s|$)", headers)
+                if not separator or match is None:
+                    raise ValueError()
+                status = int(match[1])
+            value = factory.decode_json(output)
+        except (ValueError, UnicodeError):
+            raise output_failure(argv[0]) from None
+        if merge_response:
+            if not isinstance(value, dict):
+                raise output_failure(argv[0])
+            if result.returncode == 1 and status in {405, 409}:
+                return dict(merged=False, http_status=status, message=value.get("message"))
+            if result.returncode != 0 or status != 200:
+                raise factory.FactoryError("Merge response is not a confirmed success or explicit 405/409 rejection; reconcile the same integration ID and never resend the merge")
+        return value
 
     def api(self, endpoint):
         return self.run([self.gh, "api", "--hostname", "github.com", endpoint])
@@ -118,17 +140,69 @@ class GitHub:
                         watch=watch, accepted=(0, 1) if watch else (0,))
 
     def issues(self, identity, *, merged=False):
-        return self.run([sys.executable, "-I", "-B", self.issue_helper,
-            *identity["repository"].split("/"), str(identity["number"]), *(["--merged"] if merged else [])], watch=True)
+        # GitHub owns closing semantics; refuse incomplete connections rather than
+        # infer links from body keywords or trust an undocumented helper format.
+        query = """query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){
+          nameWithOwner pullRequest(number:$number){number url state headRefOid body
+            closingIssuesReferences(first:100){totalCount pageInfo{hasNextPage}
+              nodes{number url state repository{nameWithOwner}}}}}}"""
+        owner, name = identity["repository"].split("/")
+        response = self.run([self.gh, "api", "--hostname", "github.com", "graphql", "-f", "query=" + query,
+                             "-f", "owner=" + owner, "-f", "name=" + name, "-F", "number=" + str(identity["number"])])
+        try:
+            repo = response["data"]["repository"]
+            pr = repo["pullRequest"]
+            links = pr["closingIssuesReferences"]
+            closing = links["nodes"]
+            if (response.get("errors") or repo["nameWithOwner"] != identity["repository"]
+                    or pr["number"] != identity["number"] or pr["url"] != identity["url"]
+                    or pr["headRefOid"] != identity["head"] or pr["state"] != ("MERGED" if merged else "OPEN")
+                    or not isinstance(pr["body"], str) or not isinstance(closing, list)
+                    or type(links["totalCount"]) is not int or links["totalCount"] != len(closing)
+                    or links["pageInfo"]["hasNextPage"] is not False):
+                raise ValueError()
+            for issue in closing:
+                repository = issue["repository"]["nameWithOwner"]
+                if (not re.fullmatch(r"[\w.-]+/[\w.-]+", repository)
+                        or type(issue["number"]) is not int or issue["number"] < 1
+                        or issue["url"] != f"https://github.com/{repository}/issues/{issue['number']}"
+                        or issue["state"] not in ({"CLOSED"} if merged else {"OPEN", "CLOSED"})):
+                    raise ValueError()
+            if len({issue["url"] for issue in closing}) != len(closing):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise factory.FactoryError("Cannot confirm complete source-bound GitHub issue links; restore API access/response completeness or use a supported PR before reconciling the same intent") from None
+        partials = []
+        lines = [line.strip() for line in pr["body"].splitlines()]
+        for line in lines:
+            if not line.startswith("Part of"):
+                continue
+            match = re.fullmatch(r"Part of (?:#([1-9][0-9]*)|https://github.com/([\w.-]+/[\w.-]+)/issues/([1-9][0-9]*))", line)
+            if match is None:
+                raise factory.FactoryError("Use a whole-line Part of #N or Part of https://github.com/OWNER/REPO/issues/N declaration before reassessment")
+            repository, number = match[2] or identity["repository"], int(match[1] or match[3])
+            issue = self.api(f"repos/{repository}/issues/{number}")
+            url = f"https://github.com/{repository}/issues/{number}"
+            if (not isinstance(issue, dict) or issue.get("number") != number or issue.get("html_url") != url
+                    or "pull_request" in issue or issue.get("state") not in {"open", "closed"}
+                    or url in {item["url"] for item in closing}):
+                raise factory.FactoryError("Partial declaration must name an accessible issue that this PR does not close; correct the body and reassess")
+            partials.append(url)
+        no_issue = "No issue" in lines
+        if (no_issue and (closing or partials)) or not (no_issue or closing or partials):
+            raise factory.FactoryError("Declare whole-line No issue, a GitHub-resolved closing issue, or a supported Part of issue before reassessment")
+        return dict(checker="factory-v1", pr=identity["number"], verdict="ok", state=pr["state"],
+                    closing=closing, partial_references=sorted(set(partials)), no_issue=no_issue)
 
     def requirements(self, identity):
         return self.run([self.gh, "pr", "view", str(identity["number"]), "--repo", identity["repository"],
             "--json", "headRefOid,baseRefOid,reviewDecision,mergeable,mergeStateStatus"])
 
     def merge(self, identity):
-        return self.run([self.gh, "api", "--hostname", "github.com", "--method", "PUT",
+        return self.run([self.gh, "api", "--hostname", "github.com", "--include", "--method", "PUT",
                         f"repos/{identity['repository']}/pulls/{identity['number']}/merge",
-                        "-f", "sha=" + identity["head"], "-f", "merge_method=merge"])
+                        "-f", "sha=" + identity["head"], "-f", "merge_method=merge"],
+                        accepted=(0, 1), merge_response=True)
 
     def watch_run(self, repository, run_id):
         # gh owns waiting; a nonzero exit still needs the native terminal observation.
@@ -139,6 +213,14 @@ class GitHub:
                            capture_output=True, text=True, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise command_failure(self.gh, exc) from None
+        except UnicodeError:
+            raise output_failure(self.gh) from None
+
+
+def output_failure(command):
+    return factory.FactoryError(f"Release command {command!r} returned malformed JSON or text; restore the installed "
+        "helper and output contract, then reconcile the same integration ID. A terminal pre-effect hold requires "
+        "reassessment before another intent; never resend a merge")
 
 
 def command_failure(command, exc):
@@ -333,9 +415,8 @@ def render(value):
 def from_assignment(record, assignment):
     command = assignment["request"]["command"]
     try:
-        index = command.index("--release-evidence")
-        value = factory.decode_json(command[index + 1])
         instructions = Path(assignment["brief"]).read_text()
+        value = assignment_payload(command, instructions, "release")
         if (digest_text(instructions) != assignment["request"]["instructions_sha256"]
                 or not instructions.endswith(render(value))):
             raise ValueError()
@@ -346,6 +427,25 @@ def from_assignment(record, assignment):
 
 def digest_text(value):
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def brief_payload(instructions, kind, expected_digest):
+    """The existing frozen brief is the sole payload store for new commands."""
+    try:
+        value = factory.decode_json(instructions.splitlines()[-1])
+        rendered = render(value) if kind == "release" else render_delivery(value)
+        if digest(value) != expected_digest or not instructions.endswith(rendered):
+            raise ValueError()
+    except (ValueError, IndexError, TypeError):
+        raise factory.FactoryError("Frozen evidence differs from its saved brief/digest; restore the original assignment") from None
+    return value
+
+
+def assignment_payload(command, instructions, kind):
+    flag = "--" + kind + "-evidence"
+    if flag in command:  # Historical inline commands retain their original binding.
+        return factory.decode_json(command[command.index(flag) + 1])
+    return brief_payload(instructions, kind, command[command.index(flag + "-digest") + 1])
 
 
 DELIVERY_MARKER = "\n## Factory confirmed delivery evidence\n\n"
@@ -387,8 +487,8 @@ def render_delivery(value):
 def from_delivery_assignment(record, assignment):
     command = assignment["request"]["command"]
     try:
-        value = factory.decode_json(command[command.index("--delivery-evidence") + 1])
         instructions = Path(assignment["brief"]).read_text()
+        value = assignment_payload(command, instructions, "delivery")
         if (digest_text(instructions) != assignment["request"]["instructions_sha256"]
                 or not instructions.endswith(render_delivery(value))):
             raise ValueError()
