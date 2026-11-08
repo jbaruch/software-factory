@@ -102,7 +102,7 @@ authority. The [owner contract](task-state.md#writer-worktree-provisioning) defi
 the supported tree/configuration inputs and conservative reconciliation.
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
-Mechanical integration uses the same schema-7 `factory.launch` lifecycle and real
+Mechanical integration uses the same schema-8 `factory.launch` lifecycle and real
 window/block identities. Its original worker owns a versioned execution receipt;
 repeats and cold recovery reconcile existing effects read-only. A repository-scoped
 mutex serializes integration without occupying unrelated ready-work capacity. Task

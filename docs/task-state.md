@@ -98,7 +98,7 @@ hash. New admitted assignments also contain the declared purpose, an input
 snapshot and any declared dependencies. Each assignment has a nullable `result`.
 States are
 `launching` or `launched`, describing the effect, not completion of engineering work.
-The [mechanical integration adapter](integration.md) uses the same schema-7
+The [mechanical integration adapter](integration.md) uses the same schema-8
 request/result shape with a frozen `integration.py --intent` command. It launches through `factory.launch` and owns an actual Rex window/block.
 `launching` and `launched` retain their ordinary launch meanings; neither describes
 merge completion. `status` inspects the real process and reconciles lost launch

@@ -215,6 +215,13 @@ def merged_source(intent, transport):
 
 
 def postmerge(intent, transport) -> dict:
+    try:
+        return _postmerge(intent, transport)
+    except factory.FactoryError as exc:
+        raise factory.FactoryError(str(exc) + "; restore complete GitHub API/CI evidence, wait for or inspect the exact source-bound push run, and reconcile the same integration ID without resending the merge") from None
+
+
+def _postmerge(intent, transport) -> dict:
     merge, target = merged_source(intent, transport)
     workflow = transport.api(f"{endpoint(intent)}/actions/workflows/checks.yml")
     if (not isinstance(workflow, dict) or type(workflow.get("id")) is not int or workflow["id"] <= 0
@@ -427,6 +434,11 @@ def execute(path, intent, *, transport=None, start=False) -> dict:
             if any(receipt.get("process", {}).get(key) != process.get(key)
                    for key in ("session_id", "window_id", "block_id")):
                 raise factory.FactoryError("Original integration receipt differs from its Rex pane")
+            if receipt["state"] == "executing":
+                # Submission is preceded by a durable merge_outcome_unknown save.
+                # This earlier phase therefore proves no merge was submitted.
+                receipt.update(state="held", reason="Interrupted before merge submission; reassess current inputs before a new integration ID")
+                factory.save(receipt_path, receipt)
         if receipt["state"] in {"delivered", "rejected", "held"}:
             if assignment["result"] is None and receipt["state"] == "delivered":
                 current = postmerge(intent, transport)
@@ -442,7 +454,10 @@ def execute(path, intent, *, transport=None, start=False) -> dict:
                 with factory.task_lock(path.parent, intent["task"], wait=True):
                     current = factory.load_task(path)
                     bound_assignment(path, current, intent)
-                    if current != record or current["hold"] is not None:
+                    selected = {intent["assignment"], intent["review"], *intent["required"]}
+                    if (any(current[key] != record[key] for key in ("hold", "inputs", "admission"))
+                            or any(current["assignments"][key] != record["assignments"][key] for key in selected)
+                            or current["hold"] is not None):
                         raise factory.FactoryError("Task controls or inputs changed before integration effect")
                     if command_binding(current, transport) != intent["commands"]:
                         raise factory.FactoryError("Installed command/policy bytes changed before integration effect")
@@ -458,8 +473,7 @@ def execute(path, intent, *, transport=None, start=False) -> dict:
                         receipt.update(state="rejected", reason="GitHub rejected merge")
                 except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
                     receipt["observations"].append(dict(merge_error=str(exc)))
-        if receipt["state"] in {"executing", "merge_outcome_unknown"}:
-            receipt["state"] = "merge_outcome_unknown"
+        if receipt["state"] == "merge_outcome_unknown":
             try:
                 receipt.update(state="delivered", delivery=postmerge(intent, transport))
             except (factory.FactoryError, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:

@@ -73,6 +73,9 @@ and network waits. The worker reloads controls and inputs after the watcher and
 immediately before recording the merge attempt, then collects only its result into
 the latest task record. Concurrent pause/input changes remain intact and refuse a
 new effect. An already submitted effect can still reconcile while held.
+Unrelated assignments and allowance additions during the watch are preserved and
+do not abort delivery; the final guard compares admission, inputs, hold and the
+selected integration/approval assignments.
 
 New effects run the unchanged installed `watch-pr-reviews.sh` and require its
 `ready` result, the current-head `checks.yml` successful native attempt, unchanged
@@ -129,6 +132,9 @@ GitHub evidence establishes exact PR/head, merge commit parents and target ances
 Another ID cannot bypass a pending integration. A definitive rejection or a
 pre-effect hold retains its original blocked result; reassess before a new ID.
 There is no exactly-once claim.
+An interrupted saved `executing` phase proves no submission occurred: recovery
+finishes it as held so current inputs can be reassessed under a new ID. Only the
+durable `merge_outcome_unknown` phase needs read-only merge-outcome reconciliation.
 The merge call reads native HTTP status with its JSON body. Explicit HTTP 405/409
 rejections, including `gh` exit 1, finish as rejected; transport failures, malformed
 responses and other unconfirmed outcomes retain the same pending intent.
@@ -200,7 +206,7 @@ before waits), `merge_outcome_unknown` (durable before merge, or recovery), `hel
 source-bound delivery/CI evidence. Gate snapshots and external replies/errors are
 execution evidence, not another queue. `execute` owns writes; `validate_receipt`,
 result collection and `release_evidence.delivery` read. Terminal results bind the
-receipt digest, and terminal receipt bytes are never replaced. Task schema remains 7.
+receipt digest, and terminal receipt bytes are never replaced. Task schema remains 8.
 
 These are gate artifacts under the Stateful Artifacts exception. Missing required
 fields, corrupt data, absent/noninteger/unsupported versions refuse; no guessed

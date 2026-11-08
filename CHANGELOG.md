@@ -41,6 +41,8 @@ checker; refuse incomplete or unsupported observations without invoking an
 undocumented cross-plugin issue-helper interface.
 Classify native nonzero HTTP 405/409 merge responses as rejected, while preserving
 unknown outcomes and reconciliation for transport or malformed-response failures.
+Finish interrupted pre-submission waits as held, and allow unrelated assignment
+and allowance updates during the watcher while retaining selected-evidence guards.
 
 
 ## 0.13.0 — 2026-11-07 (unpublished)

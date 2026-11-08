@@ -329,6 +329,33 @@ class Integration(unittest.TestCase):
                 factory.hold_task(self.path, "Operator controls remain available")
         self.assertEqual(self.transport.merges, [])
 
+    def test_unrelated_assignment_and_allowance_updates_during_watch_do_not_abort_delivery(self):
+        def work():
+            self.review("additional-qa", "qa", frozen=False)
+            with factory.task_lock(self.tasks, "deliver"):
+                factory.extend_allowance(self.path, purpose="correction", additional=1, expected_limit=2,
+                    request_id="unrelated-addition", reason="Fixture operator-authorized addition", clock=lambda: 1000)
+        self.transport.on_watch = work
+        self.assertEqual(self.integrate()["state"], "delivered")
+        record = factory.load_task(self.path)
+        self.assertEqual(record["assignments"]["additional-qa"]["result"]["outcome"], "approved")
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"]["limit"], 3)
+        self.assertEqual(len(self.transport.merges), 1)
+
+    def test_pre_effect_reload_still_refuses_changed_selected_approval(self):
+        original = self.transport.api
+        def changed(endpoint):
+            result = original(endpoint)
+            if self.transport.watches and endpoint.endswith("pulls/7"):
+                with factory.task_lock(self.tasks, "deliver"):
+                    record = factory.load_task(self.path)
+                    record["assignments"]["qa"]["result"]["artifacts"].append("changed-selected-evidence")
+                    factory.save(self.path, record)
+            return result
+        self.transport.api = changed
+        self.assertEqual(self.integrate()["state"], "held")
+        self.assertEqual(self.transport.merges, [])
+
     def test_pre_effect_reload_catches_control_after_network_checks(self):
         original = self.transport.api
         def changed(endpoint):
@@ -717,6 +744,46 @@ class Integration(unittest.TestCase):
             self.integrate()
         self.assertEqual(self.integrate()["state"], "merge_outcome_unknown")
         self.assertEqual(self.transport.merges, [])
+
+    def test_interrupted_pre_effect_watch_finishes_held_and_allows_reassessment(self):
+        def interrupted():
+            raise KeyboardInterrupt("fixed crash before submission")
+        self.transport.on_watch = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            self.integrate()
+        record = factory.load_task(self.path)
+        intent = integration.intent_of(record["assignments"]["merge"])
+        receipt = integration.receipt_file(self.path, intent)
+        self.assertEqual(json.loads(receipt.read_text())["state"], "executing")
+        self.transport.on_watch = lambda: None
+        recovered = self.integrate()
+        self.assertEqual(recovered["state"], "held")
+        self.assertIn("Interrupted before merge submission", recovered["reason"])
+        self.assertEqual(factory.load_task(self.path)["assignments"]["merge"]["result"]["outcome"], "blocked")
+        self.assertEqual(self.integrate(), recovered)
+        self.assertEqual(self.transport.merges, [])
+        self.assertEqual(self.integrate(assignment_id="reassessed-merge")["state"], "delivered")
+        self.assertEqual(len(self.transport.merges), 1)
+
+    def test_postmerge_inventory_errors_name_recovery_without_resending(self):
+        original = self.transport.pages
+        run = self.transport.run
+        cases = [dict(total_count=1, workflow_runs=None), dict(total_count=0, workflow_runs=[]),
+            dict(total_count=2, workflow_runs=[run, copy.deepcopy(run)]),
+            dict(total_count=1, workflow_runs=[{**run, "head_sha": "f" * 40}])]
+        for page in cases:
+            def pages(endpoint):
+                return [page] if "/actions/workflows/" in endpoint else original(endpoint)
+            with self.subTest(page=page), patch.object(self.transport, "pages", side_effect=pages):
+                receipt = self.integrate()
+                self.assertEqual(receipt["state"], "merge_outcome_unknown")
+                pending = receipt["observations"][-1]["pending"]
+                self.assertIn("restore complete GitHub API/CI evidence", pending)
+                self.assertIn("exact source-bound push run", pending)
+                self.assertIn("same integration ID without resending the merge", pending)
+                self.assertEqual(len(self.transport.merges), 1)
+        self.assertEqual(self.integrate()["state"], "delivered")
+        self.assertEqual(len(self.transport.merges), 1)
 
     def test_failed_missing_ambiguous_wrong_attempt_and_unbound_push_ci_are_pending(self):
         # Each refusal keeps the same original integration and reconciles read-only.
