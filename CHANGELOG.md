@@ -21,6 +21,8 @@ Preserve CR/LF in UTF-8 Git filenames. Probe file and directory names on the
 destination filesystem before saving intent, refusing case/Unicode aliases
 without creating a branch or worktree. Reject physical file aliases in source
 validation so an earlier partial checkout cannot be certified as complete.
+Reject ancestor/descendant branch namespace conflicts before intent, and report
+actionable recovery for missing or unreadable ownership metadata without mutation.
 
 
 ## 0.12.1 — 2026-11-07 (unpublished)

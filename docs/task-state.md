@@ -206,7 +206,8 @@ python3 factory.py --state-dir '/absolute/path/to/private-state' show --task exa
 
 The destination's parent must exist. The destination must be absent and outside
 existing checkouts, Git directories and the task store. The branch is
-`factory/<task>/<id>` and must not already exist. The API is
+`factory/<task>/<id>` and must not already exist or have an ancestor/descendant
+local-ref conflict, including case variants. The API is
 `provision_worktree(task_record_path, worktree_id=..., destination=...)`; callers
 hold the existing execution and task locks, as the CLI does. There is one
 provisioning request per task in this slice; it does not consume or restore
@@ -242,6 +243,8 @@ the uniquely locked worktree is already complete and clean; this read-only
 inspection is permitted while held. Missing, partial, dirty or conflicting
 outcomes remain pending for inspection, without retry, reset, deletion or repair.
 A lock marker, branch, Git directory or repository identity mismatch refuses.
+Missing or unreadable ownership metadata reports how to inspect the existing
+resources without retrying, resetting or deleting them.
 Changed name, path, candidate or requirements revision cannot rebind the saved
 request. `show` and the existing operator view expose the saved provisioning
 state and generated `inputs_current`; they do not observe live checkout health.

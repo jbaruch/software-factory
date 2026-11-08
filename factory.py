@@ -809,22 +809,25 @@ def provisioning_source(repository, candidate, destination_parent):
 
 def provisioning_owned(record, item):
     """A saved unique Git lock marker binds recovery to this effect, not a lookalike."""
-    destination = Path(item["request"]["path"])
-    if destination.is_symlink() or not destination.is_dir():
-        raise FactoryError("Provisioning outcome uncertain: owned worktree is missing or replaced; inspect without retrying")
-    read_record(destination / ".git")
-    directory = git_dir(destination)
-    common = Path(record["admission"]["repository_identity"]["common_dir"])
-    marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
-    if (directory.parent != common / "worktrees"
-            or directory.is_symlink()
-            or read_record(directory / "locked").strip() != marker
-            or read_record(directory / "gitdir").strip() != str(destination / ".git")
-            or repository_identity(destination) != record["admission"]["repository_identity"]
-            or provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
-            or item["git_dir"] is not None and item["git_dir"] != str(directory)):
-        raise FactoryError("Provisioning ownership differs; inspect conflicting resources without resetting or deleting them")
-    return directory
+    try:
+        destination = Path(item["request"]["path"])
+        if destination.is_symlink() or not destination.is_dir():
+            raise FactoryError("Provisioning outcome uncertain: owned worktree is missing or replaced; inspect without retrying")
+        read_record(destination / ".git")
+        directory = git_dir(destination)
+        common = Path(record["admission"]["repository_identity"]["common_dir"])
+        marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
+        if (directory.parent != common / "worktrees"
+                or directory.is_symlink()
+                or read_record(directory / "locked").strip() != marker
+                or read_record(directory / "gitdir").strip() != str(destination / ".git")
+                or repository_identity(destination) != record["admission"]["repository_identity"]
+                or provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
+                or item["git_dir"] is not None and item["git_dir"] != str(directory)):
+            raise FactoryError("Provisioning ownership differs; inspect conflicting resources without resetting or deleting them")
+        return directory
+    except OSError:
+        raise FactoryError("Cannot read provisioning ownership metadata; restore access to the original metadata and inspect existing resources without retrying, resetting or deleting them") from None
 
 
 @contextmanager
@@ -895,9 +898,13 @@ def provision_worktree(path, *, worktree_id, destination):
             raise FactoryError("Worktree path already exists; never reuse or delete conflicting resources")
         repository = record["admission"]["repository"]
         entries = provisioning_source(repository, request["inputs"]["candidate"], destination.parent)
-        branch = git_run(repository, "show-ref", "--verify", "--quiet", "refs/heads/" + request["branch"])
-        if branch.returncode != 1:
-            raise FactoryError("Worktree branch exists or cannot be inspected; choose an unused task/worktree name")
+        branches = git_run(repository, "for-each-ref", "--format=%(refname)", "refs/heads")
+        if branches.returncode:
+            raise FactoryError("Cannot inspect the local branch namespace; restore Git access before provisioning")
+        wanted = ("refs/heads/" + request["branch"]).casefold()
+        if any(ref == wanted or ref.startswith(wanted + "/") or wanted.startswith(ref + "/")
+               for ref in (name.casefold() for name in branches.stdout.splitlines())):
+            raise FactoryError("Worktree branch exists or has a namespace conflict; choose an unused task/worktree name or explicitly resolve the conflicting ref")
         existing = dict(id=worktree_id, request=request, owner_token=uuid.uuid4().hex,
                         state="provisioning", git_dir=None)
         record["provisioning"] = existing

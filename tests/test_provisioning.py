@@ -276,6 +276,59 @@ class WorktreeProvisioning(unittest.TestCase):
                 self.assertFalse((nested / "writer").exists())
         self.assertEqual(self.git("branch", "--list", "factory/fixture/backend"), "")
 
+    def test_ancestor_and_descendant_refs_refuse_before_provisioning_intent(self):
+        for ref in ("factory/fixture", "factory/fixture/backend/child", "Factory/fixture"):
+            with self.subTest(ref=ref):
+                self.git("branch", ref)
+                before = self.path.read_bytes()
+                try:
+                    with self.assertRaisesRegex(factory.FactoryError, "namespace conflict"):
+                        self.provision()
+                    self.assertEqual(self.path.read_bytes(), before)
+                    self.assertFalse(self.destination.exists())
+                    self.assertEqual(len(self.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 1)
+                    self.assertEqual(self.git("rev-parse", ref), self.git("rev-parse", "HEAD"))
+                finally:
+                    self.git("branch", "-d", ref)
+
+    def test_missing_ownership_metadata_has_actionable_recovery_without_mutation(self):
+        record = self.provision()
+        directory = Path(record["provisioning"]["git_dir"])
+        before = self.path.read_bytes()
+        for metadata in (self.destination / ".git", directory / "locked", directory / "gitdir"):
+            with self.subTest(metadata=metadata.name):
+                raw = metadata.read_bytes()
+                if metadata.name == "locked":
+                    self.git("worktree", "unlock", str(self.destination))
+                else:
+                    metadata.unlink()
+                try:
+                    code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+                    self.assertEqual(code, 1)
+                    self.assertIn("inspect existing resources without retrying", error)
+                    self.assertEqual(self.path.read_bytes(), before)
+                    self.assertTrue((self.destination / "source.bin").is_file())
+                finally:
+                    metadata.write_bytes(raw)
+
+    def test_unreadable_ownership_metadata_has_actionable_recovery(self):
+        record = self.provision()
+        directory = Path(record["provisioning"]["git_dir"])
+        before = self.path.read_bytes()
+        original = factory.read_record
+        for metadata in (self.destination / ".git", directory / "locked", directory / "gitdir"):
+            with self.subTest(metadata=metadata.name):
+                def denied(path, **kwargs):
+                    if path == metadata:
+                        raise PermissionError("fixed fixture denial")
+                    return original(path, **kwargs)
+                with patch.object(factory, "read_record", side_effect=denied):
+                    code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+                self.assertEqual(code, 1)
+                self.assertIn("restore access to the original metadata", error)
+                self.assertIn("without retrying, resetting or deleting", error)
+                self.assertEqual(self.path.read_bytes(), before)
+
     def test_hold_input_changes_and_request_changes_preserve_original_intent_and_limits(self):
         factory.hold_task(self.path, "Wait")
         with self.assertRaisesRegex(factory.FactoryError, "paused"):
