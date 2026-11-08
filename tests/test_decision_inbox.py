@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import threading
-import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlencode
@@ -174,13 +173,11 @@ class Inbox(unittest.TestCase):
                         descriptors.append(descriptor)
                         return descriptor
                     try:
-                        started = time.monotonic()
                         with patch.object(jev, "pending_decisions", side_effect=collecting), \
                              patch.object(jev, "read_decision", side_effect=reading), \
                              patch.object(os, "open", side_effect=opening), \
                              patch.object(Path, "read_text", pathname_read):
                             view = self.view()
-                        self.assertLess(time.monotonic() - started, 2)
                         inbox = view["decision_inbox"]
                         self.assertEqual((inbox["status"], inbox["items"], inbox["resolutions"]),
                                          ("unavailable", [], []))
@@ -666,10 +663,20 @@ class NativeInbox(unittest.TestCase):
                 source.unlink()
                 os.mkfifo(source)
             return read(path)
-        started = time.monotonic()
-        with patch.object(jev, "read_decision", side_effect=replacing):
+        read_text, open_file = Path.read_text, os.open
+        def pathname_read(path, *args, **kwargs):
+            if path == source and path.is_fifo():
+                raise AssertionError("Unsafe owner FIFO pathname read")
+            return read_text(path, *args, **kwargs)
+        def opening(path, flags, *args, **kwargs):
+            if Path(path) == source:
+                self.assertTrue(flags & os.O_NONBLOCK)
+                self.assertTrue(flags & os.O_NOFOLLOW)
+            return open_file(path, flags, *args, **kwargs)
+        with patch.object(jev, "read_decision", side_effect=replacing), \
+             patch.object(Path, "read_text", pathname_read), \
+             patch.object(os, "open", side_effect=opening):
             view = self.view()
-        self.assertLess(time.monotonic() - started, 2)
         inbox = view["decision_inbox"]
         self.assertEqual((inbox["status"], inbox["items"], inbox["resolutions"]), ("unavailable", [], []))
         self.assertIn("Recorded current native answers (0)", dashboard.render(view))
