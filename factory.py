@@ -473,11 +473,12 @@ def git_run(repository, *args, environment=None):
             environment = scope[1]
         result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
-                              text=True, timeout=10, check=False,
+                              timeout=10, check=False,
                               env=git_environment() if environment is None else environment)
         if scope is not None and result.returncode == 125:
             raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
-        return result
+        return subprocess.CompletedProcess(result.args, result.returncode,
+            result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -605,7 +606,7 @@ def check_tracked_bytes(cwd, candidate):
         raise FactoryError("Cannot read candidate tree; restore Git object access before launching")
     root = Path(git_worktree(cwd))
     try:
-        allowed = set()
+        allowed, identities = set(), set()
         for entry in tree.stdout.split("\0"):
             if not entry:
                 continue
@@ -624,6 +625,10 @@ def check_tracked_bytes(cwd, candidate):
                 if info.st_nlink > 1:
                     independent_source(path)
                     info = path.lstat()
+                identity = (info.st_dev, info.st_ino)
+                if identity in identities:
+                    raise FactoryError("Candidate paths alias the same source file; use filenames distinct on this filesystem before launching")
+                identities.add(identity)
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
                 data = path.read_bytes()
             else:
@@ -740,15 +745,17 @@ def provisioning_git(repository, *args, output=None):
             "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
             env=environment, stdout=subprocess.PIPE if output is None else output,
-            stderr=subprocess.PIPE, text=True, timeout=30, check=False)
+            stderr=subprocess.PIPE, timeout=30, check=False)
+        diagnostic = result.stderr.decode("utf-8")
+        output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
         raise FactoryError("Provisioning Git outcome uncertain; inspect the retained intent and resources before continuing") from exc
     if result.returncode:
-        raise FactoryError("Provisioning Git refused; inspect the retained intent and resources: " + result.stderr.strip())
-    return result.stdout
+        raise FactoryError("Provisioning Git refused; inspect the retained intent and resources: " + diagnostic.strip())
+    return output_text
 
 
-def provisioning_source(repository, candidate):
+def provisioning_source(repository, candidate, destination_parent):
     """Reject unsupported configuration and trees before any worktree mutation."""
     config = git_run(repository, "config", "--null", "--list")
     if config.returncode:
@@ -773,9 +780,30 @@ def provisioning_source(repository, candidate):
         mode, kind, oid = metadata.split()
         relative = Path(name)
         if (kind != "blob" or mode not in {"100644", "100755"} or relative.is_absolute()
+                or relative.as_posix() != name
                 or any(part.lower() in {".git", ".."} for part in relative.parts)):
             raise FactoryError("Provisioning supports only regular-file trees without symlinks or submodules")
         entries.append((name, mode, oid))
+    # Probe only names, on the actual destination filesystem, before saving intent.
+    # No normalization table can establish that filesystem's name equivalence.
+    try:
+        with tempfile.TemporaryDirectory(prefix=".factory-names-", dir=destination_parent) as temporary:
+            root, directories = Path(temporary), {}
+            for name, _, _ in entries:
+                with provisioning_file(root, name):
+                    pass
+                for parent in Path(name).parents:
+                    if parent == Path("."):
+                        continue
+                    info = (root / parent).stat()
+                    identity = (info.st_dev, info.st_ino)
+                    previous = directories.setdefault(identity, parent)
+                    if previous != parent:
+                        raise FactoryError("Candidate directory names collide on the destination filesystem; rename them or choose a compatible filesystem")
+    except (FileExistsError, NotADirectoryError, IsADirectoryError):
+        raise FactoryError("Candidate filenames collide on the destination filesystem; rename them or choose a compatible filesystem") from None
+    except OSError:
+        raise FactoryError("Cannot check destination filenames; restore temporary storage access/space before provisioning") from None
     return entries
 
 
@@ -866,7 +894,7 @@ def provision_worktree(path, *, worktree_id, destination):
         if os.path.lexists(destination):
             raise FactoryError("Worktree path already exists; never reuse or delete conflicting resources")
         repository = record["admission"]["repository"]
-        entries = provisioning_source(repository, request["inputs"]["candidate"])
+        entries = provisioning_source(repository, request["inputs"]["candidate"], destination.parent)
         branch = git_run(repository, "show-ref", "--verify", "--quiet", "refs/heads/" + request["branch"])
         if branch.returncode != 1:
             raise FactoryError("Worktree branch exists or cannot be inspected; choose an unused task/worktree name")

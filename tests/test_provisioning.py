@@ -59,6 +59,81 @@ class WorktreeProvisioning(unittest.TestCase):
             result = factory.main(["--state-dir", str(self.state), *args])
         return result, output.getvalue(), errors.getvalue()
 
+    def filename_candidate(self, names):
+        blob = subprocess.check_output([factory.git_binary(), "-C", str(self.repo),
+            "hash-object", "-w", "--stdin"], input=b"filename fixture\n").decode().strip()
+        self.git("read-tree", "--empty")
+        for name in names:
+            self.git("-c", "core.ignorecase=false", "-c", "core.precomposeunicode=false",
+                     "update-index", "--add", "--cacheinfo",
+                     "100644," + blob + "," + name)
+        candidate = self.git("commit-tree", self.git("write-tree"), "-m", "Filename fixture")
+        raw = subprocess.check_output([factory.git_binary(), "-C", str(self.repo),
+            "ls-tree", "-r", "-z", "--name-only", candidate])
+        self.assertEqual(set(raw.split(b"\0")) - {b""}, {name.encode() for name in names})
+        factory.set_inputs(self.path, candidate=candidate, requirements="requirements-v1")
+        return candidate
+
+    def test_control_character_filenames_preserve_tree_index_and_disk_names(self):
+        names = ["name\rsegment", "name\nsegment", "name\r\nsegment"]
+        candidate = self.filename_candidate(names)
+        record = self.provision()
+        expected = {name.encode() for name in names}
+        tree = subprocess.check_output([factory.git_binary(), "-C", str(self.repo),
+            "ls-tree", "-r", "-z", "--name-only", candidate])
+        index = subprocess.check_output([factory.git_binary(), "-C", str(self.destination), "ls-files", "-z"])
+        disk = {os.fsencode(path.name) for path in self.destination.iterdir() if path.name != ".git"}
+        self.assertEqual(set(tree.split(b"\0")) - {b""}, expected)
+        self.assertEqual(set(index.split(b"\0")) - {b""}, expected)
+        self.assertEqual(disk, expected)
+        factory.check_checkout(str(self.repo), str(self.destination), candidate,
+            expected_identity=record["admission"]["repository_identity"])
+        (self.destination / names[0]).rename(self.destination / "substituted-name")
+        with self.assertRaises(factory.FactoryError):
+            factory.check_tracked_bytes(str(self.destination), candidate)
+
+    def check_filename_equivalence(self, first, second, names):
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            probe = Path(temporary)
+            (probe / first).write_text("fixed filesystem capability fixture")
+            equivalent = (probe / second).exists()
+        candidate = self.filename_candidate(names)
+        if equivalent:
+            with self.assertRaisesRegex(factory.FactoryError, "collide"):
+                self.provision()
+            self.assertIsNone(factory.load_task(self.path)["provisioning"])
+            self.assertFalse(self.destination.exists())
+            branch = subprocess.run([factory.git_binary(), "-C", str(self.repo),
+                "show-ref", "--verify", "--quiet", "refs/heads/factory/fixture/backend"], check=False)
+            self.assertEqual(branch.returncode, 1)
+            self.assertEqual(list(self.root.glob(".factory-names-*")), [])
+        else:
+            record = self.provision()
+            factory.check_checkout(str(self.repo), str(self.destination), candidate,
+                expected_identity=record["admission"]["repository_identity"])
+
+    def test_case_equivalence_is_checked_on_the_destination_filesystem(self):
+        self.check_filename_equivalence("File", "file", ["File", "file"])
+
+    def test_unicode_equivalence_is_checked_on_the_destination_filesystem(self):
+        self.check_filename_equivalence("caf\u00e9", "cafe\u0301", ["caf\u00e9", "cafe\u0301"])
+
+    def test_directory_aliases_refuse_before_intent(self):
+        self.check_filename_equivalence("Dir", "dir", ["Dir/one", "dir/two"])
+
+    def test_validation_refuses_two_git_paths_for_one_physical_file(self):
+        candidate = self.filename_candidate(["File", "file"])
+        checkout = self.root / "legacy-writer"
+        self.git("worktree", "add", "--detach", "--no-checkout", str(checkout), candidate)
+        for name in ("File", "file"):
+            (checkout / name).write_bytes(b"filename fixture\n")
+        original = Path.lstat
+        first_info = original(checkout / "File")
+        def aliased(path):
+            return first_info if path == checkout / "file" else original(path)
+        with patch.object(Path, "lstat", aliased), self.assertRaisesRegex(factory.FactoryError, "alias"):
+            factory.check_tracked_bytes(str(checkout), candidate)
+
     def test_cli_creates_independent_raw_checkout_without_callbacks_or_source_changes(self):
         sentinel = self.root / "callback-ran"
         hook = self.repo / ".git/hooks/post-checkout"

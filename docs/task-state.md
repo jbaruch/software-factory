@@ -228,6 +228,12 @@ Tracked symlinks, submodules, partial clones, object alternates, sparse checkout
 executable fsmonitor, redirected worktree configuration and per-worktree config
 are unsupported and visibly refuse. Working-tree transformations such as CRLF
 conversion are bypassed: the new checkout contains the candidate's raw bytes.
+Git filename output is decoded as UTF-8 without newline conversion. Before saving
+intent, a private temporary name-only tree in the destination's existing parent
+checks that file and directory names remain distinct on that filesystem. Case or
+Unicode aliases refuse before branch/worktree creation; the probe removes only
+its own temporary directory. Source validation also rejects different Git paths
+that resolve to the same physical file, including during pending reconciliation.
 
 Repeat the exact command after a restart or lost reply. A completed request
 returns the same worktree after verifying its ownership, without writing state

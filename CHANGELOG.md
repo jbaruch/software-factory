@@ -17,6 +17,10 @@ additions from the earlier schema-6/schema-7 owners, without adopting worktrees
 or granting attempts. Expose provisioning through the existing owner view. No automatic
 candidate handoff, task acceptance or release authority is added.
 
+Preserve CR/LF in UTF-8 Git filenames. Probe file and directory names on the
+destination filesystem before saving intent, refusing case/Unicode aliases
+without creating a branch or worktree. Reject physical file aliases in source
+validation so an earlier partial checkout cannot be certified as complete.
 
 ## 0.12.0 — 2026-11-07 (unpublished)
 
