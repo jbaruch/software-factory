@@ -822,7 +822,7 @@ def provisioning_owned(record, item):
                 or read_record(directory / "locked").strip() != marker
                 or read_record(directory / "gitdir").strip() != str(destination / ".git")
                 or repository_identity(destination) != record["admission"]["repository_identity"]
-                or provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
+                or item["state"] == "provisioning" and provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
                 or item["git_dir"] is not None and item["git_dir"] != str(directory)):
             raise FactoryError("Provisioning ownership differs; inspect conflicting resources without resetting or deleting them")
         return directory
@@ -864,7 +864,14 @@ def provision_worktree(path, *, worktree_id, destination):
     supplied = Path(destination)
     if not supplied.is_absolute() or ".." in supplied.parts:
         raise FactoryError("Supply an absolute worktree path without parent traversal")
-    destination = supplied.parent.resolve(strict=True) / supplied.name
+    try:
+        parent = supplied.parent.resolve(strict=True)
+        is_directory = parent.is_dir()
+    except OSError:
+        raise FactoryError("Create or restore access to the destination parent directory before provisioning") from None
+    if not is_directory:
+        raise FactoryError("Choose an existing directory as the destination parent before provisioning")
+    destination = parent / supplied.name
     request: dict = dict(path=str(destination), branch=f'factory/{record["task"]}/{worktree_id}',
                          inputs=dict(record["inputs"]))
     check_repository(record["admission"])

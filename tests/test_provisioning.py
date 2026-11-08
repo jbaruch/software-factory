@@ -214,6 +214,21 @@ class WorktreeProvisioning(unittest.TestCase):
         self.assertEqual(record["provisioning"]["state"], "provisioned")
         self.assertEqual(record["hold"], "Inspection hold")
 
+    def test_completed_replay_preserves_detached_or_switched_head_and_writer_edits(self):
+        self.provision()
+        before = self.path.read_bytes()
+        (self.destination / "source.bin").write_bytes(b"writer edit")
+        self.git("-C", str(self.destination), "switch", "--quiet", "--detach")
+        for branch in (None, "writer-next"):
+            with self.subTest(branch=branch):
+                if branch:
+                    self.git("-C", str(self.destination), "switch", "--quiet", "-c", branch)
+                head = (factory.git_dir(self.destination) / "HEAD").read_bytes()
+                self.assertEqual(self.provision()["provisioning"]["state"], "provisioned")
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual((factory.git_dir(self.destination) / "HEAD").read_bytes(), head)
+                self.assertEqual((self.destination / "source.bin").read_bytes(), b"writer edit")
+
     def test_lost_git_reply_retains_partial_outcome_without_repeating_or_repairing(self):
         original = factory.provisioning_git
         def lost_reply(repository, *args, **kwargs):
@@ -275,6 +290,42 @@ class WorktreeProvisioning(unittest.TestCase):
                 self.assertFalse((self.state / "writer").exists())
                 self.assertFalse((nested / "writer").exists())
         self.assertEqual(self.git("branch", "--list", "factory/fixture/backend"), "")
+
+    def test_missing_or_non_directory_parent_refuses_actionably_without_effects(self):
+        file_parent = self.root / "file-parent"
+        file_parent.write_text("preserve")
+        before = self.path.read_bytes()
+        worktrees = self.git("worktree", "list", "--porcelain")
+        for parent in (self.root / "missing", file_parent):
+            with self.subTest(parent=parent):
+                code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend",
+                                          "--path", str(parent / "writer"))
+                self.assertEqual(code, 1)
+                self.assertIn("destination parent", error)
+                self.assertIn("directory", error)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+                self.assertEqual(self.git("branch", "--list", "factory/fixture/backend"), "")
+        self.assertFalse((self.root / "missing").exists())
+        self.assertEqual(file_parent.read_text(), "preserve")
+
+    def test_unreadable_destination_parent_refuses_actionably_without_effects(self):
+        original = Path.resolve
+        def denied(path, *args, **kwargs):
+            if path == self.destination.parent:
+                raise PermissionError("fixed fixture denial")
+            return original(path, *args, **kwargs)
+        before = self.path.read_bytes()
+        worktrees = self.git("worktree", "list", "--porcelain")
+        with patch.object(Path, "resolve", denied):
+            code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend",
+                                      "--path", str(self.destination))
+        self.assertEqual(code, 1)
+        self.assertIn("restore access to the destination parent directory", error)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+        self.assertEqual(self.git("branch", "--list", "factory/fixture/backend"), "")
+        self.assertFalse(self.destination.exists())
 
     def test_ancestor_and_descendant_refs_refuse_before_provisioning_intent(self):
         for ref in ("factory/fixture", "factory/fixture/backend/child", "Factory/fixture"):
