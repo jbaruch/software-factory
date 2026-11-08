@@ -529,6 +529,109 @@ class NativeLauncher(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "Cannot reach"):
                 factory.status(rex, record, qa)
 
+    def reject_creation(self):
+        """Rex refuses the request outright, e.g. after a CLI flag was renamed."""
+        original = FakeRex.call
+        def reject(rex, *args, **kwargs):
+            if args[0] == "new" or args[:2] == ("window", "new"):
+                type(rex).calls.append(args)
+                raise factory.FactoryError("Error: unknown flag: --focus")
+            return original(rex, *args, **kwargs)
+        patcher = patch.object(FakeRex, "call", reject)
+        patcher.start()
+        return patcher
+
+    def test_rejected_first_launch_can_be_abandoned_and_the_task_moves_on(self):
+        patcher = self.reject_creation()
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start()
+        patcher.stop()
+        record = factory.load_task(self.path)
+        rex = factory.connect(record)
+        with self.assertRaisesRegex(factory.FactoryError, "factory.py abandon"):
+            factory.reconcile(rex, record, record["assignments"]["qa"])
+        with self.assertRaisesRegex(factory.FactoryError, "pending assignment.*abandon"):
+            self.start(assignment_id="security", role="security")
+        record = factory.abandon_launch(self.path, rex, assignment_id="qa", reason="Rex rejected an unknown flag")
+        abandoned = factory.load_task(self.path)["assignments"]["qa"]
+        self.assertEqual((abandoned["state"], abandoned["abandoned"]["reason"]), ("abandoned", "Rex rejected an unknown flag"))
+        self.assertEqual(factory.status(rex, record, abandoned)["state"], "abandoned")
+        with self.assertRaisesRegex(factory.FactoryError, "use a new explicit ID"):
+            self.start()
+        _, security = self.start(assignment_id="security", role="security")
+        self.assertEqual(security["state"], "launched")
+        self.assertEqual(len(FakeRex.sessions), 1)
+
+    def test_rejected_additional_window_can_be_abandoned(self):
+        self.start()
+        patcher = self.reject_creation()
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start(assignment_id="security", role="security")
+        patcher.stop()
+        record = factory.load_task(self.path)
+        factory.abandon_launch(self.path, factory.connect(record), assignment_id="security", reason="Rex rejected it")
+        _, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual(backend["state"], "launched")
+
+    def test_abandon_refuses_a_launch_whose_pane_exists_or_is_not_pending(self):
+        FakeRex.fail_after_create = True
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start()
+        FakeRex.fail_after_create = False
+        record = factory.load_task(self.path)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "reconcile the launch with status instead"):
+            factory.abandon_launch(self.path, factory.connect(record), assignment_id="qa", reason="Wrong guess")
+        self.assertEqual(self.path.read_bytes(), before)
+        record, _ = self.start()
+        for identity, reason in (("qa", "Already launched"), ("missing", "Unknown"), ("qa", "  ")):
+            with self.subTest(identity=identity), self.assertRaises(factory.FactoryError):
+                factory.abandon_launch(self.path, factory.connect(record), assignment_id=identity, reason=reason)
+        FakeRex.fail_after_create = True
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start(assignment_id="security", role="security")
+        FakeRex.fail_after_create = False
+        record = factory.load_task(self.path)
+        with self.assertRaisesRegex(factory.FactoryError, "pane with this launch marker exists"):
+            factory.abandon_launch(self.path, factory.connect(record), assignment_id="security", reason="Wrong guess")
+
+    def test_abandoned_launch_records_are_validated(self):
+        patcher = self.reject_creation()
+        with self.assertRaises(factory.FactoryError):
+            self.start()
+        patcher.stop()
+        record = factory.load_task(self.path)
+        factory.abandon_launch(self.path, factory.connect(record), assignment_id="qa", reason="Rex rejected it")
+        saved = factory.load_task(self.path)
+        for change in (dict(abandoned=dict(reason="", at=1)), dict(abandoned=dict(reason="x", at=-1)),
+                       dict(abandoned=None), dict(window_id="window-1", block_id="block-1"), dict(state="launching")):
+            damaged = copy.deepcopy(saved)
+            damaged["assignments"]["qa"].update(change)
+            factory.save(self.path, damaged)
+            with self.subTest(change=change), self.assertRaisesRegex(factory.FactoryError, "Invalid abandoned launch|pane IDs"):
+                factory.load_task(self.path)
+        legacy = copy.deepcopy(saved)
+        legacy["schema_version"] = 9
+        legacy["assignments"]["qa"].pop("rex_instance")
+        factory.save(self.path, legacy)
+        with self.assertRaisesRegex(factory.FactoryError, "Invalid abandoned launch"):
+            factory.load_task(self.path)
+
+    def test_abandon_cli_records_the_operator_decision(self):
+        patcher = self.reject_creation()
+        with self.assertRaises(factory.FactoryError):
+            self.start()
+        patcher.stop()
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "abandon", "--task", "task", "--id", "qa",
+                                           "--reason", "Rex rejected an unknown flag"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["assignments"]["qa"]["state"], "abandoned")
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "status", "--task", "task", "--id", "qa"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["state"], "abandoned")
+
     def test_malformed_rex_views_have_actionable_compatibility_diagnostics(self):
         record, _ = self.start()
         original = copy.deepcopy(FakeRex.sessions[0])

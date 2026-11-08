@@ -28,6 +28,8 @@ Before launch, save the pending assignment. After Rex returns, save its session,
 
 If no unique matching pane is visible, the launch remains uncertain and is not repeated. Changed host identity, inaccessible servers or modified assignment inputs are errors for the operator to inspect; deleting state is not recovery. A user-renamed/deleted pending window may require manual reconciliation. This is deliberately conservative and does not claim exactly-once delivery or complete task recovery.
 
+When the operator knows Rex rejected the request, for example with a CLI usage error after a Rex update, `factory.py abandon --task TASK --id ID --reason TEXT` records that decision instead of deleting state. It refuses while a pane carrying the launch marker, or the pending task session, exists; reconcile those with `status`. The abandoned assignment keeps its history and allowance use, reports `abandoned`, never launches again and blocks dependents. Launch the work again under a new ID. If a pane with that marker appears later anyway, close it by hand.
+
 Operator tab changes never block a task. Splitting, renaming, moving or closing factory panes and adding your own tabs to a factory session are tolerated, because each command checks only the pane it acts on. A pane or session closed outside the factory makes that assignment `lost`; other assignments are unaffected. A window carrying an unrecorded factory marker still refuses as lost task history.
 
 `running`, `exited`, `failed`, `lost` and `unknown` describe the terminal process. Exit zero does not approve a review, accept a task or prove the agent completed the goal. `capture` returns original terminal output as data. Use the applicable [provider adapter](native-providers.md) to collect native results.

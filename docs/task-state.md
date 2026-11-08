@@ -140,6 +140,12 @@ terminal `capture` (null when lost) and the UTC epoch time `at`. Once nothing op
 remains, tidying kills the task session and sets `session_id` to null under a new
 `session_label`, so the next launch opens a fresh session.
 
+An assignment's launch state is `launching` (intent saved, pane not yet confirmed),
+`launched` (pane IDs returned) or `abandoned`. Only `factory.py abandon` sets
+`abandoned`, after confirming no pane or pending session carries the launch marker;
+it keeps an `abandoned` object with the operator's nonempty `reason` and UTC epoch
+time `at`, has no pane IDs or result, and still counts toward its purpose's allowance.
+
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input
 snapshot and any declared dependencies. Each assignment has a nullable `result` and boolean `native_collected`, initially

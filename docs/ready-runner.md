@@ -144,6 +144,8 @@ unknown and unconfirmed launches. A terminal process releases its slot even if
 its report is unusable; that report still needs action. A process `lost` to a
 Rex server restart is terminal: the runner collects a native Codex result from
 its completed receipt, and otherwise reports `blocked` and blocks dependents.
+An operator-[abandoned](native-rex.md#recovery-and-status-meanings) launch frees
+its slot and also blocks dependents; replan it under a new ID.
 
 After collection, each tick also [tidies](native-rex.md#tab-tidying) finished
 tabs in every task of its state directory, keeping their final status and output

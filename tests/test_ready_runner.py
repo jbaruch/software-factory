@@ -700,6 +700,25 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(result["tidy_issues"], [dict(task="task", reason="Fixture tidy failure")])
         self.assertEqual(result["issues"], [])
 
+    def test_abandoned_launch_frees_its_slot_and_blocks_dependents(self):
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])], workers=1, reserve=0))
+        original = PlanRex.call
+        def reject(rex, *args, **kwargs):
+            if args[0] == "new":
+                raise factory.FactoryError("Error: unknown flag: --focus")
+            return original(rex, *args, **kwargs)
+        with patch.object(PlanRex, "call", reject):
+            first = self.tick(controller)
+        self.assertEqual(first["active_workers"], 1)
+        self.assertIn("factory.py abandon", self.tick(controller)["jobs"][0]["reason"])
+        with factory.task_lock(self.directory, "task") as path:
+            record = factory.load_task(path)
+            factory.abandon_launch(path, factory.connect(record), assignment_id="first", reason="Rex rejected an unknown flag")
+        result = self.tick(controller)
+        self.assertEqual(self.states(result), {("task", "first"): "abandoned", ("task", "second"): "blocked"})
+        self.assertEqual(result["active_workers"], 0)
+        self.assertEqual(result["result"], "needs_action")
+
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
         self.tick(controller)

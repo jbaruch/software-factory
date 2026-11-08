@@ -271,7 +271,7 @@ def load_task(path) -> dict:
     earlier, labels, window_ids, block_ids = set(), set(), set(), set()
     for assignment_id, assignment in record["assignments"].items():
         if (not isinstance(assignment, dict) or not isinstance(assignment.get("request"), dict)
-                or assignment.get("state") not in ("launching", "launched")
+                or assignment.get("state") not in ("launching", "launched", "abandoned")
                 or (admission is not None and assignment["request"].get("purpose")
                     not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
@@ -308,6 +308,14 @@ def load_task(path) -> dict:
             raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
         if assignment["state"] == "launching" and any(key in assignment for key in ("window_id", "block_id")):
             raise FactoryError("Pending launch has pane IDs; restore the original task record before reconciliation")
+        if (assignment["state"] == "abandoned") != ("abandoned" in assignment) or (
+                assignment["state"] == "abandoned" and (
+                    version < 10 or any(key in assignment for key in ("window_id", "block_id", "closed"))
+                    or not isinstance(assignment["abandoned"], dict) or set(assignment["abandoned"]) != {"reason", "at"}
+                    or not isinstance(assignment["abandoned"]["reason"], str) or not assignment["abandoned"]["reason"].strip()
+                    or type(assignment["abandoned"]["at"]) not in (int, float)
+                    or not 0 <= assignment["abandoned"]["at"] <= 253402300799)):
+            raise FactoryError("Invalid abandoned launch record; restore the original task record")
         if assignment["window_label"] in labels or (assignment["state"] == "launched" and (
                 assignment["window_id"] in window_ids or assignment["block_id"] in block_ids)):
             raise FactoryError("Duplicate assignment pane identity; restore the original task record")
@@ -1231,6 +1239,29 @@ def assignment_pane(view, assignment):
     return window_id, block_id
 
 
+ABANDON_HINT = ". If Rex rejected the launch, record that with factory.py abandon --task TASK --id ID --reason TEXT"
+
+
+def abandon_launch(path, rex, *, assignment_id, reason) -> dict:
+    """Record the operator's decision that a pending launch never created its pane."""
+    record = load_task(path)
+    assignment = record["assignments"].get(assignment_id)
+    if assignment is None or assignment["state"] != "launching":
+        raise FactoryError("Only a pending launch can be abandoned; inspect the assignment with status")
+    if not isinstance(reason, str) or not reason.strip():
+        raise FactoryError("Supply the nonempty reason the launch is known not to have happened")
+    if record["session_id"] is None:
+        if any(item.get("label") == record["session_label"] for item in rex_sessions(rex)):
+            raise FactoryError("The pending task session exists; reconcile the launch with status instead")
+    else:
+        view = session_view(rex, record)
+        if view is not None and any(item.get("label") == assignment["window_label"] for item in view_windows(view)):
+            raise FactoryError("A pane with this launch marker exists; reconcile the launch with status instead")
+    assignment.update(state="abandoned", abandoned=dict(reason=reason.strip(), at=time.time()))
+    save(path, record)
+    return record
+
+
 def reconcile(rex, record, assignment):
     """Read back a uniquely labeled pending launch; never relaunch an unknown one."""
     session_id = record.get("session_id")
@@ -1238,9 +1269,12 @@ def reconcile(rex, record, assignment):
         matches = [item for item in rex_sessions(rex) if item.get("label") == record["session_label"]]
         if len(matches) != 1:
             raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
-                               + record["session_label"])
+                               + record["session_label"] + ABANDON_HINT)
         session_id = matches[0]["session_id"]
     view = check_session(rex, record, session_id)
+    if not any(item.get("label") == assignment["window_label"] for item in view_windows(view)):
+        raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
+                           + assignment["window_label"] + ABANDON_HINT)
     window_id, block_id = assignment_pane(view, assignment)
     record["session_id"] = session_id
     assignment.update(window_id=window_id, block_id=block_id, state="launched")
@@ -1355,6 +1389,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
+        if existing["state"] == "abandoned":
+            raise FactoryError("Assignment was abandoned after a rejected launch; use a new explicit ID")
         if existing["request"] != request:
             raise FactoryError("Assignment ID already has different inputs; use a new explicit ID")
         rex = connect(record, binary, server)
@@ -1365,7 +1401,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["hold"] is not None:
         raise FactoryError("Task is paused: " + record["hold"] + "; use resume before new launches")
     if any(item["state"] == "launching" for item in record["assignments"].values()):
-        raise FactoryError("Reconcile the existing pending assignment with status before another launch")
+        raise FactoryError("Reconcile the existing pending assignment with status before another launch, "
+                           "or abandon it if Rex rejected that launch")
     for dependency in request.get("dependencies", []):
         if dependency not in record["assignments"] or dependency == assignment_id:
             raise FactoryError("Dependency must name an earlier assignment in this task: " + dependency)
@@ -1468,6 +1505,9 @@ def current_instance(rex):
 
 def status(rex, record, assignment) -> dict:
     """Observe the original process. `lost` means Rex can no longer report how it ended."""
+    if assignment["state"] == "abandoned":
+        return dict(role=assignment["request"]["role"], state="abandoned", session_id=None, window_id=None,
+                    block_id=None, exit=None, reason=assignment["abandoned"]["reason"])
     closed = assignment.get("closed")
     if closed is not None:
         retained = dict(role=assignment["request"]["role"], state=closed["state"],
@@ -2143,6 +2183,10 @@ def main(argv=None):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
+    abandon = sub.add_parser("abandon", help="Record that a pending launch never created its pane")
+    abandon.add_argument("--task", required=True)
+    abandon.add_argument("--id", required=True)
+    abandon.add_argument("--reason", required=True, help="Why the launch is known not to have happened")
     cleanup = sub.add_parser("tidy", help="Close finished assignment tabs, retaining their final status and output")
     cleanup.add_argument("--task", help="Only this task; default is every task in the state directory")
     args = parser.parse_args(argv)
@@ -2237,6 +2281,13 @@ def main(argv=None):
                 else:
                     record = hold_task(path, args.reason if args.action == "pause" else None,
                                        request_id=args.request_id, expected_revision=args.expected_revision)
+                print(json.dumps(task_view(record), indent=2))
+                return 0
+            if args.action == "abandon":
+                record = load_task(path)
+                if record["rex"] is None:
+                    raise FactoryError("Only a pending launch can be abandoned; inspect the assignment with status")
+                record = abandon_launch(path, connect(record, args.rex, args.server), assignment_id=args.id, reason=args.reason)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
             if args.action in {"start", "codex-start", "grok-start", "claude-start"}:

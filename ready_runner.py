@@ -179,7 +179,7 @@ class Runner:
                 if record["hold"] is not None:
                     raise factory.FactoryError("Task is paused: " + record["hold"])
                 for identity, assignment in record["assignments"].items():
-                    if identity == self.from_writer:
+                    if identity == self.from_writer or assignment["state"] == "abandoned":
                         continue
                     # Even a saved result is no substitute for observing its process.
                     if assignment["state"] == "launching":
@@ -313,7 +313,7 @@ class Runner:
                 phases[key] = dict(state="blocked", reason="Dependency is absent from both the plan and task history; repair the explicit plan")
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") in
-                     {"findings", "blocked", "failed", "lost", "stale", "conflict"} for dependency in job["after"]):
+                     {"findings", "blocked", "failed", "lost", "abandoned", "stale", "conflict"} for dependency in job["after"]):
                 phases[key] = dict(state="blocked", reason="A dependency needs explicit correction, investigation or replanning; no automatic retry")
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") not in {"completed", "approved"} for dependency in job["after"]):
@@ -384,7 +384,7 @@ class Runner:
                     phases[key] = dict(state="blocked", reason=str(exc))
         rows = [dict(task=job["task"], id=job["id"], **phases[(job["task"], job["id"])]) for job in jobs]
         complete = all(row["state"] in {"completed", "approved"} for row in rows)
-        settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "lost", "stale", "conflict"} for row in rows)
+        settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "lost", "abandoned", "stale", "conflict"} for row in rows)
         return dict(schema_version=1, result="complete" if complete else "needs_action" if settled else "pending",
                     jobs=rows, active_workers=len(active), issues=issues, tidy_issues=list(self.tidy_issues),
                     metrics=dict(self.metrics),

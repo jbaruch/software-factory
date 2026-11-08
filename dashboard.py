@@ -169,6 +169,9 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
             if assignment is None:
                 return detail
             detail["pane"] = saved_pane(record, assignment)
+            if assignment["state"] == "abandoned":
+                detail["error"] = "No pane: the launch was abandoned. " + assignment["abandoned"]["reason"]
+                return detail
             if assignment["state"] != "launched":
                 detail["error"] = "Pane unavailable: launch needs reconciliation. Use factory status for this task, then refresh."
                 return detail
