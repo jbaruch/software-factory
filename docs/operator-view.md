@@ -56,10 +56,11 @@ Saved Rex host/session/window/block IDs remain visible independently of process
 state. **Read owned Rex pane** opens an authenticated relative dashboard URL,
 `/tasks/<task-slug>/assignments/<assignment-slug>/pane`, with no query parameters.
 It loads and validates one saved record through the owner loader/lock, releases
-the lock before any Rex call, validates that snapshot's pinned host, session
-marker and saved window/block pair through `factory.connect`, then
-reads only that block's process and original terminal capture through the existing
-Rex adapter. Concurrent controls and same-task launchers can acquire the task lock
+the lock before any Rex call, validates that snapshot's pinned host and session
+marker through `factory.connect`, then reads only the saved block's process and
+original terminal capture through the existing Rex adapter. A renamed or moved tab
+still reads its saved block; a `lost` pane shows its reason and is never captured,
+because a closed pane has no output and a restored pane shows only a new shell. Concurrent controls and same-task launchers can acquire the task lock
 while Rex responds. Saved-state changes cannot retarget this observation; it uses
 the same loaded assignment/IDs throughout and never saves that snapshot back.
 Each Rex call retains its existing 20-second deadline. There is no

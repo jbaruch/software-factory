@@ -33,6 +33,8 @@ GIT_ROUTING_VARIABLES = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDE
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
     "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_IMPLICIT_WORK_TREE",
     "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_QUARANTINE_PATH"}
+# Assignment window markers: "<role>-<assignment>-<8 hex>".
+FACTORY_WINDOW = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{8}")
 GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatversion",
     "extensions.objectformat", "extensions.refstorage", "extensions.worktreeconfig"}
 
@@ -1109,29 +1111,67 @@ def connect(record, binary=None, server=None):
     if who["host_id"] != connection["host_id"]:
         raise FactoryError("Connected Rex host differs from the recorded task host")
     rex.instance_id = rex_object(who, strings=("instance_id",))["instance_id"]
-    if record["session_id"] is not None:
-        view = check_session(rex, record, record["session_id"])
-        for assignment in record["assignments"].values():
-            if assignment["state"] == "launched":
-                window_id, block_id = assignment_pane(view, assignment)
-                if (window_id, block_id) != (assignment["window_id"], assignment["block_id"]):
-                    raise FactoryError("Rex pane identity differs from the task; inspect the original assignment before continuing")
+    # Validate the pinned session if it still exists. Individual panes are checked
+    # only when a command acts on them, so operator tab changes never block a task.
+    session_view(rex, record)
     return rex
 
 
+def session_view(rex, record):
+    """The pinned task session, or None once it no longer exists in Rex."""
+    session_id = record["session_id"]
+    if session_id is None:
+        return None
+    try:
+        return check_session(rex, record, session_id)
+    except FactoryError:
+        if any(item["session_id"] == session_id for item in rex_sessions(rex)):
+            raise
+        return None
+
+
+def rex_sessions(rex):
+    sessions = rex_object(rex.call("ls", "--json")).get("sessions", [])  # Rex omits empty lists.
+    if not isinstance(sessions, list):
+        raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+    for item in sessions:
+        rex_object(item, strings=("session_id",))
+    return sessions
+
+
+def view_windows(view):
+    windows = view.get("windows", [])  # Rex omits the list once a session has no windows.
+    if not isinstance(windows, list):
+        raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+    return windows
+
+
+def view_blocks(view):
+    return {block["block_id"] for window in view_windows(view)
+            for layer in window["layers"] for block in layer["blocks"]}
+
+
 def check_session(rex, record, session_id):
+    """Validate session identity; operator tabs, splits, renames and closures are tolerated."""
     view = rex_object(rex.call("session", "inspect", session_id, "--json"),
-                      strings=("session_id", "label"), lists=("windows",))
+                      strings=("session_id", "label"))
     if view["session_id"] != session_id:
         raise FactoryError("Rex session ID differs; inspect the pinned session before continuing")
     if view.get("label") != record["session_label"]:
         raise FactoryError("Rex session identity differs from the task; inspect the original session before continuing")
+    owned = {item["window_label"] for item in record["assignments"].values()}
     labels, ids, blocks = set(), set(), set()
-    for window in view["windows"]:
-        rex_object(window, strings=("window_id", "label"), lists=("layers",))
-        if window["label"] in labels or window["window_id"] in ids:
+    for window in view_windows(view):
+        rex_object(window, strings=("window_id",), lists=("layers",))
+        label = window.get("label")
+        if label is not None and not isinstance(label, str):
+            raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+        if window["window_id"] in ids or (label in owned and label in labels):
             raise FactoryError("Duplicate Rex window identity; inspect the original session before continuing")
-        labels.add(window["label"])
+        if label is not None and label not in owned and FACTORY_WINDOW.fullmatch(label):
+            # Operator tabs are fine; an unrecorded factory marker means lost task history.
+            raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
+        labels.add(label)
         ids.add(window["window_id"])
         for layer in window["layers"]:
             rex_object(layer, lists=("blocks",))
@@ -1140,10 +1180,6 @@ def check_session(rex, record, session_id):
                 if block["block_id"] in blocks:
                     raise FactoryError("Duplicate Rex block identity; inspect the original session before continuing")
                 blocks.add(block["block_id"])
-    expected = {item["window_label"] for item in record["assignments"].values()}
-    required = {item["window_label"] for item in record["assignments"].values() if item["state"] == "launched"}
-    if not required <= labels <= expected:
-        raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
     return view
 
 
@@ -1156,7 +1192,8 @@ def rex_object(value, *, strings=(), lists=()):
 
 
 def assignment_pane(view, assignment):
-    windows = [item for item in view.get("windows", [])
+    """The exact pane of a launch that was just created or is being reconciled."""
+    windows = [item for item in view_windows(view)
                if item.get("label") == assignment["window_label"]]
     blocks = [block for window in windows for layer in window.get("layers", [])
               for block in layer.get("blocks", [])]
@@ -1172,10 +1209,7 @@ def reconcile(rex, record, assignment):
     """Read back a uniquely labeled pending launch; never relaunch an unknown one."""
     session_id = record.get("session_id")
     if not session_id:
-        sessions = rex_object(rex.call("ls", "--json"), lists=("sessions",))["sessions"]
-        for item in sessions:
-            rex_object(item, strings=("session_id",))
-        matches = [item for item in sessions if item.get("label") == record["session_label"]]
+        matches = [item for item in rex_sessions(rex) if item.get("label") == record["session_label"]]
         if len(matches) != 1:
             raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
                                + record["session_label"])
@@ -1340,6 +1374,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         request["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
     if record["rex"] is not None:
         rex = connect(record, binary, server)
+        if record["session_id"] is not None and session_view(rex, record) is None:
+            raise FactoryError("The task's Rex session no longer exists; inspect it before launching more work")
     else:
         if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
                 or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
@@ -1414,8 +1450,15 @@ def status(rex, record, assignment):
         # would otherwise read as a running assignment forever.
         return {**observation, "state": "lost",
                 "reason": "Rex server restarted after launch; the original process ended without an observable exit status"}
-    process = rex.call("block", "call", "-s", record["session_id"],
-                       "-b", assignment["block_id"], "process")
+    try:
+        process = rex.call("block", "call", "-s", record["session_id"],
+                           "-b", assignment["block_id"], "process")
+    except FactoryError:
+        view = session_view(rex, record)
+        if view is not None and assignment["block_id"] in view_blocks(view):
+            raise
+        return {**observation, "state": "lost",
+                "reason": "Rex pane or session was closed outside the factory; the original process ended without an observable exit status"}
     rex_object(process)
     last_exit = process.get("last_exit")
     if last_exit is not None and (not isinstance(last_exit, dict) or type(last_exit.get("exit_code")) is not int):

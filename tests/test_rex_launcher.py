@@ -27,6 +27,12 @@ class FakeRex:
         self.binary, self.server = str(binary), server
         self.instance_id: str | None = None
 
+    def session(self, session_id):
+        for item in self.sessions:
+            if item["session_id"] == session_id:
+                return item
+        raise factory.FactoryError(f'session target "{session_id}" not found')
+
     def call(self, *args, **kwargs):
         type(self).calls.append(args)
         if args[0] == "whoami":
@@ -34,17 +40,27 @@ class FakeRex:
         if args[0] == "ls":
             return {"sessions": self.sessions}
         if args[:2] == ("session", "inspect"):
-            return next(item for item in self.sessions if item["session_id"] == args[2])
+            return self.session(args[2])
+        if args[:2] == ("block", "call") and args[-1] == "process":
+            session = self.session(args[args.index("-s") + 1])
+            block_id = args[args.index("-b") + 1]
+            if not any(block["block_id"] == block_id for window in session.get("windows", [])
+                       for layer in window["layers"] for block in layer["blocks"]):
+                raise factory.FactoryError(f'block target "{block_id}" not found')
+            return {"last_exit": None, "child": {"pid": 1}}
         if args[0] == "new" or args[:2] == ("window", "new"):
+            created_sessions = sum(call[0] == "new" for call in type(self).calls)
             if args[0] == "new":
-                session = {"session_id": "session-test" if not self.sessions else f"session-test-{len(self.sessions) + 1}",
+                session = {"session_id": "session-test" if created_sessions == 1 else f"session-test-{created_sessions}",
                            "label": args[1], "windows": []}
                 self.sessions.append(session)
                 label = args[args.index("--window") + 1]
             else:
-                session = next(item for item in self.sessions if item["session_id"] == args[3])
+                session = self.session(args[3])
                 label = args[4]
-            number = len(session["windows"]) + 1
+            # Rex never reuses an ID, even after windows close.
+            number = 1 + sum(call[:2] == ("window", "new") and call[3] == session["session_id"]
+                             for call in type(self).calls)
             window = dict(window_id=f"window-{number}", label=label,
                           layers=[dict(blocks=[dict(block_id=f"block-{number}")])])
             session["windows"].append(window)
@@ -313,6 +329,62 @@ class NativeLauncher(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "windows differ from saved history"):
             self.start(assignment_id="backend", role="backend")
         self.assertEqual(len(self.creation_calls()), 2)
+
+    def window(self, assignment):
+        return next(window for window in FakeRex.sessions[0]["windows"]
+                    if window["window_id"] == assignment["window_id"])
+
+    def test_operator_split_rename_and_extra_tab_never_block_the_task(self):
+        self.start()
+        record, security = self.start(assignment_id="security", role="security")
+        qa = record["assignments"]["qa"]
+        self.window(qa)["layers"][0]["blocks"].append({"block_id": "operator-split"})
+        self.window(security)["label"] = "watching-security"
+        FakeRex.sessions[0]["windows"].append(dict(window_id="operator-window", label="notes",
+                                                   layers=[dict(blocks=[dict(block_id="operator-block")])]))
+        rex = factory.connect(record)
+        for assignment in (qa, security):
+            self.assertEqual(factory.status(rex, record, assignment)["state"], "running")
+        record, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual(backend["state"], "launched")
+        self.assertEqual(len(self.creation_calls()), 3)
+
+    def test_closed_tab_is_lost_without_blocking_other_assignments(self):
+        self.start()
+        record, security = self.start(assignment_id="security", role="security")
+        qa = record["assignments"]["qa"]
+        FakeRex.sessions[0]["windows"].remove(self.window(qa))
+        rex = factory.connect(record)
+        closed = factory.status(rex, record, qa)
+        self.assertEqual(closed["state"], "lost")
+        self.assertIn("closed outside the factory", closed["reason"])
+        self.assertEqual(factory.status(rex, record, security)["state"], "running")
+        _, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual(backend["state"], "launched")
+
+    def test_killed_session_is_lost_and_refuses_new_windows_in_it(self):
+        record, qa = self.start()
+        FakeRex.sessions.clear()
+        rex = factory.connect(record)
+        self.assertEqual(factory.status(rex, record, qa)["state"], "lost")
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "session no longer exists"):
+            self.start(assignment_id="security", role="security")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(len(self.creation_calls()), 1)
+
+    def test_empty_session_omits_its_window_list(self):
+        record, qa = self.start()
+        del FakeRex.sessions[0]["windows"]
+        rex = factory.connect(record)
+        self.assertEqual(factory.status(rex, record, qa)["state"], "lost")
+
+    def test_unreachable_rex_is_never_reported_as_a_lost_pane(self):
+        record, qa = self.start()
+        rex = factory.connect(record)
+        with patch.object(rex, "call", side_effect=factory.FactoryError("Cannot reach the pinned Rex binary/server")):
+            with self.assertRaisesRegex(factory.FactoryError, "Cannot reach"):
+                factory.status(rex, record, qa)
 
     def test_malformed_rex_views_have_actionable_compatibility_diagnostics(self):
         record, _ = self.start()

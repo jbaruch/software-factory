@@ -144,8 +144,8 @@ def pane_link(task, identity):
 def observe_process(rex, record, assignment, clock):
     process: dict = factory.status(rex, record, assignment)
     # Do not forward native process objects, argv, or extra last_exit metadata.
-    observed = dict(state=process["state"], observed_at=clock(),
-                    exit_code=process["exit"]["exit_code"] if process["exit"] else None)
+    observed: dict = dict(state=process["state"], observed_at=clock(),
+                          exit_code=process["exit"]["exit_code"] if process["exit"] else None)
     if process["state"] == "lost":
         observed["error"] = process["reason"]
     return observed
@@ -170,9 +170,14 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
                 return detail
         # Release the lock before transport waits; this loaded scope stays fixed
         # through every ownership check/read and is never saved back to the task.
-        # connect validates host, session marker and every saved window/block pair.
+        # connect validates host and session marker; reads stay scoped to the saved block.
         rex = connect(record)
-        detail["process"] = observe_process(rex, record, assignment, clock)
+        process = observe_process(rex, record, assignment, clock)
+        detail["process"] = process
+        if process["state"] == "lost":
+            # A closed pane has no output, and a restored pane shows only a new shell.
+            detail["error"] = "Pane output unavailable: " + process["error"]
+            return detail
         output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
                           "--trim", "--unwrap", raw=True)
         if not isinstance(output, str):
