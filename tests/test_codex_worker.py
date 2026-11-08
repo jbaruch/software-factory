@@ -87,6 +87,7 @@ class NativeResults(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.spawns = []
+        self.shell_directories = []
         self.process = FakeProcess(events())
         self.git_scope = lambda *args, **kwargs: nullcontext()
         self.scans = []
@@ -94,7 +95,27 @@ class NativeResults(unittest.TestCase):
 
     async def spawn(self, *command, **options):
         self.spawns.append(command)
+        self.check_shell_directory(command, options)
         return self.process
+
+    def check_shell_directory(self, command, options):
+        directory = Path(options["env"]["ZDOTDIR"])
+        self.shell_directories.append(directory)
+        self.assertTrue(directory.is_absolute())
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(directory.iterdir()), [])
+        config = tomllib.loads("\n".join(command[i + 1] for i, arg in enumerate(command) if arg == "-c"))
+        self.assertEqual(config, {
+            "model_reasoning_effort": self.args.effort,
+            "allow_login_shell": False,
+            "features": {"shell_snapshot": False},
+            "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}})
+        self.assertEqual(command.count("--strict-config"), 1)
+        self.assertEqual(command[command.index("--model") + 1], self.args.model)
+        self.assertEqual(options["limit"], worker.NATIVE_LINE_LIMIT)
+        self.assertEqual(options["stdin"], asyncio.subprocess.DEVNULL)
+        self.assertEqual(options["stdout"], asyncio.subprocess.PIPE)
+        return directory
 
     def execute(self):
         with redirect_stdout(StringIO()):
@@ -121,7 +142,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("read-only", self.spawns[0])
-        self.assertEqual(self.spawns[0][3:7], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
+        self.assertEqual(self.spawns[0][4:8], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
         self.assertEqual(self.spawns[0][-1], self.brief.read_text())
         before = self.args.receipt.read_bytes()
@@ -129,6 +150,241 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.args.receipt.read_bytes(), before)
+
+    def test_shell_controls_round_trip_unusual_absolute_path_without_parent_changes(self):
+        import native_antigravity
+        import native_claude
+        import native_grok
+        temporary = self.root / 'shell "quotes" \\ backslash\tline\n\x7f雪🌱'
+        temporary.mkdir()
+        sibling = temporary / "unowned"
+        sibling.mkdir()
+        (sibling / "keep").write_text("unowned data")
+        inherited = {"HOME": str(self.root / "auth-home"), "CODEX_HOME": str(self.root / "codex-auth"),
+                     "ZDOTDIR": "/fixture/parent-startup", "BASH_ENV": "/fixture/bash", "ENV": "/fixture/env"}
+        with patch.dict(os.environ, inherited):
+            parent = dict(os.environ)
+            native = worker.native_environment()
+            original = self.spawn
+            async def spawn(*command, **options):
+                self.assertIsNot(options["env"], native)
+                self.assertEqual(options["env"], {**native, "ZDOTDIR": options["env"]["ZDOTDIR"]})
+                for name in ("HOME", "CODEX_HOME"):
+                    self.assertEqual(options["env"][name], inherited[name])
+                for module in (native_antigravity, native_claude, native_grok):
+                    self.assertEqual(module.native_environment(), native)
+                process = await original(*command, **options)
+                (self.shell_directories[-1] / "child-output").write_text("owned data")
+                return process
+            self.spawn = spawn
+            with patch.object(worker, "native_environment", return_value=native), \
+                    patch.object(worker.tempfile, "gettempdir", return_value=str(temporary)):
+                receipt = self.execute()
+            self.assertEqual(dict(os.environ), parent)
+            self.assertNotIn("ZDOTDIR", native)
+            self.assertNotIn("BASH_ENV", native)
+            self.assertNotIn("ENV", native)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(self.shell_directories[0].parent, temporary.resolve())
+        self.assertEqual(list(temporary.iterdir()), [sibling])
+        self.assertEqual((sibling / "keep").read_text(), "unowned data")
+
+    def test_concurrent_children_keep_distinct_directories_until_each_exits(self):
+        processes = [FakeProcess(events()), FakeProcess(events())]
+        async def run():
+            both_started = asyncio.Event()
+            both_asserted = asyncio.Barrier(2)
+            async def spawn(*command, **options):
+                index = len(self.spawns)
+                self.spawns.append(command)
+                directory = self.check_shell_directory(command, options)
+                if index == 1:
+                    both_started.set()
+                await both_started.wait()
+                self.assertEqual(len(set(self.shell_directories)), 2)
+                self.assertTrue(all(path.is_dir() for path in self.shell_directories))
+                await both_asserted.wait()
+                original_wait = processes[index].wait
+                async def wait():
+                    self.assertTrue(directory.is_dir())
+                    return await original_wait()
+                processes[index].wait = wait
+                return processes[index]
+            other = copy.copy(self.args)
+            other.events, other.receipt = self.root / "second.jsonl", self.root / "second.json"
+            return await asyncio.wait_for(asyncio.gather(
+                *(worker.execute(args, spawn=spawn) for args in (self.args, other))), timeout=5)
+        with redirect_stdout(StringIO()):
+            receipts = asyncio.run(run())
+        self.assertTrue(all(receipt["state"] == "completed" for receipt in receipts))
+        self.assertTrue(all(not path.exists() for path in self.shell_directories))
+
+    def test_shell_directory_lives_through_signal_and_kill_wait(self):
+        for failure in ("timeout", "stream"):
+            with self.subTest(failure=failure):
+                self.args.events, self.args.receipt = self.root / (failure + ".jsonl"), self.root / (failure + ".json")
+                observed = []
+                owner = self
+                class Process(FakeProcess):
+                    async def readline(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        if failure == "timeout":
+                            raise TimeoutError("fixture deadline")
+                        raise OSError("fixture stream failure")
+                    def send_signal(self, signal):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("signal")
+                    async def wait(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("wait")
+                        if observed.count("wait") == 1:
+                            raise TimeoutError("fixture stop deadline")
+                        self.returncode = -9
+                        return -9
+                    def kill(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("kill")
+                self.process = Process([])
+                receipt = self.execute()
+                self.assertEqual(observed, ["signal", "wait", "kill", "wait"])
+                self.assertEqual(receipt["state"], "failed")
+                self.assertEqual(receipt["exit_code"], -9)
+                self.assertFalse(self.shell_directories[-1].exists())
+                self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_shell_allocation_failure_persists_attempt_without_spawn_or_retry(self):
+        with patch.object(worker.tempfile, "mkdtemp", side_effect=OSError("fixture disk full")) as allocate:
+            receipt = self.execute()
+        self.assertEqual(allocate.call_count, 1)
+        self.assertEqual(self.spawns, [])
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("restore temporary storage access/space", receipt["error"])
+        self.assertIsNone(receipt["exit_code"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        with self.assertRaisesRegex(factory.FactoryError, "never relaunch"):
+            self.execute()
+
+    def test_shell_cleanup_failure_preserves_primary_failure_and_blocks_factory_git(self):
+        self.writer()
+        self.spawn = NativeResults.spawn.__get__(self)  # No worktree edit; each case starts clean.
+        for payload, code, primary in ((events("completed"), 0, "Native resource cleanup failed"),
+                                       (events("completed"), 2, "Native Codex exited unsuccessfully"),
+                                       (events()[:2], 0, "Native completion is missing")):
+            with self.subTest(primary=primary):
+                suffix = str(len(self.spawns))
+                self.args.events, self.args.receipt = self.root / (suffix + ".jsonl"), self.root / (suffix + ".json")
+                self.process = FakeProcess(payload, exit_code=code)
+                with patch.object(worker.shutil, "rmtree", side_effect=PermissionError("fixture cleanup")), \
+                        patch.object(worker, "commit_changes") as commit:
+                    receipt = self.execute()
+                directory = self.shell_directories[-1]
+                self.addCleanup(shutil.rmtree, directory)
+                self.assertTrue(directory.is_dir())
+                self.assertEqual(receipt["state"], "failed")
+                self.assertTrue(receipt["error"].startswith(primary))
+                self.assertIn(repr(str(directory)), receipt["error"])
+                self.assertIn("remove only this directory", receipt["error"])
+                self.assertIsNone(receipt["commit"])
+                commit.assert_not_called()
+                self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_unconfirmed_termination_retains_directory_and_primary_failure(self):
+        self.writer()
+        self.spawn = NativeResults.spawn.__get__(self)
+        for failure, expected in (("signal", ["signal"]), ("wait", ["signal", "wait"]),
+                                  ("kill", ["signal", "wait", "kill"]),
+                                  ("final-wait", ["signal", "wait", "kill", "wait"]),
+                                  ("unconfirmed", ["signal", "wait"])):
+            with self.subTest(failure=failure):
+                suffix = str(len(self.spawns))
+                self.args.events, self.args.receipt = self.root / (suffix + ".jsonl"), self.root / (suffix + ".json")
+                observed = []
+                owner = self
+                class Process(FakeProcess):
+                    def send_signal(self, signal):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("signal")
+                        if failure == "signal":
+                            raise PermissionError("fixture signal denied")
+                    async def wait(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("wait")
+                        if failure == "wait":
+                            raise OSError("fixture wait failure")
+                        if failure in ("kill", "final-wait"):
+                            raise TimeoutError("fixture stop deadline")
+                        return 0  # Deliberately leave returncode unconfirmed.
+                    def kill(self):
+                        owner.assertTrue(owner.shell_directories[-1].is_dir())
+                        observed.append("kill")
+                        if failure == "kill":
+                            raise PermissionError("fixture kill denied")
+                self.process = Process([], timeout=True)
+                with patch.object(worker.shutil, "rmtree") as remove, \
+                        patch.object(worker, "commit_changes") as commit:
+                    receipt = self.execute()
+                directory = self.shell_directories[-1]
+                self.addCleanup(shutil.rmtree, directory)
+                self.assertEqual(observed, expected)
+                self.assertTrue(directory.is_dir())
+                remove.assert_not_called()
+                commit.assert_not_called()
+                self.assertIsNone(receipt["commit"])
+                self.assertEqual(receipt["state"], "failed")
+                self.assertTrue(receipt["error"].startswith("Native execution allowance expired"))
+                self.assertEqual("Cannot stop the owned native child" in receipt["error"], failure != "unconfirmed")
+                self.assertIn("termination is unconfirmed", receipt["error"])
+                self.assertIn(repr(str(directory)), receipt["error"])
+                self.assertIsNone(receipt["exit_code"])
+                self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
+    def test_unexpected_cleanup_errors_propagate_without_factory_git(self):
+        self.writer()
+        self.spawn = NativeResults.spawn.__get__(self)
+        for target, method in ((worker, "stop_child"), (worker.shutil, "rmtree")):
+            with self.subTest(method=method):
+                self.args.events, self.args.receipt = self.root / (method + ".jsonl"), self.root / (method + ".json")
+                self.process = FakeProcess(events("completed"))
+                with patch.object(target, method, side_effect=RuntimeError("fixture unexpected error")), \
+                        patch.object(worker, "commit_changes") as commit:
+                    with self.assertRaisesRegex(RuntimeError, "fixture unexpected error"):
+                        self.execute()
+                directory = self.shell_directories[-1]
+                self.addCleanup(shutil.rmtree, directory)
+                self.assertTrue(directory.is_dir())
+                commit.assert_not_called()
+
+    def test_fixed_native_config_rejection_keeps_failed_receipt_and_original_stream(self):
+        # Fixed outcomes only: this does not simulate Codex environment-policy precedence.
+        for index, diagnostic in enumerate(("unknown configuration key", "managed requirement conflict")):
+            self.args.events, self.args.receipt = self.root / f"config-{index}.jsonl", self.root / f"config-{index}.json"
+            payload = [dict(type="error", message=diagnostic)]
+            self.process = FakeProcess(payload, exit_code=2)
+            receipt = self.execute()
+            self.assertEqual(receipt["state"], "failed")
+            self.assertEqual(receipt["exit_code"], 2)
+            self.assertIn("inspect the retained events and Rex pane", receipt["error"])
+            self.assertIsNone(receipt["report"])
+            self.assertEqual(worker.read_events(self.args.events), payload)
+            self.assertFalse(self.shell_directories[-1].exists())
+            self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        self.assertEqual(len(self.spawns), 2)
+
+    def test_native_cleanup_precedes_writer_git_and_preserves_host_environment(self):
+        self.writer()
+        before = dict(os.environ)
+        @contextmanager
+        def git_scope(*args, **kwargs):
+            self.assertIsNotNone(self.process.returncode)
+            self.assertFalse(self.shell_directories[0].exists())
+            self.assertEqual(dict(os.environ), before)
+            yield
+        self.git_scope = git_scope
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "created")
+        self.assertIn("workspace-write", self.spawns[0])
+        self.assertEqual(dict(os.environ), before)
 
     def test_duplicate_web_search_telemetry_ids_are_not_used_as_evidence(self):
         raw = (b'{"type":"item.started","item":{"id":"item_20","type":"web_search",'
@@ -157,6 +413,7 @@ class NativeResults(unittest.TestCase):
         self.process = FakeProcess(events(outcome), exit_code=exit_code)
         async def spawn(*command, **options):
             self.spawns.append(command)
+            self.check_shell_directory(command, options)
             self.assertEqual(options["env"]["PYTHONDONTWRITEBYTECODE"], "1")
             (self.repo / "feature.py").write_text("answer = 42\n")
             return self.process
@@ -179,6 +436,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
         self.assertEqual(self.scans, [receipt["commit"]["staged_tree"]])
+        self.assertFalse(self.shell_directories[0].exists())
 
     def test_secret_scan_cannot_be_skipped_when_hooks_are_disabled(self):
         self.writer()
@@ -1040,10 +1298,14 @@ class NativeResults(unittest.TestCase):
 
     def test_spawn_failure_retains_an_actionable_failed_receipt(self):
         async def unavailable(*args, **kwargs):
+            self.spawns.append(args)
+            self.check_shell_directory(args, kwargs)
             raise FileNotFoundError("Fixture executable disappeared")
         receipt = asyncio.run(worker.execute(self.args, spawn=unavailable, clock=lambda: 1000, timer=lambda: 10))
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("restore executable access/local process resources", receipt["error"])
+        self.assertEqual(len(self.spawns), 1)
+        self.assertFalse(self.shell_directories[0].exists())
         self.assertIsNone(receipt["exit_code"])
         self.assertIsNone(receipt["report"])
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)

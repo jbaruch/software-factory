@@ -10,15 +10,168 @@ import json
 from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 
 import factory
 
 ASSETS = Path(__file__).resolve().parent / "web"
+SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
+PANE_LIMIT = 64 * 1024
+
+
+def invalid_worker(message=None):
+    raise ValueError("Unknown saved worker envelope")
+
+
+def application_worker(path):
+    """Bind an exact worker file to this application or its registered Git worktrees."""
+    worker = Path(path)
+    try:
+        info = worker.lstat()
+        if (not worker.is_absolute() or str(worker.resolve(strict=True)) != path
+                or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+            return False
+        root = worker.parent
+        if root == factory.ROOT:
+            return True
+        # Inventory comes from the trusted application, never the task's repository
+        # label or the caller's path. No repository markers are created/read here.
+        inventory = factory.git_run(factory.ROOT, "worktree", "list", "--porcelain", "-z")
+        if inventory.returncode:
+            return False
+        registered = any(
+            fields[0] == "worktree " + str(root)
+            and not any(field == "bare" or field.startswith("prunable") for field in fields)
+            for entry in inventory.stdout.split("\0\0") if entry
+            for fields in [entry.split("\0")])
+        return (registered and factory.git_worktree(root) == str(root)
+                and factory.git_common_dir(root) == factory.git_common_dir(factory.ROOT))
+    except (factory.FactoryError, OSError, ValueError, RuntimeError):
+        return False
+
+
+def requested_native(record, identity, assignment):
+    """Decode only owner-supported worker envelopes, without executing a worker/probe."""
+    unknown = dict(adapter=None, harness=None, route=None, model=None, effort=None)
+    request = assignment["request"]
+    inputs = request.get("inputs")
+    admission = record["admission"]
+    if not inputs or not admission:
+        return unknown
+    # The owner stores the original template, expanding only whole arguments at launch.
+    replacements = {"{brief}": assignment["brief"], "{brief_sha256}": request["instructions_sha256"],
+                    "{cwd}": request["cwd"], "{repository}": admission["repository"],
+                    "{candidate}": inputs["candidate"], "{requirements}": inputs["requirements"],
+                    "{repository_identity}": json.dumps(admission.get("repository_identity"), sort_keys=True)}
+    command = [replacements.get(part, part) for part in request["command"]]
+    import codex_worker
+    import grok_worker
+    if command[:3] == [sys.executable, "-E", "-s"] and len(command) > 3:
+        offset = 4
+    elif command[:1] == [sys.executable] and len(command) > 1:
+        offset = 2
+    else:
+        return unknown
+    worker = Path(command[offset - 1])
+    if worker.name == "codex_worker.py":
+        parser, harness = codex_worker.parser(), "codex"
+    elif worker.name == "grok_worker.py" and offset == 4:
+        parser, harness = grok_worker.parser(), "grok"
+    else:
+        return unknown
+    if not application_worker(command[offset - 1]):
+        return unknown
+    # argparse's abbreviations and repeated options are not factory-generated envelopes.
+    parser.allow_abbrev = False
+    parser.error = invalid_worker
+    parser.exit = lambda status=0, message=None: invalid_worker(message)
+    options = [part.split("=", 1)[0] for part in command[offset:] if part.startswith("--")]
+    if "-h" in command[offset:] or "--help" in options or len(options) != len(set(options)):
+        return unknown
+    try:
+        # Parser diagnostics may contain saved argv; the overrides above never print them.
+        args = parser.parse_args(command[offset:])
+    except (SystemExit, ValueError):
+        return unknown
+    try:
+        repository_identity = factory.decode_json(args.repo_identity)
+        if harness == "codex":
+            factory.check_commit_message(args.commit_message, write=args.write)
+        elif str(uuid.UUID(args.native_session)) != args.native_session or not 1 <= args.turns <= 1000:
+            return unknown
+    except (ValueError, factory.FactoryError):
+        return unknown
+    if (repository_identity != admission.get("repository_identity")
+            or not factory.valid_repository_identity(repository_identity)
+            or args.job != record["task"] + "/" + identity
+            or str(args.cwd) != request["cwd"] or str(args.repo) != admission["repository"]
+            or str(args.brief) != assignment["brief"] or args.brief_sha256 != request["instructions_sha256"]
+            or args.candidate != inputs["candidate"] or args.requirements != inputs["requirements"]
+            or (args.role is not None and args.role != request["role"])
+            or not args.model.strip() or not args.effort.strip()
+            or not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS
+            or any(not path.is_absolute() for path in (getattr(args, harness), args.worktree_git_dir,
+                                                       args.events, args.receipt))):
+        return unknown
+    return dict(adapter=harness + "_worker", harness=harness, route=harness + "-native",
+                model=args.model, effort=args.effort)
+
+
+def saved_pane(record, assignment):
+    return dict(host_id=(record["rex"] or {}).get("host_id"), session_id=record["session_id"],
+                window_id=assignment.get("window_id"), block_id=assignment.get("block_id"))
+
+
+def pane_link(task, identity):
+    if re.fullmatch(SLUG, task) and re.fullmatch(SLUG, identity):
+        return f"/tasks/{task}/assignments/{identity}/pane"
+    return None
+
+
+def observe_process(rex, record, assignment, clock):
+    process: dict = factory.status(rex, record, assignment)
+    # Do not forward native process objects, argv, or extra last_exit metadata.
+    return dict(state=process["state"], observed_at=clock(),
+                exit_code=process["exit"]["exit_code"] if process["exit"] else None)
+
+
+def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=time.time) -> dict:
+    """A fresh read of one saved pane; no recovery or Rex mutation is permitted."""
+    detail = dict(task=task, assignment=identity, pane=None, process=dict(state="unavailable", observed_at=None),
+                  output=None, partial=False, captured_at=None,
+                  error="Pane unavailable. Restore the original task/assignment record, then refresh.")
+    if pane_link(task, identity) is None:
+        return detail
+    try:
+        with factory.task_lock(state_dir, task) as path:
+            record = factory.load_task(path)
+            assignment = record["assignments"].get(identity)
+            if assignment is None:
+                return detail
+            detail["pane"] = saved_pane(record, assignment)
+            if assignment["state"] != "launched":
+                detail["error"] = "Pane unavailable: launch needs reconciliation. Use factory status for this task, then refresh."
+                return detail
+        # Release the lock before transport waits; this loaded scope stays fixed
+        # through every ownership check/read and is never saved back to the task.
+        # connect validates host, session marker and every saved window/block pair.
+        rex = connect(record)
+        detail["process"] = observe_process(rex, record, assignment, clock)
+        output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
+                          "--trim", "--unwrap", raw=True)
+        if not isinstance(output, str):
+            raise factory.FactoryError("Invalid capture")
+        detail.update(output=output[-PANE_LIMIT:], partial=len(output) > PANE_LIMIT,
+                      captured_at=clock(), error=None)
+    except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        detail["error"] = "Pane unavailable. Inspect the pinned Rex host/session and original pane identity; restore access or use factory status, then refresh."
+    return detail
 
 
 def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time, timer=time.monotonic) -> dict:
@@ -43,24 +196,29 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
             if live and record["rex"] is not None:
                 try:
                     rex = connect(record)
-                except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-                    observation_error = "Inspect the pinned Rex host/session: " + str(exc)
+                except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+                    observation_error = "Inspect the pinned Rex host/session and restore access before refreshing"
             assignments = []
             for identity, assignment in view["assignments"].items():
-                process = dict(state="not_checked")
+                process = dict(state="not_checked", observed_at=None)
                 if live:
                     if observation_error:
-                        process = dict(state="unavailable", error=observation_error)
+                        process = dict(state="unavailable", observed_at=None, error=observation_error)
                     elif assignment["state"] == "launching":
-                        process = dict(state="unreconciled", error="Use factory status to reconcile the existing launch")
+                        process = dict(state="unreconciled", observed_at=None, error="Use factory status to reconcile the existing launch")
                     elif rex is not None:
                         try:
-                            process = factory.status(rex, record, assignment)
-                        except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-                            process = dict(state="unavailable", error="Inspect the original Rex pane: " + str(exc))
+                            process = observe_process(rex, record, assignment, clock)
+                        except (factory.FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+                            process = dict(state="unavailable", observed_at=None, error="Inspect the original Rex pane and restore access before refreshing")
                 assignments.append(dict(id=identity, role=assignment["request"]["role"],
                     goal=assignment["request"]["goal"], launch_state=assignment["state"],
                     inputs=assignment["request"].get("inputs"), process=process,
+                    inputs_current=(assignment["request"].get("inputs") == record["inputs"]
+                                    if assignment["request"].get("inputs") else None),
+                    requested_native=requested_native(record, identity, assignment), observed_model=None,
+                    pane=saved_pane(record, assignment),
+                    pane_href=(pane_link(record["task"], identity) if assignment["state"] == "launched" else None),
                     result=assignment["result"], result_current=assignment["result_current"]))
             tasks.append(dict(id=record["task"], goal=(record["admission"] or {}).get("goal"),
                               hold=record["hold"], inputs=record["inputs"],
@@ -76,12 +234,50 @@ def snapshot(state_dir, *, live=False, connect=factory.connect, clock=time.time,
             not isinstance(route.get(key), str) or not route[key].strip()
             for key in ("id", "harness", "readiness")) for route in catalog["routes"]):
         raise factory.FactoryError("Incomplete provider catalog; restore its route identities and observations")
-    return dict(schema_version=2, observed_at=clock(), collection_seconds=timer() - started,
+    return dict(schema_version=3, observed_at=clock(), collection_seconds=timer() - started,
                 live=live, tasks=tasks, errors=errors, routes=catalog["routes"])
 
 
 def text(value):
     return escape(str(value).encode("utf-8", errors="backslashreplace").decode("utf-8"), quote=True)
+
+
+def when(value):
+    return (datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            if value is not None else "Unknown — no process observation in this view")
+
+
+def pane_identity(pane):
+    return '<dl class="pane-identity">' + "".join(
+        f'<dt>{label}</dt><dd><code>{text((pane or {}).get(key) or "Unknown")}</code></dd>'
+        for key, label in (("host_id", "Host"), ("session_id", "Session"),
+                           ("window_id", "Window"), ("block_id", "Block"))) + '</dl>'
+
+
+def render_pane(detail):
+    link = pane_link(detail["task"], detail["assignment"])
+    process = detail["process"]
+    output = ''
+    if detail["output"] is not None:
+        marker = (f'Partial view: last {PANE_LIMIT:,} characters of this capture; earlier captured text omitted.'
+                  if detail["partial"] else 'All text returned by this capture is shown.')
+        output = (f'<h2>Original terminal output</h2><p>{text(marker)}</p>'
+                  '<p class="muted">Rex retains bounded scrollback; this is a terminal view, not a complete execution log.</p>'
+                  f'<p>Captured at <time>{text(when(detail["captured_at"]))}</time></p>'
+                  f'<pre class="terminal-output">{text(detail["output"])}</pre>')
+    error = f'<p class="errors">{text(detail["error"])}</p>' if detail["error"] else ''
+    refresh = f'<a class="button secondary" href="{text(link)}">Refresh pane observation</a>' if link else ''
+    return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<title>Owned Rex pane · Software Factory</title><link rel="stylesheet" href="/dashboard.css"></head>'
+            '<body><header><div class="brand">Software Factory</div></header><main>'
+            '<nav aria-label="Dashboard"><a href="/">Team</a></nav><h1>Owned Rex pane</h1>'
+            f'<p>Task <code>{text(detail["task"])}</code> / Assignment <code>{text(detail["assignment"])}</code></p>'
+            f'{refresh}<h2>Saved Rex identity</h2>{pane_identity(detail["pane"])}'
+            f'<h2>Process observation</h2><p>{text(process["state"].capitalize())}</p>'
+            f'<p>Last actual process observation: <time>{text(when(process.get("observed_at")))}</time></p>'
+            f'{error}{output}<footer>Read-only observation. Refresh reads again; reports and acceptance stay separate.</footer>'
+            '</main></body></html>')
 
 
 def render(view, *, csrf_token=None):
@@ -96,6 +292,26 @@ def render(view, *, csrf_token=None):
             observed = f'<span class="process {text(state)}">{text(label)}</span>'
             if process.get("error"):
                 observed += f'<p class="detail">{text(process["error"])}</p>'
+            observed += f'<small>Last actual process observation: <time>{text(when(process.get("observed_at")))}</time></small>'
+            native = assignment.get("requested_native") or {}
+            requested = '<dl>' + ''.join(f'<dt>{label}</dt><dd>{text(native.get(key) or "Unknown")}</dd>'
+                for key, label in (("adapter", "Native adapter"), ("harness", "Native harness"),
+                                   ("route", "Requested subscription route"), ("model", "Requested model"),
+                                   ("effort", "Requested effort"))) + '</dl><small>Observed model: Unknown</small>'
+            requested += '<small>Requested identity does not verify runtime readiness or subscription eligibility.</small>'
+            pane = pane_identity(assignment.get("pane"))
+            link = pane_link(task["id"], assignment["id"])
+            if (assignment.get("launch_state") == "launched" and link
+                    and all((assignment.get("pane") or {}).get(key) for key in ("host_id", "session_id", "window_id", "block_id"))):
+                pane += f'<a href="{text(link)}">Read owned Rex pane</a>'
+            else:
+                pane += '<small>Pane unavailable. Use factory status to inspect/reconcile the saved identity.</small>'
+            source = assignment.get("inputs")
+            freshness = {True: "current", False: "stale", None: "unknown freshness"}[assignment.get("inputs_current")]
+            source_inputs = (f'<details><summary>Assignment source inputs ({freshness})</summary><dl>' + ''.join(
+                f'<dt>{label}</dt><dd><code>{text(source[key])}</code></dd>'
+                for key, label in (("candidate", "Candidate"), ("requirements", "Requirements"))) + '</dl></details>'
+                if source else '<small>Assignment source inputs: Unknown</small>')
             report = assignment["result"]
             result = '<span class="muted">No report</span>'
             if report is not None:
@@ -105,9 +321,10 @@ def render(view, *, csrf_token=None):
                 evidence = "".join(f'<li><code>{text(ref)}</code></li>' for ref in report["artifacts"])
                 result += f'<details><summary>Evidence</summary><ul>{evidence}</ul></details>'
             rows.append(f'<tr><th scope="row">{text(assignment["role"])}<small>{text(assignment["id"])}</small></th>'
-                        f'<td>{text(assignment["goal"])}</td><td>{observed}</td><td>{result}</td></tr>')
+                        f'<td>{text(assignment["goal"])}{source_inputs}</td><td>{requested}</td><td>{pane}</td>'
+                        f'<td>{observed}</td><td>{result}</td></tr>')
         table = ('<div class="table-scroll"><table><thead><tr><th scope="col">Specialty</th>'
-                 '<th scope="col">Assignment</th><th scope="col">Process observation</th>'
+                 '<th scope="col">Assignment</th><th scope="col">Native request</th><th scope="col">Saved Rex pane</th><th scope="col">Process observation</th>'
                  '<th scope="col">Specialist report</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
                  if rows else '<p class="empty">No assignments recorded.</p>')
         hold = (f'<p class="hold">Paused: {text(task["hold"])}</p>' if task["hold"] is not None
@@ -129,8 +346,8 @@ def render(view, *, csrf_token=None):
         history = []
         for event in reversed(task["control_events"][-5:]):
             label = "Resumed" if event["hold"] is None else "Paused: " + event["hold"]
-            when = datetime.fromtimestamp(event["at"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            history.append(f'<li>{text(label)} <time>{text(when)}</time><small>Request {text(event["id"])}</small></li>')
+            event_time = datetime.fromtimestamp(event["at"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            history.append(f'<li>{text(label)} <time>{text(event_time)}</time><small>Request {text(event["id"])}</small></li>')
         trace = ('<details class="control-history"><summary>Recent control requests</summary><ol>'
                  + "".join(history) + '</ol></details>' if history else "")
         limits = "Allowances unknown (task not admitted)"
@@ -158,9 +375,10 @@ def render(view, *, csrf_token=None):
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<title>Software Factory</title><link rel="stylesheet" href="/dashboard.css"></head><body>'
             f'<header><div class="brand">Software Factory</div><div class="observation">{text(mode)}<br><time>{text(timestamp)}</time></div></header>'
-            '<main><div class="toolbar"><div><h1>Work in progress</h1><p>Process observations and specialist reports stay separate.</p></div>'
+            '<main><nav aria-label="Dashboard"><a href="#team">Team</a> <a href="#routes">Subscription routes</a></nav>'
+            '<div class="toolbar"><div><h1 id="team">Team</h1><p>Process observations and specialist reports stay separate. Header time is record collection time.</p></div>'
             '<form method="get"><a class="button secondary" href="/">Refresh records</a><button name="live" value="1">Check live processes</button></form></div>'
-            f'{unavailable}{content}<section class="routes"><h2>Subscription routes</h2><p>Configured readiness; capacity has not been refreshed here.</p>'
+            f'{unavailable}{content}<section class="routes" id="routes"><h2>Subscription routes</h2><p>Configured readiness; capacity has not been refreshed here.</p>'
             '<div class="table-scroll"><table><thead><tr><th scope="col">Route</th><th scope="col">Harness</th><th scope="col">Catalog status</th><th scope="col">Capacity observation</th></tr></thead>'
             f'<tbody>{routes}</tbody></table></div></section><footer>Reports do not accept a task or satisfy release gates. '
             f'This view collected records in {view["collection_seconds"]:.3f}s. <a href="{facts}">View source facts</a></footer></main></body></html>')
@@ -213,20 +431,36 @@ def make_server(state_dir, port=8090, *, access_key):
         def do_GET(self):
             if not self.check_access():
                 return
-            target = urlsplit(self.path)
-            query = parse_qs(target.query, keep_blank_values=True)
-            if target.netloc or query not in ({}, {"live": ["1"]}):
+            try:
+                target = urlsplit(self.path)
+            except ValueError:
+                self.send_error(400, "Use a dashboard relative URL")
+                return
+            # No aliases, fragments, encoded fields or arbitrary Rex scope parameters.
+            if (target.scheme or target.netloc or target.fragment or not self.path.startswith("/")
+                    or any(ord(character) <= 32 or ord(character) == 127 for character in self.path)
+                    or self.path.startswith("//")
+                    or target.query not in ("", "live=1")):
                 self.send_error(400, "Use only the live=1 observation option")
                 return
-            if target.path not in ("/", "/api/state", "/dashboard.css"):
+            pane = re.fullmatch(r"/tasks/(" + SLUG + r")/assignments/(" + SLUG + r")/pane", target.path)
+            if (pane or target.path == "/dashboard.css") and target.query:
+                self.send_error(400, "Use the saved pane or asset link without query parameters")
+                return
+            if target.path not in ("/", "/api/state", "/dashboard.css") and pane is None:
                 self.send_error(404, "Use / or /api/state")
                 return
             status, content_type = 200, "text/html; charset=utf-8"
             try:
                 if target.path == "/dashboard.css":
                     body, content_type = (ASSETS / "dashboard.css").read_text(), "text/css; charset=utf-8"
+                elif pane is not None:
+                    detail = pane_detail(state_dir, pane[1], pane[2])
+                    body = render_pane(detail)
+                    if detail["error"]:
+                        status = 503
                 else:
-                    view = snapshot(state_dir, live=bool(query))
+                    view = snapshot(state_dir, live=bool(target.query))
                     if target.path == "/api/state":
                         body, content_type = json.dumps(view, allow_nan=False), "application/json"
                     else:
@@ -234,7 +468,7 @@ def make_server(state_dir, port=8090, *, access_key):
             except (factory.FactoryError, OSError, ValueError) as exc:
                 status = 503
                 if target.path == "/api/state":
-                    body, content_type = json.dumps(dict(schema_version=2, error=str(exc))), "application/json"
+                    body, content_type = json.dumps(dict(schema_version=3, error=str(exc))), "application/json"
                 else:
                     body = f'<h1>Factory records unavailable</h1><p>{text(exc)}</p><p>Restore the source, then refresh.</p>'
                 print("dashboard: Restore the source, then refresh. " + str(exc), file=sys.stderr)

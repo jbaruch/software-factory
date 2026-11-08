@@ -64,6 +64,10 @@ td ul { padding-left: 18px; }
 .table-scroll { overflow-x: auto; }
 footer { color: #51657a; font-size: 14px; padding: 25px 0 5px; }
 footer a { margin-left: 8px; }
+nav { margin-bottom: 20px; display: flex; gap: 20px; }
+.pane-identity { font-size: 14px; }
+.pane-identity dd { overflow-wrap: anywhere; }
+.terminal-output { background: #fff; border: 1px solid #dce5ef; padding: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 820px) { .toolbar, .task-heading { flex-direction: column; align-items: stretch; } header { align-items: start; } .brand { font-size: 23px; } .observation { font-size: 12px; } main { padding: 24px 16px; } h1 { font-size: 28px; } .task-heading { gap: 12px; padding: 18px; } }
 @media (max-width: 450px) { header { display: block; padding: 18px; } .observation { text-align: left; margin-top: 8px; } form { flex-direction: column; } button, .button { text-align: center; } }
 @media (max-width: 650px) { .task-controls form { grid-template-columns: minmax(0, 1fr); } }

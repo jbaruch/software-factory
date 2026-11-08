@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.0 — 2026-11-07 (unpublished)
+## 0.14.0 — 2026-11-07 (unpublished)
 
 ### Exact-candidate integration and original release evidence
 
@@ -31,6 +31,76 @@ exported Bash functions, and make process failures actionable. Require verified
 strict required `verify` CI protection with administrator enforcement before the
 head-conditional merge; unsafe/unknown server guards hold without mutation. Offline
 race and recovery fixtures do not establish live enforcement or release readiness.
+
+
+## 0.12.1 — 2026-11-07 (unpublished)
+
+### Native Codex shell startup
+
+New model children use strict per-run configuration to disable login shells,
+shell snapshots and profile loading, with an identical private empty ZDOTDIR in
+the native environment and TOML override. Retain the directory through confirmed
+child exit and finish cleanup before factory Git work. Preserve failed receipts
+and earlier errors when allocation, execution or cleanup fails; unconfirmed
+termination retains the owned directory for reconciliation, without retry.
+Native auth locations, permissions, other providers, factory Git environments and
+historical receipt/reconnect contracts remain unchanged. Fixed offline regressions
+cover controls, isolation, lifetime and failure paths. The canonical inventory
+records version/worktree compatibility and outstanding independent review, host
+checks and explicit owned native qualification. No publication or broader
+readiness claim is authorized.
+
+## 0.12.0 — 2026-11-07 (unpublished)
+
+### Sanitized native Claude auth metadata
+
+Add an independent stdlib adapter for fixed native version/auth-status commands,
+strict allowlisted sign-in facts and explicit unknown eligibility/quota. Preserve
+signed-out exit 1 as an observation and non-subscription auth facts without
+claiming subscription access. Refuse environment overrides before launch, preserve
+an explicitly selected native config directory without reading its contents, and
+omit private native payloads/diagnostics. Fixed socket-free process tests cover
+success and refusal paths. Require CLI 2.1.317 or newer before auth status to avoid
+the upstream token-refresh persistence defect; fixed tests cover the floor,
+older-version refusal and installed/newer versions. Renew compatibility review
+when command/authentication contracts change, as documented in native providers.
+Candidate live observation, independent QA/security,
+host full tests and current-head policy/CI remain separate gates. No publisher is
+configured or authorized; no route is activated.
+
+## 0.11.0 — 2026-11-07 (unpublished)
+
+### Retained Antigravity result decoding
+
+Add a pure decoder for original 1.5.3 init/step_update/result JSON lines with
+frozen model/cwd/schema, consistent conversation identity, ordered single-turn
+lifecycle and strict terminal report/response agreement. Preserve nullable native
+usage/duration as observations. Fixed offline fixtures cover integrity failures;
+no execution, settings, stored formats or usage CLI change. Execution permission,
+live lifecycle/full-factory qualification, independent verification and current-head
+policy/CI remain separate gates. No publisher is configured or authorized.
+
+## 0.10.0 — 2026-11-07 (unpublished)
+
+### Team view and owned Rex pane reads
+
+Show original specialist assignments, source/result freshness, supported native
+worker request metadata and saved Rex identities in the authenticated operator
+view. Keep requested model/effort/route separate from unknown observed model,
+readiness and capacity. Link to a read-only pane detail that revalidates the saved
+scope before process/output reads, with actual observation timestamps, escaped
+terminal text and explicit partial-output markers. Preserve pause/resume and
+task schema 7; transient dashboard facts advance to version 3 while older static
+render callers remain compatible. Fake records/transports and socket-free
+handler tests cover the addition; host/browser/live acceptance remains separate.
+The application and package version advance together; no publication channel is configured.
+
+Pane observations release the task lock before Rex waits, preserving concurrent
+operator controls and their saved history without retargeting an in-progress read.
+Native request metadata recognizes exact original-owner worker paths across
+registered worktrees of the application repository, using read-only Git binding.
+Fixed fake-Rex concurrency and cross-checkout owner tests cover these corrections;
+direct-candidate host/live checks and independent re-review remain separate gates.
 
 ## 0.9.0 — 2026-11-07 (unpublished)
 
