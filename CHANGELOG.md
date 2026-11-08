@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.1 — 2026-11-07 (unpublished)
+
+### Progress-based fix-loop protection
+
+Clarify [allowance review checkpoints](docs/task-state.md#review-checkpoints-and-allowance-extensions)
+and link them from the [finite-loop design](docs/design.md#exceptions-and-finite-loops).
+The external foreman may record evidence-backed extensions through the existing
+owner API under standing authorization, preserving admission, usage and extension
+history. Repeated failures without new evidence require investigation or a changed
+approach; substantive disputes retain investigator -> Jev reassessment -> judge.
+User budgets, scope, holds and uncertain effects remain binding. This documentation
+clarification adds no runtime mechanism or automatic renewal.
+
 ## 0.14.0 — 2026-11-07 (unpublished)
 
 ### Exact-candidate integration and original release evidence

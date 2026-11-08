@@ -17,26 +17,52 @@ admission snapshot, not review evidence or a live observation of the current hea
 The repository must have a commit. References are operator-supplied; their content
 and engineering adequacy are not assessed by this command.
 
-Limits default to `config/coordination.json`; `--corrections` and `--investigations`
+Limits default to [`config/coordination.json`](../config/coordination.json); `--corrections` and `--investigations`
 override them at admission. Zero is valid. Repeating identical admission inputs
 returns the existing record, preserving the initial candidate if Git HEAD advances.
 Changed inputs are refused; admission never resets usage. An existing task with
 unclassified launches cannot acquire guessed budgets.
-Use a new task ID to admit explicitly scoped work.
+Changed scope requires explicit new admission; changing task or assignment IDs
+must not disguise unchanged retries as progress.
 
-For an operator-approved addition to an existing task, use:
+## Review checkpoints and allowance extensions
+
+Default correction/investigation counts are review checkpoints, not an automatic
+hard stop on authorized work. The launcher still enforces the recorded effective
+limit until an explicit extension is recorded. The external factory foreman may
+review concrete new evidence and record an in-scope extension under standing
+operator authorization without asking for the same permission again. A worker or
+classifier cannot grant itself authority. Real user budgets, scope, holds and
+uncertain external effects remain binding; reconcile unknown effects before retry.
+
+Review original evidence against the outstanding acceptance question: for example,
+a reproduction that isolates the cause, a changed candidate with independently
+verified improvement, or an investigation that supports a different next action.
+Link that evidence and the applicable authorization in the extension reason;
+reuse the task's existing reports rather than writing another history. Repeated
+failures without new evidence require investigation or a changed approach, not
+another unchanged retry. Substantive unresolved disputes retain the
+[investigator -> Jev reassessment -> judge sequence](design.md#investigation-and-judgment).
+If the next action needs authority beyond the standing authorization, request a
+concrete operator decision with the original evidence and options. Extensions
+are deliberate decisions, never automatic unlimited renewals.
+
+For an authorized addition to an existing task, use:
 
 ```sh
 python3 factory.py extend-allowance --task example --purpose correction \
   --additional 1 --expected-limit 1 --request-id approved-correction-one \
-  --reason 'Operator approved one additional correction for the existing scope'
+  --reason 'Standing authorization: <original reference>; progress: <original evidence>; next: <specific correction>'
 ```
 
-This command records an approval already obtained; a worker or classifier cannot
-grant itself more attempts. It adds a positive number of correction or
-investigation attempts to the current limit. The supplied expected limit must
-match. Original admission, consumed attempts, selected revisions, reports and holds
-stay unchanged. It neither retries a failed assignment nor starts a worker.
+The existing [`extend_allowance` owner API](../factory.py) records an authorized
+decision; it does not assess authorization or progress evidence. Replace the
+example references and use the current effective limit from `show` for
+`--expected-limit` (the example assumes `1`). It adds a positive number of
+correction or investigation attempts to that limit. The supplied expected limit
+must match. Original admission, consumed attempts, prior extension history,
+selected revisions, reports and holds stay unchanged. It neither retries a failed
+assignment nor starts a worker.
 Repeat the same request ID and inputs after a lost reply; the replay adds nothing,
 even after subsequent decisions. A reused ID with changed inputs or a stale
 expected limit refuses. Changed scope still needs a new explicit admission.
