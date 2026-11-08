@@ -143,7 +143,12 @@ Worker slots and active task slots are reserved from observed processes, includi
 unknown and unconfirmed launches. A terminal process releases its slot even if
 its report is unusable; that report still needs action. A process `lost` to a
 Rex server restart is terminal: the runner collects a native Codex result from
-its completed receipt, and otherwise reports `blocked` and blocks dependents. New tasks share initial
+its completed receipt, and otherwise reports `blocked` and blocks dependents.
+
+After collection, each tick also [tidies](native-rex.md#tab-tidying) finished
+tabs in every task of its state directory, keeping their final status and output
+in the task record. `metrics.tabs_closed` counts closed tabs. A tidy failure is
+listed under `tidy_issues`, never blocks work, and is retried on the next tick. New tasks share initial
 starts by existing assignment count, with plan order breaking ties. This is a
 simple finite-plan fairness rule, not a learned priority model.
 

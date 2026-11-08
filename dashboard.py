@@ -131,7 +131,9 @@ def requested_native(record, identity, assignment):
 
 
 def saved_pane(record, assignment):
-    return dict(host_id=(record["rex"] or {}).get("host_id"), session_id=record["session_id"],
+    # A tidied tab lived in the session it records, which the task may since have replaced.
+    session_id = assignment["closed"]["session_id"] if assignment.get("closed") else record["session_id"]
+    return dict(host_id=(record["rex"] or {}).get("host_id"), session_id=session_id,
                 window_id=assignment.get("window_id"), block_id=assignment.get("block_id"))
 
 
@@ -148,6 +150,8 @@ def observe_process(rex, record, assignment, clock):
                           exit_code=process["exit"]["exit_code"] if process["exit"] else None)
     if process["state"] == "lost":
         observed["error"] = process["reason"]
+    if process.get("closed"):
+        observed["closed"] = True  # Retained final observation of a tidied tab.
     return observed
 
 
@@ -167,6 +171,17 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
             detail["pane"] = saved_pane(record, assignment)
             if assignment["state"] != "launched":
                 detail["error"] = "Pane unavailable: launch needs reconciliation. Use factory status for this task, then refresh."
+                return detail
+            closed = assignment.get("closed")
+            if closed is not None:
+                # A tidied tab needs no Rex: show its retained final observation and output.
+                detail["process"] = observe_process(None, record, assignment, clock)
+                if closed["capture"] is None:
+                    detail["error"] = "Tab closed without retained output: " + (closed["reason"] or closed["state"])
+                    return detail
+                output = factory.read_record(Path(closed["capture"]), private=True)
+                detail.update(output=output[-PANE_LIMIT:], partial=len(output) > PANE_LIMIT,
+                              captured_at=closed["at"], error=None)
                 return detail
         # Release the lock before transport waits; this loaded scope stays fixed
         # through every ownership check/read and is never saved back to the task.
@@ -429,7 +444,9 @@ def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.conn
             for identity, assignment in view["assignments"].items():
                 process = dict(state="not_checked", observed_at=None)
                 if live:
-                    if observation_error:
+                    if assignment.get("closed") is not None:
+                        process = observe_process(None, record, assignment, clock)
+                    elif observation_error:
                         process = dict(state="unavailable", observed_at=None, error=observation_error)
                     elif assignment["state"] == "launching":
                         process = dict(state="unreconciled", observed_at=None, error="Use factory status to reconcile the existing launch")
@@ -637,6 +654,8 @@ def render(view, *, csrf_token=None):
             state = process["state"]
             label = {"not_checked": "Not checked", "unreconciled": "Needs reconciliation",
                      "exited": "Exited successfully"}.get(state, state.capitalize())
+            if process.get("closed"):
+                label = f"{label} (tab closed)"
             observed = f'<span class="process {text(state)}">{text(label)}</span>'
             if process.get("error"):
                 observed += f'<p class="detail">{text(process["error"])}</p>'

@@ -347,6 +347,44 @@ class OperatorView(unittest.TestCase):
         self.assertIsNone(assignment["process"]["exit_code"])
         self.assertIn("Lost", dashboard.render(self.snapshot(live=True, connect=lambda record: rex)))
 
+    def close_tab(self, *, capture=True):
+        path = self.root / "fixture.backend.capture.txt"
+        if capture:
+            factory.save(path, "Retained <terminal> output\n")
+        self.record["assignments"]["backend"]["closed"] = dict(
+            state="exited" if capture else "lost", exit=dict(exit_code=0) if capture else None,
+            reason=None if capture else "Rex server restarted after launch", session_id="fixture-session",
+            capture=str(path) if capture else None, at=900)
+        factory.save(self.path, self.record)
+
+    def test_tidied_tab_shows_retained_output_and_status_without_rex(self):
+        self.close_tab()
+        with patch.object(factory, "Rex", side_effect=AssertionError("A tidied tab needs no Rex")):
+            detail = dashboard.pane_detail(self.root, "fixture", "backend")
+        self.assertIsNone(detail["error"])
+        self.assertEqual(detail["output"], "Retained <terminal> output\n")
+        self.assertEqual(detail["captured_at"], 900)
+        self.assertEqual((detail["process"]["state"], detail["process"]["closed"]), ("exited", True))
+        unavailable = Mock(call=Mock(side_effect=AssertionError("A tidied tab needs no Rex")))
+        view = self.snapshot(live=True, connect=lambda record: unavailable)
+        self.assertEqual(view["tasks"][0]["assignments"][0]["process"]["state"], "exited")
+        self.assertIn("Exited successfully (tab closed)", dashboard.render(view))
+
+    def test_tidied_tab_keeps_the_session_it_lived_in(self):
+        self.close_tab()
+        self.record.update(session_id=None, session_label="factory-fixture-11111111")
+        factory.save(self.path, self.record)
+        detail = dashboard.pane_detail(self.root, "fixture", "backend")
+        self.assertEqual(detail["pane"]["session_id"], "fixture-session")
+        self.assertEqual(detail["output"], "Retained <terminal> output\n")
+
+    def test_tidied_tab_without_output_explains_why(self):
+        self.close_tab(capture=False)
+        detail = dashboard.pane_detail(self.root, "fixture", "backend")
+        self.assertEqual(detail["process"]["state"], "lost")
+        self.assertIn("without retained output: Rex server restarted", detail["error"])
+        self.assertIsNone(detail["output"])
+
     def test_render_accepts_old_static_snapshots_and_escapes_new_fields(self):
         view = self.snapshot()
         assignment = view["tasks"][0]["assignments"][0]

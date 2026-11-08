@@ -280,9 +280,12 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len([call for call in FakeRex.calls if call[0] == "new"]), before)
         output = StringIO()
-        with patch.object(factory, "Rex", FakeRex), patch.object(factory, "status", return_value=dict(state="exited")), redirect_stdout(output):
+        exited = dict(state="exited", exit=dict(exit_code=0))  # Collection then tidies the finished tab.
+        with patch.object(factory, "Rex", FakeRex), patch.object(factory, "status", return_value=exited), redirect_stdout(output):
             code = factory.main(["--state-dir", str(self.root), "grok-collect", "--task", "task", "--id", "inspect"])
         self.assertEqual(code, 0)
+        closed = factory.load_task(self.path)["assignments"]["inspect"]["closed"]
+        self.assertEqual((closed["state"], closed["exit"]), ("exited", dict(exit_code=0)))
         self.assertEqual(json.loads(output.getvalue())["assignments"]["inspect"]["result"]["outcome"], "approved")
         self.assertEqual(len(self.spawns), 1)
 

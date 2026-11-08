@@ -131,7 +131,14 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 | `allowance_events` | Ordered operator additions; each has a unique `id`, `purpose`, `previous_limit`, positive integer `additional`, nonempty `reason` and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
-| `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker, returned pane IDs and the Rex server `rex_instance` each new launch ran on |
+| `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker, returned pane IDs, the Rex server `rex_instance` each new launch ran on and, once its tab is tidied, `closed` |
+
+A tidied assignment's `closed` object holds its final process `state` (`exited`,
+`failed` or `lost`), the observed `exit` (null when lost), the lost `reason` (null
+otherwise), the `session_id` the pane lived in, the absolute path of its retained
+terminal `capture` (null when lost) and the UTC epoch time `at`. Once nothing open
+remains, tidying kills the task session and sets `session_id` to null under a new
+`session_label`, so the next launch opens a fresh session.
 
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input

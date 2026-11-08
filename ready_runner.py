@@ -142,7 +142,8 @@ class Runner:
             raise factory.FactoryError("Repair max_operational_retries in the coordination policy before running")
         self.probe_limit, self.probe_failures = 1 + retries, 0
         self.launch_errors = {}
-        self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0)
+        self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0, tabs_closed=0)
+        self.tidy_issues = []
 
     def select_writer_candidate(self):
         """Called under the execution lock; derive continuity from original evidence."""
@@ -190,6 +191,7 @@ class Runner:
 
     def observe(self):
         records, phases, active, issues = {}, {}, [], []
+        self.tidy_issues = []
         paths = sorted(p for p in self.directory.glob("*.json") if re.fullmatch(SLUG, p.stem))
         for source in paths:
             try:
@@ -233,6 +235,12 @@ class Runner:
                             phases[key] = dict(state="blocked" if terminal else "unknown", reason=str(exc))
                             if not terminal and not any(task == source.stem and request is assignment["request"] for task, request in active):
                                 active.append((source.stem, assignment["request"]))
+                    try:
+                        # Finished tabs close after collection; their final status and output stay in the task.
+                        self.metrics["tabs_closed"] += len(factory.tidy(path, rex, record)["closed"])
+                    except (factory.FactoryError, OSError) as exc:
+                        # Tidying never blocks work; it is reported and retried on the next tick.
+                        self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
                     records[source.stem] = record
             except (factory.FactoryError, OSError, ValueError) as exc:
                 issues.append(dict(task=source.stem, reason=str(exc)))
@@ -378,7 +386,8 @@ class Runner:
         complete = all(row["state"] in {"completed", "approved"} for row in rows)
         settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "lost", "stale", "conflict"} for row in rows)
         return dict(schema_version=1, result="complete" if complete else "needs_action" if settled else "pending",
-                    jobs=rows, active_workers=len(active), issues=issues, metrics=dict(self.metrics),
+                    jobs=rows, active_workers=len(active), issues=issues, tidy_issues=list(self.tidy_issues),
+                    metrics=dict(self.metrics),
                     capacity=self.capacity, capacity_error=self.capacity_error)
 
 

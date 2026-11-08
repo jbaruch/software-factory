@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -22,10 +23,17 @@ class FakeRex:
     fail_after_create = False
     host = "test-host"
     instance = "test-instance"  # Tests that restart the server restore this in cleanup.
+    exits = {}  # Block ID -> exit code of a finished process; tests restore this in cleanup.
 
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
         self.instance_id: str | None = None
+
+    @staticmethod
+    def require_block(session, block_id):
+        if not any(block["block_id"] == block_id for window in session.get("windows", [])
+                   for layer in window["layers"] for block in layer["blocks"]):
+            raise factory.FactoryError(f'block target "{block_id}" not found')
 
     def session(self, session_id):
         for item in self.sessions:
@@ -33,7 +41,7 @@ class FakeRex:
                 return item
         raise factory.FactoryError(f'session target "{session_id}" not found')
 
-    def call(self, *args, **kwargs):
+    def call(self, *args, **kwargs) -> Any:
         type(self).calls.append(args)
         if args[0] == "whoami":
             return {"host_id": type(self).host, "instance_id": type(self).instance}
@@ -41,13 +49,27 @@ class FakeRex:
             return {"sessions": self.sessions}
         if args[:2] == ("session", "inspect"):
             return self.session(args[2])
-        if args[:2] == ("block", "call") and args[-1] == "process":
+        if (args[:2] == ("block", "call") and args[-1] == "process") or args[0] == "capture":
             session = self.session(args[args.index("-s") + 1])
             block_id = args[args.index("-b") + 1]
-            if not any(block["block_id"] == block_id for window in session.get("windows", [])
-                       for layer in window["layers"] for block in layer["blocks"]):
-                raise factory.FactoryError(f'block target "{block_id}" not found')
+            self.require_block(session, block_id)
+            if args[0] == "capture":
+                return f"output of {block_id}\n"
+            if block_id in type(self).exits:
+                return {"last_exit": {"exit_code": type(self).exits[block_id]}}
             return {"last_exit": None, "child": {"pid": 1}}
+        if args[:2] == ("block", "close"):
+            session = self.session(args[args.index("-s") + 1])
+            self.require_block(session, args[-1])
+            for window in list(session["windows"]):
+                for layer in window["layers"]:
+                    layer["blocks"] = [block for block in layer["blocks"] if block["block_id"] != args[-1]]
+                if not any(layer["blocks"] for layer in window["layers"]):
+                    session["windows"].remove(window)  # Closing a tab's last block closes the tab.
+            return ""
+        if args[0] == "kill":
+            self.sessions.remove(self.session(args[1]))
+            return ""
         if args[0] == "new" or args[:2] == ("window", "new"):
             created_sessions = sum(call[0] == "new" for call in type(self).calls)
             if args[0] == "new":
@@ -58,9 +80,12 @@ class FakeRex:
             else:
                 session = self.session(args[3])
                 label = args[4]
-            # Rex never reuses an ID, even after windows close.
-            number = 1 + sum(call[:2] == ("window", "new") and call[3] == session["session_id"]
-                             for call in type(self).calls)
+            # Rex never reuses a pane ID, even across sessions or after tabs close. Some
+            # tests clear the call log, so live windows also bound the next number.
+            number = max(sum(call[0] == "new" or call[:2] == ("window", "new") for call in type(self).calls),
+                         1 + max((int(window["window_id"].rsplit("-", 1)[1]) for item in self.sessions
+                                  for window in item.get("windows", []) if window["window_id"].startswith("window-")),
+                                 default=0))
             window = dict(window_id=f"window-{number}", label=label,
                           layers=[dict(blocks=[dict(block_id=f"block-{number}")])])
             session["windows"].append(window)
@@ -92,6 +117,10 @@ class NativeLauncher(unittest.TestCase):
     def restart_rex(self):
         FakeRex.instance = "restarted-instance"
         self.addCleanup(setattr, FakeRex, "instance", "test-instance")
+
+    def finish(self, assignment, code=0):
+        FakeRex.exits = {**FakeRex.exits, assignment["block_id"]: code}
+        self.addCleanup(setattr, FakeRex, "exits", {})
 
     def creation_calls(self):
         return [args for args in FakeRex.calls
@@ -362,16 +391,130 @@ class NativeLauncher(unittest.TestCase):
         _, backend = self.start(assignment_id="backend", role="backend")
         self.assertEqual(backend["state"], "launched")
 
-    def test_killed_session_is_lost_and_refuses_new_windows_in_it(self):
+    def test_killed_session_is_kept_as_lost_and_new_work_opens_a_new_session(self):
         record, qa = self.start()
         FakeRex.sessions.clear()
         rex = factory.connect(record)
         self.assertEqual(factory.status(rex, record, qa)["state"], "lost")
-        before = self.path.read_bytes()
-        with self.assertRaisesRegex(factory.FactoryError, "session no longer exists"):
-            self.start(assignment_id="security", role="security")
-        self.assertEqual(self.path.read_bytes(), before)
-        self.assertEqual(len(self.creation_calls()), 1)
+        record, security = self.start(assignment_id="security", role="security")
+        self.assertEqual(security["state"], "launched")
+        self.assertEqual(record["session_id"], "session-test-2")
+        self.assertEqual([call[0] for call in self.creation_calls()], ["new", "new"])
+        closed = factory.load_task(self.path)["assignments"]["qa"]["closed"]
+        self.assertEqual((closed["state"], closed["session_id"], closed["capture"]), ("lost", "session-test", None))
+        self.assertIn("closed outside the factory", closed["reason"])
+
+    def test_tidy_closes_finished_tabs_with_their_output_and_keeps_running_ones(self):
+        self.start()
+        record, security = self.start(assignment_id="security", role="security")
+        qa = record["assignments"]["qa"]
+        self.finish(qa)
+        rex = factory.connect(record)
+        self.assertEqual(factory.tidy(self.path, rex, record), dict(closed=["qa"], running=["security"], session_closed=False))
+        saved = factory.load_task(self.path)
+        closed = saved["assignments"]["qa"]["closed"]
+        self.assertEqual((closed["state"], closed["exit"], closed["reason"]), ("exited", {"exit_code": 0}, None))
+        self.assertEqual(Path(closed["capture"]).read_text(), "output of block-1\n")
+        self.assertEqual(Path(closed["capture"]).stat().st_mode & 0o077, 0)
+        self.assertEqual([window["label"] for window in FakeRex.sessions[0]["windows"]], [security["window_label"]])
+        retained = factory.status(rex, saved, saved["assignments"]["qa"])
+        self.assertEqual((retained["state"], retained["closed"], retained["session_id"]), ("exited", True, "session-test"))
+        self.assertEqual(factory.captured(rex, saved, saved["assignments"]["qa"]), "output of block-1\n")
+        self.assertEqual(factory.status(rex, saved, saved["assignments"]["security"])["state"], "running")
+        self.finish(security, 1)
+        self.assertEqual(factory.tidy(self.path, rex, saved), dict(closed=["security"], running=[], session_closed=True))
+        self.assertEqual(FakeRex.sessions, [])
+        saved = factory.load_task(self.path)
+        self.assertIsNone(saved["session_id"])
+        self.assertNotEqual(saved["session_label"], record["session_label"])
+        self.assertEqual(saved["assignments"]["security"]["closed"]["state"], "failed")
+        _, reconnected = self.start()
+        self.assertEqual(reconnected["closed"]["state"], "exited")
+        record, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual((record["session_id"], backend["state"]), ("session-test-2", "launched"))
+
+    def test_tidy_keeps_restart_lost_tabs_without_capturing_the_restored_shell(self):
+        record, qa = self.start()
+        self.restart_rex()
+        rex = factory.connect(record)
+        FakeRex.calls.clear()
+        self.assertEqual(factory.tidy(self.path, rex, record)["closed"], ["qa"])
+        self.assertFalse(any(call[0] == "capture" for call in FakeRex.calls))
+        self.assertEqual(FakeRex.sessions, [])
+        saved = factory.load_task(self.path)
+        closed = saved["assignments"]["qa"]["closed"]
+        self.assertEqual((closed["state"], closed["exit"], closed["capture"]), ("lost", None, None))
+        with self.assertRaisesRegex(factory.FactoryError, "without retained output: Rex server restarted"):
+            factory.captured(rex, saved, saved["assignments"]["qa"])
+
+    def test_tidy_leaves_operator_splits_and_tabs_in_place(self):
+        record, qa = self.start()
+        self.window(qa)["layers"][0]["blocks"].append({"block_id": "operator-split"})
+        FakeRex.sessions[0]["windows"].append(dict(window_id="operator-window", label="notes",
+                                                   layers=[dict(blocks=[dict(block_id="operator-block")])]))
+        self.finish(qa)
+        self.assertEqual(factory.tidy(self.path, factory.connect(record), record),
+                         dict(closed=["qa"], running=[], session_closed=False))
+        blocks = [block["block_id"] for window in FakeRex.sessions[0]["windows"]
+                  for layer in window["layers"] for block in layer["blocks"]]
+        self.assertEqual(blocks, ["operator-split", "operator-block"])
+        self.assertEqual(factory.load_task(self.path)["session_id"], "session-test")
+
+    def test_interrupted_tidy_retries_the_close_without_recapturing(self):
+        record, qa = self.start()
+        self.finish(qa)
+        rex = factory.connect(record)
+        original = rex.call
+        def fail_close(*args, **kwargs):
+            if args[:2] == ("block", "close"):
+                raise factory.FactoryError("Rex command failed")
+            return original(*args, **kwargs)
+        with patch.object(rex, "call", side_effect=fail_close), self.assertRaises(factory.FactoryError):
+            factory.tidy(self.path, rex, record)
+        saved = factory.load_task(self.path)
+        self.assertEqual(saved["assignments"]["qa"]["closed"]["state"], "exited")
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 1)
+        # The output is already retained; the next tidy closes the leftover tab without recapturing.
+        FakeRex.calls.clear()
+        self.assertEqual(factory.tidy(self.path, rex, saved), dict(closed=[], running=[], session_closed=True))
+        self.assertFalse(any(call[0] == "capture" for call in FakeRex.calls))
+        self.assertEqual(FakeRex.sessions, [])
+
+    def test_closed_tab_records_are_validated(self):
+        record, qa = self.start()
+        self.finish(qa)
+        factory.tidy(self.path, factory.connect(record), record)
+        saved = factory.load_task(self.path)
+        for change in (dict(state="running"), dict(exit=None), dict(reason="extra"), dict(session_id=""),
+                       dict(capture="relative.txt"), dict(at=-1), dict(extra=True)):
+            damaged = copy.deepcopy(saved)
+            damaged["assignments"]["qa"]["closed"].update(change)
+            factory.save(self.path, damaged)
+            with self.subTest(change=change), self.assertRaisesRegex(factory.FactoryError, "Invalid closed tab record"):
+                factory.load_task(self.path)
+        legacy = copy.deepcopy(saved)
+        legacy["schema_version"] = 9
+        legacy["assignments"]["qa"].pop("rex_instance")
+        factory.save(self.path, legacy)
+        with self.assertRaisesRegex(factory.FactoryError, "Legacy assignment has newer fields"):
+            factory.load_task(self.path)
+
+    def test_tidy_cli_reports_every_task_and_capture_reads_retained_output(self):
+        record, qa = self.start()
+        factory.launch(self.root / "other.json", **{**self.arguments, "task": "other"})
+        factory.save(self.root / "idle.json", factory.new_task("idle"))
+        self.finish(qa)
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "tidy"]), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["task"], dict(closed=["qa"], running=[], session_closed=True))
+        self.assertEqual(report["other"]["running"], ["qa"])
+        self.assertEqual(report["idle"], dict(closed=[], running=[], session_closed=False))
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "capture", "--task", "task", "--id", "qa"]), 0)
+        self.assertEqual(output.getvalue(), "output of block-1\n")
 
     def test_empty_session_omits_its_window_list(self):
         record, qa = self.start()

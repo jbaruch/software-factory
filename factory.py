@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parent
 GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
+# Process states that never change again; only these assignment tabs are tidied.
+TERMINAL_STATES = ("exited", "failed", "lost")
 REPOSITORY_MARKER = "software-factory-repository.json"
 GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
                           "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
@@ -161,10 +163,13 @@ def task_lock(directory, task, *, wait=False):
         os.close(fd)
 
 
+def new_session_label(task):
+    return "factory-" + task + "-" + uuid.uuid4().hex[:8]
+
+
 def new_task(task) -> dict:
     return dict(schema_version=10, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
-                session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
-                session_id=None, assignments={})
+                session_label=new_session_label(task), session_id=None, assignments={})
 
 
 def read_record(path, *, private=False, max_bytes=None):
@@ -297,7 +302,7 @@ def load_task(path) -> dict:
                 or any(not isinstance(item, str) or item not in earlier
                        for item in request["dependencies"])):
             raise FactoryError("Invalid assignment dependencies; restore the original task record")
-        if assignment["state"] == "launched" and (record["session_id"] is None
+        if assignment["state"] == "launched" and ((record["session_id"] is None and assignment.get("closed") is None)
                 or any(not isinstance(assignment.get(key), str) or not assignment[key]
                        for key in ("window_id", "block_id"))):
             raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
@@ -335,6 +340,10 @@ def load_task(path) -> dict:
         if "rex_instance" in assignment and (not isinstance(assignment["rex_instance"], str)
                                              or not assignment["rex_instance"].strip()):
             raise FactoryError("Invalid Rex server instance; restore the original task record")
+        if version < 10 and "closed" in assignment:
+            raise FactoryError("Legacy assignment has newer fields; restore its schema version before continuing")
+        if "closed" in assignment and not valid_closed(assignment):
+            raise FactoryError("Invalid closed tab record; restore the original task record")
         result = assignment["result"]
         if result is not None and (not isinstance(result, dict)
                 or assignment["state"] != "launched"
@@ -381,6 +390,23 @@ def load_task(path) -> dict:
         except OSError:
             raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
     return record
+
+
+def valid_closed(assignment):
+    """A tidied tab keeps its final process observation and any retained output."""
+    closed = assignment["closed"]
+    return (assignment["state"] == "launched" and isinstance(closed, dict)
+            and set(closed) == {"state", "exit", "reason", "session_id", "capture", "at"}
+            and closed["state"] in TERMINAL_STATES
+            and (closed["exit"] is None or (isinstance(closed["exit"], dict)
+                                            and type(closed["exit"].get("exit_code")) is int))
+            and (closed["exit"] is not None) == (closed["state"] != "lost")
+            and (closed["reason"] is None if closed["state"] != "lost"
+                 else isinstance(closed["reason"], str) and bool(closed["reason"].strip()))
+            and isinstance(closed["session_id"], str) and bool(closed["session_id"])
+            and (closed["capture"] is None or (isinstance(closed["capture"], str)
+                                               and Path(closed["capture"]).is_absolute()))
+            and type(closed["at"]) in (int, float) and 0 <= closed["at"] <= 253402300799)
 
 
 def validate_control_events(record):
@@ -1375,7 +1401,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["rex"] is not None:
         rex = connect(record, binary, server)
         if record["session_id"] is not None and session_view(rex, record) is None:
-            raise FactoryError("The task's Rex session no longer exists; inspect it before launching more work")
+            # Every pane of a vanished session is lost; keep that, then open a new session.
+            tidy(path, rex, record)
     else:
         if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
                 or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
@@ -1439,8 +1466,14 @@ def current_instance(rex):
     return rex.instance_id
 
 
-def status(rex, record, assignment):
+def status(rex, record, assignment) -> dict:
     """Observe the original process. `lost` means Rex can no longer report how it ended."""
+    closed = assignment.get("closed")
+    if closed is not None:
+        retained = dict(role=assignment["request"]["role"], state=closed["state"],
+                        session_id=closed["session_id"], window_id=assignment["window_id"],
+                        block_id=assignment["block_id"], exit=closed["exit"], closed=True)
+        return retained if closed["reason"] is None else {**retained, "reason": closed["reason"]}
     observation = dict(role=assignment["request"]["role"], state="unknown",
                        session_id=record["session_id"], window_id=assignment["window_id"],
                        block_id=assignment["block_id"], exit=None)
@@ -1466,6 +1499,71 @@ def status(rex, record, assignment):
     state = ("exited" if last_exit["exit_code"] == 0 else "failed") if last_exit else (
         "running" if process.get("child") or process.get("foreground") else "unknown")
     return {**observation, "state": state, "exit": last_exit}
+
+
+def captured(rex, record, assignment):
+    """Original terminal output: live while the tab is open, retained once it is tidied."""
+    closed = assignment.get("closed")
+    if closed is not None:
+        if closed["capture"] is None:
+            raise FactoryError("Tab was closed without retained output: " + (closed["reason"] or closed["state"]))
+        return read_record(Path(closed["capture"]), private=True)
+    observed = status(rex, record, assignment)
+    if observed["state"] == "lost":
+        # A closed pane has no output, and a restored pane shows only a new shell.
+        raise FactoryError("Pane output unavailable: " + observed["reason"])
+    output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
+                      "--trim", "--unwrap", raw=True)
+    if not isinstance(output, str):
+        raise FactoryError("Malformed Rex capture; inspect the pinned binary/server API compatibility")
+    return output
+
+
+def tidy(path, rex, record, *, only=None) -> dict:
+    """Close finished assignment tabs; each keeps its final observation and output first."""
+    closed, running = [], []
+    view = session_view(rex, record)
+    open_blocks = set() if view is None else view_blocks(view)
+    for identity, assignment in record["assignments"].items():
+        if (only is not None and identity not in only) or assignment["state"] != "launched":
+            continue
+        if assignment.get("closed") is None:
+            observed = status(rex, record, assignment)
+            if observed["state"] not in TERMINAL_STATES:
+                running.append(identity)
+                continue
+            capture = None
+            if observed["state"] != "lost":
+                capture_path = path.parent / (record["task"] + "." + identity + ".capture.txt")
+                save(capture_path, captured(rex, record, assignment))
+                capture = str(capture_path)
+            assignment["closed"] = dict(state=observed["state"], exit=observed["exit"], reason=observed.get("reason"),
+                                        session_id=record["session_id"], capture=capture, at=time.time())
+            save(path, record)  # Durable before the pane disappears.
+            closed.append(identity)
+        elif assignment["closed"]["session_id"] != record["session_id"]:
+            continue  # Its session is already gone.
+        # Also retries a retained tab whose earlier close failed. Closing only the factory's
+        # block keeps any operator split; a lone block takes its tab along.
+        if assignment["block_id"] in open_blocks:
+            rex.call("block", "close", "-s", record["session_id"], assignment["block_id"], raw=True)
+    return dict(closed=closed, running=running, session_closed=close_idle_session(path, rex, record))
+
+
+def close_idle_session(path, rex, record):
+    """Kill the task session once nothing open remains in it; the next launch starts a new one."""
+    if record["session_id"] is None or any(
+            item["state"] == "launching" or (item["state"] == "launched" and item.get("closed") is None)
+            for item in record["assignments"].values()):
+        return False
+    view = session_view(rex, record)
+    if view is not None:
+        if view_windows(view):
+            return False  # Operator tabs remain; leave their session alone.
+        rex.call("kill", record["session_id"], raw=True)
+    record.update(session_id=None, session_label=new_session_label(record["task"]))
+    save(path, record)
+    return True
 
 
 def check_commit_message(message, *, write):
@@ -1940,6 +2038,22 @@ def collect_grok(path, assignment_id, rex, record, assignment):
         artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
 
 
+def tidy_tasks(directory, task=None, binary=None, server=None):
+    """Tidy one task or every task record in a state directory; failures are reported per task."""
+    tasks = [task] if task else sorted(item.stem for item in directory.glob("*.json")
+                                       if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item.stem))
+    report, failed = {}, False
+    for name in tasks:
+        try:
+            with task_lock(directory, name) as path:
+                record = load_task(path)
+                report[name] = (dict(closed=[], running=[], session_closed=False) if record["rex"] is None
+                                else tidy(path, connect(record, binary, server), record))
+        except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            report[name], failed = dict(error=str(exc)), True
+    return report, failed
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".factory-state")
@@ -2029,6 +2143,8 @@ def main(argv=None):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
+    cleanup = sub.add_parser("tidy", help="Close finished assignment tabs, retaining their final status and output")
+    cleanup.add_argument("--task", help="Only this task; default is every task in the state directory")
     args = parser.parse_args(argv)
     try:
         if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
@@ -2045,6 +2161,10 @@ def main(argv=None):
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
             raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
+        if args.action == "tidy":
+            report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
+            print(json.dumps(report, indent=2))
+            return 1 if failed else 0
         if args.action == "integrate":
             import integration
             path = args.state_dir.resolve() / (args.task + ".json")
@@ -2155,15 +2275,14 @@ def main(argv=None):
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
-            if args.action == "codex-collect":
-                print(json.dumps(task_view(collect_codex(path, args.id, rex, record, assignment)), indent=2))
-            elif args.action == "claude-collect":
-                print(json.dumps(task_view(collect_claude(path, args.id, rex, record, assignment)), indent=2))
-            elif args.action == "grok-collect":
-                print(json.dumps(task_view(collect_grok(path, args.id, rex, record, assignment)), indent=2))
+            if args.action in {"codex-collect", "claude-collect", "grok-collect"}:
+                collect = (collect_codex if args.action == "codex-collect"
+                           else collect_claude if args.action == "claude-collect" else collect_grok)
+                record = collect(path, args.id, rex, record, assignment)
+                tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                print(json.dumps(task_view(record), indent=2))
             elif args.action == "capture":
-                print(rex.call("capture", "-s", record["session_id"], "-b",
-                               assignment["block_id"], "--trim", "--unwrap", raw=True), end="")
+                print(captured(rex, record, assignment), end="")
             else:
                 print(json.dumps(status(rex, record, assignment), indent=2))
     except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
