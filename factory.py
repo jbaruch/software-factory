@@ -156,7 +156,7 @@ def task_lock(directory, task, *, wait=False):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=7, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], rex=None,
+    return dict(schema_version=8, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -191,9 +191,10 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    # Schema 6 belongs to the retained provisioning prototype, not this reader.
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 7):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if (version < 6 or version == 7) and "provisioning" in record:
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 7 and "allowance_events" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 5 and "control_events" in record:
@@ -343,10 +344,14 @@ def load_task(path) -> dict:
     if version < 5:
         record.update(schema_version=5, control_events=[])
     validate_control_events(record)
+    if version < 6 or version == 7:
+        record["provisioning"] = None
+    validate_provisioning(record)
     if version < 7:
-        record.update(schema_version=7, allowance_events=[])
+        record["allowance_events"] = []
     allowance_limits(record)
-    if version < 7:
+    if version < 8:
+        record["schema_version"] = 8
         save(path, record)
     return record
 
@@ -474,11 +479,12 @@ def git_run(repository, *args, environment=None):
             environment = scope[1]
         result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
-                              text=True, timeout=10, check=False,
+                              timeout=10, check=False,
                               env=git_environment() if environment is None else environment)
         if scope is not None and result.returncode == 125:
             raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
-        return result
+        return subprocess.CompletedProcess(result.args, result.returncode,
+            result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -606,7 +612,7 @@ def check_tracked_bytes(cwd, candidate):
         raise FactoryError("Cannot read candidate tree; restore Git object access before launching")
     root = Path(git_worktree(cwd))
     try:
-        allowed = set()
+        allowed, identities = set(), set()
         for entry in tree.stdout.split("\0"):
             if not entry:
                 continue
@@ -625,6 +631,10 @@ def check_tracked_bytes(cwd, candidate):
                 if info.st_nlink > 1:
                     independent_source(path)
                     info = path.lstat()
+                identity = (info.st_dev, info.st_ino)
+                if identity in identities:
+                    raise FactoryError("Candidate paths alias the same source file; use filenames distinct on this filesystem before launching")
+                identities.add(identity)
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
                 data = path.read_bytes()
             else:
@@ -700,12 +710,250 @@ def task_view(record):
             allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
     assignments = {key: {**item, "result_current": result_current(record, item["result"])}
                    for key, item in record["assignments"].items()}
-    return {**record, "allowances": allowances, "assignments": assignments}
+    item = record["provisioning"]
+    provisioning = None if item is None else {**item, "inputs_current": item["request"]["inputs"] == record["inputs"]}
+    return {**record, "allowances": allowances, "assignments": assignments, "provisioning": provisioning}
 
 
 def result_current(record, result):
     return result is not None and record["inputs"] == dict(
         candidate=result["candidate"], requirements=result["inputs"]["requirements"])
+
+
+def validate_provisioning(record):
+    item = record.get("provisioning")
+    if "provisioning" not in record:
+        raise FactoryError("Missing task provisioning field; restore the original record")
+    if item is None:
+        return
+    if (record["admission"] is None or not isinstance(item, dict)
+            or set(item) != {"id", "request", "owner_token", "state", "git_dir"}
+            or not isinstance(item["id"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item["id"])
+            or not isinstance(item["owner_token"], str) or not re.fullmatch(r"[0-9a-f]{32}", item["owner_token"])
+            or item["state"] not in ("provisioning", "provisioned")):
+        raise FactoryError("Invalid task provisioning intent; restore the original record")
+    request = item["request"]
+    if (not isinstance(request, dict) or set(request) != {"path", "branch", "inputs"}
+            or not isinstance(request["path"], str) or not Path(request["path"]).is_absolute()
+            or str(Path(request["path"])) != request["path"] or ".." in Path(request["path"]).parts
+            or request["branch"] != f'factory/{record["task"]}/{item["id"]}'
+            or not valid_inputs(request["inputs"])
+            or (item["git_dir"] is not None if item["state"] == "provisioning" else
+                not isinstance(item["git_dir"], str) or not Path(item["git_dir"]).is_absolute())):
+        raise FactoryError("Invalid task provisioning request; restore the original record")
+
+
+def provisioning_git(repository, *args, output=None):
+    """Metadata/index operations and raw blobs only; never checkout callbacks."""
+    environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        result = subprocess.run([git_binary(), "--no-replace-objects", "-C", str(repository),
+            "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
+            "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
+            env=environment, stdout=subprocess.PIPE if output is None else output,
+            stderr=subprocess.PIPE, timeout=30, check=False)
+        diagnostic = result.stderr.decode("utf-8")
+        output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        raise FactoryError("Provisioning Git outcome uncertain; inspect the retained intent and resources before continuing") from exc
+    if result.returncode:
+        raise FactoryError("Provisioning Git refused; inspect the retained intent and resources: " + diagnostic.strip())
+    return output_text
+
+
+def provisioning_source(repository, candidate, destination_parent):
+    """Reject unsupported configuration and trees before any worktree mutation."""
+    config = git_run(repository, "config", "--null", "--list")
+    if config.returncode:
+        raise FactoryError("Cannot inspect provisioning configuration; restore Git configuration access before provisioning")
+    for field in config.stdout.split("\0"):
+        key, _, value = field.partition("\n")
+        key = key.lower()
+        if (key in {"core.worktree", "core.alternaterefscommand", "extensions.partialclone"}
+                or key in {"core.fsmonitor", "core.bare", "core.sparsecheckout", "extensions.worktreeconfig"}
+                and value.lower() not in {"false", "no", "off", "0"}
+                or key.startswith("remote.") and key.endswith(".promisor")
+                and value.lower() not in {"false", "no", "off", "0"}):
+            raise FactoryError("Unsupported provisioning configuration: " + key + "; remove this setting or choose a supported repository before provisioning")
+    if os.path.lexists(git_common_dir(repository) / "objects/info/alternates"):
+        raise FactoryError("Provisioning requires local objects without alternates; choose a repository with independent local objects before provisioning")
+    try:
+        tree = provisioning_git(repository, "ls-tree", "-r", "-z", "--full-tree", candidate)
+    except FactoryError:
+        raise FactoryError("Cannot inspect candidate tree before provisioning; restore local Git object access and select a candidate with supported UTF-8 filenames") from None
+    entries = []
+    for entry in tree.split("\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split("\t", 1)
+        mode, kind, oid = metadata.split()
+        relative = Path(name)
+        if (kind != "blob" or mode not in {"100644", "100755"} or relative.is_absolute()
+                or relative.as_posix() != name
+                or any(part.lower() in {".git", ".."} for part in relative.parts)):
+            raise FactoryError("Provisioning supports only regular-file trees; select a candidate without symlinks, submodules or unsupported paths")
+        entries.append((name, mode, oid))
+    # Probe only names, on the actual destination filesystem, before saving intent.
+    # No normalization table can establish that filesystem's name equivalence.
+    try:
+        with tempfile.TemporaryDirectory(prefix=".factory-names-", dir=destination_parent) as temporary:
+            root, directories = Path(temporary), {}
+            for name, _, _ in entries:
+                with provisioning_file(root, name):
+                    pass
+                for parent in Path(name).parents:
+                    if parent == Path("."):
+                        continue
+                    info = (root / parent).stat()
+                    identity = (info.st_dev, info.st_ino)
+                    previous = directories.setdefault(identity, parent)
+                    if previous != parent:
+                        raise FactoryError("Candidate directory names collide on the destination filesystem; rename them or choose a compatible filesystem")
+    except (FileExistsError, NotADirectoryError, IsADirectoryError):
+        raise FactoryError("Candidate filenames collide on the destination filesystem; rename them or choose a compatible filesystem") from None
+    except OSError:
+        raise FactoryError("Cannot check destination filenames; restore temporary storage access/space before provisioning") from None
+    return entries
+
+
+def provisioning_owned(record, item):
+    """A saved unique Git lock marker binds recovery to this effect, not a lookalike."""
+    try:
+        destination = Path(item["request"]["path"])
+        if destination.is_symlink() or not destination.is_dir():
+            raise FactoryError("Provisioning outcome uncertain: owned worktree is missing or replaced; inspect without retrying")
+        read_record(destination / ".git")
+        directory = git_dir(destination)
+        common = Path(record["admission"]["repository_identity"]["common_dir"])
+        marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
+        if (directory.parent != common / "worktrees"
+                or directory.is_symlink()
+                or read_record(directory / "locked").strip() != marker
+                or read_record(directory / "gitdir").strip() != str(destination / ".git")
+                or repository_identity(destination) != record["admission"]["repository_identity"]
+                or item["state"] == "provisioning" and provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
+                or item["git_dir"] is not None and item["git_dir"] != str(directory)):
+            raise FactoryError("Provisioning ownership differs; inspect conflicting resources without resetting or deleting them")
+        return directory
+    except (OSError, UnicodeDecodeError):
+        raise FactoryError("Cannot read provisioning ownership metadata; restore access to the original metadata and inspect existing resources without retrying, resetting or deleting them") from None
+
+
+@contextmanager
+def provisioning_file(root, name):
+    """Create only new files beneath the owned directory, without following links."""
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = Path(name).parts
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=directory)
+                os.fsync(directory)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        with os.fdopen(descriptor, "wb") as stream:
+            yield stream
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def provision_worktree(path, *, worktree_id, destination):
+    """Caller holds the owner's execution/task locks, as for explicit launches."""
+    record = load_task(path)
+    if record["admission"] is None:
+        raise FactoryError("Admit a task before provisioning a writer worktree")
+    if not isinstance(worktree_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", worktree_id):
+        raise FactoryError("Worktree ID must be a lowercase slug, at most 64 characters")
+    supplied = Path(destination)
+    if not supplied.is_absolute() or ".." in supplied.parts:
+        raise FactoryError("Supply an absolute worktree path without parent traversal")
+    try:
+        parent = supplied.parent.resolve(strict=True)
+        is_directory = parent.is_dir()
+    except OSError:
+        raise FactoryError("Create or restore access to the destination parent directory before provisioning") from None
+    if not is_directory:
+        raise FactoryError("Choose an existing directory as the destination parent before provisioning")
+    destination = parent / supplied.name
+    request: dict = dict(path=str(destination), branch=f'factory/{record["task"]}/{worktree_id}',
+                         inputs=dict(record["inputs"]))
+    check_repository(record["admission"])
+    existing = record["provisioning"]
+    if existing is not None:
+        if existing["id"] != worktree_id or existing["request"] != request:
+            raise FactoryError("Task already has a different provisioning request; inspect its original intent")
+        directory = provisioning_owned(record, existing)
+        if existing["state"] == "provisioned":
+            return record  # Historical completion: writers may now have edited this checkout.
+        # Reconciliation is read-only, including while held. Never repair shared files.
+        try:
+            for root, _, files in os.walk(destination, followlinks=False):
+                for name in files:
+                    if (Path(root) / name).lstat().st_nlink != 1:
+                        raise FactoryError("Provisioning outcome uncertain: shared files require inspection")
+            check_checkout(record["admission"]["repository"], str(destination), request["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        except OSError:
+            raise FactoryError("Cannot inspect retained provisioning resources; restore filesystem access and inspect the existing intent/worktree without retrying, resetting or deleting them") from None
+    else:
+        if record["hold"] is not None:
+            raise FactoryError("Task is paused; resume before provisioning")
+        if any(item["state"] == "launching" for item in record["assignments"].values()):
+            raise FactoryError("Reconcile the pending launch before provisioning")
+        for parent in (destination.parent, *destination.parent.parents):
+            if (os.path.lexists(parent / ".git") or
+                    (parent / "HEAD").exists() and (parent / "objects").is_dir()):
+                raise FactoryError("Provision outside existing checkouts and Git directories")
+        if (destination.is_relative_to(path.parent.resolve())
+                or path.resolve().is_relative_to(destination)):
+            raise FactoryError("Provision outside the task owner store")
+        if os.path.lexists(destination):
+            raise FactoryError("Worktree path already exists; never reuse or delete conflicting resources")
+        repository = record["admission"]["repository"]
+        entries = provisioning_source(repository, request["inputs"]["candidate"], destination.parent)
+        branches = git_run(repository, "for-each-ref", "--format=%(refname)", "refs/heads")
+        if branches.returncode:
+            raise FactoryError("Cannot inspect the local branch namespace; restore Git access before provisioning")
+        wanted = ("refs/heads/" + request["branch"]).casefold()
+        if any(ref == wanted or ref.startswith(wanted + "/") or wanted.startswith(ref + "/")
+               for ref in (name.casefold() for name in branches.stdout.splitlines())):
+            raise FactoryError("Worktree branch exists or has a namespace conflict; choose an unused task/worktree name or explicitly resolve the conflicting ref")
+        existing = dict(id=worktree_id, request=request, owner_token=uuid.uuid4().hex,
+                        state="provisioning", git_dir=None)
+        record["provisioning"] = existing
+        try:
+            save(path, record)  # Durable immutable request and before-effect intent.
+        except OSError:
+            raise FactoryError("Cannot confirm provisioning intent save; restore state-store access/space and reconcile the saved task record before continuing; no Git worktree creation was started") from None
+        marker = f'factory-{record["task"]}-{worktree_id}-{existing["owner_token"]}'
+        provisioning_git(repository, "worktree", "add", "--no-checkout", "--lock", "--reason", marker,
+                         "-b", request["branch"], str(destination), request["inputs"]["candidate"])
+        directory = provisioning_owned(record, existing)
+        # --no-checkout avoids hooks and smudge filters; read-tree writes only this index.
+        provisioning_git(destination, "read-tree", request["inputs"]["candidate"])
+        try:
+            for name, mode, oid in entries:
+                with provisioning_file(destination, name) as stream:
+                    provisioning_git(repository, "cat-file", "blob", oid, output=stream)
+                    stream.flush()
+                    os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
+                    os.fsync(stream.fileno())
+            check_checkout(repository, str(destination), request["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        except OSError:
+            raise FactoryError("Provisioning resource writes failed; restore filesystem access/space and inspect the retained intent/worktree without retrying, resetting or deleting them") from None
+    existing.update(state="provisioned", git_dir=str(directory))
+    try:
+        save(path, record)
+    except OSError:
+        raise FactoryError("Cannot confirm provisioning completion save; restore state-store access/space and reconcile this same saved intent and existing worktree before continuing") from None
+    return record
 
 
 def set_inputs(path, *, candidate, requirements):
@@ -1514,6 +1762,10 @@ def main(argv=None):
     inputs.add_argument("--task", required=True)
     inputs.add_argument("--candidate", required=True)
     inputs.add_argument("--requirements", required=True)
+    provision = sub.add_parser("provision", help="Provision or reconcile one explicitly named writer worktree")
+    provision.add_argument("--task", required=True)
+    provision.add_argument("--id", required=True, help="Stable worktree name; branch is factory/TASK/ID")
+    provision.add_argument("--path", required=True, help="New absolute path outside existing checkouts")
     result = sub.add_parser("result", help="Record a revision-bound specialist outcome")
     result.add_argument("--task", required=True)
     result.add_argument("--id", required=True)
@@ -1593,10 +1845,10 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if prepared is not None and load_task(path) != prepared:
                 raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
-            if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance"}:
+            if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance", "provision"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
                                    acceptance=args.acceptance, corrections=args.corrections,
@@ -1608,6 +1860,8 @@ def main(argv=None):
                         expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason)
                 elif args.action == "inputs":
                     record = set_inputs(path, candidate=args.candidate, requirements=args.requirements)
+                elif args.action == "provision":
+                    record = provision_worktree(path, worktree_id=args.id, destination=args.path)
                 elif args.action == "result":
                     record = record_result(path, assignment_id=args.id, candidate=args.candidate,
                                            requirements=args.requirements, outcome=args.outcome,

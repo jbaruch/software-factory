@@ -7,7 +7,7 @@
 Add `factory.py integrate`, a mechanical head-conditional merge adapter and
 frozen original canonical feedback for selected native specialist/release
 judgments. Run the original mechanical adapter through `factory.launch` with real
-Rex pane identities and a version-1 receipt; retain ordinary schema-7 readers.
+Rex pane identities and a version-1 receipt; retain ordinary schema-8 readers.
 Release task/ready-work locks during watcher waits, serialize repository integration,
 reload pre-effect controls, and collect into current owner state. Reuse intents,
 results, holds and cumulative attempts. Require the full review packet only for
@@ -41,6 +41,31 @@ checker; refuse incomplete or unsupported observations without invoking an
 undocumented cross-plugin issue-helper interface.
 Classify native nonzero HTTP 405/409 merge responses as rejected, while preserving
 unknown outcomes and reconciliation for transport or malformed-response failures.
+
+
+## 0.13.0 — 2026-11-07 (unpublished)
+
+### Task-owned writer worktrees
+
+Provision one explicitly named writer branch and path from an admitted task's
+selected candidate. Save the immutable request and effect intent in the existing
+task store before Git mutation. Create independent regular files from raw blobs
+without checkout hooks or filters, preserving existing source checkout edits.
+Reuse completed requests after lost replies; reconcile pending effects only when
+the uniquely owned checkout is already complete and clean. Retain missing,
+partial, dirty or conflicting outcomes for inspection without retries or repair.
+Reject unsupported trees/configuration and destinations overlapping the task store.
+Schema 8 preserves legacy holds, inputs, provisioning intents and allowance
+additions from the earlier schema-6/schema-8 owners, without adopting worktrees
+or granting attempts. Expose provisioning through the existing owner view. No automatic
+candidate handoff, task acceptance or release authority is added.
+
+Preserve CR/LF in UTF-8 Git filenames. Probe file and directory names on the
+destination filesystem before saving intent, refusing case/Unicode aliases
+without creating a branch or worktree. Reject physical file aliases in source
+validation so an earlier partial checkout cannot be certified as complete.
+Reject ancestor/descendant branch namespace conflicts before intent, and report
+actionable recovery for missing or unreadable ownership metadata without mutation.
 
 
 ## 0.12.1 — 2026-11-07 (unpublished)

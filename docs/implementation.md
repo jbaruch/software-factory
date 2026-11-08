@@ -10,8 +10,9 @@ the command guides describe operation rather than maintain separate status lists
 | --- | --- | --- |
 | Contracts and package | Agreed design, specialist role catalog, configuration, one ACR skill, reference decisions and recorded replay scenarios | Structural validation and deterministic tests; no live judgment-quality claim |
 | Task runtime | Admission, cumulative attempt limits, holds, revision-bound reports, dependency launch guards, explicit Rex launches and limited interrupted-launch reconciliation | Fake-server tests and harmless live Rex conformance; process success never accepts a task |
-| Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots, fresh quota gating and opt-in `--from-writer` candidate selection | Fixed fake-process tests and the bounded live controller evidence below. Handoff tests use original receipt/event validation, observed fake Rex processes and real temporary Git commits, including restart and refusal paths; no live opt-in handoff or quality claim. Worktree provisioning and complete delivery remain incomplete |
-| Integration and final acceptance | Explicit `factory integrate` launching/reconnecting an ordinary schema-7 Rex worker, version-1 receipt, frozen original native release evidence, canonical installed watcher, conditional merge, read-only reconciliation and separate final native delivered-evidence judgment | Fixed GitHub/process transports and temporary Git exercise gates, unknown outcomes, source ancestry and current-attempt push CI. No live merge, recovery, acceptance, provider readiness or general judgment-quality claim; no automatic quality waiver or publication channel |
+| Writer worktree provisioning | One explicit task-owned branch/path from selected inputs, durable before-effect intent, raw regular-file checkout, completed replay and conservative pending reconciliation | `tests/test_provisioning.py` uses real temporary Git repositories for lost replies/restarts, collisions, holds, changed inputs and callback denial. No provider/Rex, automatic candidate handoff or independent release-readiness claim |
+| Ready-work runner | Explicit plan execution, terminal native result collection, dependency advancement, instance work limits, verification/recovery slots, fresh quota gating and opt-in `--from-writer` candidate selection | Fixed fake-process tests and the bounded live controller evidence below. Handoff tests use original receipt/event validation, observed fake Rex processes and real temporary Git commits, including restart and refusal paths; no live opt-in handoff or quality claim. Complete delivery remains incomplete |
+| Integration and final acceptance | Explicit `factory integrate` launching/reconnecting an ordinary schema-8 Rex worker, version-1 receipt, frozen original native release evidence, canonical installed watcher, conditional merge, read-only reconciliation and separate final native delivered-evidence judgment | Fixed GitHub/process transports and temporary Git exercise gates, unknown outcomes, source ancestry and current-attempt push CI. No live merge, recovery, acceptance, provider readiness or general judgment-quality claim; no automatic quality waiver or publication channel |
 | Jev adapter | Choice compilation, dynamic candidates, model discovery, shadow evaluation, exact-input reuse, a derived uncertainty inbox and explicitly bound native standby/judge answers | Recorded HTTP/restart/concurrency and native-carrier tests plus earlier live evaluation/replay on jev-1.14.0. Collected current answers close only their matching question; missing inputs remain operator requests. Automatic dispatch, calibration, consequential routing and failed-request recovery remain incomplete |
 | Native Codex adapter | Account/catalog/quota metadata, explicit execution adapter, private versioned event receipts, result collection, opt-in factory-owned writer commits and per-child shell startup controls | Native subscription sign-in, revision-bound collection/reconnect and scoped source approvals; writer/Git qualification is described below. Broader automatic delivery and judgment quality remain unverified |
 | Codex capacity snapshot | One-probe allowlisted account/plan, native pool windows and model/effort IDs; duplicate-pool conflict refusal and nullable unknown facts | Offline recorded/fake transport tests and a live metadata-only observation validate curation of the native shape. No scheduler, reservation, eligibility or broad readiness claim |
@@ -101,11 +102,16 @@ new admission before repository-backed work.
 Task schema 5 adds ordered operator-control requests without changing task limits
 or evidence. Legacy holds migrate without invented request history. Native receipt
 versions remain separate from the task store.
-Task schema 7 adds explicit operator allowance additions while preserving original
-admission and used attempts. Offline fixtures verify exhaustion, lost-reply replay,
-stale-decision refusal and unchanged holds. No live task received an addition as
-part of that verification; the schema-6 provisioning prototype remains unsupported
-by this reader.
+Task schema 8 combines the earlier provisioning and allowance owners. Migration
+preserves existing provisioning intents, allowance additions, holds, inputs and
+assignments; it adds only the missing empty field. Provisioning recovery uses the
+saved intent and a unique Git worktree lock marker. Incomplete outcomes require
+inspection rather than another creation attempt. Offline fixtures verify migration
+from both earlier formats without granting attempts or adopting worktrees.
+Filename regressions cover exact CR/LF names and destination filesystem case,
+Unicode and directory equivalence. A private name-only probe rejects aliases
+before intent; source validation rejects physical file aliases during recovery.
+Schema compatibility and these fixtures do not establish live delivery.
 
 On 2026-11-07, the optional Jev decision store evaluated the actual pending
 provisioning exception in shadow mode. Native discovery exposed only aliases;
@@ -144,7 +150,7 @@ Gemini and Claude families, without a model turn.
 
 ## Next slices
 
-1. **Operational store and scripted execution.** Qualify live ready-work execution and opt-in candidate handoff; add worktree provisioning and finer provider reservations. Qualify the offline integration/merge-recovery and final native acceptance path against live original evidence under the existing coding/release policy.
+1. **Operational store and scripted execution.** Qualify live ready-work execution and opt-in candidate handoff; add worktree provisioning and finer provider reservations. Add task acceptance and integration/merge recovery using the existing general coding/release policy.
 2. **Jev routing evaluation.** Qualify live stored evaluation/replay, resolve retained uncertainty through bounded standby/judge assignments, and add approved recovery for failed requests. Build representative labeled and held-out evaluations before enabling consequential routing. Use recorded responses for replay, never fabricated live-success receipts.
 3. **Rex and provider conformance.** Pin the discovered Rex binary/server identity and verify process launch, working directory, native session identity, input delivery, readiness and recovery for Claude, Codex, Grok and both Antigravity model families. Discover actual account eligibility, tools, supported thinking levels, model catalogs and shared allowance boundaries. Native subscription sign-in is not interchangeable with an API key.
 4. **First live specialist loop.** Deliver an authorized repository task with the appropriate developer, independent verifier and domain specialists. Route findings directly; prove that investigator -> Jev can avoid a judge invocation. Exercise changed-input invalidation, one real exception and controller restart without duplicate effects.

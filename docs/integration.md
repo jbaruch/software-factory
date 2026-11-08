@@ -62,7 +62,7 @@ The CLI prepares evidence outside task locks, then uses the ordinary execution/t
 locks only for brief submission and `factory.launch`. The worker runs in the release
 review's original clean checkout and owns real Rex window/block identities. Before
 mutation, its
-schema-7 assignment command fixes admission/repository identity, exact GitHub PR,
+schema-8 assignment command fixes admission/repository identity, exact GitHub PR,
 head, base, target, requirements, selected IDs, original report/receipt digests,
 review/issue inputs and installed executable/helper paths and hashes. No ledger,
 migration or mutable approval flags are added. Original native requests, results,

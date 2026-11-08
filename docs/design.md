@@ -93,6 +93,14 @@ correction advances the same checkout; initial collection still checks its HEAD.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
+Explicit writer-worktree provisioning belongs to the existing task owner and its
+locks. Save the selected-input request before Git mutation, retain a unique
+worktree ownership marker, and reuse completed effects. Conflicting or incomplete
+resources remain available for inspection; recovery never resets or deletes them.
+Provisioning does not select a produced candidate or grant acceptance/release
+authority. The [owner contract](task-state.md#writer-worktree-provisioning) defines
+the supported tree/configuration inputs and conservative reconciliation.
+
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
 Mechanical integration uses the same schema-7 `factory.launch` lifecycle and real
 window/block identities. Its original worker owns a versioned execution receipt;

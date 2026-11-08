@@ -29,7 +29,7 @@ class OperatorView(unittest.TestCase):
         request = dict(role="backend", goal="Fix the supplied behavior", cwd=str(self.root),
                        command=[sys.executable, "private-command-argument"], instructions_sha256="a" * 64,
                        purpose="correction", inputs=dict(inputs))
-        self.record: dict = dict(schema_version=7, control_events=[], allowance_events=[], task="fixture", admission=dict(goal="Deliver the agreed change",
+        self.record: dict = dict(schema_version=8, control_events=[], allowance_events=[], provisioning=None, task="fixture", admission=dict(goal="Deliver the agreed change",
             repository=str(self.root), initial_candidate="a" * 40, acceptance=["requirements.md"],
             repository_identity=dict(common_dir=str(self.root / ".git"), repository_id="a" * 32),
             limits=dict(correction=1, investigation=1)), inputs=dict(inputs), hold="Waiting for scope decision",
@@ -273,7 +273,7 @@ class OperatorView(unittest.TestCase):
         request.pop("inputs")
         original_command = request["command"].copy()
         legacy["assignments"]["backend"].pop("result")
-        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events"):
+        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events", "provisioning"):
             legacy.pop(key)
         factory.save(self.path, legacy)
         assignment = self.snapshot()["tasks"][0]["assignments"][0]

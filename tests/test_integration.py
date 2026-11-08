@@ -258,7 +258,7 @@ class Integration(unittest.TestCase):
         self.assertIn("--release-evidence", original["request"]["command"])
         self.assertEqual(release_evidence.from_assignment(self.record, original), self.frozen)
 
-    def test_real_pane_lifecycle_and_ordinary_schema_seven_readers(self):
+    def test_real_pane_lifecycle_and_ordinary_schema_eight_readers(self):
         started = self.launch_integration()
         self.assertEqual(started["state"], "launched")
         record = factory.load_task(self.path)
@@ -268,7 +268,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((started["window_id"], started["block_id"]),
                          (assignment["window_id"], assignment["block_id"]))
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
-        self.assertEqual(factory.task_view(record)["schema_version"], 7)
+        self.assertEqual(factory.task_view(record)["schema_version"], 8)
         rex = factory.connect(record)
         EvidenceRex.integration_running = True
         try:
@@ -549,7 +549,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(result["delivery"]["acceptance"], "pending_native_judgment")
         self.assertEqual(result["delivery"]["publication"], "inapplicable")
         saved = factory.load_task(self.path)
-        self.assertEqual(saved["schema_version"], 7)
+        self.assertEqual(saved["schema_version"], 8)
         self.assertEqual(saved["assignments"]["qa"], original["assignments"]["qa"])
         self.assertEqual(saved["assignments"]["release"], original["assignments"]["release"])
         self.assertEqual(factory.task_view(saved)["allowances"], allowance)
