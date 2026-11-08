@@ -113,6 +113,9 @@ Filename regressions cover exact CR/LF names and destination filesystem case,
 Unicode and directory equivalence. A private name-only probe rejects aliases
 before intent; source validation rejects physical file aliases during recovery.
 Schema compatibility and these fixtures do not establish live delivery.
+Task schema 10 pins the Rex server instance each new assignment launched on so a
+server restart reports `lost` instead of a restored shell's `running`. Migration
+never invents that pin for existing assignments.
 
 On 2026-11-07, the optional Jev decision store evaluated the actual pending
 provisioning exception in shadow mode. Native discovery exposed only aliases;

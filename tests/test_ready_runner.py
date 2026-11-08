@@ -126,6 +126,16 @@ class ReadyRunner(unittest.TestCase):
     def states(self, result):
         return {(item["task"], item["id"]): item["state"] for item in result["jobs"]}
 
+    def launches(self):
+        """Rex windows ever created; finished tabs are tidied, so live windows undercount."""
+        return sum(call[0] == "new" or call[:2] == ("window", "new") for call in PlanRex.calls)
+
+    def keep_tabs(self):
+        """Keep finished tabs open so a test can vary their observed process afterwards."""
+        patcher = patch.object(factory, "tidy", return_value=dict(closed=[], running=[], session_closed=False))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def completed_writer(self, *, collect=True):
         job = self.job("implement", write=True, commit_message="feat(fixture): Deliver candidate")
         controller = self.controller(self.plan([job]))
@@ -254,7 +264,7 @@ class ReadyRunner(unittest.TestCase):
                 with self.assertRaisesRegex(factory.FactoryError, "Selected task inputs changed"):
                     self.handoff()
                 self.assertEqual(path.read_bytes(), saved)
-        self.assertEqual(len(PlanRex.sessions[0]["windows"]), 1)
+        self.assertEqual(self.launches(), 1)
 
     def test_from_writer_hold_refuses_selection_and_preserves_controls(self):
         self.completed_writer()
@@ -276,6 +286,7 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.load_task(path)["hold"], "Operator hold")
 
     def test_from_writer_other_process_must_be_observed_terminal_even_with_result(self):
+        self.keep_tabs()
         # Launch before the writer moves HEAD; retain a completed result with a live process.
         other = self.controller(self.plan([self.job("other")]))
         self.tick(other)
@@ -313,6 +324,7 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
 
     def test_from_writer_failed_or_unknown_source_process_refuses_saved_success(self):
+        self.keep_tabs()
         record = self.completed_writer()
         key = (record["session_id"], record["assignments"]["implement"]["block_id"])
         for state in ("failed", "running", "unknown"):
@@ -372,7 +384,7 @@ class ReadyRunner(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "original events"):
             self.handoff()
         self.assertEqual(factory.load_task(path), record)
-        self.assertEqual(len(PlanRex.sessions[0]["windows"]), 1)
+        self.assertEqual(self.launches(), 1)
 
     def test_from_writer_invalid_verification_plan_refuses_without_effects(self):
         self.completed_writer()
@@ -511,7 +523,7 @@ class ReadyRunner(unittest.TestCase):
         self.finish("task", "first")
         result = self.tick(self.controller(plan))
         self.assertEqual(self.states(result)[("task", "second")], "running")
-        self.assertEqual(len(PlanRex.sessions[0]["windows"]), 2)
+        self.assertEqual(self.launches(), 2)
 
     def test_uncertain_launch_reconciles_same_pane_and_reserves_a_slot(self):
         PlanRex.fail_after_create = True
@@ -628,6 +640,84 @@ class ReadyRunner(unittest.TestCase):
         result = self.tick(controller)
         self.assertEqual(self.states(result), {("task", "first"): "blocked", ("other", "first"): "running"})
         self.assertEqual(result["active_workers"], 1)
+
+    def restart_rex(self):
+        PlanRex.instance = "restarted-instance"
+        self.addCleanup(setattr, PlanRex, "instance", "test-instance")
+
+    def test_rex_restart_collects_completed_receipt_and_advances(self):
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
+        self.tick(controller)
+        self.finish("task", "first")
+        record = factory.load_task(self.directory / "task.json")
+        # The restored pane is a fresh login shell with no exit status.
+        PlanRex.processes[(record["session_id"], record["assignments"]["first"]["block_id"])] = "running"
+        self.restart_rex()
+        result = self.tick(controller)
+        self.assertEqual(self.states(result), {("task", "first"): "approved", ("task", "second"): "running"})
+        self.assertEqual(result["metrics"]["collected"], 1)
+        second = factory.load_task(self.directory / "task.json")["assignments"]["second"]
+        self.assertEqual(second["rex_instance"], "restarted-instance")
+
+    def test_rex_restart_without_receipt_frees_the_slot_and_blocks_dependents(self):
+        self.admit("other")
+        plan = self.plan([self.job(), self.job("second", after=["first"]), self.job(task="other")], workers=1, reserve=0)
+        controller = self.controller(plan)
+        first = self.tick(controller)
+        self.assertEqual(first["active_workers"], 1)
+        self.restart_rex()
+        result = self.tick(controller)
+        states = self.states(result)
+        self.assertEqual(states[("task", "first")], "blocked")
+        self.assertEqual(states[("task", "second")], "blocked")
+        self.assertEqual(states[("other", "first")], "running")
+        self.assertEqual(result["active_workers"], 1)
+
+    def test_collected_tabs_close_and_the_idle_session_ends(self):
+        controller = self.controller(self.plan([self.job()]))
+        self.tick(controller)
+        self.finish("task", "first")
+        result = self.tick(controller)
+        self.assertEqual(self.states(result), {("task", "first"): "approved"})
+        self.assertEqual(result["metrics"]["tabs_closed"], 1)
+        self.assertEqual(result["tidy_issues"], [])
+        self.assertEqual(PlanRex.sessions, [])
+        record = factory.load_task(self.directory / "task.json")
+        self.assertIsNone(record["session_id"])
+        closed = record["assignments"]["first"]["closed"]
+        self.assertEqual((closed["state"], Path(closed["capture"]).read_text()), ("exited", "output of block-1\n"))
+        again = self.tick(controller)
+        self.assertEqual(again["result"], "complete")
+        self.assertEqual(again["metrics"]["tabs_closed"], 1)
+
+    def test_tidy_failure_is_reported_without_blocking_work(self):
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
+        self.tick(controller)
+        self.finish("task", "first")
+        with patch.object(factory, "tidy", side_effect=factory.FactoryError("Fixture tidy failure")):
+            result = self.tick(controller)
+        self.assertEqual(self.states(result), {("task", "first"): "approved", ("task", "second"): "running"})
+        self.assertEqual(result["tidy_issues"], [dict(task="task", reason="Fixture tidy failure")])
+        self.assertEqual(result["issues"], [])
+
+    def test_abandoned_launch_frees_its_slot_and_blocks_dependents(self):
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])], workers=1, reserve=0))
+        original = PlanRex.call
+        def reject(rex, *args, **kwargs):
+            if args[0] == "new":
+                raise factory.FactoryError("Error: unknown flag: --focus")
+            return original(rex, *args, **kwargs)
+        with patch.object(PlanRex, "call", reject):
+            first = self.tick(controller)
+        self.assertEqual(first["active_workers"], 1)
+        self.assertIn("factory.py abandon", self.tick(controller)["jobs"][0]["reason"])
+        with factory.task_lock(self.directory, "task") as path:
+            record = factory.load_task(path)
+            factory.abandon_launch(path, factory.connect(record), assignment_id="first", reason="Rex rejected an unknown flag")
+        result = self.tick(controller)
+        self.assertEqual(self.states(result), {("task", "first"): "abandoned", ("task", "second"): "blocked"})
+        self.assertEqual(result["active_workers"], 0)
+        self.assertEqual(result["result"], "needs_action")
 
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))

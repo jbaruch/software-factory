@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.0 — Unpublished
+
+- Close finished Rex tabs automatically. Exited, failed and lost assignment tabs keep their final process observation and terminal output in the task record, then close; `status` and `capture` answer from that retained copy. The ready runner tidies every tick, provider collect commands close their own tab, `factory.py tidy` sweeps a task or state directory, and an empty task session is killed so the next launch opens a fresh one.
+- Report `lost` instead of `running` after a Rex server restart, which kills every pane process and restores the panes as fresh shells. New assignments pin the server instance (task schema 10); lost is terminal, frees runner slots, reaches integration's read-only recovery and lets collection defer to the worker's completed receipt.
+- Tolerate operator tab changes. Splitting, renaming, moving or closing factory panes, adding tabs to a factory session or killing it no longer blocks the task; a missing pane is `lost` for that assignment only.
+- Add `factory.py abandon` for launches Rex rejected outright, after confirming no pane carries the launch marker, so a pending launch can no longer wedge a task.
+- Decode Rex replies with the strict JSON decoder used for every other factory input.
+
 ## 0.16.1 — Unpublished
 
 - Decode observed Claude 2.1.319 `system/thinking_tokens` nonnegative integer estimates as raw inspection metadata. Preserve strict lifecycle/collection checks and final actual usage; failed original assignments remain failed. Add fixed offline decoder and fake worker/collection regressions.

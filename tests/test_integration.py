@@ -287,7 +287,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((started["window_id"], started["block_id"]),
                          (assignment["window_id"], assignment["block_id"]))
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
-        self.assertEqual(factory.task_view(record)["schema_version"], 9)
+        self.assertEqual(factory.task_view(record)["schema_version"], 10)
         rex = factory.connect(record)
         EvidenceRex.integration_running = True
         try:
@@ -643,7 +643,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(result["delivery"]["acceptance"], "pending_native_judgment")
         self.assertEqual(result["delivery"]["publication"], "inapplicable")
         saved = factory.load_task(self.path)
-        self.assertEqual(saved["schema_version"], 9)
+        self.assertEqual(saved["schema_version"], 10)
         self.assertEqual(saved["assignments"]["qa"], original["assignments"]["qa"])
         self.assertEqual(saved["assignments"]["release"], original["assignments"]["release"])
         self.assertEqual(factory.task_view(saved)["allowances"], allowance)
@@ -810,6 +810,25 @@ class Integration(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.integrate()
         self.assertEqual(self.integrate()["state"], "merge_outcome_unknown")
+        self.assertEqual(self.transport.merges, [])
+
+    def test_rex_restart_after_merge_intent_reaches_read_only_recovery(self):
+        def stop(identity):
+            raise KeyboardInterrupt("Crash after durable intent")
+        self.transport.merge = stop
+        with self.assertRaises(KeyboardInterrupt):
+            self.integrate()
+        # Rex restores the killed pane as a fresh login shell with no exit status.
+        EvidenceRex.integration_running = True
+        self.addCleanup(setattr, EvidenceRex, "integration_running", False)
+        options = dict(assignment_id="merge", pr=self.transport.identity["url"], review="release", required=["qa"],
+                       gh=Path("/installed/gh"), scripts=Path("/installed/acr__jbaruch__coding-policy__release"),
+                       transport=self.transport)
+        self.assertEqual(integration.integrate(self.path, **options)["state"], "launched")
+        EvidenceRex.instance = "restarted-instance"
+        self.addCleanup(setattr, EvidenceRex, "instance", "test-instance")
+        recovered = integration.integrate(self.path, **options)
+        self.assertEqual(recovered["state"], "merge_outcome_unknown")
         self.assertEqual(self.transport.merges, [])
 
     def test_interrupted_pre_effect_watch_finishes_held_and_allows_reassessment(self):
@@ -1043,6 +1062,7 @@ class Integration(unittest.TestCase):
         legacy["schema_version"] = 8
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         factory.save(self.path, legacy)
         artifacts = {}
         for assignment in original["assignments"].values():
@@ -1054,7 +1074,7 @@ class Integration(unittest.TestCase):
                     artifacts[path] = path.read_bytes()
         with patch.object(factory, "status", side_effect=AssertionError("Migration cannot infer collection")):
             migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 9)
+        self.assertEqual(migrated["schema_version"], 10)
         self.assertEqual({key: value for key, value in migrated.items() if key not in ("schema_version", "assignments")},
             {key: value for key, value in legacy.items() if key not in ("schema_version", "assignments")})
         for key, assignment in migrated["assignments"].items():
@@ -1065,7 +1085,7 @@ class Integration(unittest.TestCase):
             recollected = factory.collect_codex(self.path, "legacy-recollected", None, migrated,
                 migrated["assignments"]["legacy-recollected"])
         self.assertEqual(recollected["assignments"]["legacy-recollected"],
-            original["assignments"]["legacy-recollected"])
+            {key: value for key, value in original["assignments"]["legacy-recollected"].items() if key != "rex_instance"})
         removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
         self.assertEqual(removed.returncode, 0, removed.stderr)
         integration.collected_native("legacy-recollected", recollected, recollected["assignments"]["legacy-recollected"])

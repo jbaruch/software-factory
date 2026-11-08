@@ -61,14 +61,24 @@ class OperatorView(unittest.TestCase):
         window = dict(window_id="fixture-window", label="backend-backend-00000000",
                       layers=[dict(blocks=[dict(block_id="fixture-block")])])
         session: dict = dict(session_id="fixture-session", label="factory-fixture-00000000", windows=[window])
+        def present():
+            # Like Rex, block reads fail once the pinned session or block is gone.
+            if session["session_id"] != "fixture-session" or not any(
+                    block["block_id"] == "fixture-block" for window in session["windows"]
+                    for layer in window["layers"] for block in layer["blocks"]):
+                raise factory.FactoryError('block target "fixture-block" not found')
         def call(*args, **kwargs):
             if args == ("whoami", "--json"):
-                return dict(host_id="fixture-host")
+                return dict(host_id="fixture-host", instance_id="fixture-instance")
             if args == ("session", "inspect", "fixture-session", "--json"):
                 return session
+            if args == ("ls", "--json"):
+                return dict(sessions=[dict(session_id=session["session_id"], label=session["label"])])
             if args == ("block", "call", "-s", "fixture-session", "-b", "fixture-block", "process"):
+                present()
                 return process if process is not None else dict(child=dict(pid=123, argv="private-argv"))
             if args == ("capture", "-s", "fixture-session", "-b", "fixture-block", "--trim", "--unwrap") and kwargs == dict(raw=True):
+                present()
                 return output
             raise AssertionError("Unexpected Rex operation")
         return Mock(call=Mock(side_effect=call)), session
@@ -274,6 +284,7 @@ class OperatorView(unittest.TestCase):
         original_command = request["command"].copy()
         legacy["assignments"]["backend"].pop("result")
         legacy["assignments"]["backend"].pop("native_collected")
+        legacy["assignments"]["backend"].pop("rex_instance", None)
         for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events", "provisioning"):
             legacy.pop(key)
         factory.save(self.path, legacy)
@@ -325,6 +336,54 @@ class OperatorView(unittest.TestCase):
         assignment = self.snapshot(live=True, connect=lambda record: rex)["tasks"][0]["assignments"][0]
         self.assertEqual(assignment["process"]["state"], "unavailable")
         self.assertIsNone(assignment["process"]["observed_at"])
+
+    def test_rex_restart_is_lost_not_a_running_restored_shell(self):
+        self.record["assignments"]["backend"]["rex_instance"] = "launch-instance"
+        factory.save(self.path, self.record)
+        rex, _ = self.fake_rex(process=dict(child=dict(pid=1, path="/bin/zsh")))
+        assignment = self.snapshot(live=True, connect=lambda record: rex)["tasks"][0]["assignments"][0]
+        self.assertEqual(assignment["process"]["state"], "lost")
+        self.assertIn("restarted", assignment["process"]["error"])
+        self.assertIsNone(assignment["process"]["exit_code"])
+        self.assertIn("Lost", dashboard.render(self.snapshot(live=True, connect=lambda record: rex)))
+
+    def close_tab(self, *, capture=True):
+        path = self.root / "fixture.backend.capture.txt"
+        if capture:
+            factory.save(path, "Retained <terminal> output\n")
+        self.record["assignments"]["backend"]["closed"] = dict(
+            state="exited" if capture else "lost", exit=dict(exit_code=0) if capture else None,
+            reason=None if capture else "Rex server restarted after launch", session_id="fixture-session",
+            capture=str(path) if capture else None, at=900)
+        factory.save(self.path, self.record)
+
+    def test_tidied_tab_shows_retained_output_and_status_without_rex(self):
+        self.close_tab()
+        with patch.object(factory, "Rex", side_effect=AssertionError("A tidied tab needs no Rex")):
+            detail = dashboard.pane_detail(self.root, "fixture", "backend")
+        self.assertIsNone(detail["error"])
+        self.assertEqual(detail["output"], "Retained <terminal> output\n")
+        self.assertEqual(detail["captured_at"], 900)
+        self.assertEqual((detail["process"]["state"], detail["process"]["closed"]), ("exited", True))
+        unavailable = Mock(call=Mock(side_effect=AssertionError("A tidied tab needs no Rex")))
+        view = self.snapshot(live=True, connect=lambda record: unavailable)
+        self.assertEqual(view["tasks"][0]["assignments"][0]["process"]["state"], "exited")
+        self.assertIn("Exited successfully (tab closed)", dashboard.render(view))
+
+    def test_tidied_tab_keeps_the_session_it_lived_in(self):
+        self.close_tab()
+        self.record.update(session_id=None, session_label="factory-fixture-11111111")
+        factory.save(self.path, self.record)
+        detail = dashboard.pane_detail(self.root, "fixture", "backend")
+        self.assertEqual(detail["pane"]["session_id"], "fixture-session")
+        self.assertEqual(detail["output"], "Retained <terminal> output\n")
+
+    def test_tidied_tab_without_output_explains_why(self):
+        self.close_tab(capture=False)
+        detail = dashboard.pane_detail(self.root, "fixture", "backend")
+        self.assertEqual(detail["process"]["state"], "lost")
+        self.assertIn("without retained output: Rex server restarted", detail["error"])
+        self.assertIsNone(detail["output"])
 
     def test_render_accepts_old_static_snapshots_and_escapes_new_fields(self):
         view = self.snapshot()
@@ -458,29 +517,42 @@ class OperatorView(unittest.TestCase):
         self.assertIsNotNone(dashboard.pane_detail(self.root, "fixture", "backend", connect=connect)["error"])
         connect.assert_not_called()
 
-    def test_pane_refuses_foreign_host_stale_session_window_and_block(self):
-        for mismatch in ("host", "session", "session-label", "window", "window-label", "block", "missing-window"):
+    def test_pane_refuses_foreign_host_and_session_identity(self):
+        for mismatch in ("host", "session-label"):
             rex, session = self.fake_rex()
             if mismatch == "host":
                 original = rex.call.side_effect
                 rex.call.side_effect = lambda *a, **k: dict(host_id="foreign") if a[0] == "whoami" else original(*a, **k)
-            elif mismatch == "session":
-                session["session_id"] = "foreign"
-            elif mismatch == "session-label":
-                session["label"] = "foreign"
-            elif mismatch == "window":
-                session["windows"][0]["window_id"] = "foreign"
-            elif mismatch == "window-label":
-                session["windows"][0]["label"] = "foreign"
-            elif mismatch == "block":
-                session["windows"][0]["layers"][0]["blocks"][0]["block_id"] = "foreign"
             else:
-                session["windows"] = []
+                session["label"] = "foreign"
             with self.subTest(mismatch=mismatch), patch.object(factory, "Rex", return_value=rex):
                 detail = dashboard.pane_detail(self.root, "fixture", "backend")
                 self.assertIsNotNone(detail["error"])
                 self.assertIsNone(detail["output"])
-                self.assertTrue(all(call.args[0] in ("whoami", "session") for call in rex.call.call_args_list))
+                self.assertTrue(all(call.args[0] in ("whoami", "session", "ls") for call in rex.call.call_args_list))
+
+    def test_pane_follows_renamed_or_moved_tabs_and_never_captures_a_closed_one(self):
+        for change in ("window", "window-label"):
+            rex, session = self.fake_rex()
+            session["windows"][0]["window_id" if change == "window" else "label"] = "operator-" + change
+            with self.subTest(change=change), patch.object(factory, "Rex", return_value=rex):
+                detail = dashboard.pane_detail(self.root, "fixture", "backend")
+                self.assertIsNone(detail["error"])
+                self.assertEqual(detail["output"], "Original <terminal> & output\n")
+        for change in ("session", "block", "missing-window"):
+            rex, session = self.fake_rex()
+            if change == "session":
+                session["session_id"] = "foreign"
+            elif change == "block":
+                session["windows"][0]["layers"][0]["blocks"][0]["block_id"] = "foreign"
+            else:
+                session["windows"] = []
+            with self.subTest(change=change), patch.object(factory, "Rex", return_value=rex):
+                detail = dashboard.pane_detail(self.root, "fixture", "backend")
+                self.assertEqual(detail["process"]["state"], "lost")
+                self.assertIn("closed outside the factory", detail["error"])
+                self.assertIsNone(detail["output"])
+                self.assertFalse(any(call.args[0] == "capture" for call in rex.call.call_args_list))
 
     def test_pane_unavailable_transport_and_capture_never_expose_errors(self):
         for failure in (factory.FactoryError("private stderr credentials argv"), OSError("private path"),

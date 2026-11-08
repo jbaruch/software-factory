@@ -406,6 +406,7 @@ class ClaudeWorker(unittest.TestCase):
         self.spawns = []
         self.probes = []
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
+        self.rex.instance_id = FakeRex.instance  # As connect() records it.
 
     def git(self, *command, directory=None):
         result = subprocess.run([factory.git_binary(), "-C", str(directory or self.base), *command],
@@ -438,6 +439,19 @@ class ClaudeWorker(unittest.TestCase):
         self.assignment=self.record["assignments"]["inspect"]
         with patch.object(factory,"status",return_value=dict(state="exited")):
             return factory.collect_claude(self.path,"inspect",self.rex,self.record,self.assignment)
+
+    def test_lost_pane_defers_to_the_completed_receipt(self):
+        self.record=factory.load_task(self.path)
+        self.assignment=self.record["assignments"]["inspect"]
+        lost=dict(state="lost",reason="Rex server restarted after launch")
+        with patch.object(factory,"status",return_value=lost),self.assertRaises(factory.FactoryError):
+            factory.collect_claude(self.path,"inspect",self.rex,self.record,self.assignment)
+        self.assertEqual(self.execute()["state"],"completed")
+        self.record=factory.load_task(self.path)
+        self.assignment=self.record["assignments"]["inspect"]
+        with patch.object(factory,"status",return_value=lost):
+            result=factory.collect_claude(self.path,"inspect",self.rex,self.record,self.assignment)
+        self.assertTrue(result["assignments"]["inspect"]["native_collected"])
 
     def test_execute_collect_reconnect_and_metadata(self):
         self.assertEqual(self.execute()["state"],"completed")

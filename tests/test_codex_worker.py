@@ -1536,6 +1536,7 @@ class NativeResults(unittest.TestCase):
         if execute:
             self.execute()
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
+        self.rex.instance_id = FakeRex.instance  # As connect() records it.
         return record, assignment
 
     def test_collection_rejects_a_replacement_linked_worktree_at_the_same_path(self):
@@ -1897,6 +1898,7 @@ class NativeResults(unittest.TestCase):
         del command[index:index + 2]
         record["schema_version"] = 2
         del assignment["native_collected"]
+        assignment.pop("rex_instance", None)
         del record["control_events"]
         del record["provisioning"]
         del record["allowance_events"]

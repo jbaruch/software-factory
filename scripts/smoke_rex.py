@@ -1,4 +1,4 @@
-"""Explicit live check: creates one Rex session and two harmless specialist tabs."""
+"""Explicit live check: creates one Rex session and two harmless specialist tabs, then tidies them."""
 import argparse
 import json
 from pathlib import Path
@@ -50,7 +50,19 @@ def main():
         results.append(current)
     if results[0]["session_id"] != results[1]["session_id"] or results[0]["block_id"] == results[1]["block_id"]:
         raise RuntimeError("Expected one task session with distinct specialist blocks")
-    print(json.dumps(dict(result="passed", state_dir=str(state), assignments=results), indent=2))
+    tidied = json.loads(call("tidy", "--task", task))[task]
+    if "error" in tidied or tidied["running"]:
+        raise RuntimeError("Tidy did not close both finished tabs: " + json.dumps(tidied))
+    live = json.loads(subprocess.check_output([args.rex, "--autostart=false", "-S", args.server, "ls", "--json"], text=True))
+    if any(item.get("session_id") == results[0]["session_id"] for item in live.get("sessions", [])):
+        raise RuntimeError("Tidy left the task session open: " + results[0]["session_id"])
+    for role, original in zip(("qa", "security"), results):
+        retained = json.loads(call("status", "--task", task, "--id", role))
+        if retained.get("closed") is not True or retained["state"] != "exited" or retained["block_id"] != original["block_id"]:
+            raise RuntimeError("Tidied tab lost its final status: " + json.dumps(retained))
+        if "NATIVE_REX_OK role=" + role not in call("capture", "--task", task, "--id", role):
+            raise RuntimeError("Tidied tab lost its terminal output: " + role)
+    print(json.dumps(dict(result="passed", state_dir=str(state), assignments=results, tidy=tidied), indent=2))
 
 
 if __name__ == "__main__":

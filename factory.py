@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parent
 GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
+# Process states that never change again; only these assignment tabs are tidied.
+TERMINAL_STATES = ("exited", "failed", "lost")
 REPOSITORY_MARKER = "software-factory-repository.json"
 GIT_IDENTITY_VARIABLES = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
                           "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
@@ -33,6 +35,8 @@ GIT_ROUTING_VARIABLES = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDE
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
     "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_IMPLICIT_WORK_TREE",
     "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_QUARANTINE_PATH"}
+# Assignment window markers: "<role>-<assignment>-<8 hex>".
+FACTORY_WINDOW = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{8}")
 GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatversion",
     "extensions.objectformat", "extensions.refstorage", "extensions.worktreeconfig"}
 
@@ -84,6 +88,7 @@ def decode_json(value, *, object_pairs_hook=unique_object):
 class Rex:
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
+        self.instance_id: str | None = None  # Server instance observed by connect(); fetched on demand.
 
     def call(self, *args, raw=False) -> Any:
         try:
@@ -99,8 +104,8 @@ class Rex:
         if raw:
             return result.stdout
         try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
+            return decode_json(result.stdout)
+        except ValueError:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 
@@ -158,10 +163,13 @@ def task_lock(directory, task, *, wait=False):
         os.close(fd)
 
 
+def new_session_label(task):
+    return "factory-" + task + "-" + uuid.uuid4().hex[:8]
+
+
 def new_task(task) -> dict:
-    return dict(schema_version=9, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
-                session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
-                session_id=None, assignments={})
+    return dict(schema_version=10, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
+                session_label=new_session_label(task), session_id=None, assignments={})
 
 
 def read_record(path, *, private=False, max_bytes=None):
@@ -201,7 +209,7 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (version < 6 or version == 7) and "provisioning" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
@@ -263,7 +271,7 @@ def load_task(path) -> dict:
     earlier, labels, window_ids, block_ids = set(), set(), set(), set()
     for assignment_id, assignment in record["assignments"].items():
         if (not isinstance(assignment, dict) or not isinstance(assignment.get("request"), dict)
-                or assignment.get("state") not in ("launching", "launched")
+                or assignment.get("state") not in ("launching", "launched", "abandoned")
                 or (admission is not None and assignment["request"].get("purpose")
                     not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
@@ -294,12 +302,20 @@ def load_task(path) -> dict:
                 or any(not isinstance(item, str) or item not in earlier
                        for item in request["dependencies"])):
             raise FactoryError("Invalid assignment dependencies; restore the original task record")
-        if assignment["state"] == "launched" and (record["session_id"] is None
+        if assignment["state"] == "launched" and ((record["session_id"] is None and assignment.get("closed") is None)
                 or any(not isinstance(assignment.get(key), str) or not assignment[key]
                        for key in ("window_id", "block_id"))):
             raise FactoryError("Missing launched pane identity; restore the original task record before continuing")
         if assignment["state"] == "launching" and any(key in assignment for key in ("window_id", "block_id")):
             raise FactoryError("Pending launch has pane IDs; restore the original task record before reconciliation")
+        if (assignment["state"] == "abandoned") != ("abandoned" in assignment) or (
+                assignment["state"] == "abandoned" and (
+                    version < 10 or any(key in assignment for key in ("window_id", "block_id", "closed"))
+                    or not isinstance(assignment["abandoned"], dict) or set(assignment["abandoned"]) != {"reason", "at"}
+                    or not isinstance(assignment["abandoned"]["reason"], str) or not assignment["abandoned"]["reason"].strip()
+                    or type(assignment["abandoned"]["at"]) not in (int, float)
+                    or not 0 <= assignment["abandoned"]["at"] <= 253402300799)):
+            raise FactoryError("Invalid abandoned launch record; restore the original task record")
         if assignment["window_label"] in labels or (assignment["state"] == "launched" and (
                 assignment["window_id"] in window_ids or assignment["block_id"] in block_ids)):
             raise FactoryError("Duplicate assignment pane identity; restore the original task record")
@@ -327,6 +343,15 @@ def load_task(path) -> dict:
             assignment["native_collected"] = False
         if type(assignment.get("native_collected")) is not bool or (assignment["native_collected"] and assignment["result"] is None):
             raise FactoryError("Invalid native collection provenance; restore the original task record")
+        if version < 10 and "rex_instance" in assignment:
+            raise FactoryError("Legacy assignment has newer fields; restore its schema version before continuing")
+        if "rex_instance" in assignment and (not isinstance(assignment["rex_instance"], str)
+                                             or not assignment["rex_instance"].strip()):
+            raise FactoryError("Invalid Rex server instance; restore the original task record")
+        if version < 10 and "closed" in assignment:
+            raise FactoryError("Legacy assignment has newer fields; restore its schema version before continuing")
+        if "closed" in assignment and not valid_closed(assignment):
+            raise FactoryError("Invalid closed tab record; restore the original task record")
         result = assignment["result"]
         if result is not None and (not isinstance(result, dict)
                 or assignment["state"] != "launched"
@@ -366,13 +391,30 @@ def load_task(path) -> dict:
     if version < 7:
         record["allowance_events"] = []
     allowance_limits(record)
-    if version < 9:
-        record["schema_version"] = 9
+    if version < 10:
+        record["schema_version"] = 10
         try:
             save(path, record)
         except OSError:
             raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
     return record
+
+
+def valid_closed(assignment):
+    """A tidied tab keeps its final process observation and any retained output."""
+    closed = assignment["closed"]
+    return (assignment["state"] == "launched" and isinstance(closed, dict)
+            and set(closed) == {"state", "exit", "reason", "session_id", "capture", "at"}
+            and closed["state"] in TERMINAL_STATES
+            and (closed["exit"] is None or (isinstance(closed["exit"], dict)
+                                            and type(closed["exit"].get("exit_code")) is int))
+            and (closed["exit"] is not None) == (closed["state"] != "lost")
+            and (closed["reason"] is None if closed["state"] != "lost"
+                 else isinstance(closed["reason"], str) and bool(closed["reason"].strip()))
+            and isinstance(closed["session_id"], str) and bool(closed["session_id"])
+            and (closed["capture"] is None or (isinstance(closed["capture"], str)
+                                               and Path(closed["capture"]).is_absolute()))
+            and type(closed["at"]) in (int, float) and 0 <= closed["at"] <= 253402300799)
 
 
 def validate_control_events(record):
@@ -1102,29 +1144,68 @@ def connect(record, binary=None, server=None):
     who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
     if who["host_id"] != connection["host_id"]:
         raise FactoryError("Connected Rex host differs from the recorded task host")
-    if record["session_id"] is not None:
-        view = check_session(rex, record, record["session_id"])
-        for assignment in record["assignments"].values():
-            if assignment["state"] == "launched":
-                window_id, block_id = assignment_pane(view, assignment)
-                if (window_id, block_id) != (assignment["window_id"], assignment["block_id"]):
-                    raise FactoryError("Rex pane identity differs from the task; inspect the original assignment before continuing")
+    rex.instance_id = rex_object(who, strings=("instance_id",))["instance_id"]
+    # Validate the pinned session if it still exists. Individual panes are checked
+    # only when a command acts on them, so operator tab changes never block a task.
+    session_view(rex, record)
     return rex
 
 
+def session_view(rex, record):
+    """The pinned task session, or None once it no longer exists in Rex."""
+    session_id = record["session_id"]
+    if session_id is None:
+        return None
+    try:
+        return check_session(rex, record, session_id)
+    except FactoryError:
+        if any(item["session_id"] == session_id for item in rex_sessions(rex)):
+            raise
+        return None
+
+
+def rex_sessions(rex):
+    sessions = rex_object(rex.call("ls", "--json")).get("sessions", [])  # Rex omits empty lists.
+    if not isinstance(sessions, list):
+        raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+    for item in sessions:
+        rex_object(item, strings=("session_id",))
+    return sessions
+
+
+def view_windows(view):
+    windows = view.get("windows", [])  # Rex omits the list once a session has no windows.
+    if not isinstance(windows, list):
+        raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+    return windows
+
+
+def view_blocks(view):
+    return {block["block_id"] for window in view_windows(view)
+            for layer in window["layers"] for block in layer["blocks"]}
+
+
 def check_session(rex, record, session_id):
+    """Validate session identity; operator tabs, splits, renames and closures are tolerated."""
     view = rex_object(rex.call("session", "inspect", session_id, "--json"),
-                      strings=("session_id", "label"), lists=("windows",))
+                      strings=("session_id", "label"))
     if view["session_id"] != session_id:
         raise FactoryError("Rex session ID differs; inspect the pinned session before continuing")
     if view.get("label") != record["session_label"]:
         raise FactoryError("Rex session identity differs from the task; inspect the original session before continuing")
+    owned = {item["window_label"] for item in record["assignments"].values()}
     labels, ids, blocks = set(), set(), set()
-    for window in view["windows"]:
-        rex_object(window, strings=("window_id", "label"), lists=("layers",))
-        if window["label"] in labels or window["window_id"] in ids:
+    for window in view_windows(view):
+        rex_object(window, strings=("window_id",), lists=("layers",))
+        label = window.get("label")
+        if label is not None and not isinstance(label, str):
+            raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
+        if window["window_id"] in ids or (label in owned and label in labels):
             raise FactoryError("Duplicate Rex window identity; inspect the original session before continuing")
-        labels.add(window["label"])
+        if label is not None and label not in owned and FACTORY_WINDOW.fullmatch(label):
+            # Operator tabs are fine; an unrecorded factory marker means lost task history.
+            raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
+        labels.add(label)
         ids.add(window["window_id"])
         for layer in window["layers"]:
             rex_object(layer, lists=("blocks",))
@@ -1133,10 +1214,6 @@ def check_session(rex, record, session_id):
                 if block["block_id"] in blocks:
                     raise FactoryError("Duplicate Rex block identity; inspect the original session before continuing")
                 blocks.add(block["block_id"])
-    expected = {item["window_label"] for item in record["assignments"].values()}
-    required = {item["window_label"] for item in record["assignments"].values() if item["state"] == "launched"}
-    if not required <= labels <= expected:
-        raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
     return view
 
 
@@ -1149,7 +1226,8 @@ def rex_object(value, *, strings=(), lists=()):
 
 
 def assignment_pane(view, assignment):
-    windows = [item for item in view.get("windows", [])
+    """The exact pane of a launch that was just created or is being reconciled."""
+    windows = [item for item in view_windows(view)
                if item.get("label") == assignment["window_label"]]
     blocks = [block for window in windows for layer in window.get("layers", [])
               for block in layer.get("blocks", [])]
@@ -1161,19 +1239,42 @@ def assignment_pane(view, assignment):
     return window_id, block_id
 
 
+ABANDON_HINT = ". If Rex rejected the launch, record that with factory.py abandon --task TASK --id ID --reason TEXT"
+
+
+def abandon_launch(path, rex, *, assignment_id, reason) -> dict:
+    """Record the operator's decision that a pending launch never created its pane."""
+    record = load_task(path)
+    assignment = record["assignments"].get(assignment_id)
+    if assignment is None or assignment["state"] != "launching":
+        raise FactoryError("Only a pending launch can be abandoned; inspect the assignment with status")
+    if not isinstance(reason, str) or not reason.strip():
+        raise FactoryError("Supply the nonempty reason the launch is known not to have happened")
+    if record["session_id"] is None:
+        if any(item.get("label") == record["session_label"] for item in rex_sessions(rex)):
+            raise FactoryError("The pending task session exists; reconcile the launch with status instead")
+    else:
+        view = session_view(rex, record)
+        if view is not None and any(item.get("label") == assignment["window_label"] for item in view_windows(view)):
+            raise FactoryError("A pane with this launch marker exists; reconcile the launch with status instead")
+    assignment.update(state="abandoned", abandoned=dict(reason=reason.strip(), at=time.time()))
+    save(path, record)
+    return record
+
+
 def reconcile(rex, record, assignment):
     """Read back a uniquely labeled pending launch; never relaunch an unknown one."""
     session_id = record.get("session_id")
     if not session_id:
-        sessions = rex_object(rex.call("ls", "--json"), lists=("sessions",))["sessions"]
-        for item in sessions:
-            rex_object(item, strings=("session_id",))
-        matches = [item for item in sessions if item.get("label") == record["session_label"]]
+        matches = [item for item in rex_sessions(rex) if item.get("label") == record["session_label"]]
         if len(matches) != 1:
             raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
-                               + record["session_label"])
+                               + record["session_label"] + ABANDON_HINT)
         session_id = matches[0]["session_id"]
     view = check_session(rex, record, session_id)
+    if not any(item.get("label") == assignment["window_label"] for item in view_windows(view)):
+        raise FactoryError("Launch outcome unknown; no command was retried. Inspect Rex for "
+                           + assignment["window_label"] + ABANDON_HINT)
     window_id, block_id = assignment_pane(view, assignment)
     record["session_id"] = session_id
     assignment.update(window_id=window_id, block_id=block_id, state="launched")
@@ -1288,6 +1389,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
+        if existing["state"] == "abandoned":
+            raise FactoryError("Assignment was abandoned after a rejected launch; use a new explicit ID")
         if existing["request"] != request:
             raise FactoryError("Assignment ID already has different inputs; use a new explicit ID")
         rex = connect(record, binary, server)
@@ -1298,7 +1401,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if record["hold"] is not None:
         raise FactoryError("Task is paused: " + record["hold"] + "; use resume before new launches")
     if any(item["state"] == "launching" for item in record["assignments"].values()):
-        raise FactoryError("Reconcile the existing pending assignment with status before another launch")
+        raise FactoryError("Reconcile the existing pending assignment with status before another launch, "
+                           "or abandon it if Rex rejected that launch")
     for dependency in request.get("dependencies", []):
         if dependency not in record["assignments"] or dependency == assignment_id:
             raise FactoryError("Dependency must name an earlier assignment in this task: " + dependency)
@@ -1333,13 +1437,17 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         request["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
     if record["rex"] is not None:
         rex = connect(record, binary, server)
+        if record["session_id"] is not None and session_view(rex, record) is None:
+            # Every pane of a vanished session is lost; keep that, then open a new session.
+            tidy(path, rex, record)
     else:
         if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
                 or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
             raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
         rex = Rex(str(Path(binary).resolve()), server)
-        who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
+        who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
+        rex.instance_id = who["instance_id"]
     brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
@@ -1355,7 +1463,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, native_collected=False, brief=str(brief_path),
-                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
+                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8],
+                            rex_instance=current_instance(rex))
     record["assignments"][assignment_id] = assignment
     save(path, record)
     options = ["--cwd", cwd, "--keep-open", "--shell=none", "--json", "--", *argv]
@@ -1387,18 +1496,114 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     return record, assignment
 
 
-def status(rex, record, assignment):
-    process = rex.call("block", "call", "-s", record["session_id"],
-                       "-b", assignment["block_id"], "process")
+def current_instance(rex):
+    """The connected Rex server instance; a restart replaces it and every original process."""
+    if vars(rex).get("instance_id") is None:
+        rex.instance_id = rex_object(rex.call("whoami", "--json"), strings=("instance_id",))["instance_id"]
+    return rex.instance_id
+
+
+def status(rex, record, assignment) -> dict:
+    """Observe the original process. `lost` means Rex can no longer report how it ended."""
+    if assignment["state"] == "abandoned":
+        return dict(role=assignment["request"]["role"], state="abandoned", session_id=None, window_id=None,
+                    block_id=None, exit=None, reason=assignment["abandoned"]["reason"])
+    closed = assignment.get("closed")
+    if closed is not None:
+        retained = dict(role=assignment["request"]["role"], state=closed["state"],
+                        session_id=closed["session_id"], window_id=assignment["window_id"],
+                        block_id=assignment["block_id"], exit=closed["exit"], closed=True)
+        return retained if closed["reason"] is None else {**retained, "reason": closed["reason"]}
+    observation = dict(role=assignment["request"]["role"], state="unknown",
+                       session_id=record["session_id"], window_id=assignment["window_id"],
+                       block_id=assignment["block_id"], exit=None)
+    launched_on = assignment.get("rex_instance")
+    if launched_on is not None and launched_on != current_instance(rex):
+        # Rex restores the pane with a fresh login shell and no exit status, which
+        # would otherwise read as a running assignment forever.
+        return {**observation, "state": "lost",
+                "reason": "Rex server restarted after launch; the original process ended without an observable exit status"}
+    try:
+        process = rex.call("block", "call", "-s", record["session_id"],
+                           "-b", assignment["block_id"], "process")
+    except FactoryError:
+        view = session_view(rex, record)
+        if view is not None and assignment["block_id"] in view_blocks(view):
+            raise
+        return {**observation, "state": "lost",
+                "reason": "Rex pane or session was closed outside the factory; the original process ended without an observable exit status"}
     rex_object(process)
     last_exit = process.get("last_exit")
     if last_exit is not None and (not isinstance(last_exit, dict) or type(last_exit.get("exit_code")) is not int):
         raise FactoryError("Malformed Rex exit status; inspect the pinned binary/server API compatibility")
     state = ("exited" if last_exit["exit_code"] == 0 else "failed") if last_exit else (
         "running" if process.get("child") or process.get("foreground") else "unknown")
-    return dict(role=assignment["request"]["role"], state=state,
-                session_id=record["session_id"], window_id=assignment["window_id"],
-                block_id=assignment["block_id"], exit=last_exit)
+    return {**observation, "state": state, "exit": last_exit}
+
+
+def captured(rex, record, assignment):
+    """Original terminal output: live while the tab is open, retained once it is tidied."""
+    closed = assignment.get("closed")
+    if closed is not None:
+        if closed["capture"] is None:
+            raise FactoryError("Tab was closed without retained output: " + (closed["reason"] or closed["state"]))
+        return read_record(Path(closed["capture"]), private=True)
+    observed = status(rex, record, assignment)
+    if observed["state"] == "lost":
+        # A closed pane has no output, and a restored pane shows only a new shell.
+        raise FactoryError("Pane output unavailable: " + observed["reason"])
+    output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
+                      "--trim", "--unwrap", raw=True)
+    if not isinstance(output, str):
+        raise FactoryError("Malformed Rex capture; inspect the pinned binary/server API compatibility")
+    return output
+
+
+def tidy(path, rex, record, *, only=None) -> dict:
+    """Close finished assignment tabs; each keeps its final observation and output first."""
+    closed, running = [], []
+    view = session_view(rex, record)
+    open_blocks = set() if view is None else view_blocks(view)
+    for identity, assignment in record["assignments"].items():
+        if (only is not None and identity not in only) or assignment["state"] != "launched":
+            continue
+        if assignment.get("closed") is None:
+            observed = status(rex, record, assignment)
+            if observed["state"] not in TERMINAL_STATES:
+                running.append(identity)
+                continue
+            capture = None
+            if observed["state"] != "lost":
+                capture_path = path.parent / (record["task"] + "." + identity + ".capture.txt")
+                save(capture_path, captured(rex, record, assignment))
+                capture = str(capture_path)
+            assignment["closed"] = dict(state=observed["state"], exit=observed["exit"], reason=observed.get("reason"),
+                                        session_id=record["session_id"], capture=capture, at=time.time())
+            save(path, record)  # Durable before the pane disappears.
+            closed.append(identity)
+        elif assignment["closed"]["session_id"] != record["session_id"]:
+            continue  # Its session is already gone.
+        # Also retries a retained tab whose earlier close failed. Closing only the factory's
+        # block keeps any operator split; a lone block takes its tab along.
+        if assignment["block_id"] in open_blocks:
+            rex.call("block", "close", "-s", record["session_id"], assignment["block_id"], raw=True)
+    return dict(closed=closed, running=running, session_closed=close_idle_session(path, rex, record))
+
+
+def close_idle_session(path, rex, record):
+    """Kill the task session once nothing open remains in it; the next launch starts a new one."""
+    if record["session_id"] is None or any(
+            item["state"] == "launching" or (item["state"] == "launched" and item.get("closed") is None)
+            for item in record["assignments"].values()):
+        return False
+    view = session_view(rex, record)
+    if view is not None:
+        if view_windows(view):
+            return False  # Operator tabs remain; leave their session alone.
+        rex.call("kill", record["session_id"], raw=True)
+    record.update(session_id=None, session_label=new_session_label(record["task"]))
+    save(path, record)
+    return True
 
 
 def check_commit_message(message, *, write):
@@ -1501,7 +1706,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Collect a current native result before using its answer as coordination evidence")
     if collected and assignment.get("native_collected") is not True:
         raise FactoryError("Native evidence lacks proven strict collection; explicitly collect it with its original checkout available")
-    if observe is not None and observe()["state"] not in ({"failed", "exited"} if failed_identity else {"exited"}):
+    if observe is not None and observe()["state"] not in ({"failed", "exited", "lost"} if failed_identity else {"exited", "lost"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -1638,7 +1843,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         raise FactoryError("Claude result is stale; obtain a judgment of current inputs")
     if observe is None and not collected:
         raise FactoryError("First Claude collection requires original successful Rex exit")
-    if observe is not None and observe()["state"] != "exited":
+    if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Claude worker has not exited successfully; inspect its original Rex pane")
     try:
         receipt = decode_json(read_record(args.receipt, private=True))
@@ -1822,7 +2027,7 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     if args.role == "code-review" and args.base is None:
         raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
     valid_base(args.base, args.role)
-    if status(rex, record, assignment)["state"] != "exited":
+    if status(rex, record, assignment)["state"] not in {"exited", "lost"}:
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -1871,6 +2076,22 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
         requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
         artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+
+
+def tidy_tasks(directory, task=None, binary=None, server=None):
+    """Tidy one task or every task record in a state directory; failures are reported per task."""
+    tasks = [task] if task else sorted(item.stem for item in directory.glob("*.json")
+                                       if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item.stem))
+    report, failed = {}, False
+    for name in tasks:
+        try:
+            with task_lock(directory, name) as path:
+                record = load_task(path)
+                report[name] = (dict(closed=[], running=[], session_closed=False) if record["rex"] is None
+                                else tidy(path, connect(record, binary, server), record))
+        except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            report[name], failed = dict(error=str(exc)), True
+    return report, failed
 
 
 def main(argv=None):
@@ -1962,6 +2183,12 @@ def main(argv=None):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
+    abandon = sub.add_parser("abandon", help="Record that a pending launch never created its pane")
+    abandon.add_argument("--task", required=True)
+    abandon.add_argument("--id", required=True)
+    abandon.add_argument("--reason", required=True, help="Why the launch is known not to have happened")
+    cleanup = sub.add_parser("tidy", help="Close finished assignment tabs, retaining their final status and output")
+    cleanup.add_argument("--task", help="Only this task; default is every task in the state directory")
     args = parser.parse_args(argv)
     try:
         if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
@@ -1978,6 +2205,10 @@ def main(argv=None):
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
             raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
+        if args.action == "tidy":
+            report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
+            print(json.dumps(report, indent=2))
+            return 1 if failed else 0
         if args.action == "integrate":
             import integration
             path = args.state_dir.resolve() / (args.task + ".json")
@@ -2052,6 +2283,13 @@ def main(argv=None):
                                        request_id=args.request_id, expected_revision=args.expected_revision)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
+            if args.action == "abandon":
+                record = load_task(path)
+                if record["rex"] is None:
+                    raise FactoryError("Only a pending launch can be abandoned; inspect the assignment with status")
+                record = abandon_launch(path, connect(record, args.rex, args.server), assignment_id=args.id, reason=args.reason)
+                print(json.dumps(task_view(record), indent=2))
+                return 0
             if args.action in {"start", "codex-start", "grok-start", "claude-start"}:
                 if args.action == "codex-start":
                     if load_task(path)["admission"] is None:
@@ -2088,15 +2326,14 @@ def main(argv=None):
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
-            if args.action == "codex-collect":
-                print(json.dumps(task_view(collect_codex(path, args.id, rex, record, assignment)), indent=2))
-            elif args.action == "claude-collect":
-                print(json.dumps(task_view(collect_claude(path, args.id, rex, record, assignment)), indent=2))
-            elif args.action == "grok-collect":
-                print(json.dumps(task_view(collect_grok(path, args.id, rex, record, assignment)), indent=2))
+            if args.action in {"codex-collect", "claude-collect", "grok-collect"}:
+                collect = (collect_codex if args.action == "codex-collect"
+                           else collect_claude if args.action == "claude-collect" else collect_grok)
+                record = collect(path, args.id, rex, record, assignment)
+                tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                print(json.dumps(task_view(record), indent=2))
             elif args.action == "capture":
-                print(rex.call("capture", "-s", record["session_id"], "-b",
-                               assignment["block_id"], "--trim", "--unwrap", raw=True), end="")
+                print(captured(rex, record, assignment), end="")
             else:
                 print(json.dumps(status(rex, record, assignment), indent=2))
     except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:

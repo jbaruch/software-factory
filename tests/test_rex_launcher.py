@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -21,28 +22,70 @@ class FakeRex:
     calls = []
     fail_after_create = False
     host = "test-host"
+    instance = "test-instance"  # Tests that restart the server restore this in cleanup.
+    exits = {}  # Block ID -> exit code of a finished process; tests restore this in cleanup.
 
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
+        self.instance_id: str | None = None
 
-    def call(self, *args, **kwargs):
+    @staticmethod
+    def require_block(session, block_id):
+        if not any(block["block_id"] == block_id for window in session.get("windows", [])
+                   for layer in window["layers"] for block in layer["blocks"]):
+            raise factory.FactoryError(f'block target "{block_id}" not found')
+
+    def session(self, session_id):
+        for item in self.sessions:
+            if item["session_id"] == session_id:
+                return item
+        raise factory.FactoryError(f'session target "{session_id}" not found')
+
+    def call(self, *args, **kwargs) -> Any:
         type(self).calls.append(args)
         if args[0] == "whoami":
-            return {"host_id": type(self).host}
+            return {"host_id": type(self).host, "instance_id": type(self).instance}
         if args[0] == "ls":
             return {"sessions": self.sessions}
         if args[:2] == ("session", "inspect"):
-            return next(item for item in self.sessions if item["session_id"] == args[2])
+            return self.session(args[2])
+        if (args[:2] == ("block", "call") and args[-1] == "process") or args[0] == "capture":
+            session = self.session(args[args.index("-s") + 1])
+            block_id = args[args.index("-b") + 1]
+            self.require_block(session, block_id)
+            if args[0] == "capture":
+                return f"output of {block_id}\n"
+            if block_id in type(self).exits:
+                return {"last_exit": {"exit_code": type(self).exits[block_id]}}
+            return {"last_exit": None, "child": {"pid": 1}}
+        if args[:2] == ("block", "close"):
+            session = self.session(args[args.index("-s") + 1])
+            self.require_block(session, args[-1])
+            for window in list(session["windows"]):
+                for layer in window["layers"]:
+                    layer["blocks"] = [block for block in layer["blocks"] if block["block_id"] != args[-1]]
+                if not any(layer["blocks"] for layer in window["layers"]):
+                    session["windows"].remove(window)  # Closing a tab's last block closes the tab.
+            return ""
+        if args[0] == "kill":
+            self.sessions.remove(self.session(args[1]))
+            return ""
         if args[0] == "new" or args[:2] == ("window", "new"):
+            created_sessions = sum(call[0] == "new" for call in type(self).calls)
             if args[0] == "new":
-                session = {"session_id": "session-test" if not self.sessions else f"session-test-{len(self.sessions) + 1}",
+                session = {"session_id": "session-test" if created_sessions == 1 else f"session-test-{created_sessions}",
                            "label": args[1], "windows": []}
                 self.sessions.append(session)
                 label = args[args.index("--window") + 1]
             else:
-                session = next(item for item in self.sessions if item["session_id"] == args[3])
+                session = self.session(args[3])
                 label = args[4]
-            number = len(session["windows"]) + 1
+            # Rex never reuses a pane ID, even across sessions or after tabs close. Some
+            # tests clear the call log, so live windows also bound the next number.
+            number = max(sum(call[0] == "new" or call[:2] == ("window", "new") for call in type(self).calls),
+                         1 + max((int(window["window_id"].rsplit("-", 1)[1]) for item in self.sessions
+                                  for window in item.get("windows", []) if window["window_id"].startswith("window-")),
+                                 default=0))
             window = dict(window_id=f"window-{number}", label=label,
                           layers=[dict(blocks=[dict(block_id=f"block-{number}")])])
             session["windows"].append(window)
@@ -70,6 +113,14 @@ class NativeLauncher(unittest.TestCase):
 
     def start(self, **changes):
         return factory.launch(self.path, **{**self.arguments, **changes})
+
+    def restart_rex(self):
+        FakeRex.instance = "restarted-instance"
+        self.addCleanup(setattr, FakeRex, "instance", "test-instance")
+
+    def finish(self, assignment, code=0):
+        FakeRex.exits = {**FakeRex.exits, assignment["block_id"]: code}
+        self.addCleanup(setattr, FakeRex, "exits", {})
 
     def creation_calls(self):
         return [args for args in FakeRex.calls
@@ -194,10 +245,61 @@ class NativeLauncher(unittest.TestCase):
     def test_process_exit_is_not_task_acceptance(self):
         record, assignment = self.start()
         rex = FakeRex(sys.executable, "unix:///test.sock")
+        rex.instance_id = "test-instance"
         with patch.object(rex, "call", return_value={"last_exit": {"exit_code": 0}}):
             result = factory.status(rex, record, assignment)
         self.assertEqual(result["state"], "exited")
         self.assertNotIn("accepted", result)
+
+    def test_rex_restart_reports_lost_instead_of_a_restored_shell(self):
+        record, assignment = self.start()
+        self.assertEqual(assignment["rex_instance"], "test-instance")
+        restored_shell = {"last_exit": None, "child": {"pid": 1, "path": "/bin/zsh"}}
+        rex = factory.connect(record)
+        with patch.object(rex, "call", return_value=restored_shell):
+            self.assertEqual(factory.status(rex, record, assignment)["state"], "running")
+        self.restart_rex()
+        rex = factory.connect(record)
+        with patch.object(rex, "call", side_effect=AssertionError("A restored shell is not the original process")):
+            result = factory.status(rex, record, assignment)
+        self.assertEqual(result["state"], "lost")
+        self.assertIn("restarted", result["reason"])
+        self.assertIsNone(result["exit"])
+        self.assertEqual(result["block_id"], assignment["block_id"])
+
+    def test_status_fetches_the_server_instance_when_not_connected(self):
+        record, assignment = self.start()
+        self.restart_rex()
+        FakeRex.calls.clear()
+        self.assertEqual(factory.status(FakeRex(sys.executable, "unix:///test.sock"), record, assignment)["state"], "lost")
+        self.assertEqual(FakeRex.calls, [("whoami", "--json")])
+
+    def test_legacy_assignment_without_instance_keeps_process_observation(self):
+        record, _ = self.start()
+        del record["assignments"]["qa"]["rex_instance"]
+        record["schema_version"] = 9
+        factory.save(self.path, record)
+        migrated = factory.load_task(self.path)
+        self.assertEqual(migrated["schema_version"], 10)
+        self.assertNotIn("rex_instance", migrated["assignments"]["qa"])
+        self.restart_rex()
+        rex = factory.connect(migrated)
+        with patch.object(rex, "call", return_value={"last_exit": {"exit_code": 0}}):
+            self.assertEqual(factory.status(rex, migrated, migrated["assignments"]["qa"])["state"], "exited")
+
+    def test_rex_instance_is_validated_and_newer_than_legacy_schemas(self):
+        record, _ = self.start()
+        for value in ("", 7, None):
+            damaged = copy.deepcopy(record)
+            damaged["assignments"]["qa"]["rex_instance"] = value
+            factory.save(self.path, damaged)
+            with self.subTest(value=value), self.assertRaisesRegex(factory.FactoryError, "Invalid Rex server instance"):
+                factory.load_task(self.path)
+        legacy = copy.deepcopy(record)
+        legacy["schema_version"] = 9
+        factory.save(self.path, legacy)
+        with self.assertRaisesRegex(factory.FactoryError, "Legacy assignment has newer fields"):
+            factory.load_task(self.path)
 
     def test_duplicate_task_keys_refuse_mutation_without_losing_history(self):
         self.start()
@@ -256,6 +358,279 @@ class NativeLauncher(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "windows differ from saved history"):
             self.start(assignment_id="backend", role="backend")
         self.assertEqual(len(self.creation_calls()), 2)
+
+    def window(self, assignment):
+        return next(window for window in FakeRex.sessions[0]["windows"]
+                    if window["window_id"] == assignment["window_id"])
+
+    def test_operator_split_rename_and_extra_tab_never_block_the_task(self):
+        self.start()
+        record, security = self.start(assignment_id="security", role="security")
+        qa = record["assignments"]["qa"]
+        self.window(qa)["layers"][0]["blocks"].append({"block_id": "operator-split"})
+        self.window(security)["label"] = "watching-security"
+        FakeRex.sessions[0]["windows"].append(dict(window_id="operator-window", label="notes",
+                                                   layers=[dict(blocks=[dict(block_id="operator-block")])]))
+        rex = factory.connect(record)
+        for assignment in (qa, security):
+            self.assertEqual(factory.status(rex, record, assignment)["state"], "running")
+        record, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual(backend["state"], "launched")
+        self.assertEqual(len(self.creation_calls()), 3)
+
+    def test_closed_tab_is_lost_without_blocking_other_assignments(self):
+        self.start()
+        record, security = self.start(assignment_id="security", role="security")
+        qa = record["assignments"]["qa"]
+        FakeRex.sessions[0]["windows"].remove(self.window(qa))
+        rex = factory.connect(record)
+        closed = factory.status(rex, record, qa)
+        self.assertEqual(closed["state"], "lost")
+        self.assertIn("closed outside the factory", closed["reason"])
+        self.assertEqual(factory.status(rex, record, security)["state"], "running")
+        _, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual(backend["state"], "launched")
+
+    def test_killed_session_is_kept_as_lost_and_new_work_opens_a_new_session(self):
+        record, qa = self.start()
+        FakeRex.sessions.clear()
+        rex = factory.connect(record)
+        self.assertEqual(factory.status(rex, record, qa)["state"], "lost")
+        record, security = self.start(assignment_id="security", role="security")
+        self.assertEqual(security["state"], "launched")
+        self.assertEqual(record["session_id"], "session-test-2")
+        self.assertEqual([call[0] for call in self.creation_calls()], ["new", "new"])
+        closed = factory.load_task(self.path)["assignments"]["qa"]["closed"]
+        self.assertEqual((closed["state"], closed["session_id"], closed["capture"]), ("lost", "session-test", None))
+        self.assertIn("closed outside the factory", closed["reason"])
+
+    def test_tidy_closes_finished_tabs_with_their_output_and_keeps_running_ones(self):
+        self.start()
+        record, security = self.start(assignment_id="security", role="security")
+        qa = record["assignments"]["qa"]
+        self.finish(qa)
+        rex = factory.connect(record)
+        self.assertEqual(factory.tidy(self.path, rex, record), dict(closed=["qa"], running=["security"], session_closed=False))
+        saved = factory.load_task(self.path)
+        closed = saved["assignments"]["qa"]["closed"]
+        self.assertEqual((closed["state"], closed["exit"], closed["reason"]), ("exited", {"exit_code": 0}, None))
+        self.assertEqual(Path(closed["capture"]).read_text(), "output of block-1\n")
+        self.assertEqual(Path(closed["capture"]).stat().st_mode & 0o077, 0)
+        self.assertEqual([window["label"] for window in FakeRex.sessions[0]["windows"]], [security["window_label"]])
+        retained = factory.status(rex, saved, saved["assignments"]["qa"])
+        self.assertEqual((retained["state"], retained["closed"], retained["session_id"]), ("exited", True, "session-test"))
+        self.assertEqual(factory.captured(rex, saved, saved["assignments"]["qa"]), "output of block-1\n")
+        self.assertEqual(factory.status(rex, saved, saved["assignments"]["security"])["state"], "running")
+        self.finish(security, 1)
+        self.assertEqual(factory.tidy(self.path, rex, saved), dict(closed=["security"], running=[], session_closed=True))
+        self.assertEqual(FakeRex.sessions, [])
+        saved = factory.load_task(self.path)
+        self.assertIsNone(saved["session_id"])
+        self.assertNotEqual(saved["session_label"], record["session_label"])
+        self.assertEqual(saved["assignments"]["security"]["closed"]["state"], "failed")
+        _, reconnected = self.start()
+        self.assertEqual(reconnected["closed"]["state"], "exited")
+        record, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual((record["session_id"], backend["state"]), ("session-test-2", "launched"))
+
+    def test_tidy_keeps_restart_lost_tabs_without_capturing_the_restored_shell(self):
+        record, qa = self.start()
+        self.restart_rex()
+        rex = factory.connect(record)
+        FakeRex.calls.clear()
+        self.assertEqual(factory.tidy(self.path, rex, record)["closed"], ["qa"])
+        self.assertFalse(any(call[0] == "capture" for call in FakeRex.calls))
+        self.assertEqual(FakeRex.sessions, [])
+        saved = factory.load_task(self.path)
+        closed = saved["assignments"]["qa"]["closed"]
+        self.assertEqual((closed["state"], closed["exit"], closed["capture"]), ("lost", None, None))
+        with self.assertRaisesRegex(factory.FactoryError, "without retained output: Rex server restarted"):
+            factory.captured(rex, saved, saved["assignments"]["qa"])
+
+    def test_tidy_leaves_operator_splits_and_tabs_in_place(self):
+        record, qa = self.start()
+        self.window(qa)["layers"][0]["blocks"].append({"block_id": "operator-split"})
+        FakeRex.sessions[0]["windows"].append(dict(window_id="operator-window", label="notes",
+                                                   layers=[dict(blocks=[dict(block_id="operator-block")])]))
+        self.finish(qa)
+        self.assertEqual(factory.tidy(self.path, factory.connect(record), record),
+                         dict(closed=["qa"], running=[], session_closed=False))
+        blocks = [block["block_id"] for window in FakeRex.sessions[0]["windows"]
+                  for layer in window["layers"] for block in layer["blocks"]]
+        self.assertEqual(blocks, ["operator-split", "operator-block"])
+        self.assertEqual(factory.load_task(self.path)["session_id"], "session-test")
+
+    def test_interrupted_tidy_retries_the_close_without_recapturing(self):
+        record, qa = self.start()
+        self.finish(qa)
+        rex = factory.connect(record)
+        original = rex.call
+        def fail_close(*args, **kwargs):
+            if args[:2] == ("block", "close"):
+                raise factory.FactoryError("Rex command failed")
+            return original(*args, **kwargs)
+        with patch.object(rex, "call", side_effect=fail_close), self.assertRaises(factory.FactoryError):
+            factory.tidy(self.path, rex, record)
+        saved = factory.load_task(self.path)
+        self.assertEqual(saved["assignments"]["qa"]["closed"]["state"], "exited")
+        self.assertEqual(len(FakeRex.sessions[0]["windows"]), 1)
+        # The output is already retained; the next tidy closes the leftover tab without recapturing.
+        FakeRex.calls.clear()
+        self.assertEqual(factory.tidy(self.path, rex, saved), dict(closed=[], running=[], session_closed=True))
+        self.assertFalse(any(call[0] == "capture" for call in FakeRex.calls))
+        self.assertEqual(FakeRex.sessions, [])
+
+    def test_closed_tab_records_are_validated(self):
+        record, qa = self.start()
+        self.finish(qa)
+        factory.tidy(self.path, factory.connect(record), record)
+        saved = factory.load_task(self.path)
+        for change in (dict(state="running"), dict(exit=None), dict(reason="extra"), dict(session_id=""),
+                       dict(capture="relative.txt"), dict(at=-1), dict(extra=True)):
+            damaged = copy.deepcopy(saved)
+            damaged["assignments"]["qa"]["closed"].update(change)
+            factory.save(self.path, damaged)
+            with self.subTest(change=change), self.assertRaisesRegex(factory.FactoryError, "Invalid closed tab record"):
+                factory.load_task(self.path)
+        legacy = copy.deepcopy(saved)
+        legacy["schema_version"] = 9
+        legacy["assignments"]["qa"].pop("rex_instance")
+        factory.save(self.path, legacy)
+        with self.assertRaisesRegex(factory.FactoryError, "Legacy assignment has newer fields"):
+            factory.load_task(self.path)
+
+    def test_tidy_cli_reports_every_task_and_capture_reads_retained_output(self):
+        record, qa = self.start()
+        factory.launch(self.root / "other.json", **{**self.arguments, "task": "other"})
+        factory.save(self.root / "idle.json", factory.new_task("idle"))
+        self.finish(qa)
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "tidy"]), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["task"], dict(closed=["qa"], running=[], session_closed=True))
+        self.assertEqual(report["other"]["running"], ["qa"])
+        self.assertEqual(report["idle"], dict(closed=[], running=[], session_closed=False))
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "capture", "--task", "task", "--id", "qa"]), 0)
+        self.assertEqual(output.getvalue(), "output of block-1\n")
+
+    def test_empty_session_omits_its_window_list(self):
+        record, qa = self.start()
+        del FakeRex.sessions[0]["windows"]
+        rex = factory.connect(record)
+        self.assertEqual(factory.status(rex, record, qa)["state"], "lost")
+
+    def test_unreachable_rex_is_never_reported_as_a_lost_pane(self):
+        record, qa = self.start()
+        rex = factory.connect(record)
+        with patch.object(rex, "call", side_effect=factory.FactoryError("Cannot reach the pinned Rex binary/server")):
+            with self.assertRaisesRegex(factory.FactoryError, "Cannot reach"):
+                factory.status(rex, record, qa)
+
+    def reject_creation(self):
+        """Rex refuses the request outright, e.g. after a CLI flag was renamed."""
+        original = FakeRex.call
+        def reject(rex, *args, **kwargs):
+            if args[0] == "new" or args[:2] == ("window", "new"):
+                type(rex).calls.append(args)
+                raise factory.FactoryError("Error: unknown flag: --focus")
+            return original(rex, *args, **kwargs)
+        patcher = patch.object(FakeRex, "call", reject)
+        patcher.start()
+        return patcher
+
+    def test_rejected_first_launch_can_be_abandoned_and_the_task_moves_on(self):
+        patcher = self.reject_creation()
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start()
+        patcher.stop()
+        record = factory.load_task(self.path)
+        rex = factory.connect(record)
+        with self.assertRaisesRegex(factory.FactoryError, "factory.py abandon"):
+            factory.reconcile(rex, record, record["assignments"]["qa"])
+        with self.assertRaisesRegex(factory.FactoryError, "pending assignment.*abandon"):
+            self.start(assignment_id="security", role="security")
+        record = factory.abandon_launch(self.path, rex, assignment_id="qa", reason="Rex rejected an unknown flag")
+        abandoned = factory.load_task(self.path)["assignments"]["qa"]
+        self.assertEqual((abandoned["state"], abandoned["abandoned"]["reason"]), ("abandoned", "Rex rejected an unknown flag"))
+        self.assertEqual(factory.status(rex, record, abandoned)["state"], "abandoned")
+        with self.assertRaisesRegex(factory.FactoryError, "use a new explicit ID"):
+            self.start()
+        _, security = self.start(assignment_id="security", role="security")
+        self.assertEqual(security["state"], "launched")
+        self.assertEqual(len(FakeRex.sessions), 1)
+
+    def test_rejected_additional_window_can_be_abandoned(self):
+        self.start()
+        patcher = self.reject_creation()
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start(assignment_id="security", role="security")
+        patcher.stop()
+        record = factory.load_task(self.path)
+        factory.abandon_launch(self.path, factory.connect(record), assignment_id="security", reason="Rex rejected it")
+        _, backend = self.start(assignment_id="backend", role="backend")
+        self.assertEqual(backend["state"], "launched")
+
+    def test_abandon_refuses_a_launch_whose_pane_exists_or_is_not_pending(self):
+        FakeRex.fail_after_create = True
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start()
+        FakeRex.fail_after_create = False
+        record = factory.load_task(self.path)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "reconcile the launch with status instead"):
+            factory.abandon_launch(self.path, factory.connect(record), assignment_id="qa", reason="Wrong guess")
+        self.assertEqual(self.path.read_bytes(), before)
+        record, _ = self.start()
+        for identity, reason in (("qa", "Already launched"), ("missing", "Unknown"), ("qa", "  ")):
+            with self.subTest(identity=identity), self.assertRaises(factory.FactoryError):
+                factory.abandon_launch(self.path, factory.connect(record), assignment_id=identity, reason=reason)
+        FakeRex.fail_after_create = True
+        with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+            self.start(assignment_id="security", role="security")
+        FakeRex.fail_after_create = False
+        record = factory.load_task(self.path)
+        with self.assertRaisesRegex(factory.FactoryError, "pane with this launch marker exists"):
+            factory.abandon_launch(self.path, factory.connect(record), assignment_id="security", reason="Wrong guess")
+
+    def test_abandoned_launch_records_are_validated(self):
+        patcher = self.reject_creation()
+        with self.assertRaises(factory.FactoryError):
+            self.start()
+        patcher.stop()
+        record = factory.load_task(self.path)
+        factory.abandon_launch(self.path, factory.connect(record), assignment_id="qa", reason="Rex rejected it")
+        saved = factory.load_task(self.path)
+        for change in (dict(abandoned=dict(reason="", at=1)), dict(abandoned=dict(reason="x", at=-1)),
+                       dict(abandoned=None), dict(window_id="window-1", block_id="block-1"), dict(state="launching")):
+            damaged = copy.deepcopy(saved)
+            damaged["assignments"]["qa"].update(change)
+            factory.save(self.path, damaged)
+            with self.subTest(change=change), self.assertRaisesRegex(factory.FactoryError, "Invalid abandoned launch|pane IDs"):
+                factory.load_task(self.path)
+        legacy = copy.deepcopy(saved)
+        legacy["schema_version"] = 9
+        legacy["assignments"]["qa"].pop("rex_instance")
+        factory.save(self.path, legacy)
+        with self.assertRaisesRegex(factory.FactoryError, "Invalid abandoned launch"):
+            factory.load_task(self.path)
+
+    def test_abandon_cli_records_the_operator_decision(self):
+        patcher = self.reject_creation()
+        with self.assertRaises(factory.FactoryError):
+            self.start()
+        patcher.stop()
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "abandon", "--task", "task", "--id", "qa",
+                                           "--reason", "Rex rejected an unknown flag"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["assignments"]["qa"]["state"], "abandoned")
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(factory.main(["--state-dir", str(self.root), "status", "--task", "task", "--id", "qa"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["state"], "abandoned")
 
     def test_malformed_rex_views_have_actionable_compatibility_diagnostics(self):
         record, _ = self.start()
@@ -401,17 +776,22 @@ class TaskAdmission(unittest.TestCase):
         legacy = {key: value for key, value in copy.deepcopy(original).items() if key not in {"allowance_events", "provisioning"}}
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         legacy["schema_version"] = 5
         factory.save(self.path, legacy)
+        # Migration never invents the server instance a legacy launch ran on.
+        expected = copy.deepcopy(original)
+        for assignment in expected["assignments"].values():
+            del assignment["rex_instance"]
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated, original)
+        self.assertEqual(migrated, expected)
         self.assertEqual(factory.task_view(migrated)["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
         with self.assertRaisesRegex(factory.FactoryError, "allowance exhausted"):
             self.start(assignment_id="another", purpose="correction")
         prototype = {**legacy, "schema_version": 6, "provisioning": None}
         factory.save(self.path, prototype)
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated, original)
+        self.assertEqual(migrated, expected)
         self.assertEqual(factory.task_view(migrated)["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
 
     def test_allowance_cli_returns_effective_limits_without_a_provider_or_rex(self):
@@ -1272,9 +1652,10 @@ class TaskAdmission(unittest.TestCase):
         for assignment in record["assignments"].values():
             del assignment["result"]
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 9)
+        self.assertEqual(migrated["schema_version"], 10)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
                          {key: {**item, "result": None, "native_collected": False} for key, item in record["assignments"].items()})
@@ -1392,9 +1773,10 @@ class TaskAdmission(unittest.TestCase):
         del record["assignments"]["qa"]["request"]["inputs"]
         del record["assignments"]["qa"]["result"]
         del record["assignments"]["qa"]["native_collected"]
+        record["assignments"]["qa"].pop("rex_instance", None)
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 9)
+        self.assertEqual(upgraded["schema_version"], 10)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
@@ -1410,6 +1792,7 @@ class TaskAdmission(unittest.TestCase):
         legacy["schema_version"] = 2
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         legacy.pop("control_events", None)
         legacy.pop("provisioning", None)
         legacy.pop("allowance_events", None)
@@ -1417,9 +1800,10 @@ class TaskAdmission(unittest.TestCase):
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 9)
+        self.assertEqual(upgraded["schema_version"], 10)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
-        self.assertEqual(upgraded["assignments"], original["assignments"])
+        self.assertEqual(upgraded["assignments"], {key: {k: v for k, v in item.items() if k != "rex_instance"}
+                                                   for key, item in original["assignments"].items()})
         self.assertEqual(upgraded["hold"], original["hold"])
         self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"]["remaining"], 0)
         factory.hold_task(self.path, None)
@@ -1457,6 +1841,7 @@ class TaskAdmission(unittest.TestCase):
         legacy["schema_version"] = 3
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         legacy.pop("control_events", None)
         legacy.pop("provisioning", None)
         legacy.pop("allowance_events", None)
@@ -1465,7 +1850,7 @@ class TaskAdmission(unittest.TestCase):
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No inferred historical identity")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 9)
+        self.assertEqual(upgraded["schema_version"], 10)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["admission"]["legacy_repository_identity"], pin)
         self.assertEqual(upgraded["assignments"],
@@ -1806,6 +2191,14 @@ class RexTransport(unittest.TestCase):
                 for raw in (False, True):
                     with self.assertRaisesRegex(factory.FactoryError, "inspect the pinned binary/server API compatibility"):
                         rex.call("whoami", "--json", raw=raw)
+
+    def test_ambiguous_json_replies_report_compatibility_recovery(self):
+        rex = factory.Rex(sys.executable, "unix:///fixture")
+        for reply in ('{"host_id": "a", "host_id": "b"}', '{"exit_code": NaN}', "not json"):
+            completed = subprocess.CompletedProcess([], 0, stdout=reply, stderr="")
+            with self.subTest(reply=reply), patch.object(factory.subprocess, "run", return_value=completed):
+                with self.assertRaisesRegex(factory.FactoryError, "inspect the pinned binary/server API compatibility"):
+                    rex.call("whoami", "--json")
 
 
 if __name__ == "__main__":

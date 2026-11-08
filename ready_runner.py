@@ -20,6 +20,8 @@ JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
+# Process states that will never change again; `lost` is terminal without an exit status.
+TERMINAL = {"exited", "failed", "lost"}
 
 
 def validate_plan(value):
@@ -140,7 +142,8 @@ class Runner:
             raise factory.FactoryError("Repair max_operational_retries in the coordination policy before running")
         self.probe_limit, self.probe_failures = 1 + retries, 0
         self.launch_errors = {}
-        self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0)
+        self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0, tabs_closed=0)
+        self.tidy_issues = []
 
     def select_writer_candidate(self):
         """Called under the execution lock; derive continuity from original evidence."""
@@ -176,18 +179,19 @@ class Runner:
                 if record["hold"] is not None:
                     raise factory.FactoryError("Task is paused: " + record["hold"])
                 for identity, assignment in record["assignments"].items():
-                    if identity == self.from_writer:
+                    if identity == self.from_writer or assignment["state"] == "abandoned":
                         continue
                     # Even a saved result is no substitute for observing its process.
                     if assignment["state"] == "launching":
                         factory.reconcile(rex, record, assignment)
-                    if factory.status(rex, record, assignment)["state"] not in {"exited", "failed"}:
+                    if factory.status(rex, record, assignment)["state"] not in TERMINAL:
                         raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
                 factory.set_inputs(path, **target)
             self.plan = {**self.supplied_plan, "jobs": [{**job, **target} for job in jobs]}
 
     def observe(self):
         records, phases, active, issues = {}, {}, [], []
+        self.tidy_issues = []
         paths = sorted(p for p in self.directory.glob("*.json") if re.fullmatch(SLUG, p.stem))
         for source in paths:
             try:
@@ -211,11 +215,14 @@ class Runner:
                                 factory.reconcile(rex, record, assignment)
                                 factory.save(path, record)
                             observed = factory.status(rex, record, assignment)
-                            terminal = observed["state"] in {"exited", "failed"}
+                            terminal = observed["state"] in TERMINAL
                             phase = dict(state=observed["state"])
                             if observed["state"] in {"running", "unknown"}:
                                 active.append((source.stem, assignment["request"]))
-                            if observed["state"] == "exited":
+                            if observed["state"] == "lost":
+                                phase["reason"] = observed["reason"]
+                            if observed["state"] in {"exited", "lost"}:
+                                # A lost pane defers to the worker's own completed receipt.
                                 if native_request(assignment["request"]) and assignment["result"] is None:
                                     record = factory.collect_codex(path, identity, rex, record, assignment)
                                     self.metrics["collected"] += 1
@@ -228,6 +235,12 @@ class Runner:
                             phases[key] = dict(state="blocked" if terminal else "unknown", reason=str(exc))
                             if not terminal and not any(task == source.stem and request is assignment["request"] for task, request in active):
                                 active.append((source.stem, assignment["request"]))
+                    try:
+                        # Finished tabs close after collection; their final status and output stay in the task.
+                        self.metrics["tabs_closed"] += len(factory.tidy(path, rex, record)["closed"])
+                    except (factory.FactoryError, OSError) as exc:
+                        # Tidying never blocks work; it is reported and retried on the next tick.
+                        self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
                     records[source.stem] = record
             except (factory.FactoryError, OSError, ValueError) as exc:
                 issues.append(dict(task=source.stem, reason=str(exc)))
@@ -300,7 +313,7 @@ class Runner:
                 phases[key] = dict(state="blocked", reason="Dependency is absent from both the plan and task history; repair the explicit plan")
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") in
-                     {"findings", "blocked", "failed", "stale", "conflict"} for dependency in job["after"]):
+                     {"findings", "blocked", "failed", "lost", "abandoned", "stale", "conflict"} for dependency in job["after"]):
                 phases[key] = dict(state="blocked", reason="A dependency needs explicit correction, investigation or replanning; no automatic retry")
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") not in {"completed", "approved"} for dependency in job["after"]):
@@ -371,9 +384,10 @@ class Runner:
                     phases[key] = dict(state="blocked", reason=str(exc))
         rows = [dict(task=job["task"], id=job["id"], **phases[(job["task"], job["id"])]) for job in jobs]
         complete = all(row["state"] in {"completed", "approved"} for row in rows)
-        settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "stale", "conflict"} for row in rows)
+        settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "lost", "abandoned", "stale", "conflict"} for row in rows)
         return dict(schema_version=1, result="complete" if complete else "needs_action" if settled else "pending",
-                    jobs=rows, active_workers=len(active), issues=issues, metrics=dict(self.metrics),
+                    jobs=rows, active_workers=len(active), issues=issues, tidy_issues=list(self.tidy_issues),
+                    metrics=dict(self.metrics),
                     capacity=self.capacity, capacity_error=self.capacity_error)
 
 

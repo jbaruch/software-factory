@@ -117,11 +117,11 @@ no-follow/nonblocking open and descriptor-based regular-file checks, plus owner,
 single-link and private-permission checks with `private=True`. The default reader
 behavior is unchanged. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 9:
+`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 10:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `9` on every task record |
+| `schema_version` | Integer `10` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
@@ -131,7 +131,20 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 | `allowance_events` | Ordered operator additions; each has a unique `id`, `purpose`, `previous_limit`, positive integer `additional`, nonempty `reason` and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
-| `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker and returned pane IDs |
+| `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker, returned pane IDs, the Rex server `rex_instance` each new launch ran on and, once its tab is tidied, `closed` |
+
+A tidied assignment's `closed` object holds its final process `state` (`exited`,
+`failed` or `lost`), the observed `exit` (null when lost), the lost `reason` (null
+otherwise), the `session_id` the pane lived in, the absolute path of its retained
+terminal `capture` (null when lost) and the UTC epoch time `at`. Once nothing open
+remains, tidying kills the task session and sets `session_id` to null under a new
+`session_label`, so the next launch opens a fresh session.
+
+An assignment's launch state is `launching` (intent saved, pane not yet confirmed),
+`launched` (pane IDs returned) or `abandoned`. Only `factory.py abandon` sets
+`abandoned`, after confirming no pane or pending session carries the launch marker;
+it keeps an `abandoned` object with the operator's nonempty `reason` and UTC epoch
+time `at`, has no pane IDs or result, and still counts toward its purpose's allowance.
 
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input
@@ -228,11 +241,12 @@ Legacy records containing newer-version fields refuse migration. The loader vali
 request identity and evidence references before using saved results as dependencies.
 Recorded Rex identity without assignment history also refuses action. Live
 connections verify the saved session label before reusing its ID.
-They also match every retained launched window marker and window/block ID to
-that inspected session. Duplicate JSON keys or pane identities refuse loading;
-pending launches cannot have pane IDs. The inspected session must contain exactly
-the recorded assignment windows, allowing a pending window to be absent before
-reconciliation. Malformed Rex shapes require API compatibility inspection.
+Commands then act only on their own saved block in that session; operator splits,
+renames, moves, closed panes and extra tabs never block other assignments, and a
+missing block or session reports `lost`. Duplicate JSON keys or pane identities
+refuse loading; pending launches cannot have pane IDs. A session window carrying an
+unrecorded factory marker refuses as lost history. Malformed Rex shapes require
+API compatibility inspection.
 Assignment-map order preserves launch order; dependencies
 must reference earlier entries. Task inputs are null only without admission, and
 the investigator role and investigation purpose remain paired on reads.

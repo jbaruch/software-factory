@@ -131,7 +131,9 @@ def requested_native(record, identity, assignment):
 
 
 def saved_pane(record, assignment):
-    return dict(host_id=(record["rex"] or {}).get("host_id"), session_id=record["session_id"],
+    # A tidied tab lived in the session it records, which the task may since have replaced.
+    session_id = assignment["closed"]["session_id"] if assignment.get("closed") else record["session_id"]
+    return dict(host_id=(record["rex"] or {}).get("host_id"), session_id=session_id,
                 window_id=assignment.get("window_id"), block_id=assignment.get("block_id"))
 
 
@@ -144,8 +146,13 @@ def pane_link(task, identity):
 def observe_process(rex, record, assignment, clock):
     process: dict = factory.status(rex, record, assignment)
     # Do not forward native process objects, argv, or extra last_exit metadata.
-    return dict(state=process["state"], observed_at=clock(),
-                exit_code=process["exit"]["exit_code"] if process["exit"] else None)
+    observed: dict = dict(state=process["state"], observed_at=clock(),
+                          exit_code=process["exit"]["exit_code"] if process["exit"] else None)
+    if process["state"] == "lost":
+        observed["error"] = process["reason"]
+    if process.get("closed"):
+        observed["closed"] = True  # Retained final observation of a tidied tab.
+    return observed
 
 
 def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=time.time) -> dict:
@@ -162,14 +169,33 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
             if assignment is None:
                 return detail
             detail["pane"] = saved_pane(record, assignment)
+            if assignment["state"] == "abandoned":
+                detail["error"] = "No pane: the launch was abandoned. " + assignment["abandoned"]["reason"]
+                return detail
             if assignment["state"] != "launched":
                 detail["error"] = "Pane unavailable: launch needs reconciliation. Use factory status for this task, then refresh."
                 return detail
+            closed = assignment.get("closed")
+            if closed is not None:
+                # A tidied tab needs no Rex: show its retained final observation and output.
+                detail["process"] = observe_process(None, record, assignment, clock)
+                if closed["capture"] is None:
+                    detail["error"] = "Tab closed without retained output: " + (closed["reason"] or closed["state"])
+                    return detail
+                output = factory.read_record(Path(closed["capture"]), private=True)
+                detail.update(output=output[-PANE_LIMIT:], partial=len(output) > PANE_LIMIT,
+                              captured_at=closed["at"], error=None)
+                return detail
         # Release the lock before transport waits; this loaded scope stays fixed
         # through every ownership check/read and is never saved back to the task.
-        # connect validates host, session marker and every saved window/block pair.
+        # connect validates host and session marker; reads stay scoped to the saved block.
         rex = connect(record)
-        detail["process"] = observe_process(rex, record, assignment, clock)
+        process = observe_process(rex, record, assignment, clock)
+        detail["process"] = process
+        if process["state"] == "lost":
+            # A closed pane has no output, and a restored pane shows only a new shell.
+            detail["error"] = "Pane output unavailable: " + process["error"]
+            return detail
         output = rex.call("capture", "-s", record["session_id"], "-b", assignment["block_id"],
                           "--trim", "--unwrap", raw=True)
         if not isinstance(output, str):
@@ -421,7 +447,9 @@ def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.conn
             for identity, assignment in view["assignments"].items():
                 process = dict(state="not_checked", observed_at=None)
                 if live:
-                    if observation_error:
+                    if assignment.get("closed") is not None:
+                        process = observe_process(None, record, assignment, clock)
+                    elif observation_error:
                         process = dict(state="unavailable", observed_at=None, error=observation_error)
                     elif assignment["state"] == "launching":
                         process = dict(state="unreconciled", observed_at=None, error="Use factory status to reconcile the existing launch")
@@ -629,6 +657,8 @@ def render(view, *, csrf_token=None):
             state = process["state"]
             label = {"not_checked": "Not checked", "unreconciled": "Needs reconciliation",
                      "exited": "Exited successfully"}.get(state, state.capitalize())
+            if process.get("closed"):
+                label = f"{label} (tab closed)"
             observed = f'<span class="process {text(state)}">{text(label)}</span>'
             if process.get("error"):
                 observed += f'<p class="detail">{text(process["error"])}</p>'

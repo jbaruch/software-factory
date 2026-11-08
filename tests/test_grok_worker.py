@@ -76,6 +76,7 @@ class GrokWorker(unittest.TestCase):
         self.spawns = []
         self.probes = []
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
+        self.rex.instance_id = FakeRex.instance  # As connect() records it.
 
     def git(self, *command, directory=None):
         result = subprocess.run([factory.git_binary(), "-C", str(directory or self.base), *command],
@@ -115,6 +116,15 @@ class GrokWorker(unittest.TestCase):
     def collect(self):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             return factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
+
+    def test_lost_pane_defers_to_the_completed_receipt(self):
+        lost = dict(state="lost", reason="Rex server restarted after launch")
+        with patch.object(factory, "status", return_value=lost), self.assertRaises(factory.FactoryError):
+            factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
+        self.assertEqual(self.execute()["state"], "completed")
+        with patch.object(factory, "status", return_value=lost):
+            result = factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
+        self.assertEqual(result["assignments"]["inspect"]["result"]["outcome"], self.collect()["assignments"]["inspect"]["result"]["outcome"])
 
     def test_production_hold_prevents_worker_probe_and_model_launch(self):
         self.boundary.stop()
@@ -270,9 +280,12 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len([call for call in FakeRex.calls if call[0] == "new"]), before)
         output = StringIO()
-        with patch.object(factory, "Rex", FakeRex), patch.object(factory, "status", return_value=dict(state="exited")), redirect_stdout(output):
+        exited = dict(state="exited", exit=dict(exit_code=0))  # Collection then tidies the finished tab.
+        with patch.object(factory, "Rex", FakeRex), patch.object(factory, "status", return_value=exited), redirect_stdout(output):
             code = factory.main(["--state-dir", str(self.root), "grok-collect", "--task", "task", "--id", "inspect"])
         self.assertEqual(code, 0)
+        closed = factory.load_task(self.path)["assignments"]["inspect"]["closed"]
+        self.assertEqual((closed["state"], closed["exit"]), ("exited", dict(exit_code=0)))
         self.assertEqual(json.loads(output.getvalue())["assignments"]["inspect"]["result"]["outcome"], "approved")
         self.assertEqual(len(self.spawns), 1)
 
