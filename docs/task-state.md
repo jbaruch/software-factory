@@ -112,7 +112,7 @@ The runtime owner is `factory.py`; all CLI readers and writers use its loader un
 the task lock. Task records must be regular files; links, directories and FIFOs
 refuse without resetting holds or history. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree`, `record_result` and `collect_codex` functions define schema version 9:
+`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 9:
 
 | Field | Meaning |
 | --- | --- |
@@ -131,7 +131,7 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input
 snapshot and any declared dependencies. Each assignment has a nullable `result` and boolean `native_collected`, initially
-false. Only `collect_codex`, after strict successful original Rex, receipt, events,
+false. Only `collect_codex` or `collect_claude`, after strict successful original Rex, receipt, events,
 brief, repository, worktree/Git-directory and HEAD validation and immutable result
 registration, sets it true. Generic `record_result` never grants collection proof.
 Historical native replay requires this proof and still verifies the complete
@@ -169,7 +169,8 @@ migrate with this flag false, preserving original assignments/results, admission
 selected inputs, controls, holds, allowance history and used attempts. Migration
 never infers collection from a matching report or invents historical proof.
 Legacy results remain available for inspection but cannot supply historical native
-approval/delivery until explicitly recollected through `collect_codex` with their
+approval/delivery until explicitly recollected through the original provider's strict
+collector (`collect_codex` or `collect_claude`) with their
 original checkout, Git directory and required HEAD still available. If cleanup or
 later work has removed that strict original context, retained artifacts alone
 cannot recover collection proof; do not backfill it or use a replacement checkout.

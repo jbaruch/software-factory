@@ -1632,7 +1632,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         raise FactoryError("Claude worker has not exited successfully; inspect its original Rex pane")
     try:
         receipt = decode_json(read_record(args.receipt, private=True))
-        instructions = Path(assignment["brief"]).read_text()
+        instructions = read_record(Path(assignment["brief"]), private=True)
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Restore original private Claude receipt and brief before collection") from None
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1

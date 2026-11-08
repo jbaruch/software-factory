@@ -94,6 +94,23 @@ class Decoder(unittest.TestCase):
         data = events("/fixture"); data[-1]["modelUsage"][MODEL]["outputTokens"] = 21
         with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
 
+    def test_owner_read_preserves_event_envelope_and_line_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events"
+            envelope = dict(schema_version=1, kind="claude-event-line", data='{"ok":true}\n')
+            path.write_text(json.dumps(envelope) + "\n")
+            path.chmod(0o600)
+            with patch.object(claude_worker, "NATIVE_LINE_LIMIT", 32):
+                self.assertEqual(claude_worker.read_events(path), [dict(ok=True)])
+                for payload in [b'\xff', b'{}\n', b'x' * 193,
+                        json.dumps({**envelope, "schema_version": 2}).encode(),
+                        json.dumps({**envelope, "data": "x" * 33}).encode(),
+                        json.dumps({**envelope, "data": '{"ok":true,"ok":false}'}).encode()]:
+                    with self.subTest(payload=payload):
+                        path.write_bytes(payload)
+                        with self.assertRaises(native_claude.ClaudeProbeError):
+                            claude_worker.read_events(path)
+
 
 class ClaudeWorker(unittest.TestCase):
     def setUp(self):
@@ -234,6 +251,71 @@ class ClaudeWorker(unittest.TestCase):
                 factory.collect_claude(self.path,"inspect",self.rex,self.record,self.assignment)
         self.args.brief.write_text("replacement")
         with self.assertRaises(factory.FactoryError):self.collect()
+
+    def assert_special_file_refused(self, path, read, error):
+        original = path.read_bytes() if path.exists() else None
+        original_open = os.open
+        required_flags = os.O_NOFOLLOW | os.O_NONBLOCK
+        for kind in ("fifo", "fifo-link", "directory", "file-link"):
+            with self.subTest(kind=kind):
+                if path.exists():
+                    path.unlink()
+                target = self.root / (path.name + "." + kind)
+                if kind == "fifo":
+                    os.mkfifo(path, 0o600)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    if kind == "fifo-link":
+                        os.mkfifo(target, 0o600)
+                    else:
+                        target.write_text("replacement")
+                    path.symlink_to(target)
+                opened = []
+
+                def safe_open(name, flags, *args, **kwargs):
+                    if Path(name) == path:
+                        # Assert before the real open: a regression must never block.
+                        self.assertEqual(flags & required_flags, required_flags)
+                        opened.append(name)
+                    return original_open(name, flags, *args, **kwargs)
+
+                try:
+                    with patch.object(Path, "open", side_effect=AssertionError("Unsafe Path.open")), \
+                            patch.object(os, "open", side_effect=safe_open):
+                        with self.assertRaises(error):
+                            read()
+                    self.assertEqual(len(opened), 1)
+                finally:
+                    if kind == "directory":
+                        path.rmdir()
+                    else:
+                        path.unlink()
+                    if original is not None:
+                        path.write_bytes(original)
+                        path.chmod(0o600)
+
+    def test_event_special_files_refuse_before_blocking(self):
+        self.assert_special_file_refused(self.args.events,
+            lambda: claude_worker.read_events(self.args.events), native_claude.ClaudeProbeError)
+
+    def test_execution_brief_special_files_refuse_before_probe_or_spawn(self):
+        before = self.path.read_bytes()
+        self.assert_special_file_refused(self.args.brief, self.execute, factory.FactoryError)
+        self.assertEqual(self.probes, [])
+        self.assertEqual(self.spawns, [])
+        self.assertFalse(self.args.events.exists())
+        self.assertFalse(self.args.receipt.exists())
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_collection_brief_special_files_refuse_without_mutation(self):
+        self.execute()
+        before = self.path.read_bytes()
+        receipt, stream = self.args.receipt.read_bytes(), self.args.events.read_bytes()
+        self.assert_special_file_refused(self.args.brief, self.collect, factory.FactoryError)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.args.receipt.read_bytes(), receipt)
+        self.assertEqual(self.args.events.read_bytes(), stream)
 
     def test_hold_budget_and_invalid_allowance_do_not_launch(self):
         before = self.path.read_bytes()

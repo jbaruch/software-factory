@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ from codex_worker import NATIVE_LINE_LIMIT, stop_child
 def read_events(path):
     try:
         events = []
-        with path.open(encoding="utf-8") as stream:
+        with StringIO(factory.read_record(path, private=True)) as stream:
             while True:
                 line = stream.readline(NATIVE_LINE_LIMIT * 6 + 1)
                 if not line:
@@ -54,7 +55,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         if not args.claude.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError("Invalid native binary")
         identity = factory.decode_json(args.repo_identity)
-        instructions = args.brief.read_text()
+        instructions = factory.read_record(args.brief, private=True)
     except (OSError, ValueError, UnicodeError):
         raise factory.FactoryError("Restore the original Claude executable, native session, repository identity and brief before another attempt") from None
     digest = hashlib.sha256(instructions.encode()).hexdigest()
