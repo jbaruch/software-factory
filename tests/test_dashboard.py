@@ -273,7 +273,7 @@ class OperatorView(unittest.TestCase):
         request.pop("inputs")
         original_command = request["command"].copy()
         legacy["assignments"]["backend"].pop("result")
-        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events"):
+        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events", "provisioning"):
             legacy.pop(key)
         factory.save(self.path, legacy)
         assignment = self.snapshot()["tasks"][0]["assignments"][0]
