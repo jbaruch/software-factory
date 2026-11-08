@@ -1,7 +1,7 @@
 """Grok execution/collection uses fake native processes and fake Rex only."""
 import asyncio
 import copy
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 from io import StringIO
 import json
@@ -125,6 +125,19 @@ class GrokWorker(unittest.TestCase):
         with patch.object(factory, "status", return_value=lost):
             result = factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
         self.assertEqual(result["assignments"]["inspect"]["result"]["outcome"], self.collect()["assignments"]["inspect"]["result"]["outcome"])
+
+    def test_collect_cli_shows_the_saved_result_when_tidy_fails(self):
+        self.assertEqual(self.execute()["state"], "completed")
+        exited = dict(state="exited", exit=dict(exit_code=0))
+        output, error = StringIO(), StringIO()
+        with patch.object(factory, "Rex", FakeRex), patch.object(factory, "status", return_value=exited), \
+                patch.object(factory, "tidy", side_effect=factory.FactoryError("Rex command failed")), \
+                redirect_stdout(output), redirect_stderr(error):
+            code = factory.main(["--state-dir", str(self.root), "grok-collect", "--task", "task", "--id", "inspect"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())["assignments"]["inspect"]["result"]["outcome"],
+                         factory.load_task(self.path)["assignments"]["inspect"]["result"]["outcome"])
+        self.assertIn("Collected result saved, but its tab was not tidied; run tidy: Rex command failed", error.getvalue())
 
     def test_production_hold_prevents_worker_probe_and_model_launch(self):
         self.boundary.stop()

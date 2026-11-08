@@ -2349,7 +2349,14 @@ def main(argv=None):
                 collect = (collect_codex if args.action == "codex-collect"
                            else collect_claude if args.action == "claude-collect" else collect_grok)
                 record = collect(path, args.id, rex, record, assignment)
-                tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                try:
+                    tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                except (FactoryError, OSError) as exc:
+                    # The result is already saved; show it, then fail so the open tab is noticed.
+                    print(json.dumps(task_view(record), indent=2))
+                    print("factory: Collected result saved, but its tab was not tidied; run tidy: " + str(exc),
+                          file=sys.stderr)
+                    return 1
                 print(json.dumps(task_view(record), indent=2))
             elif args.action == "capture":
                 print(captured(rex, record, assignment), end="")
