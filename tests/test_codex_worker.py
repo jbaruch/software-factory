@@ -1876,6 +1876,7 @@ class NativeResults(unittest.TestCase):
         del command[index:index + 2]
         record["schema_version"] = 2
         del record["control_events"]
+        del record["provisioning"]
         del record["allowance_events"]
         del record["admission"]["repository_identity"]
         factory.save(self.path, record)

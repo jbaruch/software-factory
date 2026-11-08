@@ -108,7 +108,8 @@ upgrade accepted legacy formats and create its normal advisory lock files, as
 `GET /api/state` returns transient schema-version-3 source facts. `?live=1` adds
 the same explicit Rex observations as the page. `dashboard.py` owns the response
 shape: collection time/duration, observation mode, task summaries, per-assignment
-process/result facts, task control events, per-task read errors and configured routes. Commands and
+process/result facts, task control events, optional task provisioning facts,
+per-task read errors and configured routes. Commands and
 instruction contents are omitted. Responses are not cached. The endpoint is a
 view, not an authorization or acceptance API. The HTML forms use the separate
 hold endpoint above. Version 1 omitted control events; version 2 added those events.
@@ -120,7 +121,7 @@ Version 3 adds per-assignment `requested_native` (`adapter`, `harness`, `route`,
 sanitized recovery `error`, and `exit_code` after a successful process read. It
 omits native process/exit objects and their potentially private fields. A link
 is a saved target, not proof the pane is currently available. No stored snapshots
-are migrated; task schema remains 7 with the owner's existing legacy support.
+are migrated; task schema is 8 with the owner's existing legacy support.
 Older static render callers can omit these additions and remain read-only when
 no CSRF token is supplied.
 
