@@ -631,6 +631,31 @@ class WorktreeProvisioning(unittest.TestCase):
                 factory.load_task(self.path)
             self.assertEqual(self.path.read_bytes(), before)
 
+    def test_migration_publication_errors_are_actionable_before_or_after_replace(self):
+        original = factory.load_task(self.path)
+        save = factory.save
+        for version in (6, 7):
+            for published in (False, True):
+                with self.subTest(version=version, published=published):
+                    legacy = {**original, "schema_version": version}
+                    del legacy["allowance_events" if version == 6 else "provisioning"]
+                    save(self.path, legacy)
+                    before = self.path.read_bytes()
+                    def failed(path, value, **kwargs):
+                        if published:
+                            save(path, value, **kwargs)
+                        raise OSError("fixed migration storage failure")
+                    with patch.object(factory, "save", side_effect=failed):
+                        code, _, error = self.cli("show", "--task", "fixture")
+                    self.assertEqual(code, 1)
+                    self.assertIn("task schema migration save", error)
+                    self.assertIn("restore state-store access/space", error)
+                    self.assertIn("reload or inspect the task record", error)
+                    if not published:
+                        self.assertEqual(self.path.read_bytes(), before)
+                    self.assertEqual(factory.load_task(self.path), original)
+                    self.assertFalse(self.destination.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
