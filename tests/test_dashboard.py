@@ -29,14 +29,14 @@ class OperatorView(unittest.TestCase):
         request = dict(role="backend", goal="Fix the supplied behavior", cwd=str(self.root),
                        command=[sys.executable, "private-command-argument"], instructions_sha256="a" * 64,
                        purpose="correction", inputs=dict(inputs))
-        self.record: dict = dict(schema_version=7, control_events=[], allowance_events=[], task="fixture", admission=dict(goal="Deliver the agreed change",
+        self.record: dict = dict(schema_version=9, control_events=[], allowance_events=[], provisioning=None, task="fixture", admission=dict(goal="Deliver the agreed change",
             repository=str(self.root), initial_candidate="a" * 40, acceptance=["requirements.md"],
             repository_identity=dict(common_dir=str(self.root / ".git"), repository_id="a" * 32),
             limits=dict(correction=1, investigation=1)), inputs=dict(inputs), hold="Waiting for scope decision",
             rex=dict(binary=sys.executable, server="unix:///fixture.sock", host_id="fixture-host"),
             session_label="factory-fixture-00000000", session_id="fixture-session", assignments={"backend": dict(
                 request=request, state="launched", brief=str(self.root / "brief.md"), window_label="backend-backend-00000000",
-                window_id="fixture-window", block_id="fixture-block", result=dict(inputs=dict(inputs),
+                window_id="fixture-window", block_id="fixture-block", native_collected=False, result=dict(inputs=dict(inputs),
                     candidate="a" * 40, outcome="completed", artifacts=["evidence/original.txt"]))})
         self.path = self.root / "fixture.json"
         factory.save(self.path, self.record)
@@ -273,7 +273,8 @@ class OperatorView(unittest.TestCase):
         request.pop("inputs")
         original_command = request["command"].copy()
         legacy["assignments"]["backend"].pop("result")
-        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events"):
+        legacy["assignments"]["backend"].pop("native_collected")
+        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events", "provisioning"):
             legacy.pop(key)
         factory.save(self.path, legacy)
         assignment = self.snapshot()["tasks"][0]["assignments"][0]

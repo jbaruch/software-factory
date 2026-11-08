@@ -394,11 +394,13 @@ class TaskAdmission(unittest.TestCase):
                     factory.load_task(self.path)
                 self.assertEqual(self.path.read_bytes(), before)
 
-    def test_allowance_migration_preserves_exhaustion_and_refuses_provisioning_schema(self):
+    def test_allowance_migration_preserves_exhaustion_across_earlier_owners(self):
         self.admit()
         self.start(purpose="correction")
         original = factory.load_task(self.path)
-        legacy = {key: value for key, value in original.items() if key != "allowance_events"}
+        legacy = {key: value for key, value in copy.deepcopy(original).items() if key not in {"allowance_events", "provisioning"}}
+        for assignment in legacy["assignments"].values():
+            del assignment["native_collected"]
         legacy["schema_version"] = 5
         factory.save(self.path, legacy)
         migrated = factory.load_task(self.path)
@@ -408,10 +410,9 @@ class TaskAdmission(unittest.TestCase):
             self.start(assignment_id="another", purpose="correction")
         prototype = {**legacy, "schema_version": 6, "provisioning": None}
         factory.save(self.path, prototype)
-        before = self.path.read_bytes()
-        with self.assertRaisesRegex(factory.FactoryError, "Unsupported task schema"):
-            self.extend()
-        self.assertEqual(self.path.read_bytes(), before)
+        migrated = factory.load_task(self.path)
+        self.assertEqual(migrated, original)
+        self.assertEqual(factory.task_view(migrated)["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
 
     def test_allowance_cli_returns_effective_limits_without_a_provider_or_rex(self):
         self.admit()
@@ -1266,16 +1267,17 @@ class TaskAdmission(unittest.TestCase):
     def test_legacy_record_migrates_without_relaunch_or_inferred_allowances(self):
         _, original = self.start(purpose=None)
         record = json.loads(self.path.read_text())
-        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events"):
+        for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events", "provisioning"):
             del record[key]
         for assignment in record["assignments"].values():
             del assignment["result"]
+            del assignment["native_collected"]
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(migrated["schema_version"], 9)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
-                         {key: {**item, "result": None} for key, item in record["assignments"].items()})
+                         {key: {**item, "result": None, "native_collected": False} for key, item in record["assignments"].items()})
         _, reconnected = self.start(purpose=None)
         self.assertEqual(reconnected["block_id"], original["block_id"])
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 1)
@@ -1383,14 +1385,16 @@ class TaskAdmission(unittest.TestCase):
         record = json.loads(self.path.read_text())
         record["schema_version"] = 1
         record.pop("control_events", None)
+        record.pop("provisioning", None)
         record.pop("allowance_events", None)
         del record["admission"]["repository_identity"]
         del record["inputs"]
         del record["assignments"]["qa"]["request"]["inputs"]
         del record["assignments"]["qa"]["result"]
+        del record["assignments"]["qa"]["native_collected"]
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 7)
+        self.assertEqual(upgraded["schema_version"], 9)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
@@ -1404,13 +1408,16 @@ class TaskAdmission(unittest.TestCase):
         original = factory.load_task(self.path)
         legacy = copy.deepcopy(original)
         legacy["schema_version"] = 2
+        for assignment in legacy["assignments"].values():
+            del assignment["native_collected"]
         legacy.pop("control_events", None)
+        legacy.pop("provisioning", None)
         legacy.pop("allowance_events", None)
         del legacy["admission"]["repository_identity"]
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 7)
+        self.assertEqual(upgraded["schema_version"], 9)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["assignments"], original["assignments"])
         self.assertEqual(upgraded["hold"], original["hold"])
@@ -1448,17 +1455,21 @@ class TaskAdmission(unittest.TestCase):
         factory.hold_task(self.path, "Keep original hold")
         legacy = factory.load_task(self.path)
         legacy["schema_version"] = 3
+        for assignment in legacy["assignments"].values():
+            del assignment["native_collected"]
         legacy.pop("control_events", None)
+        legacy.pop("provisioning", None)
         legacy.pop("allowance_events", None)
         pin = dict(common_dir=str(self.repo / ".git"), device=42, inode=17)
         legacy["admission"]["repository_identity"] = pin
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No inferred historical identity")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 7)
+        self.assertEqual(upgraded["schema_version"], 9)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["admission"]["legacy_repository_identity"], pin)
-        self.assertEqual(upgraded["assignments"], legacy["assignments"])
+        self.assertEqual(upgraded["assignments"],
+                         {key: {**item, "native_collected": False} for key, item in legacy["assignments"].items()})
         self.assertEqual(upgraded["hold"], legacy["hold"])
         self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"]["remaining"], 0)
         before = self.path.read_bytes()

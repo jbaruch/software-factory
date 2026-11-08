@@ -1,4 +1,4 @@
-"""Explicit native Rex launches. No scheduler, provider broker or model routing."""
+"""Task admission, explicit native Rex launches and mechanical integration."""
 import argparse
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -140,14 +140,14 @@ def execution_lock(directory):
 
 
 @contextmanager
-def task_lock(directory, task):
+def task_lock(directory, task, *, wait=False):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", task):
         raise FactoryError("Task ID must be a lowercase slug, at most 64 characters")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(directory / (task + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise FactoryError("Another command is working on this task; retry later") from exc
         yield directory / (task + ".json")
@@ -156,7 +156,7 @@ def task_lock(directory, task):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=7, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], rex=None,
+    return dict(schema_version=9, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -172,6 +172,12 @@ def read_record(path, *, private=False):
         return stream.read()
 
 
+def integration_request(request):
+    """Recognize only the factory-owned mechanical adapter; imports stay lazy."""
+    return (request.get("role") == "integration" and request.get("command", [])[:5]
+            == [sys.executable, "-E", "-s", str(ROOT / "integration.py"), "--intent"])
+
+
 def load_task(path) -> dict:
     """Factory owns migration of its gate store; unknown formats cannot launch."""
     try:
@@ -185,9 +191,10 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    # Schema 6 belongs to the retained provisioning prototype, not this reader.
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 7):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if (version < 6 or version == 7) and "provisioning" in record:
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 7 and "allowance_events" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 5 and "control_events" in record:
@@ -304,6 +311,12 @@ def load_task(path) -> dict:
     for assignment in record["assignments"].values():
         if "result" not in assignment:
             raise FactoryError("Missing assignment result field; restore the original state before continuing")
+        if version < 9:
+            if "native_collected" in assignment:
+                raise FactoryError("Legacy assignment has newer fields; restore its schema version before continuing")
+            assignment["native_collected"] = False
+        if type(assignment.get("native_collected")) is not bool or (assignment["native_collected"] and assignment["result"] is None):
+            raise FactoryError("Invalid native collection provenance; restore the original task record")
         result = assignment["result"]
         if result is not None and (not isinstance(result, dict)
                 or assignment["state"] != "launched"
@@ -337,11 +350,18 @@ def load_task(path) -> dict:
     if version < 5:
         record.update(schema_version=5, control_events=[])
     validate_control_events(record)
+    if version < 6 or version == 7:
+        record["provisioning"] = None
+    validate_provisioning(record)
     if version < 7:
-        record.update(schema_version=7, allowance_events=[])
+        record["allowance_events"] = []
     allowance_limits(record)
-    if version < 7:
-        save(path, record)
+    if version < 9:
+        record["schema_version"] = 9
+        try:
+            save(path, record)
+        except OSError:
+            raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
     return record
 
 
@@ -468,11 +488,12 @@ def git_run(repository, *args, environment=None):
             environment = scope[1]
         result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
-                              text=True, timeout=10, check=False,
+                              timeout=10, check=False,
                               env=git_environment() if environment is None else environment)
         if scope is not None and result.returncode == 125:
             raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
-        return result
+        return subprocess.CompletedProcess(result.args, result.returncode,
+            result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -600,7 +621,7 @@ def check_tracked_bytes(cwd, candidate):
         raise FactoryError("Cannot read candidate tree; restore Git object access before launching")
     root = Path(git_worktree(cwd))
     try:
-        allowed = set()
+        allowed, identities = set(), set()
         for entry in tree.stdout.split("\0"):
             if not entry:
                 continue
@@ -619,6 +640,10 @@ def check_tracked_bytes(cwd, candidate):
                 if info.st_nlink > 1:
                     independent_source(path)
                     info = path.lstat()
+                identity = (info.st_dev, info.st_ino)
+                if identity in identities:
+                    raise FactoryError("Candidate paths alias the same source file; use filenames distinct on this filesystem before launching")
+                identities.add(identity)
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
                 data = path.read_bytes()
             else:
@@ -694,12 +719,250 @@ def task_view(record):
             allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
     assignments = {key: {**item, "result_current": result_current(record, item["result"])}
                    for key, item in record["assignments"].items()}
-    return {**record, "allowances": allowances, "assignments": assignments}
+    item = record["provisioning"]
+    provisioning = None if item is None else {**item, "inputs_current": item["request"]["inputs"] == record["inputs"]}
+    return {**record, "allowances": allowances, "assignments": assignments, "provisioning": provisioning}
 
 
 def result_current(record, result):
     return result is not None and record["inputs"] == dict(
         candidate=result["candidate"], requirements=result["inputs"]["requirements"])
+
+
+def validate_provisioning(record):
+    item = record.get("provisioning")
+    if "provisioning" not in record:
+        raise FactoryError("Missing task provisioning field; restore the original record")
+    if item is None:
+        return
+    if (record["admission"] is None or not isinstance(item, dict)
+            or set(item) != {"id", "request", "owner_token", "state", "git_dir"}
+            or not isinstance(item["id"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item["id"])
+            or not isinstance(item["owner_token"], str) or not re.fullmatch(r"[0-9a-f]{32}", item["owner_token"])
+            or item["state"] not in ("provisioning", "provisioned")):
+        raise FactoryError("Invalid task provisioning intent; restore the original record")
+    request = item["request"]
+    if (not isinstance(request, dict) or set(request) != {"path", "branch", "inputs"}
+            or not isinstance(request["path"], str) or not Path(request["path"]).is_absolute()
+            or str(Path(request["path"])) != request["path"] or ".." in Path(request["path"]).parts
+            or request["branch"] != f'factory/{record["task"]}/{item["id"]}'
+            or not valid_inputs(request["inputs"])
+            or (item["git_dir"] is not None if item["state"] == "provisioning" else
+                not isinstance(item["git_dir"], str) or not Path(item["git_dir"]).is_absolute())):
+        raise FactoryError("Invalid task provisioning request; restore the original record")
+
+
+def provisioning_git(repository, *args, output=None):
+    """Metadata/index operations and raw blobs only; never checkout callbacks."""
+    environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        result = subprocess.run([git_binary(), "--no-replace-objects", "-C", str(repository),
+            "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
+            "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
+            env=environment, stdout=subprocess.PIPE if output is None else output,
+            stderr=subprocess.PIPE, timeout=30, check=False)
+        diagnostic = result.stderr.decode("utf-8")
+        output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        raise FactoryError("Provisioning Git outcome uncertain; inspect the retained intent and resources before continuing") from exc
+    if result.returncode:
+        raise FactoryError("Provisioning Git refused; inspect the retained intent and resources: " + diagnostic.strip())
+    return output_text
+
+
+def provisioning_source(repository, candidate, destination_parent):
+    """Reject unsupported configuration and trees before any worktree mutation."""
+    config = git_run(repository, "config", "--null", "--list")
+    if config.returncode:
+        raise FactoryError("Cannot inspect provisioning configuration; restore Git configuration access before provisioning")
+    for field in config.stdout.split("\0"):
+        key, _, value = field.partition("\n")
+        key = key.lower()
+        if (key in {"core.worktree", "core.alternaterefscommand", "extensions.partialclone"}
+                or key in {"core.fsmonitor", "core.bare", "core.sparsecheckout", "extensions.worktreeconfig"}
+                and value.lower() not in {"false", "no", "off", "0"}
+                or key.startswith("remote.") and key.endswith(".promisor")
+                and value.lower() not in {"false", "no", "off", "0"}):
+            raise FactoryError("Unsupported provisioning configuration: " + key + "; remove this setting or choose a supported repository before provisioning")
+    if os.path.lexists(git_common_dir(repository) / "objects/info/alternates"):
+        raise FactoryError("Provisioning requires local objects without alternates; choose a repository with independent local objects before provisioning")
+    try:
+        tree = provisioning_git(repository, "ls-tree", "-r", "-z", "--full-tree", candidate)
+    except FactoryError:
+        raise FactoryError("Cannot inspect candidate tree before provisioning; restore local Git object access and select a candidate with supported UTF-8 filenames") from None
+    entries = []
+    for entry in tree.split("\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split("\t", 1)
+        mode, kind, oid = metadata.split()
+        relative = Path(name)
+        if (kind != "blob" or mode not in {"100644", "100755"} or relative.is_absolute()
+                or relative.as_posix() != name
+                or any(part.lower() in {".git", ".."} for part in relative.parts)):
+            raise FactoryError("Provisioning supports only regular-file trees; select a candidate without symlinks, submodules or unsupported paths")
+        entries.append((name, mode, oid))
+    # Probe only names, on the actual destination filesystem, before saving intent.
+    # No normalization table can establish that filesystem's name equivalence.
+    try:
+        with tempfile.TemporaryDirectory(prefix=".factory-names-", dir=destination_parent) as temporary:
+            root, directories = Path(temporary), {}
+            for name, _, _ in entries:
+                with provisioning_file(root, name):
+                    pass
+                for parent in Path(name).parents:
+                    if parent == Path("."):
+                        continue
+                    info = (root / parent).stat()
+                    identity = (info.st_dev, info.st_ino)
+                    previous = directories.setdefault(identity, parent)
+                    if previous != parent:
+                        raise FactoryError("Candidate directory names collide on the destination filesystem; rename them or choose a compatible filesystem")
+    except (FileExistsError, NotADirectoryError, IsADirectoryError):
+        raise FactoryError("Candidate filenames collide on the destination filesystem; rename them or choose a compatible filesystem") from None
+    except OSError:
+        raise FactoryError("Cannot check destination filenames; restore temporary storage access/space before provisioning") from None
+    return entries
+
+
+def provisioning_owned(record, item):
+    """A saved unique Git lock marker binds recovery to this effect, not a lookalike."""
+    try:
+        destination = Path(item["request"]["path"])
+        if destination.is_symlink() or not destination.is_dir():
+            raise FactoryError("Provisioning outcome uncertain: owned worktree is missing or replaced; inspect without retrying")
+        read_record(destination / ".git")
+        directory = git_dir(destination)
+        common = Path(record["admission"]["repository_identity"]["common_dir"])
+        marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
+        if (directory.parent != common / "worktrees"
+                or directory.is_symlink()
+                or read_record(directory / "locked").strip() != marker
+                or read_record(directory / "gitdir").strip() != str(destination / ".git")
+                or repository_identity(destination) != record["admission"]["repository_identity"]
+                or item["state"] == "provisioning" and provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
+                or item["git_dir"] is not None and item["git_dir"] != str(directory)):
+            raise FactoryError("Provisioning ownership differs; inspect conflicting resources without resetting or deleting them")
+        return directory
+    except (OSError, UnicodeDecodeError):
+        raise FactoryError("Cannot read provisioning ownership metadata; restore access to the original metadata and inspect existing resources without retrying, resetting or deleting them") from None
+
+
+@contextmanager
+def provisioning_file(root, name):
+    """Create only new files beneath the owned directory, without following links."""
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = Path(name).parts
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=directory)
+                os.fsync(directory)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        with os.fdopen(descriptor, "wb") as stream:
+            yield stream
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def provision_worktree(path, *, worktree_id, destination):
+    """Caller holds the owner's execution/task locks, as for explicit launches."""
+    record = load_task(path)
+    if record["admission"] is None:
+        raise FactoryError("Admit a task before provisioning a writer worktree")
+    if not isinstance(worktree_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", worktree_id):
+        raise FactoryError("Worktree ID must be a lowercase slug, at most 64 characters")
+    supplied = Path(destination)
+    if not supplied.is_absolute() or ".." in supplied.parts:
+        raise FactoryError("Supply an absolute worktree path without parent traversal")
+    try:
+        parent = supplied.parent.resolve(strict=True)
+        is_directory = parent.is_dir()
+    except OSError:
+        raise FactoryError("Create or restore access to the destination parent directory before provisioning") from None
+    if not is_directory:
+        raise FactoryError("Choose an existing directory as the destination parent before provisioning")
+    destination = parent / supplied.name
+    request: dict = dict(path=str(destination), branch=f'factory/{record["task"]}/{worktree_id}',
+                         inputs=dict(record["inputs"]))
+    check_repository(record["admission"])
+    existing = record["provisioning"]
+    if existing is not None:
+        if existing["id"] != worktree_id or existing["request"] != request:
+            raise FactoryError("Task already has a different provisioning request; inspect its original intent")
+        directory = provisioning_owned(record, existing)
+        if existing["state"] == "provisioned":
+            return record  # Historical completion: writers may now have edited this checkout.
+        # Reconciliation is read-only, including while held. Never repair shared files.
+        try:
+            for root, _, files in os.walk(destination, followlinks=False):
+                for name in files:
+                    if (Path(root) / name).lstat().st_nlink != 1:
+                        raise FactoryError("Provisioning outcome uncertain: shared files require inspection")
+            check_checkout(record["admission"]["repository"], str(destination), request["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        except OSError:
+            raise FactoryError("Cannot inspect retained provisioning resources; restore filesystem access and inspect the existing intent/worktree without retrying, resetting or deleting them") from None
+    else:
+        if record["hold"] is not None:
+            raise FactoryError("Task is paused; resume before provisioning")
+        if any(item["state"] == "launching" for item in record["assignments"].values()):
+            raise FactoryError("Reconcile the pending launch before provisioning")
+        for parent in (destination.parent, *destination.parent.parents):
+            if (os.path.lexists(parent / ".git") or
+                    (parent / "HEAD").exists() and (parent / "objects").is_dir()):
+                raise FactoryError("Provision outside existing checkouts and Git directories")
+        if (destination.is_relative_to(path.parent.resolve())
+                or path.resolve().is_relative_to(destination)):
+            raise FactoryError("Provision outside the task owner store")
+        if os.path.lexists(destination):
+            raise FactoryError("Worktree path already exists; never reuse or delete conflicting resources")
+        repository = record["admission"]["repository"]
+        entries = provisioning_source(repository, request["inputs"]["candidate"], destination.parent)
+        branches = git_run(repository, "for-each-ref", "--format=%(refname)", "refs/heads")
+        if branches.returncode:
+            raise FactoryError("Cannot inspect the local branch namespace; restore Git access before provisioning")
+        wanted = ("refs/heads/" + request["branch"]).casefold()
+        if any(ref == wanted or ref.startswith(wanted + "/") or wanted.startswith(ref + "/")
+               for ref in (name.casefold() for name in branches.stdout.splitlines())):
+            raise FactoryError("Worktree branch exists or has a namespace conflict; choose an unused task/worktree name or explicitly resolve the conflicting ref")
+        existing = dict(id=worktree_id, request=request, owner_token=uuid.uuid4().hex,
+                        state="provisioning", git_dir=None)
+        record["provisioning"] = existing
+        try:
+            save(path, record)  # Durable immutable request and before-effect intent.
+        except OSError:
+            raise FactoryError("Cannot confirm provisioning intent save; restore state-store access/space and reconcile the saved task record before continuing; no Git worktree creation was started") from None
+        marker = f'factory-{record["task"]}-{worktree_id}-{existing["owner_token"]}'
+        provisioning_git(repository, "worktree", "add", "--no-checkout", "--lock", "--reason", marker,
+                         "-b", request["branch"], str(destination), request["inputs"]["candidate"])
+        directory = provisioning_owned(record, existing)
+        # --no-checkout avoids hooks and smudge filters; read-tree writes only this index.
+        provisioning_git(destination, "read-tree", request["inputs"]["candidate"])
+        try:
+            for name, mode, oid in entries:
+                with provisioning_file(destination, name) as stream:
+                    provisioning_git(repository, "cat-file", "blob", oid, output=stream)
+                    stream.flush()
+                    os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
+                    os.fsync(stream.fileno())
+            check_checkout(repository, str(destination), request["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        except OSError:
+            raise FactoryError("Provisioning resource writes failed; restore filesystem access/space and inspect the retained intent/worktree without retrying, resetting or deleting them") from None
+    existing.update(state="provisioned", git_dir=str(directory))
+    try:
+        save(path, record)
+    except OSError:
+        raise FactoryError("Cannot confirm provisioning completion save; restore state-store access/space and reconcile this same saved intent and existing worktree before continuing") from None
+    return record
 
 
 def set_inputs(path, *, candidate, requirements):
@@ -719,6 +982,8 @@ def record_result(path, *, assignment_id, candidate, requirements, outcome, arti
     if assignment_id not in record["assignments"]:
         raise FactoryError(f"Unknown assignment {assignment_id!r}; use show --task {record['task']} to find its ID")
     assignment = record["assignments"][assignment_id]
+    if integration_request(assignment["request"]):
+        raise FactoryError("Mechanical delivery results belong to factory integrate, not manual reports")
     inputs = assignment["request"].get("inputs")
     if not valid_inputs(inputs):
         raise FactoryError("Assignment predates input binding; launch a new explicit assignment ID")
@@ -905,7 +1170,7 @@ def reconcile(rex, record, assignment):
 
 
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
-           binary=None, server=None, purpose=None, dependencies=()):
+           binary=None, server=None, purpose=None, dependencies=(), frozen_release=None, frozen_delivery=None):
     if not goal.strip():
         raise FactoryError("Supply a nonempty assignment goal before launching")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", assignment_id):
@@ -960,6 +1225,42 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                        expected_git_dir=native_args.worktree_git_dir)
         instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
             requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
+    if not existing and any(flag in command for flag in ("--delivery-evidence", "--delivery-evidence-digest")):
+        import codex_worker
+        import release_evidence
+        if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
+            raise FactoryError("Delivered evidence requires the verified native adapter")
+        try:
+            native_args = codex_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Damaged final native release command") from None
+        if native_args.write or native_args.role != "release" or role != "release" or any(flag in command for flag in ("--release-evidence", "--release-evidence-digest")):
+            raise FactoryError("Final acceptance evidence needs a distinct read-only release assignment")
+        frozen = decode_json(native_args.delivery_evidence) if native_args.delivery_evidence is not None else frozen_delivery
+        if native_args.delivery_evidence_digest is not None and release_evidence.digest(frozen) != native_args.delivery_evidence_digest:
+            raise FactoryError("Supply the original delivery evidence matching the command digest before launching")
+        release_evidence.validate_delivery(frozen, record)
+        instructions += release_evidence.render_delivery(frozen)
+    if not existing and any(flag in command for flag in ("--release-evidence", "--release-evidence-digest")):
+        import codex_worker
+        import release_evidence
+        if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
+            raise FactoryError("Release evidence requires the verified native Codex adapter")
+        try:
+            native_args = codex_worker.parser().parse_args(command[4:])
+        except SystemExit:
+            raise FactoryError("Damaged native release-review command") from None
+        if native_args.write or native_args.role != role:
+            raise FactoryError("Frozen release evidence requires a matching read-only specialist")
+        frozen = decode_json(native_args.release_evidence) if native_args.release_evidence is not None else frozen_release
+        if native_args.release_evidence_digest is not None and release_evidence.digest(frozen) != native_args.release_evidence_digest:
+            raise FactoryError("Supply the original release evidence matching the command digest before launching")
+        frozen = release_evidence.validate(frozen, record)
+        instructions += release_evidence.render(frozen)
+    if not existing and integration_request(request):
+        import integration
+        integration.validate_launch(record, request, task, assignment_id, path)
+        instructions += integration.render_intent(decode_json(command[5]))
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
@@ -1029,7 +1330,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         argv = [sys.executable, "-E", "-s", str(ROOT / "checkout_exec.py"), "--identity",
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
-    assignment: dict = dict(request=request, state="launching", result=None, brief=str(brief_path),
+    assignment: dict = dict(request=request, state="launching", result=None, native_collected=False, brief=str(brief_path),
                             window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
     record["assignments"][assignment_id] = assignment
     save(path, record)
@@ -1083,7 +1384,7 @@ def check_commit_message(message, *, write):
 
 
 def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None,
-                  decision_store=None, decision=None, question=None):
+                  decision_store=None, decision=None, question=None, release_evidence=None, delivery_evidence=None):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
@@ -1136,10 +1437,22 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         if existing is None and role == "judge" and model != coordination_evidence.judge_model():
             raise FactoryError("Select the configured judge_model; arbitrary model choices cannot adjudicate this case")
         command.extend(["--decision-store", str(decision_store), "--decision", str(decision), "--question", str(question)])
+    if delivery_evidence is not None:
+        if existing is not None and "--delivery-evidence" in existing["request"]["command"]:
+            command.extend(["--delivery-evidence", json.dumps(delivery_evidence, sort_keys=True)])
+        else:
+            import release_evidence as evidence
+            command.extend(["--delivery-evidence-digest", evidence.digest(delivery_evidence)])
+    if release_evidence is not None:
+        if existing is not None and "--release-evidence" in existing["request"]["command"]:
+            command.extend(["--release-evidence", json.dumps(release_evidence, sort_keys=True)])
+        else:
+            import release_evidence as evidence
+            command.extend(["--release-evidence-digest", evidence.digest(release_evidence)])
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
-def codex_evidence(assignment_id, record, assignment, *, observe=None):
+def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False):
     """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import check_commit_receipt, parse_events, parser, read_events
 
@@ -1160,9 +1473,11 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None):
         raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
-    if observe is None and (assignment["result"] is None or not result_current(record, assignment["result"])):
+    if not failed_identity and (observe is None or collected) and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
         raise FactoryError("Collect a current native result before using its answer as coordination evidence")
-    if observe is not None and observe()["state"] != "exited":
+    if collected and assignment.get("native_collected") is not True:
+        raise FactoryError("Native evidence lacks proven strict collection; explicitly collect it with its original checkout available")
+    if observe is not None and observe()["state"] not in ({"failed", "exited"} if failed_identity else {"exited"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -1174,14 +1489,14 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None):
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
             or receipt["schema_version"] not in (4, 5, 6)
-            or receipt.get("kind") != "codex-execution" or receipt.get("state") != "completed"
+            or receipt.get("kind") != "codex-execution" or receipt.get("state") != ("failed" if failed_identity else "completed")
             or any(type(receipt.get(key)) not in (int, float)
                    or not 0 <= receipt[key] <= sys.float_info.max
                    for key in ("created_at", "finished_at", "elapsed_seconds"))
             or receipt["finished_at"] < receipt["created_at"]
-            or "error" not in receipt or receipt["error"] is not None
+            or (not isinstance(receipt.get("error"), str) if failed_identity else ("error" not in receipt or receipt["error"] is not None))
             or any(key not in receipt for key in ("thread_id", "report", "usage"))
-            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or (not failed_identity and (type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0))
             or receipt.get("job") != record["task"] + "/" + assignment_id
             or not valid_inputs(receipt.get("inputs"))
             or receipt.get("inputs") != assignment["request"].get("inputs")
@@ -1194,11 +1509,29 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None):
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or receipt.get("binary") != str(args.codex) or not args.codex.is_absolute()
             or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
-            or not isinstance(receipt.get("candidate"), str)
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
-            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
+            or (not failed_identity and (not isinstance(receipt.get("candidate"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
+                or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])))
             or receipt.get("events") != str(args.events)):
         raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
+    if failed_identity:
+        # Identity-only recovery of a failed contributor. This is never a report,
+        # success receipt, dependency or approval, even if partial events contain one.
+        events = read_events(args.events)
+        threads = [event.get("thread_id") for event in events
+                   if isinstance(event, dict) and event.get("type") == "thread.started"]
+        if (not args.write or not events or not isinstance(events[0], dict)
+                or events[0].get("type") != "thread.started" or len(threads) != 1
+                or not isinstance(threads[0], str) or not threads[0]
+                or receipt.get("thread_id") not in (None, threads[0])):
+            raise FactoryError("Unknown or ambiguous original failed contributor context")
+        try:
+            instructions = Path(assignment["brief"]).read_text()
+        except (OSError, UnicodeError):
+            raise FactoryError("Restore the original failed contributor brief") from None
+        if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
+            raise FactoryError("Original failed contributor brief changed")
+        return args, receipt, dict(thread_id=threads[0])
     import coordination_evidence
     coordination = None
     if args.decision is not None or args.question is not None:
@@ -1221,8 +1554,11 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None):
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
-    if observe is not None:
-        check_commit_receipt(receipt, args, record["admission"]["repository"])
+    if observe is not None or collected:
+        # Only a fully collected result may outlive its original checkout.
+        # Initial collection (including stale work) keeps the strict HEAD check.
+        check_commit_receipt(receipt, args, record["admission"]["repository"],
+                             historical=collected)
     elif (coordination is None or args.write or receipt.get("commit") is not None
             or repository_identity(record["admission"]["repository"]) != receipt["repository_identity"]):
         raise FactoryError("Offline coordination needs collected read-only evidence from the original repository")
@@ -1230,6 +1566,18 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None):
             or assignment["result"]["candidate"] != receipt["candidate"]
             or str(args.receipt) not in assignment["result"]["artifacts"]):
         raise FactoryError("Collected native result differs from its original answer evidence")
+    if collected:
+        expected = dict(inputs=receipt["inputs"], candidate=receipt["candidate"],
+            outcome=native["report"]["outcome"], artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+        if assignment["result"] != expected:
+            raise FactoryError("Collected result differs from the complete original native report")
+    if observe is not None or collected:
+        try:
+            instructions = Path(assignment["brief"]).read_text()
+        except (OSError, UnicodeError):
+            raise FactoryError("Missing original native brief") from None
+        if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
+            raise FactoryError("Original native brief changed")
     return args, receipt, native
 
 
@@ -1237,9 +1585,12 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     """Register a finished native report; this never accepts the whole task."""
     args, receipt, native = codex_evidence(assignment_id, record, assignment, observe=lambda: status(rex, record, assignment))
     artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
-    return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
-                         requirements=receipt["inputs"]["requirements"],
-                         outcome=native["report"]["outcome"], artifacts=artifacts)
+    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+                           requirements=receipt["inputs"]["requirements"],
+                           outcome=native["report"]["outcome"], artifacts=artifacts)
+    record["assignments"][assignment_id]["native_collected"] = True
+    save(path, record)
+    return record
 
 
 def require_grok_execution():
@@ -1388,6 +1739,10 @@ def main(argv=None):
             start.add_argument("--decision-store", type=Path)
             start.add_argument("--decision")
             start.add_argument("--question")
+            start.add_argument("--delivery", help="Freeze an original confirmed integration for final release judgment")
+            start.add_argument("--release-pr", help="Freeze complete canonical feedback for a native read-only judgment")
+            start.add_argument("--gh", type=Path)
+            start.add_argument("--release-scripts", type=Path)
         else:
             start.add_argument("--grok", required=True)
             start.add_argument("--model", required=True)
@@ -1395,6 +1750,15 @@ def main(argv=None):
             start.add_argument("--seconds", type=int, default=600)
             start.add_argument("--turns", type=int, default=30)
             start.add_argument("--base", help="Full base commit ID; required for code-review")
+    delivery = sub.add_parser("integrate", help="Integrate selected exact-input native approvals; existing IDs reconcile read-only")
+    delivery.add_argument("--task", required=True)
+    delivery.add_argument("--id", required=True)
+    delivery.add_argument("--pr", required=True)
+    delivery.add_argument("--review", required=True)
+    delivery.add_argument("--acceptance", help="Explicit final native release judgment; read-only after delivery")
+    delivery.add_argument("--after", action="append", required=True)
+    delivery.add_argument("--gh", type=Path, required=True)
+    delivery.add_argument("--release-scripts", type=Path, required=True)
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -1413,6 +1777,10 @@ def main(argv=None):
     inputs.add_argument("--task", required=True)
     inputs.add_argument("--candidate", required=True)
     inputs.add_argument("--requirements", required=True)
+    provision = sub.add_parser("provision", help="Provision or reconcile one explicitly named writer worktree")
+    provision.add_argument("--task", required=True)
+    provision.add_argument("--id", required=True, help="Stable worktree name; branch is factory/TASK/ID")
+    provision.add_argument("--path", required=True, help="New absolute path outside existing checkouts")
     result = sub.add_parser("result", help="Record a revision-bound specialist outcome")
     result.add_argument("--task", required=True)
     result.add_argument("--id", required=True)
@@ -1444,8 +1812,58 @@ def main(argv=None):
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
             raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
-            if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance"}:
+        if args.action == "integrate":
+            import integration
+            path = args.state_dir.resolve() / (args.task + ".json")
+            if args.acceptance is not None:
+                with task_lock(path.parent, args.task):
+                    original = load_task(path)["assignments"].get(args.id)
+                    if original is None or original["result"] is None:
+                        raise FactoryError("Final acceptance only observes an existing terminal integration")
+            receipt = integration.integrate(path, assignment_id=args.id, pr=args.pr, review=args.review,
+                required=args.after, gh=args.gh, scripts=args.release_scripts)
+            if args.acceptance is not None:
+                import release_evidence
+                with task_lock(path.parent, args.task):
+                    record = load_task(path)
+                transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
+                receipt = {**receipt, "acceptance": integration.accepted(record, args.id, args.acceptance, transport)}
+            print(json.dumps(receipt, indent=2))
+            return 0 if receipt["state"] in {"launched", "delivered"} else 1
+        prepared = None
+        frozen_release = frozen_delivery = None
+        if args.action == "codex-start" and (args.release_pr is not None or args.delivery is not None):
+            import release_evidence
+            if args.release_pr is not None and args.delivery is not None:
+                raise FactoryError("Select pre-merge release review or final delivery judgment")
+            with task_lock(args.state_dir.resolve(), args.task) as path:
+                prepared = load_task(path)
+            if prepared["admission"] is None:
+                raise FactoryError("Admit a task before capturing native release evidence")
+            original = prepared["assignments"].get(args.id)
+            if args.delivery is not None:
+                if original is not None:
+                    frozen_delivery = release_evidence.from_delivery_assignment(prepared, original)
+                    if frozen_delivery["assignment"] != args.delivery:
+                        raise FactoryError("Original delivery differs; use a new final review assignment")
+                else:
+                    delivered = release_evidence.delivery(prepared, args.delivery)
+                    intent = delivered["receipt"]["intent"]
+                    transport = release_evidence.GitHub(intent["gh"], intent["scripts"], prepared["admission"]["repository"])
+                    frozen_delivery = release_evidence.capture_delivery(prepared, args.delivery, transport, cwd=args.cwd)
+            elif original is not None:
+                frozen_release = release_evidence.from_assignment(prepared, original)
+                if frozen_release["pr"]["url"] != args.release_pr:
+                    raise FactoryError("Original release PR differs; use a new review assignment")
+            else:
+                if args.gh is None or args.release_scripts is None:
+                    raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
+                transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
+                frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+            if prepared is not None and load_task(path) != prepared:
+                raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
+            if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance", "provision"}:
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
                                    acceptance=args.acceptance, corrections=args.corrections,
@@ -1457,6 +1875,8 @@ def main(argv=None):
                         expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason)
                 elif args.action == "inputs":
                     record = set_inputs(path, candidate=args.candidate, requirements=args.requirements)
+                elif args.action == "provision":
+                    record = provision_worktree(path, worktree_id=args.id, destination=args.path)
                 elif args.action == "result":
                     record = record_result(path, assignment_id=args.id, candidate=args.candidate,
                                            requirements=args.requirements, outcome=args.outcome,
@@ -1473,7 +1893,7 @@ def main(argv=None):
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
                                          write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role,
-                                         decision_store=args.decision_store, decision=args.decision, question=args.question)
+                                         decision_store=args.decision_store, decision=args.decision, question=args.question, release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 elif args.action == "grok-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")
@@ -1484,7 +1904,8 @@ def main(argv=None):
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
                     role=args.role, goal=args.goal, cwd=args.cwd, command=argv,
-                    binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after)
+                    binary=args.rex, server=args.server, purpose=args.purpose, dependencies=args.after,
+                    frozen_release=frozen_release, frozen_delivery=frozen_delivery)
                 rex = connect(record)
             else:
                 record = load_task(path)

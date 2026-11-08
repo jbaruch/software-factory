@@ -443,6 +443,7 @@ def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.conn
                               allowance_events=record["allowance_events"],
                               admission=({key: record["admission"][key] for key in
                                           ("goal", "initial_candidate", "acceptance", "limits")} if record["admission"] else None),
+                              provisioning=view["provisioning"],
                               allowances=view["allowances"], assignments=assignments))
         except (factory.FactoryError, OSError) as exc:
             errors.append(dict(task=path.stem, error=str(exc)))
@@ -687,10 +688,15 @@ def render(view, *, csrf_token=None):
         revisions = (f'<details class="revisions"><summary>Selected inputs</summary><dl><dt>Candidate</dt>'
                      f'<dd><code>{text(inputs["candidate"])}</code></dd><dt>Requirements</dt>'
                      f'<dd><code>{text(inputs["requirements"])}</code></dd></dl></details>' if inputs else "")
+        item = task.get("provisioning")
+        worktree = (f'<p>Writer worktree {text(item["id"])}: {text(item["state"])} '
+                    f'({"current inputs" if item["inputs_current"] else "previous inputs"})<br>'
+                    f'<code>{text(item["request"]["path"])}</code> '
+                    f'<code>{text(item["request"]["branch"])}</code></p>' if item else "")
         tasks.append(f'<section class="task" aria-labelledby="task-{text(task["id"])}">'
                      f'<div class="task-heading"><div><h2 id="task-{text(task["id"])}">{text(task["id"])}</h2>'
                      f'<p class="goal">{text(task["goal"] or "Scope not admitted")}</p></div>{revisions}</div>'
-                     f'{hold}{controls}{trace}{table}<p class="allowances">{text(limits)}</p>'
+                     f'{hold}{controls}{trace}{worktree}{table}<p class="allowances">{text(limits)}</p>'
                      f'{allowance_controls(task, csrf_token)}</section>')
     errors = "".join(f'<li><strong>{text(item["task"])}</strong>: {text(item["error"])}</li>' for item in view["errors"])
     unavailable = f'<aside class="errors"><h2>Records needing attention</h2><ul>{errors}</ul></aside>' if errors else ""

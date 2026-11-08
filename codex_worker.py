@@ -670,13 +670,22 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     return hooked
 
 
-def check_commit_receipt(receipt, args, repository):
+def check_commit_receipt(receipt, args, repository, *, historical=False):
     """Version 4 has no factory commit; version 5 declares its nullable intent."""
-    if (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
+    if factory.repository_identity(repository) != receipt["repository_identity"]:
+        raise factory.FactoryError("Admitted repository identity changed; restore its original repository marker before validating provenance")
+    if not historical and (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
             or factory.git_dir(str(args.cwd)) != args.worktree_git_dir):
         raise factory.FactoryError("Assignment worktree binding differs at collection; restore its original repository and Git directory")
-    if args.write and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
+    if args.write and not historical and factory.git_commit(str(args.cwd), "HEAD") != receipt["candidate"]:
         raise factory.FactoryError("Writer candidate differs from the assigned worktree HEAD; inspect its retained checkout before collection")
+    if factory.git_commit(repository, receipt["candidate"]) != receipt["candidate"]:
+        raise factory.FactoryError("Restore the original writer candidate objects before validating historical provenance")
+    if factory.git_commit(repository, receipt["inputs"]["candidate"]) != receipt["inputs"]["candidate"]:
+        raise factory.FactoryError("Restore the original assignment parent objects before validating provenance")
+    tree_object = factory.git_run(repository, "cat-file", "-e", receipt["candidate"] + "^{tree}")
+    if tree_object.returncode:
+        raise factory.FactoryError("Restore the original candidate tree objects before validating provenance")
     commit = receipt.get("commit")
     if receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:
@@ -732,6 +741,24 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         factory.check_role_write(args.role)
     if args.role is not None and instructions.split("\n", 1)[0] != "# Assignment: " + args.role:
         raise factory.FactoryError("Worker role differs from the bound assignment brief; inspect the original request")
+    if args.delivery_evidence is not None or args.delivery_evidence_digest is not None:
+        import release_evidence
+        if args.release_evidence is not None or args.release_evidence_digest is not None:
+            raise factory.FactoryError("Select one original release or delivery payload before launching")
+        frozen = (factory.decode_json(args.delivery_evidence) if args.delivery_evidence is not None else
+                  release_evidence.brief_payload(instructions, "delivery", args.delivery_evidence_digest))
+        if args.write or args.role != "release" or not instructions.endswith(release_evidence.render_delivery(frozen)):
+            raise factory.FactoryError("Final acceptance needs its original frozen read-only release brief")
+        if frozen["receipt"]["intent"]["inputs"] != dict(candidate=args.candidate, requirements=args.requirements):
+            raise factory.FactoryError("Final acceptance inputs differ from confirmed delivery")
+    if args.release_evidence is not None or args.release_evidence_digest is not None:
+        import release_evidence
+        frozen = (factory.decode_json(args.release_evidence) if args.release_evidence is not None else
+                  release_evidence.brief_payload(instructions, "release", args.release_evidence_digest))
+        if args.write or not instructions.endswith(release_evidence.render(frozen)):
+            raise factory.FactoryError("Original release evidence differs from the frozen read-only brief")
+        if frozen.get("inputs") != dict(candidate=args.candidate, requirements=args.requirements):
+            raise factory.FactoryError("Release evidence inputs differ from native assignment")
     coordination = None
     if any(getattr(args, key, None) is not None for key in ("decision_store", "decision", "question")):
         import coordination_evidence
@@ -783,54 +810,94 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         os.close(fd)
         raise
     started, process = timer(), None
+    directory = None
+    cleanup_errors = []
     events = []
     try:
-        with os.fdopen(fd, "w") as stream:
-            if args.commit_message is not None:
-                instructions += "\nFactory commit mode: edit and test only; do not stage or commit Git changes. The factory commits after a completed report. Keep temporary outputs outside this checkout.\n"
-            try:
-                process = await spawn(str(binary), "--no-daemon", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
-                                      "--json", "--color", "never",
-                                      "--output-schema", str(schema), "--model", args.model,
-                                      "--sandbox", "workspace-write" if args.write else "read-only",
-                                      "-c", "model_reasoning_effort=" + json.dumps(args.effort),
-                                      "--cd", ".", instructions,
-                                      env=native_environment(),
-                                      limit=NATIVE_LINE_LIMIT,
-                                      stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
-            except OSError:
-                raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
+        try:
+            with os.fdopen(fd, "w") as stream:
+                if args.commit_message is not None:
+                    instructions += "\nFactory commit mode: edit and test only; do not stage or commit Git changes. The factory commits after a completed report. Keep temporary outputs outside this checkout.\n"
+                try:
+                    directory = Path(tempfile.mkdtemp(prefix="sf-codex-shell-",
+                                                     dir=Path(tempfile.gettempdir()).resolve()))
+                except OSError:
+                    raise factory.FactoryError("Cannot allocate the private native shell directory; restore temporary storage access/space and reconcile this attempt before another launch") from None
+                environment = {**native_environment(), "ZDOTDIR": str(directory)}
+                # JSON basic-string escapes also fit TOML, except raw DEL;
+                # keep non-BMP Unicode literal rather than JSON surrogate pairs.
+                shell_path = json.dumps(str(directory), ensure_ascii=False).replace("\x7f", "\\u007f")
+                try:
+                    # A seekable private stdin avoids argv limits and pipe backpressure.
+                    # The child owns its inherited descriptor; the parent closes its copy.
+                    with tempfile.TemporaryFile() as prompt:
+                        prompt.write(instructions.encode("utf-8"))
+                        prompt.seek(0)
+                        process = await spawn(str(binary), "--no-daemon", "--strict-config", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                                          "--json", "--color", "never",
+                                          "--output-schema", str(schema), "--model", args.model,
+                                          "--sandbox", "workspace-write" if args.write else "read-only",
+                                          "-c", "model_reasoning_effort=" + json.dumps(args.effort),
+                                          "-c", "allow_login_shell=false",
+                                          "-c", "features.shell_snapshot=false",
+                                          "-c", "shell_environment_policy.experimental_use_profile=false",
+                                          "-c", "shell_environment_policy.set.ZDOTDIR=" + shell_path,
+                                          "--cd", ".", "-",
+                                          env=environment,
+                                          limit=NATIVE_LINE_LIMIT,
+                                          stdin=prompt, stdout=asyncio.subprocess.PIPE)
+                except OSError:
+                    raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
 
-            async def consume():
-                while True:
-                    try:
-                        line = await process.stdout.readline()
-                    except ValueError:
-                        raise factory.FactoryError("Native event exceeded the 1 MiB line limit; inspect the existing Rex pane and retained stream, then reduce command output or update the adapter before authorizing another attempt") from None
-                    if not line:
-                        break
-                    text = line.decode("utf-8", errors="surrogateescape")
-                    stream.write(json.dumps(dict(schema_version=1, kind="codex-event-line", data=text)) + "\n")
-                    stream.flush()
-                    try:
-                        line.decode("utf-8")
-                        event = factory.decode_json(text, object_pairs_hook=native_object)
-                    except (UnicodeDecodeError, ValueError):
-                        raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
-                    print(text, end="", flush=True)
-                    if not isinstance(event, dict):
-                        raise factory.FactoryError("Native output is not an event object; inspect the retained stream")
-                    events.append(event)
-                    if (event.get("type") == "thread.started" and receipt["thread_id"] is None
-                            and isinstance(event.get("thread_id"), str) and event["thread_id"]):
-                        receipt["thread_id"] = event["thread_id"]
-                return await process.wait()
+                async def consume():
+                    while True:
+                        try:
+                            line = await process.stdout.readline()
+                        except ValueError:
+                            raise factory.FactoryError("Native event exceeded the 1 MiB line limit; inspect the existing Rex pane and retained stream, then reduce command output or update the adapter before authorizing another attempt") from None
+                        if not line:
+                            break
+                        text = line.decode("utf-8", errors="surrogateescape")
+                        stream.write(json.dumps(dict(schema_version=1, kind="codex-event-line", data=text)) + "\n")
+                        stream.flush()
+                        try:
+                            line.decode("utf-8")
+                            event = factory.decode_json(text, object_pairs_hook=native_object)
+                        except (UnicodeDecodeError, ValueError):
+                            raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
+                        print(text, end="", flush=True)
+                        if not isinstance(event, dict):
+                            raise factory.FactoryError("Native output is not an event object; inspect the retained stream")
+                        events.append(event)
+                        if (event.get("type") == "thread.started" and receipt["thread_id"] is None
+                                and isinstance(event.get("thread_id"), str) and event["thread_id"]):
+                            receipt["thread_id"] = event["thread_id"]
+                    return await process.wait()
 
-            receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
-            os.fsync(stream.fileno())
-        if receipt["exit_code"] != 0:
-            raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
-        receipt.update(parse_events(events, coordination))
+                receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
+                os.fsync(stream.fileno())
+            if receipt["exit_code"] != 0:
+                raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
+            receipt.update(parse_events(events, coordination))
+        finally:
+            # Retire native resources before any factory-owned Git callbacks.
+            # mkdtemp has no finalizer: an unconfirmed child keeps its directory.
+            if process is not None:
+                try:
+                    await stop_child(process)
+                except OSError:
+                    cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
+                receipt["exit_code"] = process.returncode
+            if directory is not None:
+                if process is not None and process.returncode is None:
+                    cleanup_errors.append(f"Native termination is unconfirmed; retain shell directory {str(directory)!r} until owned-child reconciliation confirms exit")
+                else:
+                    try:
+                        shutil.rmtree(directory)
+                    except OSError:
+                        cleanup_errors.append(f"Cannot remove owned native shell directory {str(directory)!r}; restore access and remove only this directory after reconciling the attempt")
+        if cleanup_errors:
+            raise factory.FactoryError("Native resource cleanup failed; factory Git was not started")
         committing = args.commit_message is not None and receipt["report"]["outcome"] == "completed"
         if committing:
             receipt["commit"] = dict(state="preparing", parent=args.candidate, message=args.commit_message,
@@ -853,9 +920,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     except (factory.FactoryError, ValueError, KeyError, TypeError) as exc:
         receipt.update(state="failed", error=str(exc))
     finally:
-        if process is not None:
-            await stop_child(process)
-            receipt["exit_code"] = process.returncode
+        if cleanup_errors:
+            receipt.update(state="failed", error="; ".join(filter(None, [receipt["error"], *cleanup_errors])))
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)
         factory.save(args.receipt, receipt)
     return receipt
@@ -867,6 +933,10 @@ def parser():
         command.add_argument("--" + field, type=Path, required=True)
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity"):
         command.add_argument("--" + field, required=True)
+    for kind in ("delivery", "release"):
+        evidence = command.add_mutually_exclusive_group()
+        evidence.add_argument("--" + kind + "-evidence", help="Historical inline frozen evidence")
+        evidence.add_argument("--" + kind + "-evidence-digest", help="Digest of original evidence in the saved brief")
     command.add_argument("--role", help="Owner-selected role; required for writer execution")
     command.add_argument("--decision-store", type=Path, help="Original Jev decision store; frozen before the native launch")
     command.add_argument("--decision", help="Exact original Jev decision ID")

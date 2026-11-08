@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.12.0 — 2026-11-07 (unpublished)
+## 0.15.0 — 2026-11-08 (unpublished)
 
 ### Source-derived Decision Inbox and human allowance control
 
@@ -22,11 +22,154 @@ An authenticated same-origin valid-CSRF operator form can approve exactly one
 additional correction/investigation attempt through `factory.extend_allowance`,
 with bounded reason, observed limit and replay-safe request ID. Preserve original
 admission, usage, reports, holds and decision history. Static renderers remain
-read-only; transient dashboard facts advance to schema 4, task schema remains 7.
+read-only; transient dashboard facts advance to schema 4; the existing task owner defines the task schema.
 Fixed offline source/render/handler/concurrency/replay cases use isolated records
 and fake transports. Host/browser checks, independent QA/security, policy review
 and CI remain separate gates. No real held task was granted an attempt. No
 publisher is configured or authorized.
+
+## 0.14.3 — 2026-11-08 (unpublished)
+
+### Public CLI reconnect after worktree cleanup
+
+Reconnect existing integrations through their frozen assignment and original Rex
+pane after checkout removal, without new launch validation or resending effects.
+Keep first-launch checks and original intent, brief and pane validation intact.
+Exercise public CLI acceptance replay and lost-launch recovery with collected native
+fixtures and temporary Git; preserve original evidence and cumulative allowances.
+Replace stale secondary task-schema literals with links to the owner schema.
+
+## 0.14.2 — 2026-11-07 (unpublished)
+
+### Acceptance replay after worktree cleanup
+
+Replay complete collected native evidence against the admitted repository and
+retained Git objects after normal worktree removal. Keep first collection strict,
+original artifacts immutable, and input currency and final acceptance gates intact.
+Cover linked-worktree delivery/acceptance replay, missing first-collection checkouts,
+damaged results/provenance and changed repository identity with temporary Git and
+fake native transports. Schema 9 records one per-assignment strict native-collection
+flag; manual results cannot authorize historical replay. Older records migrate
+without collection proof and need explicit strict recollection with the original
+checkout still available; removed legacy checkouts cannot be backfilled.
+
+## 0.14.1 — 2026-11-07 (unpublished)
+
+### Progress-based fix-loop protection
+
+Clarify [allowance review checkpoints](docs/task-state.md#review-checkpoints-and-allowance-extensions)
+and link them from the [finite-loop design](docs/design.md#exceptions-and-finite-loops).
+The external foreman may record evidence-backed extensions through the existing
+owner API under standing authorization, preserving admission, usage and extension
+history. Repeated failures without new evidence require investigation or a changed
+approach; substantive disputes retain investigator -> Jev reassessment -> judge.
+User budgets, scope, holds and uncertain effects remain binding. This documentation
+clarification adds no runtime mechanism or automatic renewal.
+
+## 0.14.0 — 2026-11-07 (unpublished)
+
+### Exact-candidate integration and original release evidence
+
+Add `factory.py integrate`, a mechanical head-conditional merge adapter and
+frozen original canonical feedback for selected native specialist/release
+judgments. Run the original mechanical adapter through `factory.launch` with real
+Rex pane identities and a version-1 receipt; retain ordinary schema-8 readers.
+Release task/ready-work locks during watcher waits, serialize repository integration,
+reload pre-effect controls, and collect into current owner state. Reuse intents,
+results, holds and cumulative attempts. Require the full review packet only for
+release judgment, preserving ordinary exact-input QA/security approvals and failed
+writers' original contributor identities. Version frozen payloads and support the
+protected ignored managed `.codex` helper installation through canonical bash.
+Require unchanged canonical watcher readiness, original exact-input independent
+approvals, actual repository gates, source-bound merge ancestry, terminal current-
+attempt push CI and issue checks. Replays reconcile read-only without resending
+unknown effects. Final acceptance requires a separate native delivered-evidence
+judgment. Keep PR preparation and cleanup with release, add no automatic quality
+waiver or publication claim. Fixed offline transports and temporary Git cover
+refusals, lost replies and recovery; live delivery and judgment remain unqualified.
+
+Preserve collected successful writer provenance across subsequent corrections.
+Move release/delivery capture outside execution/task locks and revalidate the owner
+before submission. Freeze fresh successful CI rerun observations into version-2
+native delivery briefs while retaining original receipts/results. Reject helpers
+from sibling worktrees and newly selected checkouts before execution, remove
+exported Bash functions, and make process failures actionable. Require verified
+strict required `verify` CI protection with administrator enforcement before the
+head-conditional merge; unsafe/unknown server guards hold without mutation. Offline
+race and recovery fixtures do not establish live enforcement or release readiness.
+Malformed helper JSON or text now reports an actionable restoration and same-intent
+reconciliation diagnostic without exposing the response body; a pre-effect hold
+still requires reassessment, and post-submission recovery never resends the merge.
+Keep full release/delivery evidence in the existing brief with digest-only command
+arguments, and pass native prompts through private temporary stdin. Preserve legacy
+inline evidence. Check GitHub issue links directly with a versioned factory-owned
+checker; refuse incomplete or unsupported observations without invoking an
+undocumented cross-plugin issue-helper interface.
+Classify native nonzero HTTP 405/409 merge responses as rejected, while preserving
+unknown outcomes and reconciliation for transport or malformed-response failures.
+Finish interrupted pre-submission waits as held, and allow unrelated assignment
+and allowance updates during the watcher while retaining selected-evidence guards.
+
+
+## 0.13.0 — 2026-11-07 (unpublished)
+
+### Task-owned writer worktrees
+
+Provision one explicitly named writer branch and path from an admitted task's
+selected candidate. Save the immutable request and effect intent in the existing
+task store before Git mutation. Create independent regular files from raw blobs
+without checkout hooks or filters, preserving existing source checkout edits.
+Reuse completed requests after lost replies; reconcile pending effects only when
+the uniquely owned checkout is already complete and clean. Retain missing,
+partial, dirty or conflicting outcomes for inspection without retries or repair.
+Reject unsupported trees/configuration and destinations overlapping the task store.
+Schema 8 preserves legacy holds, inputs, provisioning intents and allowance
+additions from the earlier schema-6/schema-7 owners, without adopting worktrees
+or granting attempts. Expose provisioning through the existing owner view. No automatic
+candidate handoff, task acceptance or release authority is added.
+
+Preserve CR/LF in UTF-8 Git filenames. Probe file and directory names on the
+destination filesystem before saving intent, refusing case/Unicode aliases
+without creating a branch or worktree. Reject physical file aliases in source
+validation so an earlier partial checkout cannot be certified as complete.
+Reject ancestor/descendant branch namespace conflicts before intent, and report
+actionable recovery for missing or unreadable ownership metadata without mutation.
+
+
+## 0.12.1 — 2026-11-07 (unpublished)
+
+### Native Codex shell startup
+
+New model children use strict per-run configuration to disable login shells,
+shell snapshots and profile loading, with an identical private empty ZDOTDIR in
+the native environment and TOML override. Retain the directory through confirmed
+child exit and finish cleanup before factory Git work. Preserve failed receipts
+and earlier errors when allocation, execution or cleanup fails; unconfirmed
+termination retains the owned directory for reconciliation, without retry.
+Native auth locations, permissions, other providers, factory Git environments and
+historical receipt/reconnect contracts remain unchanged. Fixed offline regressions
+cover controls, isolation, lifetime and failure paths. The canonical inventory
+records version/worktree compatibility and outstanding independent review, host
+checks and explicit owned native qualification. No publication or broader
+readiness claim is authorized.
+
+## 0.12.0 — 2026-11-07 (unpublished)
+
+### Sanitized native Claude auth metadata
+
+Add an independent stdlib adapter for fixed native version/auth-status commands,
+strict allowlisted sign-in facts and explicit unknown eligibility/quota. Preserve
+signed-out exit 1 as an observation and non-subscription auth facts without
+claiming subscription access. Refuse environment overrides before launch, preserve
+an explicitly selected native config directory without reading its contents, and
+omit private native payloads/diagnostics. Fixed socket-free process tests cover
+success and refusal paths. Require CLI 2.1.317 or newer before auth status to avoid
+the upstream token-refresh persistence defect; fixed tests cover the floor,
+older-version refusal and installed/newer versions. Renew compatibility review
+when command/authentication contracts change, as documented in native providers.
+Candidate live observation, independent QA/security,
+host full tests and current-head policy/CI remain separate gates. No publisher is
+configured or authorized; no route is activated.
 
 ## 0.11.0 — 2026-11-07 (unpublished)
 

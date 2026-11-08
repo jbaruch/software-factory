@@ -33,7 +33,7 @@ The plugin starts without global always-loaded rules and without unimplemented h
 3. Create isolated writer worktrees and explicit interface/dependency ownership. Review and testing get the exact candidate commit and relevant requirements. Concurrent writers never share one checkout.
 4. Start eligible ready assignments within work-in-progress, provider and integration capacity. Reserve resources for verification, urgent work and recovery. Idle capacity without ready useful work stays idle.
 5. Route specialist findings to implementation directly. Within-scope routine corrections consume the task's cumulative allowance; changing worker identity does not reset it. Verify the changed candidate independently.
-6. Integrate through a merge queue and satisfy the project's actual review, test, publication and acceptance requirements. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
+6. Integrate through a merge queue, or a verified server-enforced strict up-to-date required-CI guard where a native queue is unavailable, and satisfy the project's actual review, test, publication and acceptance requirements. The guard must apply to administrators without bypass. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
 
 No foreman turn is required to recognize that a dependency completed or to launch an already authorized next assignment. Dynamic scope decisions and unresolved technical conflicts still require reasoning.
 
@@ -69,7 +69,7 @@ The judge runs on a highly capable eligible model at maximum supported thinking 
 
 Known temporary failures get bounded scripted retry/backoff, an eligible alternative or a named wait condition. A timeout with an uncertain launch/merge outcome is reconciled before any retry. Workers and completed artifacts survive coordination-service outages; decisions requiring an unavailable classifier queue durably rather than flooding the standby model.
 
-Every exception has a task, named owner, evidence references, attempts already made, next action and remaining allowance. Outcomes are resume with a specific fix, change approach, split, reassign, wait for a named dependency, stop, or request a concrete operator decision. Substantive repeat failures trigger investigation. Unresolved adjudication or exhausted investigation requiring additional scope/resources reaches the operator with options. Independent tasks continue unless a real shared/global dependency or explicit global hold prevents them.
+Every exception has a task, named owner, evidence references, attempts already made, next action and remaining allowance. Outcomes are resume with a specific fix, change approach, split, reassign, wait for a named dependency, stop, or request a concrete operator decision. Default correction/investigation counts are review checkpoints; apply the owner guide’s [progress review and authorized extension guidance](task-state.md#review-checkpoints-and-allowance-extensions). Substantive repeat failures trigger investigation. Unresolved adjudication or exhausted investigation requiring additional scope/resources reaches the operator with options. Independent tasks continue unless a real shared/global dependency or explicit global hold prevents them.
 
 Operator requests are generated from existing state: what is blocked, what was tried and learned, the recommended action and the exact requested decision. The operator may prioritize, pause, cancel, authorize a proposed adjustment or stop the task. No fictitious pause or automatic unlimited attempt reset is permitted.
 
@@ -84,10 +84,41 @@ Use learned outcomes to rank suitable candidates and controlled rotation to expl
 ## Integration and recovery
 
 Bind review evidence to the inputs it assessed, including candidate commit and requirements revision. A changed input invalidates only dependent work; a new source commit must not inherit an old approval. Integration ownership covers shared interfaces, merge ordering, conflicts and required revalidation.
+The release judgment alone consumes the complete frozen external-review packet;
+ordinary exact-input specialist approvals remain valid when only review prose changes.
+Failed native writers retain their original contributor identity for independence,
+without promoting failed execution or blocked results into successful evidence.
+Collected successful writers also retain their original provenance when a later
+correction advances or cleanup removes the checkout. Collected evidence validates
+against the admitted repository identity and retained candidate/parent/tree objects;
+initial collection still requires the original checkout, Git directory and HEAD.
+Schema-9 assignment `native_collected` records only successful strict native
+collection; generic result registration and legacy migration never grant it.
+Legacy evidence needs explicit strict recollection while its original checkout
+remains available. Collection history does not relax task-input currency or final
+acceptance gates.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
+Explicit writer-worktree provisioning belongs to the existing task owner and its
+locks. Save the selected-input request before Git mutation, retain a unique
+worktree ownership marker, and reuse completed effects. Conflicting or incomplete
+resources remain available for inspection; recovery never resets or deletes them.
+Provisioning does not select a produced candidate or grant acceptance/release
+authority. The [owner contract](task-state.md#writer-worktree-provisioning) defines
+the supported tree/configuration inputs and conservative reconciliation.
+
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
+Mechanical integration uses the same schema-9 `factory.launch` lifecycle and real
+window/block identities. Its original worker owns a versioned execution receipt;
+repeats and cold recovery reconcile existing effects read-only. A repository-scoped
+mutex serializes integration without occupying unrelated ready-work capacity. Task
+locks never span canonical watcher/network waits; controls and selected inputs are
+reloaded immediately before effects and current owner state before result collection.
+Release and delivery capture also run outside execution/task locks and revalidate
+the owner before submission. Successful reruns of the same delivery CI run can be
+recollected read-only. Fresh delivery observations freeze in a new final native
+brief, preserving original receipts/results and requiring a new semantic judgment.
 
 ## Measurement and self-improvement
 

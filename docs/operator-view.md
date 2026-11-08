@@ -165,7 +165,8 @@ upgrade accepted legacy formats and create its normal advisory lock files, as
 `GET /api/state` returns transient schema-version-4 source facts. `?live=1` adds
 the same explicit Rex observations as the page. `dashboard.py` owns the response
 shape: collection time/duration, observation mode, task summaries, per-assignment
-process/result facts, task control events, per-task read errors and configured routes. Commands and
+process/result facts, task control events, optional task provisioning facts,
+per-task read errors and configured routes. Commands and
 instruction contents are omitted. Responses are not cached. The endpoint is a
 view, not an authorization or acceptance API. The HTML forms use the separate
 hold endpoint above. Version 1 omitted control events; version 2 added those events.
@@ -192,7 +193,7 @@ and nullable `recorded_answer`. Pending/failed evaluations also expose
 `evaluation_questions` with original IDs/versions/options (no instructions).
 Native answers expose only choice/ruling,
 consequences and missing input, never the original receipt/event objects. No stored snapshots
-are migrated; task schema remains 7 with the owner's existing legacy support.
+are migrated; the [task owner](task-state.md#schema-and-ownership) defines stored task schemas and legacy support.
 Older static render callers can omit these additions and remain read-only when
 no CSRF token is supplied.
 
