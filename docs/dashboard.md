@@ -14,6 +14,15 @@ Status: full application/UI acceptance contract. The [implementation inventory](
 
 Controls: prioritize, pause/resume, cancel, reassign and act on a concrete decision request, constrained by the current user's authority. Actions need traceable results and idempotent submission; refreshing a page must not repeat an effect.
 
+Team distinguishes requested native identity from observed model and runtime
+readiness. Show original assignment inputs/result freshness, saved Rex
+host/session/window/block identity and the actual process read time separately
+from page collection time. Supported owner-parsed worker commands supply request
+metadata; generic/unsupported/damaged commands remain unknown. The pane link is
+an authenticated relative read-only dashboard detail that revalidates the saved
+scope before process/capture reads. Unavailable identities remain actionable and
+unknown; partial output is explicitly marked. See the [operator view contract](operator-view.md).
+
 ## Definitions
 
 Use timestamped, mutually exclusive activity intervals per worker/resource: useful execution, coordination, rework, idle, or unavailable. Concurrent agents contribute separate worker-seconds. Do not add their time and call it task wall-clock latency.

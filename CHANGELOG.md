@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 — 2026-11-07
+## 0.13.0 — 2026-11-07 (unpublished)
 
 ### Task-owned writer worktrees
 
@@ -16,6 +16,133 @@ Schema 8 preserves legacy holds, inputs, provisioning intents and allowance
 additions from the earlier schema-6/schema-7 owners, without adopting worktrees
 or granting attempts. Expose provisioning through the existing owner view. No automatic
 candidate handoff, task acceptance or release authority is added.
+
+
+## 0.12.0 — 2026-11-07 (unpublished)
+
+### Sanitized native Claude auth metadata
+
+Add an independent stdlib adapter for fixed native version/auth-status commands,
+strict allowlisted sign-in facts and explicit unknown eligibility/quota. Preserve
+signed-out exit 1 as an observation and non-subscription auth facts without
+claiming subscription access. Refuse environment overrides before launch, preserve
+an explicitly selected native config directory without reading its contents, and
+omit private native payloads/diagnostics. Fixed socket-free process tests cover
+success and refusal paths. Require CLI 2.1.317 or newer before auth status to avoid
+the upstream token-refresh persistence defect; fixed tests cover the floor,
+older-version refusal and installed/newer versions. Renew compatibility review
+when command/authentication contracts change, as documented in native providers.
+Candidate live observation, independent QA/security,
+host full tests and current-head policy/CI remain separate gates. No publisher is
+configured or authorized; no route is activated.
+
+## 0.11.0 — 2026-11-07 (unpublished)
+
+### Retained Antigravity result decoding
+
+Add a pure decoder for original 1.5.3 init/step_update/result JSON lines with
+frozen model/cwd/schema, consistent conversation identity, ordered single-turn
+lifecycle and strict terminal report/response agreement. Preserve nullable native
+usage/duration as observations. Fixed offline fixtures cover integrity failures;
+no execution, settings, stored formats or usage CLI change. Execution permission,
+live lifecycle/full-factory qualification, independent verification and current-head
+policy/CI remain separate gates. No publisher is configured or authorized.
+
+## 0.10.0 — 2026-11-07 (unpublished)
+
+### Team view and owned Rex pane reads
+
+Show original specialist assignments, source/result freshness, supported native
+worker request metadata and saved Rex identities in the authenticated operator
+view. Keep requested model/effort/route separate from unknown observed model,
+readiness and capacity. Link to a read-only pane detail that revalidates the saved
+scope before process/output reads, with actual observation timestamps, escaped
+terminal text and explicit partial-output markers. Preserve pause/resume and
+task schema 7; transient dashboard facts advance to version 3 while older static
+render callers remain compatible. Fake records/transports and socket-free
+handler tests cover the addition; host/browser/live acceptance remains separate.
+The application and package version advance together; no publication channel is configured.
+
+Pane observations release the task lock before Rex waits, preserving concurrent
+operator controls and their saved history without retargeting an in-progress read.
+Native request metadata recognizes exact original-owner worker paths across
+registered worktrees of the application repository, using read-only Git binding.
+Fixed fake-Rex concurrency and cross-checkout owner tests cover these corrections;
+direct-candidate host/live checks and independent re-review remain separate gates.
+
+## 0.9.0 — 2026-11-07 (unpublished)
+
+### Opt-in writer candidate handoff
+
+Add `ready_runner.py --from-writer ASSIGNMENT_ID` for explicitly authorized
+read-only independent verification plans. Validate the collected native Codex
+writer against original receipts/events, its factory commit and live Rex status;
+select its exact output with unchanged requirements through the existing task
+owner. Preserve original plans/history, holds and cumulative allowances, and
+reuse selected targets and existing verification launches on restart. Keep
+schema versions, launch gates and acceptance/release authority unchanged.
+Offline fake-transport tests with real temporary Git commits cover handoff,
+replay and refusal paths; live integration and judgment quality remain separate.
+
+## 0.8.0 — 2026-11-07
+
+### Bounded native reasoner answers
+
+Bind explicit read-only Codex standby/judge assignments to one retained uncertain
+question. Freeze its original request/response in the existing brief and return
+a selected answer or concrete missing input in the native report. Require the
+exact current investigator result for post-investigation judging. Ordinary
+reports stay unchanged; bounded reports use version-6 receipts. The offline inbox
+can use collected current evidence to close only its matching question; missing
+inputs, stale results, uncollected effects and conflicts remain operator-visible.
+No extra resolution store, automatic dispatch, acceptance authority or retry
+allowance is introduced.
+
+## 0.7.0 — 2026-11-07
+
+### Retained Jev decisions
+
+Add optional private decision storage to shadow evaluations. Bind reuse to the
+endpoint, versioned model, evidence revision, question versions and exact compiled
+payload. Save intent before HTTP and retain original usage/timing; interrupted,
+failed or malformed attempts never become implicit retries. Derive an offline
+uncertainty inbox from those records, proposing standby reasoning for generic
+uncertainty and judging after unresolved investigation. Keep consequential
+routing, reasoner dispatch, recovery authorization and task acceptance separate.
+
+## 0.6.0 — 2026-11-07
+
+### Explicit read-only Grok execution
+
+Keep this route held before native inspection, metadata or model children start.
+Refuse new assignments without consuming allowance and refuse new result collection;
+preserve existing effects and raw artifacts. The native sandbox does not confine
+reads to the assigned checkout, and mutable executable configuration is reloaded
+after inspection. Offline protocol tests and historical fixtures do not qualify
+that boundary. No runtime override bypasses the hold.
+
+Add `grok-start` and `grok-collect` with frozen native sessions, brief/repository
+bindings, bounded seconds/turns, retained original event lines and version-1
+receipts. Verify cached OIDC subscription metadata and advertised model/effort
+before a model turn; retain that observation and its probe duration. Filter host
+credential environment variables from metadata and worker children. Decode only
+the final structured report, preserving native usage and model labels separately
+from quota and spend. Collection verifies original events and current repository/
+worktree identity without accepting a task. Existing effects reconnect unchanged;
+failed or uncertain attempts never retry themselves. Automatic Grok quota-aware
+scheduling and writer mode remain incomplete. Preserve the selected `GROK_HOME`
+profile and refuse native authentication/model/endpoint overrides before a model
+turn. Retain only inspected configuration paths/hashes in version-2 execution
+receipts; earlier execution receipts remain unchanged and inspection-only.
+Require native project trust and no executable customizations before metadata
+agents start. Restrict model tools to file reads with overriding denies and the
+strict sandbox; refuse inherited route/profile environment overrides. Earlier
+configuration-1 evidence remains inspection-only under the tightened reader.
+Validate nested configuration layers, CLI identity and timing, and reuse the
+native discovery validation at both execution and collection boundaries.
+Supply candidate path inventories in the existing frozen brief and require an
+explicit base for code reviews, with revision-bound changed paths and full diffs.
+Use native prompt-file input; keep older reviews without a range inspection-only.
 
 ## 0.5.0 — 2026-11-07
 

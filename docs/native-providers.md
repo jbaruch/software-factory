@@ -41,6 +41,69 @@ lifecycle and subscription eligibility. Do not substitute API-key billing for
 subscription routes. See the [implementation inventory](implementation.md) for
 provider coverage.
 
+## Sanitized native Claude authentication
+
+```sh
+python3 -B native_claude.py --binary '/absolute/path/to/claude' --cwd '/absolute/trusted/directory'
+```
+
+`probe(binary, cwd)` invokes only `--version` and
+`--safe-mode --restricted auth status --json`, with closed stdin, the explicit
+accessible executable and trusted cwd, and a 20-second timeout per command.
+There is no retry, prompt, model turn, login/logout, paid API fallback or settings
+change. Our code opens no auth/config files; the CLI owns native authentication.
+`curate(output, returncode=...)` is pure and accepts original JSON text.
+
+The minimum CLI version is **2.1.317**. After strict version-response validation,
+the adapter compares numeric version components and refuses older versions with
+update guidance before invoking auth status. The primary
+[2.1.317 changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21317)
+records the fix for auth status exiting before a slow token refresh was saved,
+which could sign out the next run. The adapter never updates the CLI or repairs
+credentials. Renew compatibility review and candidate-bound metadata conformance
+when CLI changes affect command flags, auth-status fields/exits or authentication
+persistence; a newer version number alone does not establish compatibility.
+
+The primary [Claude CLI reference](https://code.claude.com/docs/en/cli-reference)
+defines exit 0 as signed in and exit 1 as signed out. Both are successful metadata
+observations when JSON agrees. Supported `authMethod` values are `none`,
+`claude.ai`, `oauth_token`, `api_key`, `api_key_helper` and `third_party`.
+Signed out requires `none`; signed in requires a non-`none` method. A genuine
+API-key/helper or third-party sign-in remains a sign-in fact and supplies no
+subscription eligibility. The conservative `apiProvider` allowlist is
+`firstParty`, `bedrock`, `vertex`, `foundry`; changed values require adapter review.
+Missing/wrong types, unknown methods/providers, contradictory status/exit,
+duplicate keys, nonfinite numbers (even in omitted fields), malformed JSON,
+unsupported exits and invalid UTF-8 refuse with sanitized recovery guidance.
+
+Safe mode suppresses customizations while preserving native auth and permissions;
+restricted mode ignores user/project/local settings. Managed policy still applies,
+including permitted policy-configured commands. These flags do not establish
+model-tool confinement or suppress every policy effect. `--bare` skips OAuth and
+keychain authentication and is unsuitable here; `--print` is never requested.
+CLI 2.1.319 flag compatibility and a signed-out native status were supplied as
+admission evidence; they do not qualify execution or this candidate's live probe.
+
+Children receive the existing curated `native_environment()`. Claude/Anthropic
+and cloud provider environment selectors are refused, including empty values,
+before either child starts; remove overrides only when native account observation
+is intended. An explicit `CLAUDE_CONFIG_DIR` must be an accessible absolute
+directory and is forwarded unchanged, never silently replaced with the default.
+Only path metadata is checked, not directory contents. Other credentials and
+runtime injection variables are not forwarded. Path/timeout/process failures
+emit no native diagnostics and no partial observation JSON.
+
+`native_claude.py` owns the transient schema-1 `claude-native-auth` envelope:
+`harness`, resolved `binary`/`cwd`, validated `cli_version`, wall-clock
+`started_at`/`observed_at`, monotonic `probe_seconds` and `auth` containing only
+native `loggedIn`, `authMethod`, `apiProvider`. `readiness` stays `unverified`;
+`quota_observation` and `subscription_eligibility` stay null. No model list,
+subscription tier or allowance pool is inferred. Raw stdout/stderr, email,
+account IDs, credential/token fields and auth-payload paths are omitted.
+The adapter persists/migrates nothing and changes no task/route state. If retained,
+keep observation provenance private and refresh before any independent eligibility
+or scheduling decision. The [inventory](implementation.md) owns verification status.
+
 ## Safe Codex capacity snapshot
 
 ```sh
@@ -134,7 +197,47 @@ The native [headless command guide](https://antigravity.google/docs/cli/headless
 describes standalone slash-command reports; the
 [usage guide](https://antigravity.google/docs/cli/commands/usage/) describes quota groups.
 
+## Antigravity retained execution decoder
+
+`native_antigravity.parse_execution(events, expected_model=..., expected_cwd=...,
+expected_schema=...)` consumes original JSON lines without I/O. Supply an explicit
+model, absolute cwd and frozen schema for exactly `{outcome, artifacts}`: required
+string outcome enum (a nonempty subset of factory outcomes), string-array artifacts
+and `additionalProperties: false`. It supports the retained CLI 1.5.3 shapes only.
+
+Require one first `init`, one last `result`, matching conversation IDs, init
+model/cwd/schema, terminal schema, `SUCCESS`, one DONE user-input step, ordered
+contiguous steps ending in DONE finish, and a supported `structured_output`.
+When present, `response` must strictly decode to the same report. Duplicate JSON
+keys, invalid/nonfinite numbers, failed/malformed/reordered/duplicate events and
+trailing data refuse with inspection guidance. Warnings are never stripped.
+Text, tool parameters and permission labels supply no report or authority.
+
+The derived result contains `report`, `conversation_id`, `init_model`, `cwd`,
+`turns`, terminal `usage` and `duration_seconds`. Missing/null usage or duration
+stays null; absent counters stay unknown. Token counters must be nonnegative
+integers or null; duration must be finite and nonnegative or null. Step usage is
+validated but never summed into terminal usage. Init model is an echo, not actual
+inference identity. No dollars, quota, entitlement, confinement, acceptance or
+launch/process success is inferred. The caller must retain immutable original
+streams/provenance and independently require the original process exit.
+
+This additive parser changes no CLI, usage snapshot, task or receipt format and
+migrates no stored data. Rollback is removal of the decoder/version change by the
+integration owner; no irreversible data effects occur. Keep historical failures
+unchanged. The canonical [inventory](implementation.md) records qualification
+limits; execution remains held pending the separate security/lifecycle work.
+
 ## Grok authenticated metadata
+
+The ACP metadata command is currently held before any native child starts. The
+CLI reloads mutable executable configuration after inspection, so the check below
+does not establish a safe execution boundary. Use another eligible route.
+The following describes retained protocol coverage, not current route readiness.
+
+The metadata command applies the same native configuration/trust and executable-
+customization checks as the [inspection worker](#explicit-grok-inspection-assignments)
+before starting its ACP agent. Unsupported profiles remain held without a model turn.
 
 ```sh
 python3 native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
@@ -171,6 +274,118 @@ The adapter has no persistence/migration reader; keep retained output private.
 
 Tests use fixed ACP replies and fake processes. Live discovery is recorded in
 the [implementation inventory](implementation.md).
+
+`native_grok.parse_execution` decodes the observed Grok 1.0.77 headless event
+format after strict JSON decoding. It requires one final `end` event with
+`end_turn`, the frozen native session/directory, a request identity and a turn
+count within the declared bound. Only `structuredOutput` supplies the report;
+provisional text and tool telemetry never supply completion or acceptance.
+Native usage and reported model identities remain separate from requested model
+selection, quota and monetary spend. Missing usage stays unknown. This decoder
+is used by the explicit worker and collector below.
+
+## Explicit Grok inspection assignments
+
+New assignments, direct worker execution and new result collection are currently
+held. Existing assignment reconnect and raw artifact inspection remain available.
+The native built-in sandbox can fail open, `read_file` does not enforce checkout
+confinement, and custom profiles only add to inherited filesystem grants. Native
+configuration inspection also leaves a gap before mutable hooks/plugins/MCP/LSP
+configuration is reloaded. Tool denies and file hashes do not close those gaps.
+No environment switch or command-line option bypasses the hold. Restore execution
+only with a compatible boundary and separate live conformance evidence.
+
+The retained command interface uses an admitted task, selected
+candidate/requirements and discovered model/effort, as with
+[native launcher commands](native-rex.md):
+
+```sh
+python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  grok-start --task example --id inspect --role qa --goal 'Inspect the selected candidate' \
+  --cwd '/absolute/path/to/clean/worktree' --purpose work \
+  --grok '/absolute/path/to/native/grok' --model 'discovered-model-id' \
+  --effort 'discovered-supported-effort' --seconds 600 --turns 30
+python3 factory.py grok-collect --task example --id inspect
+```
+
+For `--role code-review`, also supply `--base` with the full base commit ID.
+The factory never guesses a review range. Before a new launch, `review_evidence.py`
+adds a version-1 JSON section to the existing frozen brief: `candidate`,
+`requirements`, nullable `base`, the candidate's tracked `paths`, and nullable
+`changed_paths`/`diff`. An explicit base produces both changed paths and the full
+binary-capable patch from that base to the selected candidate. Git external diff,
+text conversion, hooks and fsmonitor callbacks are disabled for this read. The
+brief's existing SHA-256 covers the evidence; no second task store is created.
+The worker validates its revision binding and passes the brief with native
+`--prompt-file`, avoiding command-argument size limits. Git/encoding failures
+refuse before a model launch. Evidence gathering uses local objects and never
+chooses the base or judges whether the change is correct.
+
+Reconnecting an existing effect preserves its original brief and range. Historical
+code-review assignments without a base remain inspection-only; they cannot gain
+review evidence retroactively. Historical non-review briefs stay unchanged.
+
+The retained protocol implementation requests only the built-in `read_file` tool, with explicit write, edit,
+shell, MCP, web, workflow and subagent denies and the native `strict` sandbox.
+Source reads are explicitly allowed; model file reads of the default and selected
+Grok profile directories are denied. It disables native subagents, web search and automatic
+updates, preserves native subscription configuration and excludes host credential
+environment variables. API-key overrides, including empty ones, refuse. Metadata
+preflight requires cached OIDC sign-in, a reported subscription, no access gate,
+and the requested model/effort in the actual catalog. Before a model turn,
+`grok inspect --json` identifies native configuration layers. The worker reads
+those TOML layers and refuses authentication, model, endpoint, experiment,
+campaign and version overrides rather than reproducing native precedence.
+Opaque/unreadable layers and API, endpoint, auth-provider or configuration-overlay
+environment overrides also refuse. All inherited `GROK_*` variables except
+`GROK_HOME` and the runtime-controlled worktree-GC setting refuse, including
+empty issuer/client/proxy overrides. `GROK_HOME` reaches both native children;
+the recorded configuration includes its resolved root and layer paths/hashes,
+without configuration contents or credentials. Native discovery must report
+the assigned project trusted and no executable hooks, enabled plugins, MCP or
+LSP servers. Inspection precedes the metadata agent and model child, but does not
+freeze the configuration either child consumes. The execution hold prevents
+these checks from being treated as sufficient confinement. It changes no global configuration.
+Unknown quota stays unknown;
+these explicit commands do not add automatic Grok scheduling to the ready runner.
+
+`--seconds` accepts 1–86400 and `--turns` accepts 1–1000. Invalid bounds refuse
+before task locks; worker deadlines interrupt only the owned child. A local exit
+does not prove a provider request was cancelled. Inspect the original native
+session, receipt and stream before authorizing a new attempt after an unknown
+outcome. The native CLI installation must remain outside the checkout/Git metadata.
+
+`grok_worker.py` owns version-2 `*.grok.json` receipts and version-1 `*.grok.jsonl` streams.
+Every stream record has `schema_version: 1`, `kind: grok-event-line` and `data`,
+the unchanged native line including its newline. Invalid bytes stay escaped
+inspection evidence and refuse collection. Native lines are limited to 1 MiB.
+The event reader accepts only version 1; unversioned captures and unsupported versions
+remain inspection-only. Neither reader migrates or rewrites old evidence.
+
+The exclusively claimed receipt records job/input revisions, repository marker,
+worktree Git directory, cwd, role/brief digest, resolved binary, requested model/
+effort, native session, declared seconds/turn bound, preflight discovery snapshot,
+version-2 subscription-configuration observation and its probe duration,
+timestamps/duration, exit code, final report/request identity, native usage/model
+usage, actual turn count, candidate, stream path and error. Before completion,
+result/timing/exit fields are null. State is `starting`, `completed` or `failed`.
+The discovery retains its own native metadata schema version and probe duration.
+Execution and collection share validation of discovery metadata and configuration
+evidence, including each layer's absolute path, nonempty role and SHA-256 digest,
+the CLI version and finite nonnegative observation timing. Collection validates
+the retained observation without rereading mutable profile files.
+No quota or monetary spend is inferred from native token/cost telemetry.
+
+Collection requires successful owned worker exit, a completed version-2 receipt
+with finite nonnegative timing and null error, exact frozen command/input/role
+bindings, and agreement with the original final event. It revalidates repository
+marker and worktree Git directory; replaced linked checkouts refuse. Reports stay
+bound to their assessed candidate when current task inputs change. Repeated
+collection reuses the immutable result. Task records keep their existing schema;
+generic historical Grok commands are not adopted as managed worker evidence.
+Version-1 execution receipts and earlier version-2 receipts containing a version-1
+configuration observation predate these capability checks. They remain unchanged
+and inspection-only, without being upgraded into capability evidence.
 
 ## Explicit Codex assignments
 
@@ -362,10 +577,15 @@ collection completes.
 
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
-code. Schema changes belong to the worker. Receipt readers accept versions 4 and 5;
+code. Explicit bounded coordination assignments additionally return the typed
+answer described in [bounded native answers](jev.md#bounded-native-answers) and
+use version-6 receipts. Generic reports remain unchanged. The frozen question
+and native event report must agree at execution and collection.
+Schema changes belong to the worker. Receipt readers accept versions 4, 5 and 6;
 version 4 has no factory-owned commit and remains collectable unchanged with its
 original command. Version 5 requires the nullable `commit` field. Neither version
-is migrated or rewritten by collection. Versions below 4 remain inspection-only:
+is migrated or rewritten by collection. Version 6 retains the version-5 metadata
+and nullable commit field and requires its bound read-only answer. Versions below 4 remain inspection-only:
 version 1 lacks the repository pin and version 2 uses a reusable filesystem pin.
 Version 3 binds the repository but not the individual worktree.
 Existing commands reconnect unchanged; they cannot acquire
