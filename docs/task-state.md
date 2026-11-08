@@ -117,11 +117,11 @@ no-follow/nonblocking open and descriptor-based regular-file checks, plus owner,
 single-link and private-permission checks with `private=True`. The default reader
 behavior is unchanged. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 9:
+`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 10:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `9` on every task record |
+| `schema_version` | Integer `10` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
@@ -131,7 +131,7 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 | `allowance_events` | Ordered operator additions; each has a unique `id`, `purpose`, `previous_limit`, positive integer `additional`, nonempty `reason` and `at` in UTC epoch seconds |
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
-| `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker and returned pane IDs |
+| `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker, returned pane IDs and the Rex server `rex_instance` each new launch ran on |
 
 Assignment requests retain role, goal, working directory, command and instruction
 hash. New admitted assignments also contain the declared purpose, an input

@@ -141,7 +141,9 @@ results are `needs_action`, `pending` for a one-cycle observation, and
 
 Worker slots and active task slots are reserved from observed processes, including
 unknown and unconfirmed launches. A terminal process releases its slot even if
-its report is unusable; that report still needs action. New tasks share initial
+its report is unusable; that report still needs action. A process `lost` to a
+Rex server restart is terminal: the runner collects a native Codex result from
+its completed receipt, and otherwise reports `blocked` and blocks dependents. New tasks share initial
 starts by existing assignment count, with plan order breaking ties. This is a
 simple finite-plan fairness rule, not a learned priority model.
 

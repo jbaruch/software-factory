@@ -629,6 +629,38 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.states(result), {("task", "first"): "blocked", ("other", "first"): "running"})
         self.assertEqual(result["active_workers"], 1)
 
+    def restart_rex(self):
+        PlanRex.instance = "restarted-instance"
+        self.addCleanup(setattr, PlanRex, "instance", "test-instance")
+
+    def test_rex_restart_collects_completed_receipt_and_advances(self):
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
+        self.tick(controller)
+        self.finish("task", "first")
+        record = factory.load_task(self.directory / "task.json")
+        # The restored pane is a fresh login shell with no exit status.
+        PlanRex.processes[(record["session_id"], record["assignments"]["first"]["block_id"])] = "running"
+        self.restart_rex()
+        result = self.tick(controller)
+        self.assertEqual(self.states(result), {("task", "first"): "approved", ("task", "second"): "running"})
+        self.assertEqual(result["metrics"]["collected"], 1)
+        second = factory.load_task(self.directory / "task.json")["assignments"]["second"]
+        self.assertEqual(second["rex_instance"], "restarted-instance")
+
+    def test_rex_restart_without_receipt_frees_the_slot_and_blocks_dependents(self):
+        self.admit("other")
+        plan = self.plan([self.job(), self.job("second", after=["first"]), self.job(task="other")], workers=1, reserve=0)
+        controller = self.controller(plan)
+        first = self.tick(controller)
+        self.assertEqual(first["active_workers"], 1)
+        self.restart_rex()
+        result = self.tick(controller)
+        states = self.states(result)
+        self.assertEqual(states[("task", "first")], "blocked")
+        self.assertEqual(states[("task", "second")], "blocked")
+        self.assertEqual(states[("other", "first")], "running")
+        self.assertEqual(result["active_workers"], 1)
+
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
         self.tick(controller)

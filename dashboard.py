@@ -144,8 +144,11 @@ def pane_link(task, identity):
 def observe_process(rex, record, assignment, clock):
     process: dict = factory.status(rex, record, assignment)
     # Do not forward native process objects, argv, or extra last_exit metadata.
-    return dict(state=process["state"], observed_at=clock(),
-                exit_code=process["exit"]["exit_code"] if process["exit"] else None)
+    observed = dict(state=process["state"], observed_at=clock(),
+                    exit_code=process["exit"]["exit_code"] if process["exit"] else None)
+    if process["state"] == "lost":
+        observed["error"] = process["reason"]
+    return observed
 
 
 def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=time.time) -> dict:

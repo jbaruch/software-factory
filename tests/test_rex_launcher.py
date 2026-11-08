@@ -21,14 +21,16 @@ class FakeRex:
     calls = []
     fail_after_create = False
     host = "test-host"
+    instance = "test-instance"  # Tests that restart the server restore this in cleanup.
 
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
+        self.instance_id: str | None = None
 
     def call(self, *args, **kwargs):
         type(self).calls.append(args)
         if args[0] == "whoami":
-            return {"host_id": type(self).host}
+            return {"host_id": type(self).host, "instance_id": type(self).instance}
         if args[0] == "ls":
             return {"sessions": self.sessions}
         if args[:2] == ("session", "inspect"):
@@ -70,6 +72,10 @@ class NativeLauncher(unittest.TestCase):
 
     def start(self, **changes):
         return factory.launch(self.path, **{**self.arguments, **changes})
+
+    def restart_rex(self):
+        FakeRex.instance = "restarted-instance"
+        self.addCleanup(setattr, FakeRex, "instance", "test-instance")
 
     def creation_calls(self):
         return [args for args in FakeRex.calls
@@ -194,10 +200,61 @@ class NativeLauncher(unittest.TestCase):
     def test_process_exit_is_not_task_acceptance(self):
         record, assignment = self.start()
         rex = FakeRex(sys.executable, "unix:///test.sock")
+        rex.instance_id = "test-instance"
         with patch.object(rex, "call", return_value={"last_exit": {"exit_code": 0}}):
             result = factory.status(rex, record, assignment)
         self.assertEqual(result["state"], "exited")
         self.assertNotIn("accepted", result)
+
+    def test_rex_restart_reports_lost_instead_of_a_restored_shell(self):
+        record, assignment = self.start()
+        self.assertEqual(assignment["rex_instance"], "test-instance")
+        restored_shell = {"last_exit": None, "child": {"pid": 1, "path": "/bin/zsh"}}
+        rex = factory.connect(record)
+        with patch.object(rex, "call", return_value=restored_shell):
+            self.assertEqual(factory.status(rex, record, assignment)["state"], "running")
+        self.restart_rex()
+        rex = factory.connect(record)
+        with patch.object(rex, "call", side_effect=AssertionError("A restored shell is not the original process")):
+            result = factory.status(rex, record, assignment)
+        self.assertEqual(result["state"], "lost")
+        self.assertIn("restarted", result["reason"])
+        self.assertIsNone(result["exit"])
+        self.assertEqual(result["block_id"], assignment["block_id"])
+
+    def test_status_fetches_the_server_instance_when_not_connected(self):
+        record, assignment = self.start()
+        self.restart_rex()
+        FakeRex.calls.clear()
+        self.assertEqual(factory.status(FakeRex(sys.executable, "unix:///test.sock"), record, assignment)["state"], "lost")
+        self.assertEqual(FakeRex.calls, [("whoami", "--json")])
+
+    def test_legacy_assignment_without_instance_keeps_process_observation(self):
+        record, _ = self.start()
+        del record["assignments"]["qa"]["rex_instance"]
+        record["schema_version"] = 9
+        factory.save(self.path, record)
+        migrated = factory.load_task(self.path)
+        self.assertEqual(migrated["schema_version"], 10)
+        self.assertNotIn("rex_instance", migrated["assignments"]["qa"])
+        self.restart_rex()
+        rex = factory.connect(migrated)
+        with patch.object(rex, "call", return_value={"last_exit": {"exit_code": 0}}):
+            self.assertEqual(factory.status(rex, migrated, migrated["assignments"]["qa"])["state"], "exited")
+
+    def test_rex_instance_is_validated_and_newer_than_legacy_schemas(self):
+        record, _ = self.start()
+        for value in ("", 7, None):
+            damaged = copy.deepcopy(record)
+            damaged["assignments"]["qa"]["rex_instance"] = value
+            factory.save(self.path, damaged)
+            with self.subTest(value=value), self.assertRaisesRegex(factory.FactoryError, "Invalid Rex server instance"):
+                factory.load_task(self.path)
+        legacy = copy.deepcopy(record)
+        legacy["schema_version"] = 9
+        factory.save(self.path, legacy)
+        with self.assertRaisesRegex(factory.FactoryError, "Legacy assignment has newer fields"):
+            factory.load_task(self.path)
 
     def test_duplicate_task_keys_refuse_mutation_without_losing_history(self):
         self.start()
@@ -401,17 +458,22 @@ class TaskAdmission(unittest.TestCase):
         legacy = {key: value for key, value in copy.deepcopy(original).items() if key not in {"allowance_events", "provisioning"}}
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         legacy["schema_version"] = 5
         factory.save(self.path, legacy)
+        # Migration never invents the server instance a legacy launch ran on.
+        expected = copy.deepcopy(original)
+        for assignment in expected["assignments"].values():
+            del assignment["rex_instance"]
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated, original)
+        self.assertEqual(migrated, expected)
         self.assertEqual(factory.task_view(migrated)["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
         with self.assertRaisesRegex(factory.FactoryError, "allowance exhausted"):
             self.start(assignment_id="another", purpose="correction")
         prototype = {**legacy, "schema_version": 6, "provisioning": None}
         factory.save(self.path, prototype)
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated, original)
+        self.assertEqual(migrated, expected)
         self.assertEqual(factory.task_view(migrated)["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
 
     def test_allowance_cli_returns_effective_limits_without_a_provider_or_rex(self):
@@ -1272,9 +1334,10 @@ class TaskAdmission(unittest.TestCase):
         for assignment in record["assignments"].values():
             del assignment["result"]
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 9)
+        self.assertEqual(migrated["schema_version"], 10)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
                          {key: {**item, "result": None, "native_collected": False} for key, item in record["assignments"].items()})
@@ -1392,9 +1455,10 @@ class TaskAdmission(unittest.TestCase):
         del record["assignments"]["qa"]["request"]["inputs"]
         del record["assignments"]["qa"]["result"]
         del record["assignments"]["qa"]["native_collected"]
+        record["assignments"]["qa"].pop("rex_instance", None)
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 9)
+        self.assertEqual(upgraded["schema_version"], 10)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
@@ -1410,6 +1474,7 @@ class TaskAdmission(unittest.TestCase):
         legacy["schema_version"] = 2
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         legacy.pop("control_events", None)
         legacy.pop("provisioning", None)
         legacy.pop("allowance_events", None)
@@ -1417,9 +1482,10 @@ class TaskAdmission(unittest.TestCase):
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 9)
+        self.assertEqual(upgraded["schema_version"], 10)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
-        self.assertEqual(upgraded["assignments"], original["assignments"])
+        self.assertEqual(upgraded["assignments"], {key: {k: v for k, v in item.items() if k != "rex_instance"}
+                                                   for key, item in original["assignments"].items()})
         self.assertEqual(upgraded["hold"], original["hold"])
         self.assertEqual(factory.task_view(upgraded)["allowances"]["correction"]["remaining"], 0)
         factory.hold_task(self.path, None)
@@ -1457,6 +1523,7 @@ class TaskAdmission(unittest.TestCase):
         legacy["schema_version"] = 3
         for assignment in legacy["assignments"].values():
             del assignment["native_collected"]
+            assignment.pop("rex_instance", None)
         legacy.pop("control_events", None)
         legacy.pop("provisioning", None)
         legacy.pop("allowance_events", None)
@@ -1465,7 +1532,7 @@ class TaskAdmission(unittest.TestCase):
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No inferred historical identity")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 9)
+        self.assertEqual(upgraded["schema_version"], 10)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["admission"]["legacy_repository_identity"], pin)
         self.assertEqual(upgraded["assignments"],

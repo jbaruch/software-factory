@@ -27,7 +27,9 @@ Before launch, save the pending assignment. After Rex returns, save its session,
 
 If no unique matching pane is visible, the launch remains uncertain and is not repeated. Missing sessions, changed host identity, inaccessible servers or modified assignment inputs are errors for the operator to inspect; deleting state is not recovery. A user-renamed/deleted pending window may require manual reconciliation. This is deliberately conservative and does not claim exactly-once delivery or complete task recovery.
 
-`running`, `exited`, `failed` and `unknown` describe the terminal process. Exit zero does not approve a review, accept a task or prove the agent completed the goal. `capture` returns original terminal output as data. Use the applicable [provider adapter](native-providers.md) to collect native results.
+`running`, `exited`, `failed`, `lost` and `unknown` describe the terminal process. Exit zero does not approve a review, accept a task or prove the agent completed the goal. `capture` returns original terminal output as data. Use the applicable [provider adapter](native-providers.md) to collect native results.
+
+`lost` means Rex can no longer report how the original process ended. A Rex server restart kills every pane process and restores the panes as fresh login shells without an exit status, which would otherwise read as `running` forever. Each assignment therefore pins the server `instance_id` it launched on; a different connected instance makes it `lost` with a `reason`. Lost is terminal. The ready runner releases its slot and blocks dependents, and provider collection accepts it only together with the worker's own completed, exit-zero receipt. Assignments recorded before task schema 10 have no instance pin and keep the previous process observation.
 
 ## Verification
 

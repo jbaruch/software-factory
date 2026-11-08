@@ -84,6 +84,7 @@ def decode_json(value, *, object_pairs_hook=unique_object):
 class Rex:
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
+        self.instance_id: str | None = None  # Server instance observed by connect(); fetched on demand.
 
     def call(self, *args, raw=False) -> Any:
         try:
@@ -159,7 +160,7 @@ def task_lock(directory, task, *, wait=False):
 
 
 def new_task(task) -> dict:
-    return dict(schema_version=9, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
+    return dict(schema_version=10, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
                 session_label="factory-" + task + "-" + uuid.uuid4().hex[:8],
                 session_id=None, assignments={})
 
@@ -201,7 +202,7 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (version < 6 or version == 7) and "provisioning" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
@@ -327,6 +328,11 @@ def load_task(path) -> dict:
             assignment["native_collected"] = False
         if type(assignment.get("native_collected")) is not bool or (assignment["native_collected"] and assignment["result"] is None):
             raise FactoryError("Invalid native collection provenance; restore the original task record")
+        if version < 10 and "rex_instance" in assignment:
+            raise FactoryError("Legacy assignment has newer fields; restore its schema version before continuing")
+        if "rex_instance" in assignment and (not isinstance(assignment["rex_instance"], str)
+                                             or not assignment["rex_instance"].strip()):
+            raise FactoryError("Invalid Rex server instance; restore the original task record")
         result = assignment["result"]
         if result is not None and (not isinstance(result, dict)
                 or assignment["state"] != "launched"
@@ -366,8 +372,8 @@ def load_task(path) -> dict:
     if version < 7:
         record["allowance_events"] = []
     allowance_limits(record)
-    if version < 9:
-        record["schema_version"] = 9
+    if version < 10:
+        record["schema_version"] = 10
         try:
             save(path, record)
         except OSError:
@@ -1102,6 +1108,7 @@ def connect(record, binary=None, server=None):
     who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
     if who["host_id"] != connection["host_id"]:
         raise FactoryError("Connected Rex host differs from the recorded task host")
+    rex.instance_id = rex_object(who, strings=("instance_id",))["instance_id"]
     if record["session_id"] is not None:
         view = check_session(rex, record, record["session_id"])
         for assignment in record["assignments"].values():
@@ -1338,8 +1345,9 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                 or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
             raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
         rex = Rex(str(Path(binary).resolve()), server)
-        who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
+        who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
+        rex.instance_id = who["instance_id"]
     brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
@@ -1355,7 +1363,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, native_collected=False, brief=str(brief_path),
-                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8])
+                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8],
+                            rex_instance=current_instance(rex))
     record["assignments"][assignment_id] = assignment
     save(path, record)
     options = ["--cwd", cwd, "--keep-open", "--shell=none", "--json", "--", *argv]
@@ -1387,7 +1396,24 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     return record, assignment
 
 
+def current_instance(rex):
+    """The connected Rex server instance; a restart replaces it and every original process."""
+    if vars(rex).get("instance_id") is None:
+        rex.instance_id = rex_object(rex.call("whoami", "--json"), strings=("instance_id",))["instance_id"]
+    return rex.instance_id
+
+
 def status(rex, record, assignment):
+    """Observe the original process. `lost` means Rex can no longer report how it ended."""
+    observation = dict(role=assignment["request"]["role"], state="unknown",
+                       session_id=record["session_id"], window_id=assignment["window_id"],
+                       block_id=assignment["block_id"], exit=None)
+    launched_on = assignment.get("rex_instance")
+    if launched_on is not None and launched_on != current_instance(rex):
+        # Rex restores the pane with a fresh login shell and no exit status, which
+        # would otherwise read as a running assignment forever.
+        return {**observation, "state": "lost",
+                "reason": "Rex server restarted after launch; the original process ended without an observable exit status"}
     process = rex.call("block", "call", "-s", record["session_id"],
                        "-b", assignment["block_id"], "process")
     rex_object(process)
@@ -1396,9 +1422,7 @@ def status(rex, record, assignment):
         raise FactoryError("Malformed Rex exit status; inspect the pinned binary/server API compatibility")
     state = ("exited" if last_exit["exit_code"] == 0 else "failed") if last_exit else (
         "running" if process.get("child") or process.get("foreground") else "unknown")
-    return dict(role=assignment["request"]["role"], state=state,
-                session_id=record["session_id"], window_id=assignment["window_id"],
-                block_id=assignment["block_id"], exit=last_exit)
+    return {**observation, "state": state, "exit": last_exit}
 
 
 def check_commit_message(message, *, write):
@@ -1501,7 +1525,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Collect a current native result before using its answer as coordination evidence")
     if collected and assignment.get("native_collected") is not True:
         raise FactoryError("Native evidence lacks proven strict collection; explicitly collect it with its original checkout available")
-    if observe is not None and observe()["state"] not in ({"failed", "exited"} if failed_identity else {"exited"}):
+    if observe is not None and observe()["state"] not in ({"failed", "exited", "lost"} if failed_identity else {"exited", "lost"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -1638,7 +1662,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         raise FactoryError("Claude result is stale; obtain a judgment of current inputs")
     if observe is None and not collected:
         raise FactoryError("First Claude collection requires original successful Rex exit")
-    if observe is not None and observe()["state"] != "exited":
+    if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Claude worker has not exited successfully; inspect its original Rex pane")
     try:
         receipt = decode_json(read_record(args.receipt, private=True))
@@ -1822,7 +1846,7 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     if args.role == "code-review" and args.base is None:
         raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
     valid_base(args.base, args.role)
-    if status(rex, record, assignment)["state"] != "exited":
+    if status(rex, record, assignment)["state"] not in {"exited", "lost"}:
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
     try:
         receipt = decode_json(args.receipt.read_text())

@@ -63,7 +63,7 @@ class OperatorView(unittest.TestCase):
         session: dict = dict(session_id="fixture-session", label="factory-fixture-00000000", windows=[window])
         def call(*args, **kwargs):
             if args == ("whoami", "--json"):
-                return dict(host_id="fixture-host")
+                return dict(host_id="fixture-host", instance_id="fixture-instance")
             if args == ("session", "inspect", "fixture-session", "--json"):
                 return session
             if args == ("block", "call", "-s", "fixture-session", "-b", "fixture-block", "process"):
@@ -274,6 +274,7 @@ class OperatorView(unittest.TestCase):
         original_command = request["command"].copy()
         legacy["assignments"]["backend"].pop("result")
         legacy["assignments"]["backend"].pop("native_collected")
+        legacy["assignments"]["backend"].pop("rex_instance", None)
         for key in ("schema_version", "admission", "hold", "inputs", "control_events", "allowance_events", "provisioning"):
             legacy.pop(key)
         factory.save(self.path, legacy)
@@ -325,6 +326,16 @@ class OperatorView(unittest.TestCase):
         assignment = self.snapshot(live=True, connect=lambda record: rex)["tasks"][0]["assignments"][0]
         self.assertEqual(assignment["process"]["state"], "unavailable")
         self.assertIsNone(assignment["process"]["observed_at"])
+
+    def test_rex_restart_is_lost_not_a_running_restored_shell(self):
+        self.record["assignments"]["backend"]["rex_instance"] = "launch-instance"
+        factory.save(self.path, self.record)
+        rex, _ = self.fake_rex(process=dict(child=dict(pid=1, path="/bin/zsh")))
+        assignment = self.snapshot(live=True, connect=lambda record: rex)["tasks"][0]["assignments"][0]
+        self.assertEqual(assignment["process"]["state"], "lost")
+        self.assertIn("restarted", assignment["process"]["error"])
+        self.assertIsNone(assignment["process"]["exit_code"])
+        self.assertIn("Lost", dashboard.render(self.snapshot(live=True, connect=lambda record: rex)))
 
     def test_render_accepts_old_static_snapshots_and_escapes_new_fields(self):
         view = self.snapshot()

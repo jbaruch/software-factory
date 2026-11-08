@@ -20,6 +20,8 @@ JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
+# Process states that will never change again; `lost` is terminal without an exit status.
+TERMINAL = {"exited", "failed", "lost"}
 
 
 def validate_plan(value):
@@ -181,7 +183,7 @@ class Runner:
                     # Even a saved result is no substitute for observing its process.
                     if assignment["state"] == "launching":
                         factory.reconcile(rex, record, assignment)
-                    if factory.status(rex, record, assignment)["state"] not in {"exited", "failed"}:
+                    if factory.status(rex, record, assignment)["state"] not in TERMINAL:
                         raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
                 factory.set_inputs(path, **target)
             self.plan = {**self.supplied_plan, "jobs": [{**job, **target} for job in jobs]}
@@ -211,11 +213,14 @@ class Runner:
                                 factory.reconcile(rex, record, assignment)
                                 factory.save(path, record)
                             observed = factory.status(rex, record, assignment)
-                            terminal = observed["state"] in {"exited", "failed"}
+                            terminal = observed["state"] in TERMINAL
                             phase = dict(state=observed["state"])
                             if observed["state"] in {"running", "unknown"}:
                                 active.append((source.stem, assignment["request"]))
-                            if observed["state"] == "exited":
+                            if observed["state"] == "lost":
+                                phase["reason"] = observed["reason"]
+                            if observed["state"] in {"exited", "lost"}:
+                                # A lost pane defers to the worker's own completed receipt.
                                 if native_request(assignment["request"]) and assignment["result"] is None:
                                     record = factory.collect_codex(path, identity, rex, record, assignment)
                                     self.metrics["collected"] += 1
@@ -300,7 +305,7 @@ class Runner:
                 phases[key] = dict(state="blocked", reason="Dependency is absent from both the plan and task history; repair the explicit plan")
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") in
-                     {"findings", "blocked", "failed", "stale", "conflict"} for dependency in job["after"]):
+                     {"findings", "blocked", "failed", "lost", "stale", "conflict"} for dependency in job["after"]):
                 phases[key] = dict(state="blocked", reason="A dependency needs explicit correction, investigation or replanning; no automatic retry")
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") not in {"completed", "approved"} for dependency in job["after"]):
@@ -371,7 +376,7 @@ class Runner:
                     phases[key] = dict(state="blocked", reason=str(exc))
         rows = [dict(task=job["task"], id=job["id"], **phases[(job["task"], job["id"])]) for job in jobs]
         complete = all(row["state"] in {"completed", "approved"} for row in rows)
-        settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "stale", "conflict"} for row in rows)
+        settled = all(row["state"] in {"completed", "approved", "findings", "blocked", "failed", "lost", "stale", "conflict"} for row in rows)
         return dict(schema_version=1, result="complete" if complete else "needs_action" if settled else "pending",
                     jobs=rows, active_workers=len(active), issues=issues, metrics=dict(self.metrics),
                     capacity=self.capacity, capacity_error=self.capacity_error)
