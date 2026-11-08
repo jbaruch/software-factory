@@ -14,6 +14,30 @@ Status: full application/UI acceptance contract. The [implementation inventory](
 
 Controls: prioritize, pause/resume, cancel, reassign and act on a concrete decision request, constrained by the current user's authority. Actions need traceable results and idempotent submission; refreshing a page must not repeat an effect.
 
+The implemented Decision inbox groups operator, standby-reasoner, investigator
+and judge proposals from existing owners. Task conditions are deterministic:
+holds, current blocked/findings reports and exhausted admitted allowances.
+Zero limits without attempts remain authorization conditions, not failed loops.
+Failed-loop proposals require relevant attempted correction work and current
+failure evidence. Investigation availability respects existing completed, pending
+or blocked work, remaining allowance and holds. Finding
+recipients and substantive options remain operator planning when unknown. Original
+shadow proposals stay separate from recorded current native answers and accepted
+outcomes. Generic Jev evidence can be unbound; its revision alone establishes no
+freshness or task identity. Judge availability requires the original exact current
+completed investigation and bounded dispute. An original blocked investigation
+never becomes completed through later evidence. Missing or unavailable sources
+never mean an empty/all-resolved inbox.
+
+The only added budget control is an explicit human approval of exactly one
+correction/investigation attempt, with a reason and observed limit. It uses the
+task owner's existing lock/history/replay semantics, preserves holds and starts
+no work. Default counts are progress-review checkpoints; recorded limits remain
+enforced until an explicit extension. The foreman may use existing standing
+operator authorization without asking again; real user budgets, scope and holds
+bind. See [the owner guidance](task-state.md#review-checkpoints-and-allowance-extensions)
+and [operator view](operator-view.md) for authentication and schema details.
+
 Team distinguishes requested native identity from observed model and runtime
 readiness. Show original assignment inputs/result freshness, saved Rex
 host/session/window/block identity and the actual process read time separately

@@ -29,7 +29,7 @@ class OperatorView(unittest.TestCase):
         request = dict(role="backend", goal="Fix the supplied behavior", cwd=str(self.root),
                        command=[sys.executable, "private-command-argument"], instructions_sha256="a" * 64,
                        purpose="correction", inputs=dict(inputs))
-        self.record: dict = dict(schema_version=9, control_events=[], allowance_events=[], provisioning=None, task="fixture", admission=dict(goal="Deliver the agreed change",
+        self.record: dict = dict(schema_version=factory.new_task("fixture")["schema_version"], control_events=[], allowance_events=[], provisioning=None, task="fixture", admission=dict(goal="Deliver the agreed change",
             repository=str(self.root), initial_candidate="a" * 40, acceptance=["requirements.md"],
             repository_identity=dict(common_dir=str(self.root / ".git"), repository_id="a" * 32),
             limits=dict(correction=1, investigation=1)), inputs=dict(inputs), hold="Waiting for scope decision",
@@ -73,10 +73,10 @@ class OperatorView(unittest.TestCase):
             raise AssertionError("Unexpected Rex operation")
         return Mock(call=Mock(side_effect=call)), session
 
-    def get_without_socket(self, path, *, auth=True, host="127.0.0.1:8090", method="GET", body=b"", headers=None):
+    def get_without_socket(self, path, *, auth=True, host="127.0.0.1:8090", method="GET", body=b"", headers=None, decision_store=None):
         # Exercise the actual HTTP handler without binding a socket in the native sandbox.
         with patch.object(dashboard, "ThreadingHTTPServer", return_value=Mock(server_port=8090)) as server:
-            dashboard.make_server(self.root, access_key="fixture-key")
+            dashboard.make_server(self.root, access_key="fixture-key", decision_store=decision_store)
         handler_type = server.call_args.args[1]
         handler = handler_type.__new__(handler_type)
         handler.path = path
@@ -104,7 +104,7 @@ class OperatorView(unittest.TestCase):
                 before = self.path.read_bytes()
                 view = self.snapshot()
                 assignment = view["tasks"][0]["assignments"][0]
-                self.assertEqual(view["schema_version"], 3)
+                self.assertEqual(view["schema_version"], 4)
                 self.assertEqual(assignment["requested_native"], dict(adapter=harness + "_worker", harness=harness,
                     route=harness + "-native", model="requested-model", effort="high"))
                 self.assertIsNone(assignment["observed_model"])
@@ -583,6 +583,31 @@ class OperatorView(unittest.TestCase):
         page = dashboard.render(self.snapshot())
         self.assertIn("Recent control requests", page)
         self.assertIn("Hold again", page)
+
+    def test_provisioning_and_inbox_controls_preserve_owner_facts_together(self):
+        for state in ("provisioning", "provisioned"):
+            with self.subTest(state=state):
+                item = dict(id="writer", owner_token="b" * 32, state=state,
+                    git_dir=str(self.root / ".git/worktrees/writer") if state == "provisioned" else None,
+                    request=dict(path=str(self.root / "writer"), branch="factory/fixture/writer",
+                                 inputs=dict(self.record["inputs"])))
+                self.record["provisioning"] = item
+                factory.save(self.path, self.record)
+                original = self.path.read_bytes()
+                with patch.object(factory, "connect", side_effect=AssertionError("Offline only")):
+                    view = self.snapshot()
+                task, = view["tasks"]
+                self.assertEqual(task["provisioning"], dict(item, inputs_current=True))
+                self.assertEqual(task["admission"]["limits"], self.record["admission"]["limits"])
+                self.assertEqual(task["allowance_events"], [])
+                self.assertEqual(task["allowances"]["correction"], dict(used=1, limit=1, remaining=0))
+                page = dashboard.render(view, csrf_token="fixture-csrf")
+                self.assertIn("Writer worktree writer: " + state, page)
+                self.assertIn("current inputs", page)
+                self.assertIn('action="/tasks/fixture/allowance"', page)
+                self.assertIn("Original admission", page)
+                self.assertIn("Waiting for scope decision", page)
+                self.assertEqual(self.path.read_bytes(), original)
 
     def test_stored_view_derives_allowances_and_current_results_without_connecting(self):
         connect = Mock(side_effect=AssertionError("No live connection expected"))

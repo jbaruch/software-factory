@@ -185,7 +185,7 @@ def validate_request(request):
 def read_decision(path) -> dict:
     """Read the owner's version-1 decision record; unknown versions hold retries."""
     try:
-        record = decode_json(path.read_text())
+        record = decode_json(factory.read_record(path))
         json.dumps(record, allow_nan=False)
         if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
                 or record["schema_version"] != 1 or record.get("kind") != "jev-decision"
@@ -272,7 +272,15 @@ def evaluate_stored(directory, *, state, specs, model, evidence_revision, candid
 def pending_decisions(directory, *, task_state_dir=None) -> dict:
     """Derive the shadow inbox from original records; this never dispatches work."""
     try:
-        paths = sorted(path for path in directory.iterdir() if path.suffix == ".json") if directory.exists() else []
+        try:
+            paths = sorted(path for path in directory.iterdir() if path.suffix == ".json")
+        except FileNotFoundError:
+            try:
+                directory.lstat()
+            except FileNotFoundError:
+                paths = []  # The owner's first-use semantics; never create a store here.
+            else:
+                raise JevError("Selected decision store is a dangling link; restore the original directory") from None
         attempts, resolutions = {}, []
         if task_state_dir is not None:
             import coordination_evidence

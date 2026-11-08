@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.15.0 — 2026-11-08 (unpublished)
+
+### Source-derived Decision Inbox and human allowance control
+
+Add four owner queues to the authenticated loopback view, using task/Jev owners
+and optional `--decision-store`. Keep original shadow proposals, current native
+answers, current task reports, holds and exhausted allowances distinct. Show
+original references/options/revisions without exposing classifier state or native
+commands. Unconfigured, damaged, stale, unbound, conflicting and unavailable
+evidence remain explicit; judging requires the original exact current completed
+investigation. No automatic dispatch, semantic finding routing or acceptance.
+
+Distinguish zero authorization with no attempts from failed correction loops.
+Require current failure evidence and relevant attempted corrections before
+proposing investigation; respect exhausted allowance, blocked/pending work and
+existing successful investigation evidence. Detect Jev/task source changes during
+collection and report unavailable instead of mixing empty/pending/current views.
+Close the owner handoff race identified by investigator `investigate-owner-read`
+at `a42524e` and retained shadow decision
+`726bf3919446bd91178306280e9662327d498a1069b0ad016a3d86eeb663dd0f`:
+Jev now uses the existing no-follow/nonblocking regular-file owner reader after
+fingerprinting. Preserve schema validation and final consistency checks; reject
+replacement/new FIFOs and FIFO links without partial proposals or resolutions.
+The shadow result is diagnostic evidence, not approval or execution authority.
+
+An authenticated same-origin valid-CSRF operator form can approve exactly one
+additional correction/investigation attempt through `factory.extend_allowance`,
+with bounded reason, observed limit and replay-safe request ID. Preserve original
+admission, usage, reports, holds and decision history. Static renderers remain
+read-only; transient dashboard facts advance to schema 4; the existing task owner defines the task schema.
+Fixed offline source/render/handler/concurrency/replay cases use isolated records
+and fake transports. Host/browser checks, independent QA/security, policy review
+and CI remain separate gates. Default counts are progress-review checkpoints; foreman extensions may use
+existing standing authorization while user budgets, scope and holds bind.
+No real held task was granted an attempt. No
+publisher is configured or authorized.
+
 ## 0.14.3 — 2026-11-08 (unpublished)
 
 ### Public CLI reconnect after worktree cleanup

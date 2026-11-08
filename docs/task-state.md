@@ -67,6 +67,15 @@ Repeat the same request ID and inputs after a lost reply; the replay adds nothin
 even after subsequent decisions. A reused ID with changed inputs or a stale
 expected limit refuses. Changed scope still needs a new explicit admission.
 
+The authenticated [operator view](operator-view.md) offers the same owner action
+as an explicit human form, restricted to exactly one additional attempt with a
+nonempty approval reason of at most 512 characters. It supplies the observed
+limit and a unique request ID, records the decision under the existing task lock,
+and redirects after success. Its task detail shows the original allowance-decision
+history and admission limits alongside current used/remaining attempts. Refresh
+never grants attempts. A worker/classifier cannot approve its own budget; the UI
+does not dispatch assignments or remove holds.
+
 ## Launches and holds
 
 For an admitted task, add `--purpose work`, `--purpose correction` or

@@ -65,6 +65,14 @@ td ul { padding-left: 18px; }
 footer { color: #51657a; font-size: 14px; padding: 25px 0 5px; }
 footer a { margin-left: 8px; }
 nav { margin-bottom: 20px; display: flex; gap: 20px; }
+.inbox { margin-bottom: 40px; }
+.decision-queue { margin: 22px 0; }
+.decision-queue h3 { border-bottom: 1px solid #9aabbd; padding-bottom: 8px; }
+.decision { background: white; border-left: 5px solid #93552f; border-radius: 0 7px 7px 0; padding: 18px 22px; margin: 14px 0; overflow-wrap: anywhere; }
+.decision h4 { font-size: 18px; margin: 0 0 8px; }
+.decision details { margin-top: 12px; }
+.decision ul { padding-left: 22px; }
+.source-status { font-weight: 600; }
 .pane-identity { font-size: 14px; }
 .pane-identity dd { overflow-wrap: anywhere; }
 .terminal-output { background: #fff; border: 1px solid #dce5ef; padding: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }

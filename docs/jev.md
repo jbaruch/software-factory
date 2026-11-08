@@ -184,3 +184,25 @@ produces `engine_unavailable` for operator inspection, never silent adoption or
 a new standby proposal. Cross-engine-path adoption is not implemented. Earlier
 attempts on stale task inputs remain in history; only current-input attempts can
 resolve the current phase.
+
+The authenticated loopback dashboard accepts an optional `--decision-store` and
+reads `pending_decisions`/`read_decision` and collected native evidence offline.
+Omission means unknown/not configured; a selected absent directory retains the
+owner's first-use empty meaning without creating it. Inaccessible, unsupported,
+damaged or dangling sources remain unavailable. No Rex/provider query is needed
+to read decisions, and malformed saved reasoner arguments do not echo argv.
+The dashboard checks source identities/content before and after owner reads;
+changes during collection make the inbox explicitly unavailable until refreshed,
+without claiming current native answers from a mixed view. No snapshot is stored.
+
+The dashboard shows original question IDs/versions and option descriptions,
+evidence references/revisions, and the original dispute question/options for
+judging. Generic question instruction contents, raw state, payloads, commands and
+native argv stay private. Only explicit investigator/native task bindings to IDs
+under the selected task directory can resolve a task; generic state labels/paths
+are not interpreted as task records. Generic evidence freshness stays unknown.
+Unbound/unknown conditions become operator planning, with original shadow owner
+proposals retained separately from current native answers. A missing, blocked,
+changed or stale current investigation blocks judge availability even if a native
+ruling was previously collected. No original investigation result is rewritten.
+These are views/proposals, never automatic routing, dispatch or task acceptance.
