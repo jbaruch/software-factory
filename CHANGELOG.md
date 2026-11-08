@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.1 — Unpublished
+
+- Decode observed Claude 2.1.319 `system/thinking_tokens` nonnegative integer estimates as raw inspection metadata. Preserve strict lifecycle/collection checks and final actual usage; failed original assignments remain failed. Add fixed offline decoder and fake worker/collection regressions.
+
 ## 0.16.0 — Unpublished
 
 - Add explicit read-only native Claude execution/strict collection, original session-bound evidence, requested Team metadata and independent ordinary specialist approvals. Codex release behavior stays binding; managed live qualification remains separate.

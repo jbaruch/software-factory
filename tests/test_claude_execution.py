@@ -58,6 +58,16 @@ def events(cwd, session=SESSION):
                  modelUsage={MODEL: dict(provider="firstParty", canonicalModel=MODEL, costBasis="list", costUSD=0.01, inputTokens=2, outputTokens=20)})]
 
 
+def thinking_events(session=SESSION) -> list[dict]:
+    """Fixed sanitized operational-loop/architecture 2.1.319 metadata shapes."""
+    return [dict(type="system", subtype="thinking_tokens", estimated_tokens=50,
+                 estimated_tokens_delta=50, session_id=session,
+                 uuid="00000000-0000-0000-0000-000000000050"),
+            dict(type="system", subtype="thinking_tokens", estimated_tokens=234,
+                 estimated_tokens_delta=184, session_id=session,
+                 uuid="00000000-0000-0000-0000-000000000234")]
+
+
 class Decoder(unittest.TestCase):
     def parse(self, data):
         return native_claude.parse_execution(data, session_id=SESSION, cwd="/fixture", model=MODEL, max_turns=3)
@@ -68,6 +78,92 @@ class Decoder(unittest.TestCase):
         self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
         self.assertIsNone(self.parse(data)["rate_limits"][0]["utilization"])
         self.assertEqual(data, original)
+
+    def test_thinking_estimates_preserve_raw_events_and_actual_result(self):
+        data = events("/fixture")
+        expected = self.parse(data)
+        data[1:1] = thinking_events()
+        original = copy.deepcopy(data)
+        self.assertEqual(self.parse(data), expected)
+        self.assertEqual(data, original)
+        for metadata in ({}, {"uuid": None}, {"uuid": True}, {"uuid": False},
+                         {"uuid": 7}, {"uuid": "opaque"}, {"uuid": ["opaque"]},
+                         {"uuid": {"opaque": "metadata"}}):
+            with self.subTest(metadata=metadata):
+                data = events("/fixture")
+                telemetry = thinking_events()
+                for event in telemetry:
+                    del event["uuid"]
+                    event.update(metadata)
+                data[1:1] = telemetry
+                original = copy.deepcopy(data)
+                self.assertEqual(self.parse(data), expected)
+                self.assertEqual(data, original)
+        # These are independent estimates, with no documented continuity/reset rule.
+        data[2].update(estimated_tokens=0, estimated_tokens_delta=999)
+        self.assertEqual(self.parse(data), expected)
+
+    def test_thinking_estimate_counters_refuse_malformed_values(self):
+        for key in ("estimated_tokens", "estimated_tokens_delta"):
+            for value in (None, True, False, -1, 1.0, "50", [], {}):
+                with self.subTest(key=key, value=value):
+                    telemetry = thinking_events()[0]
+                    telemetry[key] = value
+                    data = events("/fixture")
+                    data.insert(1, telemetry)
+                    with self.assertRaises(native_claude.ClaudeProbeError):
+                        self.parse(data)
+            telemetry = thinking_events()[0]
+            del telemetry[key]
+            data = events("/fixture")
+            data.insert(1, telemetry)
+            with self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse(data)
+
+    def test_thinking_session_order_and_unknown_subtype_refuse(self):
+        for position, changes in ((0, {}), (5, {}), (1, {"session_id": "foreign"}),
+                                  (1, {"session_id": None}), (1, {"subtype": "unknown"})):
+            with self.subTest(position=position, changes=changes):
+                data = events("/fixture")
+                data.insert(position, {**thinking_events()[0], **changes})
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    self.parse(data)
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse([events("/fixture")[0], *thinking_events()])
+
+    def test_thinking_does_not_supply_report_or_actual_usage(self):
+        for outcome in ("blocked", "findings", "completed", "approved"):
+            data = events("/fixture")
+            report = dict(outcome=outcome, artifacts=["README.md"])
+            data[1]["message"]["content"][0]["input"] = report
+            data[-1].update(structured_output=report, result=json.dumps(report))
+            data[1:1] = thinking_events()
+            self.assertEqual(self.parse(data)["report"], report)
+        for changes in (dict(usage=None), dict(usage=dict(input_tokens=2, output_tokens=234)),
+                        dict(modelUsage={}), dict(structured_output=None),
+                        dict(subtype="error_max_turns"), dict(permission_denials=[{}])):
+            with self.subTest(changes=changes):
+                data = events("/fixture")
+                data[1:1] = thinking_events()
+                data[-1].update(changes)
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    self.parse(data)
+        data = events("/fixture")
+        data[1:3] = thinking_events()
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
+
+    def test_thinking_preserves_read_pairing_scope_and_pending_tools(self):
+        for requested, returned in (("/fixture/file", "/fixture/file"),
+                                    ("/fixture/file", "/fixture/other"),
+                                    ("/outside/file", "/outside/file")):
+            data = self.read_data(requested, returned)
+            data[2:2] = thinking_events()
+            if requested == returned == "/fixture/file":
+                self.assertEqual(self.parse(data)["usage"], dict(input_tokens=2, output_tokens=20))
+                del data[4]  # Telemetry cannot complete a pending Read.
+            with self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse(data)
 
     def test_shared_json_depth_refuses_without_chained_traceback(self):
         with recursion_on(RECURSIVE_JSON), self.assertRaisesRegex(ValueError, "nesting.*reduce") as error:
@@ -367,6 +463,59 @@ class ClaudeWorker(unittest.TestCase):
         self.process=FakeProcess(self.events,exit_code=1)
         self.assertEqual(self.execute()["state"],"failed")
         with self.assertRaises(factory.FactoryError):self.collect()
+
+    def test_thinking_worker_collection_preserves_raw_and_actual_usage(self):
+        self.events[1:1] = thinking_events(self.args.native_session)
+        self.process = FakeProcess(self.events)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed")
+        self.assertEqual(receipt["usage"], dict(input_tokens=2, output_tokens=20))
+        self.assertEqual(receipt["model_usage"], self.events[-1]["modelUsage"])
+        raw = envelope_bytes([json.dumps(event) + "\n" for event in self.events])
+        self.assertEqual(self.args.events.read_bytes(), raw)
+        result = self.collect()
+        self.assertTrue(result["assignments"]["inspect"]["native_collected"])
+        self.assertEqual(self.collect(), result)
+        self.assertEqual(self.args.events.read_bytes(), raw)
+
+    def assert_telemetry_failure(self, telemetry, position):
+        self.events.insert(position, telemetry)
+        self.process = FakeProcess(self.events)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIsNone(receipt["report"])
+        self.assertIsNone(receipt["candidate"])
+        before = (self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes())
+        with self.assertRaises(factory.FactoryError):
+            self.collect()
+        self.assertEqual((self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes()), before)
+        self.assertFalse(factory.load_task(self.path)["assignments"]["inspect"]["native_collected"])
+
+    def test_malformed_thinking_never_collects(self):
+        telemetry = thinking_events(self.args.native_session)[0]
+        telemetry["estimated_tokens_delta"] = True
+        self.assert_telemetry_failure(telemetry, 1)
+
+    def test_foreign_thinking_never_collects(self):
+        self.assert_telemetry_failure(thinking_events("foreign")[0], 1)
+
+    def test_late_thinking_never_collects(self):
+        self.assert_telemetry_failure(thinking_events(self.args.native_session)[0], len(self.events))
+
+    def test_prior_failed_receipt_stays_failed_even_when_stream_now_decodes(self):
+        self.events[1:1] = thinking_events(self.args.native_session)
+        self.process = FakeProcess(self.events)
+        # Model the original strict decoder's refusal, without changing its evidence.
+        with patch.object(native_claude, "parse_execution", side_effect=native_claude.ClaudeProbeError("Unknown subtype")):
+            self.assertEqual(self.execute()["state"], "failed")
+        native = native_claude.parse_execution(claude_worker.read_events(self.args.events),
+            session_id=self.args.native_session, cwd=str(self.repo), model=MODEL, max_turns=3)
+        self.assertEqual(native["report"]["outcome"], "approved")
+        before = (self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes())
+        with self.assertRaises(factory.FactoryError):
+            self.collect()
+        self.assertEqual((self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes()), before)
+        self.assertFalse(factory.load_task(self.path)["assignments"]["inspect"]["native_collected"])
 
     def test_deep_native_event_saves_controlled_failed_receipt(self):
         self.process = FakeProcess([])
