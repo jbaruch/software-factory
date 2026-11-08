@@ -86,6 +86,19 @@ class Decoder(unittest.TestCase):
         original = copy.deepcopy(data)
         self.assertEqual(self.parse(data), expected)
         self.assertEqual(data, original)
+        for metadata in ({}, {"uuid": None}, {"uuid": True}, {"uuid": False},
+                         {"uuid": 7}, {"uuid": "opaque"}, {"uuid": ["opaque"]},
+                         {"uuid": {"opaque": "metadata"}}):
+            with self.subTest(metadata=metadata):
+                data = events("/fixture")
+                telemetry = thinking_events()
+                for event in telemetry:
+                    del event["uuid"]
+                    event.update(metadata)
+                data[1:1] = telemetry
+                original = copy.deepcopy(data)
+                self.assertEqual(self.parse(data), expected)
+                self.assertEqual(data, original)
         # These are independent estimates, with no documented continuity/reset rule.
         data[2].update(estimated_tokens=0, estimated_tokens_delta=999)
         self.assertEqual(self.parse(data), expected)
