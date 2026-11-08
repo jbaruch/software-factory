@@ -58,7 +58,7 @@ the uniquely owned checkout is already complete and clean. Retain missing,
 partial, dirty or conflicting outcomes for inspection without retries or repair.
 Reject unsupported trees/configuration and destinations overlapping the task store.
 Schema 8 preserves legacy holds, inputs, provisioning intents and allowance
-additions from the earlier schema-6/schema-8 owners, without adopting worktrees
+additions from the earlier schema-6/schema-7 owners, without adopting worktrees
 or granting attempts. Expose provisioning through the existing owner view. No automatic
 candidate handoff, task acceptance or release authority is added.
 
