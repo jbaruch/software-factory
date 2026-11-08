@@ -1,6 +1,6 @@
 schemaVersion: 1
 name: jbaruch/software-factory
-version: 0.14.2
+version: 0.14.3
 description: Entry point and role catalog for a script-and-Jev coordinated Rex factory.
 source:
   repository: https://github.com/jbaruch/software-factory

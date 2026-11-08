@@ -250,6 +250,17 @@ class Integration(unittest.TestCase):
             review="release", required=["qa"], gh=Path("/installed/gh"),
             scripts=Path("/installed/acr__jbaruch__coding-policy__release"), transport=self.transport)
 
+    def integration_cli(self, *, review="release", required="qa", acceptance=None):
+        command = ["--state-dir", str(self.tasks), "integrate", "--task", "deliver", "--id", "merge",
+            "--pr", self.transport.identity["url"], "--review", review, "--after", required,
+            "--gh", "/installed/gh", "--release-scripts", "/installed/acr__jbaruch__coding-policy__release"]
+        if acceptance is not None:
+            command.extend(["--acceptance", acceptance])
+        output, errors = StringIO(), StringIO()
+        with patch.object(release_evidence, "GitHub", return_value=self.transport), redirect_stdout(output), redirect_stderr(errors):
+            code = factory.main(command)
+        return code, json.loads(output.getvalue()) if output.getvalue() else None, errors.getvalue()
+
     def test_large_frozen_evidence_stays_in_original_brief_and_legacy_commands_still_read(self):
         self.frozen = copy.deepcopy(self.frozen)
         self.frozen["snapshot"]["review_bodies"][0]["body"] = "Original feedback 雪\n" * 100000
@@ -306,6 +317,54 @@ class Integration(unittest.TestCase):
         # Cold recovery never starts a second execution even if no receipt survived.
         self.assertEqual(self.launch_integration()["state"], "merge_outcome_unknown")
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
+        self.assertEqual(self.transport.merges, [])
+
+    def test_cli_lost_launch_reconnect_after_checkout_removal_never_resends(self):
+        checkout = self.root / "lost-launch-worktree"
+        added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.review("linked-release", "release", cwd=checkout)
+        FakeRex.fail_after_create = True
+        try:
+            code, output, errors = self.integration_cli(review="linked-release")
+        finally:
+            FakeRex.fail_after_create = False
+        self.assertEqual((code, output), (1, None))
+        self.assertIn("Launch outcome uncertain", errors)
+        original = factory.load_task(self.path)
+        self.assertEqual(original["assignments"]["merge"]["state"], "launching")
+        panes = copy.deepcopy(FakeRex.sessions)
+        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse(checkout.exists())
+        before = self.path.read_bytes()
+        for options in ({"review": "release"}, {"review": "linked-release", "required": "release"}):
+            with self.subTest(options=options):
+                code, output, errors = self.integration_cli(**options)
+                self.assertEqual((code, output), (1, None))
+                self.assertIn("different immutable inputs", errors)
+                self.assertEqual(self.path.read_bytes(), before)
+        EvidenceRex.integration_running = True
+        try:
+            code, output, errors = self.integration_cli(review="linked-release")
+        finally:
+            EvidenceRex.integration_running = False
+        self.assertEqual((code, errors), (0, ""))
+        assert output is not None
+        self.assertEqual(output["process"]["state"], "running")
+        current = factory.load_task(self.path)
+        recovered = current["assignments"]["merge"]
+        self.assertEqual(recovered["state"], "launched")
+        expected = copy.deepcopy(original)
+        expected["assignments"]["merge"].update(state="launched", window_id=recovered["window_id"], block_id=recovered["block_id"])
+        self.assertEqual(current, expected)
+        for _ in range(2):
+            code, output, errors = self.integration_cli(review="linked-release")
+            self.assertEqual((code, errors), (1, ""))
+            assert output is not None
+            self.assertEqual(output["state"], "merge_outcome_unknown")
+            self.assertEqual(factory.load_task(self.path), expected)
+        self.assertEqual(FakeRex.sessions, panes)
         self.assertEqual(self.transport.merges, [])
 
     def test_pause_and_inputs_remain_usable_during_watcher_and_are_not_overwritten(self):
@@ -866,6 +925,11 @@ class Integration(unittest.TestCase):
         record = factory.load_task(self.path)
         verdict = integration.accepted(record, "merge", "cleanup-accept", self.transport)
         self.assertEqual(verdict["outcome"], "approved")
+        code, before, errors = self.integration_cli(review="cleanup-release", required="cleanup-qa", acceptance="cleanup-accept")
+        self.assertEqual((code, errors), (0, ""))
+        assert before is not None
+        self.assertEqual(before["acceptance"], verdict)
+        panes = copy.deepcopy(FakeRex.sessions)
         originals = {self.path: self.path.read_bytes()}
         for assignment in record["assignments"].values():
             paths = [assignment["brief"], *assignment["result"]["artifacts"]]
@@ -880,6 +944,10 @@ class Integration(unittest.TestCase):
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertFalse(checkout.exists())
         self.assertEqual(integration.accepted(record, "merge", "cleanup-accept", self.transport), verdict)
+        code, after, errors = self.integration_cli(review="cleanup-release", required="cleanup-qa", acceptance="cleanup-accept")
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual(after, before)
+        self.assertEqual(FakeRex.sessions, panes)
         # An unrelated checkout at the old path supplies no historical authority.
         subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
         self.assertEqual(integration.accepted(record, "merge", "cleanup-accept", self.transport), verdict)
