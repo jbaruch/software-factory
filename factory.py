@@ -1139,12 +1139,18 @@ def brief(role_id, goal):
             + "Existing repository policy and user authorization remain binding.\n")
 
 
-def connect(record, binary=None, server=None):
+def check_pins(record, binary=None, server=None):
+    """Offline check that an explicitly supplied Rex binary/endpoint is the task's pinned one."""
     connection = record["rex"]
     if binary and str(Path(binary).resolve()) != connection["binary"]:
         raise FactoryError("Task is pinned to another Rex binary")
     if server and server != connection["server"]:
         raise FactoryError("Task is pinned to another Rex endpoint")
+    return connection
+
+
+def connect(record, binary=None, server=None):
+    connection = check_pins(record, binary, server)
     rex = Rex(connection["binary"], connection["server"])
     who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
     if who["host_id"] != connection["host_id"]:
@@ -1548,6 +1554,8 @@ def status(rex, record, assignment) -> dict:
 
 def captured(rex, record, assignment):
     """Original terminal output: live while the tab is open, retained once it is tidied."""
+    if assignment["state"] == "abandoned":
+        raise FactoryError("No pane: the launch was abandoned. " + assignment["abandoned"]["reason"])
     closed = assignment.get("closed")
     if closed is not None:
         if closed["capture"] is None:
@@ -2327,7 +2335,13 @@ def main(argv=None):
                 if args.id not in record["assignments"]:
                     raise FactoryError(f"Unknown assignment {args.id!r}; use show --task {args.task} to find its ID")
                 assignment = record["assignments"][args.id]
-                rex = connect(record, args.rex, args.server)
+                if args.action in {"status", "capture"} and (
+                        assignment["state"] == "abandoned" or assignment.get("closed") is not None):
+                    # Answered from the task record alone, even while Rex is unavailable.
+                    check_pins(record, args.rex, args.server)
+                    rex = None
+                else:
+                    rex = connect(record, args.rex, args.server)
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
