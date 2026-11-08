@@ -759,7 +759,7 @@ def provisioning_source(repository, candidate, destination_parent):
     """Reject unsupported configuration and trees before any worktree mutation."""
     config = git_run(repository, "config", "--null", "--list")
     if config.returncode:
-        raise FactoryError("Cannot inspect provisioning configuration")
+        raise FactoryError("Cannot inspect provisioning configuration; restore Git configuration access before provisioning")
     for field in config.stdout.split("\0"):
         key, _, value = field.partition("\n")
         key = key.lower()
@@ -768,10 +768,13 @@ def provisioning_source(repository, candidate, destination_parent):
                 and value.lower() not in {"false", "no", "off", "0"}
                 or key.startswith("remote.") and key.endswith(".promisor")
                 and value.lower() not in {"false", "no", "off", "0"}):
-            raise FactoryError("Unsupported provisioning configuration: " + key)
+            raise FactoryError("Unsupported provisioning configuration: " + key + "; remove this setting or choose a supported repository before provisioning")
     if os.path.lexists(git_common_dir(repository) / "objects/info/alternates"):
-        raise FactoryError("Provisioning requires local objects without alternates")
-    tree = provisioning_git(repository, "ls-tree", "-r", "-z", "--full-tree", candidate)
+        raise FactoryError("Provisioning requires local objects without alternates; choose a repository with independent local objects before provisioning")
+    try:
+        tree = provisioning_git(repository, "ls-tree", "-r", "-z", "--full-tree", candidate)
+    except FactoryError:
+        raise FactoryError("Cannot inspect candidate tree before provisioning; restore local Git object access and select a candidate with supported UTF-8 filenames") from None
     entries = []
     for entry in tree.split("\0"):
         if not entry:
@@ -782,7 +785,7 @@ def provisioning_source(repository, candidate, destination_parent):
         if (kind != "blob" or mode not in {"100644", "100755"} or relative.is_absolute()
                 or relative.as_posix() != name
                 or any(part.lower() in {".git", ".."} for part in relative.parts)):
-            raise FactoryError("Provisioning supports only regular-file trees without symlinks or submodules")
+            raise FactoryError("Provisioning supports only regular-file trees; select a candidate without symlinks, submodules or unsupported paths")
         entries.append((name, mode, oid))
     # Probe only names, on the actual destination filesystem, before saving intent.
     # No normalization table can establish that filesystem's name equivalence.
@@ -826,7 +829,7 @@ def provisioning_owned(record, item):
                 or item["git_dir"] is not None and item["git_dir"] != str(directory)):
             raise FactoryError("Provisioning ownership differs; inspect conflicting resources without resetting or deleting them")
         return directory
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         raise FactoryError("Cannot read provisioning ownership metadata; restore access to the original metadata and inspect existing resources without retrying, resetting or deleting them") from None
 
 
@@ -883,12 +886,15 @@ def provision_worktree(path, *, worktree_id, destination):
         if existing["state"] == "provisioned":
             return record  # Historical completion: writers may now have edited this checkout.
         # Reconciliation is read-only, including while held. Never repair shared files.
-        for root, _, files in os.walk(destination, followlinks=False):
-            for name in files:
-                if (Path(root) / name).lstat().st_nlink != 1:
-                    raise FactoryError("Provisioning outcome uncertain: shared files require inspection")
-        check_checkout(record["admission"]["repository"], str(destination), request["inputs"]["candidate"],
-                       expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        try:
+            for root, _, files in os.walk(destination, followlinks=False):
+                for name in files:
+                    if (Path(root) / name).lstat().st_nlink != 1:
+                        raise FactoryError("Provisioning outcome uncertain: shared files require inspection")
+            check_checkout(record["admission"]["repository"], str(destination), request["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        except OSError:
+            raise FactoryError("Cannot inspect retained provisioning resources; restore filesystem access and inspect the existing intent/worktree without retrying, resetting or deleting them") from None
     else:
         if record["hold"] is not None:
             raise FactoryError("Task is paused; resume before provisioning")
@@ -915,23 +921,32 @@ def provision_worktree(path, *, worktree_id, destination):
         existing = dict(id=worktree_id, request=request, owner_token=uuid.uuid4().hex,
                         state="provisioning", git_dir=None)
         record["provisioning"] = existing
-        save(path, record)  # Durable immutable request and before-effect intent.
+        try:
+            save(path, record)  # Durable immutable request and before-effect intent.
+        except OSError:
+            raise FactoryError("Cannot confirm provisioning intent save; restore state-store access/space and reconcile the saved task record before continuing; no Git worktree creation was started") from None
         marker = f'factory-{record["task"]}-{worktree_id}-{existing["owner_token"]}'
         provisioning_git(repository, "worktree", "add", "--no-checkout", "--lock", "--reason", marker,
                          "-b", request["branch"], str(destination), request["inputs"]["candidate"])
         directory = provisioning_owned(record, existing)
         # --no-checkout avoids hooks and smudge filters; read-tree writes only this index.
         provisioning_git(destination, "read-tree", request["inputs"]["candidate"])
-        for name, mode, oid in entries:
-            with provisioning_file(destination, name) as stream:
-                provisioning_git(repository, "cat-file", "blob", oid, output=stream)
-                stream.flush()
-                os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
-                os.fsync(stream.fileno())
-        check_checkout(repository, str(destination), request["inputs"]["candidate"],
-                       expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        try:
+            for name, mode, oid in entries:
+                with provisioning_file(destination, name) as stream:
+                    provisioning_git(repository, "cat-file", "blob", oid, output=stream)
+                    stream.flush()
+                    os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
+                    os.fsync(stream.fileno())
+            check_checkout(repository, str(destination), request["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+        except OSError:
+            raise FactoryError("Provisioning resource writes failed; restore filesystem access/space and inspect the retained intent/worktree without retrying, resetting or deleting them") from None
     existing.update(state="provisioned", git_dir=str(directory))
-    save(path, record)
+    try:
+        save(path, record)
+    except OSError:
+        raise FactoryError("Cannot confirm provisioning completion save; restore state-store access/space and reconcile this same saved intent and existing worktree before continuing") from None
     return record
 
 

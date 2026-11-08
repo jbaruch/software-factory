@@ -186,7 +186,7 @@ class WorktreeProvisioning(unittest.TestCase):
             if value.get("provisioning", {}).get("state") == "provisioned":
                 raise OSError("lost completed response")
         with patch.object(factory, "provisioning_git", side_effect=inspect), \
-                patch.object(factory, "save", side_effect=lost_reply), self.assertRaises(OSError):
+                patch.object(factory, "save", side_effect=lost_reply), self.assertRaises(factory.FactoryError):
             self.provision()
         self.assertEqual(len(observed), 1)
         before = self.path.read_bytes()
@@ -204,7 +204,7 @@ class WorktreeProvisioning(unittest.TestCase):
             if value.get("provisioning", {}).get("state") == "provisioned":
                 raise OSError("restart before completion publication")
             original(path, value, **kwargs)
-        with patch.object(factory, "save", side_effect=interrupted), self.assertRaises(OSError):
+        with patch.object(factory, "save", side_effect=interrupted), self.assertRaises(factory.FactoryError):
             self.provision()
         self.assertEqual(factory.load_task(self.path)["provisioning"]["state"], "provisioning")
         factory.hold_task(self.path, "Inspection hold")
@@ -249,7 +249,7 @@ class WorktreeProvisioning(unittest.TestCase):
                          self.git("rev-parse", "HEAD"))
 
     def test_pre_effect_save_failure_never_runs_git_and_pending_missing_effect_is_not_retried(self):
-        with patch.object(factory, "save", side_effect=OSError("disk full")), self.assertRaises(OSError):
+        with patch.object(factory, "save", side_effect=OSError("disk full")), self.assertRaises(factory.FactoryError):
             self.provision()
         self.assertFalse(self.destination.exists())
         self.assertIsNone(factory.load_task(self.path)["provisioning"])
@@ -258,7 +258,7 @@ class WorktreeProvisioning(unittest.TestCase):
             def stop_after_intent(*args, **kwargs):
                 original(*args, **kwargs)
                 raise OSError("reply lost before Git")
-            with patch.object(factory, "save", side_effect=stop_after_intent), self.assertRaises(OSError):
+            with patch.object(factory, "save", side_effect=stop_after_intent), self.assertRaises(factory.FactoryError):
                 self.provision()
             self.assertFalse(any(call.args[1:3] == ("worktree", "add") for call in git.call_args_list))
         with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
@@ -380,6 +380,77 @@ class WorktreeProvisioning(unittest.TestCase):
                 self.assertIn("without retrying, resetting or deleting", error)
                 self.assertEqual(self.path.read_bytes(), before)
 
+    def test_non_utf8_ownership_metadata_has_actionable_recovery(self):
+        record = self.provision()
+        directory = Path(record["provisioning"]["git_dir"])
+        before = self.path.read_bytes()
+        for metadata in (self.destination / ".git", directory / "locked", directory / "gitdir"):
+            with self.subTest(metadata=metadata.name):
+                original = metadata.read_bytes()
+                metadata.write_bytes(b"\xff fixed damaged metadata")
+                try:
+                    code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+                    self.assertEqual(code, 1)
+                    self.assertIn("original metadata", error)
+                    self.assertIn("without retrying, resetting or deleting", error)
+                    self.assertNotIn("codec", error)
+                    self.assertEqual(self.path.read_bytes(), before)
+                finally:
+                    metadata.write_bytes(original)
+
+    def test_preflight_probe_failures_tell_operator_what_to_restore_without_intent(self):
+        original = factory.git_run
+        def denied_config(repository, *args, **kwargs):
+            if args == ("config", "--null", "--list"):
+                return subprocess.CompletedProcess([], 1, "", "fixture denied")
+            return original(repository, *args, **kwargs)
+        for target, failure, action in (
+                ("git_run", denied_config, "restore Git configuration access"),
+                ("provisioning_git", factory.FactoryError("old retained-intent diagnostic"), "restore local Git object access")):
+            with self.subTest(target=target), patch.object(factory, target, side_effect=failure):
+                before = self.path.read_bytes()
+                code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+                self.assertEqual(code, 1)
+                self.assertIn(action, error)
+                self.assertNotIn("retained", error)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertFalse(self.destination.exists())
+
+    def test_cli_intent_save_failure_names_state_reconciliation_before_git(self):
+        before = self.path.read_bytes()
+        with patch.object(factory, "save", side_effect=PermissionError("fixed denied")):
+            code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+        self.assertEqual(code, 1)
+        self.assertIn("restore state-store access/space", error)
+        self.assertIn("no Git worktree creation was started", error)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(self.git("branch", "--list", "factory/fixture/backend"), "")
+
+    def test_cli_materialization_failure_retains_resources_for_inspection(self):
+        with patch.object(factory.os, "fchmod", side_effect=PermissionError("fixed denied")):
+            code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+        self.assertEqual(code, 1)
+        self.assertIn("restore filesystem access/space", error)
+        self.assertIn("without retrying, resetting or deleting", error)
+        self.assertEqual(factory.load_task(self.path)["provisioning"]["state"], "provisioning")
+        self.assertTrue(self.destination.exists())
+        self.assertEqual(self.git("rev-parse", "factory/fixture/backend"), self.git("rev-parse", "HEAD"))
+
+    def test_cli_completion_save_failure_reconciles_same_existing_effect(self):
+        original = factory.save
+        def denied(path, value, **kwargs):
+            if value.get("provisioning", {}).get("state") == "provisioned":
+                raise PermissionError("fixed denied")
+            return original(path, value, **kwargs)
+        with patch.object(factory, "save", side_effect=denied):
+            code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+        self.assertEqual(code, 1)
+        self.assertIn("restore state-store access/space", error)
+        self.assertIn("same saved intent and existing worktree", error)
+        self.assertEqual(factory.load_task(self.path)["provisioning"]["state"], "provisioning")
+        self.assertEqual(self.provision()["provisioning"]["state"], "provisioned")
+
     def test_hold_input_changes_and_request_changes_preserve_original_intent_and_limits(self):
         factory.hold_task(self.path, "Wait")
         with self.assertRaisesRegex(factory.FactoryError, "paused"):
@@ -443,7 +514,7 @@ class WorktreeProvisioning(unittest.TestCase):
             if args[:1] == ("read-tree",):
                 (self.destination / "nested").symlink_to(outside, target_is_directory=True)
             return result
-        with patch.object(factory, "provisioning_git", side_effect=substituted), self.assertRaises(OSError):
+        with patch.object(factory, "provisioning_git", side_effect=substituted), self.assertRaises(factory.FactoryError):
             self.provision()
         self.assertEqual(list(outside.iterdir()), [])
         before = self.path.read_bytes()
@@ -467,8 +538,11 @@ class WorktreeProvisioning(unittest.TestCase):
                            ("core.alternateRefsCommand", "/bad/callback")):
             self.git("config", key, value)
             try:
-                with self.subTest(key=key), self.assertRaisesRegex(factory.FactoryError, "Unsupported provisioning"):
-                    self.provision()
+                with self.subTest(key=key):
+                    code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+                    self.assertEqual(code, 1)
+                    self.assertIn("Unsupported provisioning", error)
+                    self.assertIn("remove this setting or choose a supported repository", error)
                 self.assertIsNone(factory.load_task(self.path)["provisioning"])
             finally:
                 self.git("config", "--unset", key)
@@ -480,8 +554,20 @@ class WorktreeProvisioning(unittest.TestCase):
         factory.set_inputs(self.path, candidate="HEAD", requirements="with-link")
         with self.assertRaisesRegex(factory.FactoryError, "regular-file trees"):
             self.provision()
+        code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+        self.assertEqual(code, 1)
+        self.assertIn("select a candidate without symlinks", error)
         self.assertFalse(self.destination.exists())
         self.assertIsNone(factory.load_task(self.path)["provisioning"])
+
+    def test_alternates_refusal_names_supported_repository_without_effect(self):
+        (self.repo / ".git/objects/info/alternates").write_text("")
+        before = self.path.read_bytes()
+        code, _, error = self.cli("provision", "--task", "fixture", "--id", "backend", "--path", str(self.destination))
+        self.assertEqual(code, 1)
+        self.assertIn("choose a repository with independent local objects", error)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(self.destination.exists())
 
     def test_version_five_migration_preserves_gates_and_rejects_downgrade_or_damage(self):
         factory.hold_task(self.path, "Keep hold")
