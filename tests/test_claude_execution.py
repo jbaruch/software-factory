@@ -23,6 +23,7 @@ from test_rex_launcher import FakeRex
 
 MODEL = "claude-sonnet-5-5"
 SESSION = "00000000-0000-0000-0000-000000000001"
+DEEP_JSON = "[" * 2000 + "0" + "]" * 2000
 
 
 def events(cwd, session=SESSION):
@@ -51,6 +52,37 @@ class Decoder(unittest.TestCase):
         self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
         self.assertIsNone(self.parse(data)["rate_limits"][0]["utilization"])
         self.assertEqual(data, original)
+
+    def test_shared_json_depth_refuses_without_chained_traceback(self):
+        with self.assertRaisesRegex(ValueError, "nesting.*reduce") as error:
+            factory.decode_json(DEEP_JSON)
+        self.assertTrue(error.exception.__suppress_context__)
+        self.assertIsNone(error.exception.__cause__)
+
+    def test_shared_json_preserves_valid_and_strict_values(self):
+        self.assertEqual(factory.decode_json('{"a":[0,1.5,true,null],"b":-2}'),
+                         dict(a=[0, 1.5, True, None], b=-2))
+        for payload in ('{"a":1,"a":2}', 'NaN', 'Infinity', '-Infinity', '1e999', '9' * 400):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                factory.decode_json(payload)
+
+    def test_deep_embedded_final_result_refuses(self):
+        data = events("/fixture")
+        data[-1]["result"] = DEEP_JSON
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
+
+    def test_retained_deep_envelope_and_data_refuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events"
+            for text in (DEEP_JSON, json.dumps(dict(schema_version=1, kind="claude-event-line", data=DEEP_JSON))):
+                with self.subTest(envelope=text == DEEP_JSON):
+                    path.write_text(text + "\n")
+                    path.chmod(0o600)
+                    original = path.read_bytes()
+                    with self.assertRaisesRegex(native_claude.ClaudeProbeError, "retained Claude events"):
+                        claude_worker.read_events(path)
+                    self.assertEqual(path.read_bytes(), original)
 
     def test_conflicts_and_unsupported_lifecycles(self):
         for index, key, value in [(0,"tools",["Read","Bash","StructuredOutput"]), (0,"mcp_servers",[{}]),
@@ -243,6 +275,20 @@ class ClaudeWorker(unittest.TestCase):
         self.process=FakeProcess(self.events,exit_code=1)
         self.assertEqual(self.execute()["state"],"failed")
         with self.assertRaises(factory.FactoryError):self.collect()
+
+    def test_deep_native_event_saves_controlled_failed_receipt(self):
+        self.process = FakeProcess([])
+        self.process.lines = iter([(DEEP_JSON + "\n").encode()])
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("Malformed Claude event", receipt["error"])
+        self.assertIsNone(receipt["report"])
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        retained = self.args.events.read_bytes()
+        self.assertEqual(json.loads(retained)["data"], DEEP_JSON + "\n")
+        with self.assertRaises(factory.FactoryError):
+            self.collect()
+        self.assertEqual(self.args.events.read_bytes(), retained)
 
     def test_timeout_retains_original_stream(self):
         self.process=FakeProcess(self.events[:-1],timeout=True)

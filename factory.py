@@ -73,9 +73,12 @@ def finite_json_integer(value):
 
 
 def decode_json(value, *, object_pairs_hook=unique_object):
-    return json.loads(value, object_pairs_hook=object_pairs_hook,
-                      parse_constant=reject_json_constant, parse_float=finite_json_float,
-                      parse_int=finite_json_integer)
+    try:
+        return json.loads(value, object_pairs_hook=object_pairs_hook,
+                          parse_constant=reject_json_constant, parse_float=finite_json_float,
+                          parse_int=finite_json_integer)
+    except RecursionError:
+        raise ValueError("JSON nesting exceeds the supported depth; reduce nesting before retrying") from None
 
 
 class Rex:
