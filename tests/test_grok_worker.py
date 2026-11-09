@@ -2,7 +2,7 @@
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 import hashlib
 from io import StringIO
 import json
@@ -18,6 +18,7 @@ from typing import Any
 
 import factory
 import grok_worker
+import integration
 import native_grok
 from test_codex_worker import FakeProcess
 from test_rex_launcher import FakeRex
@@ -113,6 +114,82 @@ class GrokWorker(unittest.TestCase):
     def collect(self):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             return factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
+
+    def launch_writer(self, **changes):
+        command = self.make_command(**{**dict(assignment_id="implement", role="backend", write=True,
+                                              commit_message="Add fixture notes", sandbox=sys.executable), **changes})
+        with patch.object(factory, "Rex", FakeRex):
+            factory.launch(self.path, task="task", assignment_id="implement", role="backend", goal="Add fixture notes",
+                cwd=str(self.repo), command=command, purpose="work", binary=sys.executable, server="unix:///test.sock")
+        actual = [call for call in FakeRex.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
+        argv = actual[actual.index("--") + 1:]
+        argv = argv[argv.index("--") + 1:]
+        return grok_worker.parser().parse_args(argv[4:])
+
+    def execute_writer(self, args, *, edit=True):
+        events = [dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="writer-request",
+                       cwd=str(self.repo), num_turns=2, structuredOutput=dict(outcome="completed", artifacts=["NOTES.md"]),
+                       usage=dict(input_tokens=1, output_tokens=2), modelUsage=None)]
+        async def spawn(*command, **options):
+            self.spawns.append((command, options))
+            if edit:
+                (self.repo / "NOTES.md").write_text("Notes\n")
+            return FakeProcess(events)
+        with redirect_stdout(StringIO()):
+            return asyncio.run(grok_worker.execute(args, spawn=spawn, probe=self.probe, configuration=self.configuration,
+                clock=lambda: 1000, timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+
+    def collect_writer(self):
+        record = factory.load_task(self.path)
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            return factory.collect_grok(self.path, "implement", self.rex, record, record["assignments"]["implement"])
+
+    def test_writer_edits_are_committed_by_the_factory_and_collected(self):
+        args = self.launch_writer()
+        self.assertNotIn("Candidate path inventory", Path(factory.load_task(self.path)["assignments"]["implement"]["brief"]).read_text())
+        receipt = self.execute_writer(args)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (3, True, "created"))
+        self.assertEqual(receipt["commit"]["parent"], self.candidate)
+        self.assertEqual(factory.git_commit(".", "HEAD"), receipt["candidate"])
+        self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
+        command = self.spawns[-1][0]
+        self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+        self.assertNotIn("--tools", command)  # Writers get every built-in tool.
+        self.assertIn("do not stage or commit", command[command.index("--rules") + 1])
+        collected = self.collect_writer()
+        result = collected["assignments"]["implement"]["result"]
+        self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
+        self.assertTrue(collected["assignments"]["implement"]["native_collected"])
+
+    def test_writer_without_edits_records_an_unchanged_commit(self):
+        receipt = self.execute_writer(self.launch_writer(), edit=False)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((receipt["commit"]["state"], receipt["candidate"]), ("unchanged", self.candidate))
+
+    def test_writer_mode_requires_a_writing_role_commit_message_and_sandbox(self):
+        for changes, message in ((dict(role="qa"), "does not permit writer"),
+                                 (dict(commit_message=None), "--commit-message"),
+                                 (dict(sandbox=None), "commit sandbox"),
+                                 (dict(base=self.candidate), "--base is for code review")):
+            with self.subTest(changes=changes), self.assertRaisesRegex(factory.FactoryError, message):
+                self.make_command(**{**dict(assignment_id="implement", role="backend", write=True,
+                                            commit_message="Add fixture notes", sandbox=sys.executable), **changes})
+
+    def test_writer_and_reviewer_receipts_never_substitute_for_each_other(self):
+        # The reviewer runs first: a writer's commit moves the shared fixture checkout.
+        self.assertEqual(self.execute()["state"], "completed")
+        reviewer = json.loads(self.args.receipt.read_text())
+        self.args.receipt.write_text(json.dumps({**reviewer, "schema_version": 3, "writer": True}))
+        with self.assertRaisesRegex(factory.FactoryError, "differs from its frozen"):
+            self.collect()
+        args = self.launch_writer()
+        self.assertEqual(self.execute_writer(args)["state"], "completed")
+        receipt = json.loads(args.receipt.read_text())
+        for damaged in ({**receipt, "schema_version": 2}, {key: value for key, value in receipt.items() if key != "writer"}):
+            args.receipt.write_text(json.dumps(damaged))
+            with self.subTest(keys=sorted(damaged)), self.assertRaisesRegex(factory.FactoryError, "differs from its frozen"):
+                self.collect_writer()
 
     def test_lost_pane_defers_to_the_completed_receipt(self):
         lost = dict(state="lost", reason="Rex server restarted after launch")
@@ -439,6 +516,97 @@ class GrokWorker(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(factory.FactoryError):
                 self.collect()
             self.assertEqual(self.path.read_bytes(), before)
+
+
+
+def fake_grok_discovery(repo, root):
+    async def configuration(binary, cwd):
+        return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(repo),
+                    grok_home=str(root / "grok-profile"), cli_version="fixture", layers=[],
+                    observed_at=1000, probe_seconds=0.1, route="cached-session-without-routing-overrides",
+                    sandbox="none", tools=["read_file"], no_executable_customizations=True)
+    async def probe(binary, cwd, *, configuration) -> dict[str, Any]:
+        return dict(schema_version=1, kind="grok-native-metadata", route="grok-native", binary=str(binary), cwd=str(repo),
+                    observed_at=1000, probe_seconds=0.25, configuration=await configuration(binary, cwd),
+                    readiness="unverified", quota_observation=None, agent_version="fixture", capabilities={},
+                    current_model="fixture-model",
+                    authentication=dict(method="cached_token", auth_mode="Oidc", subscription_tier="Fixture", gate=None, backend_billed=False),
+                    models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value="high")]))])
+    return probe, configuration
+
+
+class GrokApprovals(unittest.TestCase):
+    """Grok reports count toward integration like Claude's: independent, collected, current."""
+    REVIEW_SESSION = "00000000-0000-0000-0000-00000000000a"
+
+    def setUp(self):
+        environment = {key: value for key, value in os.environ.items() if key not in ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")}
+        cleanup = patch.dict(os.environ, environment, clear=True)
+        cleanup.start()
+        self.addCleanup(cleanup.stop)
+        from test_integration import Integration
+        self.fixture = Integration()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        record, assignment, receipt = self.run_grok("grok-qa", "qa", self.REVIEW_SESSION)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            self.record = factory.collect_grok(self.fixture.path, "grok-qa", None, record, assignment)
+
+    def run_grok(self, identity, role, session, *, write=False):
+        f = self.fixture
+        writer: dict[str, Any] = dict(write=True, commit_message="Add fixture notes", sandbox=sys.executable) if write else {}
+        with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(session)):
+            command = factory.grok_command(f.path, task="deliver", assignment_id=identity, grok=sys.executable,
+                model="fixture-model", effort="high", cwd=str(f.repo), role=role, **writer)
+        record, assignment = factory.launch(f.path, task="deliver", assignment_id=identity, role=role,
+            goal="Fixture " + role, cwd=str(f.repo), command=command, purpose="work",
+            binary=sys.executable, server="unix:///fixture.sock")
+        replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
+            "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
+            "{requirements}": record["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = grok_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
+        events = [dict(type="end", stopReason="end_turn", sessionId=session, requestId="fixture-request",
+                       cwd=str(f.repo), num_turns=1, usage=None, modelUsage=None,
+                       structuredOutput=dict(outcome="completed" if write else "approved", artifacts=["fixture"]))]
+        async def spawn(*command, **options):
+            return FakeProcess(events)
+        probe, configuration = fake_grok_discovery(f.repo, f.root)
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(grok_worker.execute(args, spawn=spawn, probe=probe, configuration=configuration,
+                clock=lambda: 1000, timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        return record, assignment, receipt
+
+    def test_collected_grok_approval_counts_beside_the_codex_release(self):
+        selected = integration.approvals(self.record, "release", ["grok-qa"])
+        self.assertEqual(selected["grok-qa"]["context"], self.REVIEW_SESSION)
+
+    def test_grok_writer_contributes_and_cannot_approve_its_own_work(self):
+        writer_session = "00000000-0000-0000-0000-00000000000b"
+        record, assignment, receipt = self.run_grok("grok-writer", "backend", writer_session, write=True)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            record = factory.collect_grok(self.fixture.path, "grok-writer", None, record, assignment)
+            self.assertEqual(integration.contributor_context("grok-writer", record, record["assignments"]["grok-writer"]),
+                             writer_session)
+            self.assertEqual(integration.approvals(record, "release", ["grok-qa"])["grok-qa"]["context"], self.REVIEW_SESSION)
+            with self.assertRaisesRegex(factory.FactoryError, "read-only approved"):
+                integration.approvals(record, "release", ["grok-writer"])
+
+    def test_manual_or_stale_grok_approval_refused(self):
+        record = copy.deepcopy(self.record)
+        record["assignments"]["grok-qa"]["native_collected"] = False
+        with self.assertRaises(factory.FactoryError):
+            integration.approvals(record, "release", ["grok-qa"])
+        record = copy.deepcopy(self.record)
+        record["inputs"]["requirements"] = "changed"
+        with self.assertRaises(factory.FactoryError):
+            integration.approvals(record, "release", ["grok-qa"])
+
+    def test_grok_cannot_be_the_release_judgment(self):
+        with self.assertRaises(factory.FactoryError):
+            integration.approvals(self.record, "grok-qa", ["qa"])
 
 
 if __name__ == "__main__":

@@ -24,6 +24,11 @@ sys.dont_write_bytecode = True
 import factory
 
 
+# What every writer is told, whichever harness carries it.
+WRITER_CONTRACT = ("Factory commit mode: edit and test only; do not stage or commit Git changes. "
+                   "The factory commits after a completed report. Keep temporary outputs outside this checkout.")
+
+
 def tool_environment():
     """Minimal environment for local scanner identity checks."""
     allowed = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",

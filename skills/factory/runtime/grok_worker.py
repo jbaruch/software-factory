@@ -1,4 +1,4 @@
-"""One explicit read-only native Grok assignment with retained original events."""
+"""One explicit native Grok assignment, reviewer or writer, with retained original events."""
 import argparse
 import asyncio
 import hashlib
@@ -12,6 +12,7 @@ import uuid
 sys.dont_write_bytecode = True
 
 import factory
+import factory_commit
 import native_grok
 import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, outcome_schema, stop_child
@@ -35,7 +36,10 @@ def read_events(path):
 
 
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_grok.probe,
-                  configuration=native_grok.subscription_configuration, clock=time.time, timer=time.monotonic):
+                  configuration=native_grok.subscription_configuration, clock=time.time, timer=time.monotonic,
+                  git_scope=None, scan=None):
+    git_scope = git_scope or factory_commit.isolated_git
+    scan = scan or factory_commit.scan_staged
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Grok attempt already has artifacts; inspect or collect it without relaunching")
     if any(name in os.environ for name in native_grok.API_KEY_ENVIRONMENT):
@@ -44,6 +48,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or type(args.turns) is not int or not 1 <= args.turns <= 1000
             or not args.model.strip() or not args.effort.strip()):
         raise factory.FactoryError("Supply discovered Grok model/effort choices and positive bounded seconds/turns before execution")
+    factory.check_commit_message(args.commit_message, write=args.write)
+    if args.write and (args.commit_message is None or args.sandbox is None or not args.sandbox.is_absolute()):
+        raise factory.FactoryError("A Grok writer needs --commit-message and the absolute Codex sandbox binary for the factory commit")
     try:
         if str(uuid.UUID(args.native_session)) != args.native_session:
             raise ValueError("Noncanonical session")
@@ -59,14 +66,25 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or not factory.valid_repository_identity(identity) or not args.worktree_git_dir.is_absolute()):
         raise factory.FactoryError("Grok assignment binding changed; inspect its original brief, role and repository pin")
     factory.role_spec(args.role)
-    review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
-                             base=args.base, role=args.role)
+    if args.write:
+        factory.check_role_write(args.role)
+    else:
+        review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
+                                 base=args.base, role=args.role)
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
     if any(binary.is_relative_to(root) for root in (
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Grok installation outside the assigned checkout and Git metadata")
+    if args.write:
+        try:
+            sandbox = args.sandbox.resolve(strict=True)
+        except OSError:
+            raise factory.FactoryError("Restore the Codex sandbox binary before a Grok writer attempt") from None
+        factory_commit.prepare_writer(args, sandbox, (
+            Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir))
+        factory_commit.prepare_commit(args, scan=scan)
     try:
         observation = await probe(binary, Path("."), configuration=configuration)
         native_grok.validate_discovery(observation, binary, args.cwd)
@@ -79,7 +97,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or authentication["gate"] is not None or model is None
             or args.effort not in {item["value"] for item in model.get("_meta", {}).get("reasoningEfforts", [])}):
         raise factory.FactoryError("Grok subscription eligibility or model/effort is unavailable; refresh native metadata and select an eligible route before another attempt")
-    receipt = dict(schema_version=2, kind="grok-execution", state="starting", job=args.job,
+    # Version 2 reviews; version 3 writes.
+    receipt = dict(schema_version=3 if args.write else 2, kind="grok-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -88,6 +107,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         created_at=clock(), finished_at=None, elapsed_seconds=None, exit_code=None,
         report=None, request_id=None, usage=None, model_usage=None, turns=None,
         candidate=None, events=str(args.events), error=None)
+    if args.write:
+        # Version 3 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
+        receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         factory.save(args.receipt, receipt, exclusive=True)
@@ -99,7 +121,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         with os.fdopen(fd, "w") as stream:
             environment = native_grok.environment()
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
-                "--permission-mode", "bypassPermissions", *native_grok.READ_OPTIONS, "--max-turns", str(args.turns),
+                # Writers get every built-in tool and the factory commit contract; reviewers get only the read tool.
+                "--permission-mode", "bypassPermissions",
+                *(("--rules", factory_commit.WRITER_CONTRACT) if args.write else native_grok.READ_OPTIONS),
+                "--max-turns", str(args.turns),
                 "--model", args.model, "--reasoning-effort", args.effort, "--session-id", args.native_session,
                 "--output-format", "streaming-json", "--json-schema", json.dumps(outcome_schema()),
                 "--prompt-file", str(args.brief), cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
@@ -128,10 +153,16 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             raise factory.FactoryError("Native Grok exited unsuccessfully; inspect its retained events and original Rex pane")
         native = native_grok.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), max_turns=args.turns)
         receipt.update({key: native[key] for key in ("report", "request_id", "usage", "model_usage", "turns")})
-        factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
-        if factory.git_commit(".", "HEAD") != args.candidate:
-            raise factory.FactoryError("Read-only Grok candidate changed; inspect its original checkout without reusing the report")
-        receipt.update(state="completed", candidate=args.candidate)
+        if args.write:
+            # The native process has exited; the factory alone stages, scans and commits its work.
+            candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
+                                                        receipt, identity, git_scope=git_scope, scan=scan)
+        else:
+            factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
+            if factory.git_commit(".", "HEAD") != args.candidate:
+                raise factory.FactoryError("Read-only Grok candidate changed; inspect its original checkout without reusing the report")
+            candidate = args.candidate
+        receipt.update(state="completed", candidate=candidate)
     except TimeoutError:
         receipt.update(state="failed", error="Grok execution allowance expired; inspect the original attempt without retrying")
     except OSError:
@@ -148,7 +179,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
 
 
 def parser():
-    command = argparse.ArgumentParser(description=__doc__)
+    command = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     for field in ("grok", "repo", "cwd", "brief", "events", "receipt", "worktree-git-dir"):
         command.add_argument("--" + field, type=Path, required=True)
     for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity", "role", "native-session"):
@@ -156,6 +187,9 @@ def parser():
     command.add_argument("--seconds", type=int, default=600)
     command.add_argument("--turns", type=int, default=30)
     command.add_argument("--base")
+    command.add_argument("--write", action="store_true", help="Implementation specialist with every built-in tool in its worktree")
+    command.add_argument("--commit-message", help="With --write, the factory commits a completed result using this message")
+    command.add_argument("--sandbox", type=Path, help="With --write, the Codex CLI used as the factory commit's local sandbox")
     return command
 
 

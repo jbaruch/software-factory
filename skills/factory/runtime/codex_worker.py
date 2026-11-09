@@ -255,7 +255,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         try:
             with os.fdopen(fd, "w") as stream:
                 if args.commit_message is not None:
-                    instructions += "\nFactory commit mode: edit and test only; do not stage or commit Git changes. The factory commits after a completed report. Keep temporary outputs outside this checkout.\n"
+                    instructions += "\n" + factory_commit.WRITER_CONTRACT + "\n"
                 try:
                     directory = Path(tempfile.mkdtemp(prefix="sf-codex-shell-",
                                                      dir=Path(tempfile.gettempdir()).resolve()))

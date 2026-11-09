@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.0 — Unpublished
+
+- Grok can write. `grok-start --write --commit-message --sandbox` runs Grok with every built-in tool in its worktree, and the shared factory commit stages, scans, signs and commits a completed report. Writer receipts are version 3 and collection binds the produced candidate.
+- The ready runner dispatches Grok jobs (`harness: grok`, `--grok`), collects them, and accepts a Grok writer for `--from-writer`. `grok-collect` now marks native collection like the other collectors.
+- Integration accepts collected Grok `qa`, `security` and `code-review` approvals and treats Grok writers as contributors; before, any Grok assignment made a task unintegrable.
+- One owner maps a command to its harness, evidence reader and collector (`factory.native_harness`); the runner and integration use it instead of their own checks. The writer contract text lives in `factory_commit.WRITER_CONTRACT`; Grok writers receive it through `--rules`, after a live Grok writer committed on its own without it.
+
 ## 0.22.0 — 2026-11-09
 
 Includes the unpublished 0.20.0 and 0.21.0 changes below.

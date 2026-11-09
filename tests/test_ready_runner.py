@@ -785,9 +785,90 @@ class ReadyRunner(unittest.TestCase):
     def test_claude_jobs_need_their_binary_effort_and_writer_commit_message(self):
         with self.assertRaisesRegex(factory.FactoryError, "--claude executable"):
             self.controller(self.plan([self.claude_job("first", role="qa")]))
-        for changes in (dict(effort="turbo"), dict(write=True, role="backend"), dict(harness="grok")):
+        for changes in (dict(effort="turbo"), dict(write=True, role="backend"), dict(harness="unknown")):
             with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
                 self.claude_controller(self.plan([self.claude_job("first", **{"role": "qa", **changes})]))
+
+    def grok_job(self, identity, **changes):
+        return self.job(identity, **{"harness": "grok", **changes})
+
+    def grok_controller(self, plan, **options):
+        return runner.Runner(self.directory, plan, codex=sys.executable, grok=sys.executable, rex=sys.executable,
+                             server="unix:///test.sock", probe=self.probe, clock=lambda: self.now, **options)
+
+    def finish_grok(self, task, identity, outcome="approved", edit=False):
+        import grok_worker
+        record = factory.load_task(self.directory / (task + ".json"))
+        assignment = record["assignments"][identity]
+        request = assignment["request"]
+        replacements = {"{repository}": str(self.repo), "{cwd}": request["cwd"],
+            "{brief}": assignment["brief"], "{brief_sha256}": request["instructions_sha256"],
+            "{candidate}": request["inputs"]["candidate"], "{requirements}": request["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = grok_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
+        events = [dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="fixture-request",
+                       cwd=request["cwd"], num_turns=1, structuredOutput=dict(outcome=outcome, artifacts=["fixture/evidence.txt"]),
+                       usage=dict(input_tokens=1, output_tokens=2), modelUsage=None)]
+        async def spawn(*command, **options):
+            if edit:
+                (self.repo / "delivery.txt").write_text("Useful fixture delivery\n")
+            return FakeProcess(events)
+        async def configuration(binary, cwd):
+            return dict(schema_version=2, kind="grok-subscription-configuration", cwd=request["cwd"],
+                        grok_home=str(self.root / "grok-profile"), cli_version="fixture", layers=[],
+                        observed_at=1000, probe_seconds=0.1, route="cached-session-without-routing-overrides",
+                        sandbox="none", tools=["read_file"], no_executable_customizations=True)
+        async def probe(binary, cwd, *, configuration):
+            return dict(schema_version=1, kind="grok-native-metadata", route="grok-native", binary=str(binary), cwd=request["cwd"],
+                        observed_at=1000, probe_seconds=0.25, configuration=await configuration(binary, cwd),
+                        readiness="unverified", quota_observation=None, agent_version="fixture", capabilities={},
+                        current_model="fixture-model",
+                        authentication=dict(method="cached_token", auth_mode="Oidc", subscription_tier="Fixture", gate=None, backend_billed=False),
+                        models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value="high")]))])
+        environment = {key: value for key, value in os.environ.items() if key not in ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")}
+        before = Path.cwd()
+        try:
+            os.chdir(self.repo)
+            with patch.dict(os.environ, environment, clear=True), redirect_stdout(StringIO()):
+                receipt = asyncio.run(grok_worker.execute(args, spawn=spawn, probe=probe, configuration=configuration,
+                    clock=lambda: 1000.0, timer=lambda: 10.0, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        finally:
+            os.chdir(before)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        PlanRex.processes[(record["session_id"], assignment["block_id"])] = "exited"
+
+    def test_grok_jobs_launch_collect_and_advance_without_codex_capacity(self):
+        controller = self.grok_controller(self.plan([self.grok_job("first", role="qa"),
+                                                     self.grok_job("second", role="qa", after=["first"])]))
+        first = self.tick(controller)
+        self.assertEqual(self.states(first), {("task", "first"): "running", ("task", "second"): "waiting"})
+        command = factory.load_task(self.directory / "task.json")["assignments"]["first"]["request"]["command"]
+        self.assertEqual(Path(command[3]).name, "grok_worker.py")
+        self.finish_grok("task", "first")
+        second = self.tick(controller)
+        self.assertEqual(self.states(second), {("task", "first"): "approved", ("task", "second"): "running"})
+        self.assertEqual(second["metrics"]["collected"], 1)
+        self.assertEqual(self.probes, 0)
+
+    def test_grok_writer_hands_its_commit_to_independent_verification(self):
+        writer = self.grok_job("implement", write=True, commit_message="feat(fixture): Deliver candidate")
+        controller = self.grok_controller(self.plan([writer]))
+        self.assertEqual(self.tick(controller)["metrics"]["launched"], 1)
+        with patch.dict(os.environ, GIT_AUTHOR_DATE="2000-01-02T00:00:00Z", GIT_COMMITTER_DATE="2000-01-02T00:00:00Z"):
+            self.finish_grok("task", "implement", outcome="completed", edit=True)
+        self.assertEqual(self.tick(controller)["metrics"]["collected"], 1)
+        record = factory.load_task(self.directory / "task.json")
+        target = record["assignments"]["implement"]["result"]["candidate"]
+        self.assertNotEqual(target, self.candidate)
+        self.assertEqual(self.handoff()["metrics"]["launched"], 1)
+        self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"],
+                         dict(candidate=target, requirements="requirements-1"))
+
+    def test_grok_jobs_need_their_binary_and_writer_commit_message(self):
+        with self.assertRaisesRegex(factory.FactoryError, "--grok executable"):
+            self.controller(self.plan([self.grok_job("first", role="qa")]))
+        with self.assertRaisesRegex(factory.FactoryError, "Grok writers need a commit message"):
+            self.grok_controller(self.plan([self.grok_job("first", write=True)]))
 
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))

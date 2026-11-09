@@ -1427,8 +1427,11 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
                        expected_identity=record["admission"]["repository_identity"],
                        expected_git_dir=native_args.worktree_git_dir)
-        instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
-            requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
+        if native_args.write:
+            check_role_write(role)
+        else:
+            instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
+                requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     if not existing and any(flag in command for flag in ("--delivery-evidence", "--delivery-evidence-digest")):
         import codex_worker
         import release_evidence
@@ -2031,15 +2034,7 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
             or type(turns) is not int or not 1 <= turns <= 1000):
         raise FactoryError("Supply an absolute native Claude executable, a discovered model, a supported effort and bounded seconds/turns")
-    check_commit_message(commit_message, write=write)
-    tool = None
-    if write:
-        check_role_write(role)
-        if commit_message is None or sandbox is None or not Path(sandbox).is_absolute():
-            raise FactoryError("A Claude writer needs --commit-message and the absolute Codex CLI as its commit sandbox")
-        tool = Path(sandbox).resolve()
-    if base is not None and write:
-        raise FactoryError("Writers implement from the selected candidate; --base is for code review")
+    writer = writer_arguments("Claude", role, write, commit_message, sandbox, base)
     coordination = []
     if decision_store is not None or decision is not None or question is not None:
         import coordination_evidence
@@ -2074,11 +2069,8 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
                 raise ValueError("Invalid frozen binding")
         except (ValueError, IndexError):
             raise FactoryError("Saved Claude binding is damaged; restore the original command without relaunching") from None
-    writer = []
-    if tool is not None:
-        if existing is None and (not tool.is_file() or not os.access(tool, os.X_OK)):
-            raise FactoryError("Supply the executable Codex CLI as the Claude writer's commit sandbox")
-        writer = ["--write", "--commit-message", commit_message, "--sandbox", str(tool)]
+    if writer and existing is None:
+        check_commit_tool("Claude", writer[-1])
     prefix = path.parent / (task + "." + assignment_id + ".claude")
     return worker + ([] if base is None else ["--base", base]) + writer + coordination + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
@@ -2088,12 +2080,32 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
         "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
 
 
-def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None):
-    """Freeze one explicit read-only Grok effect, including its native session."""
+def writer_arguments(provider, role, write, commit_message, sandbox, base):
+    """The frozen writer flags for a Claude or Grok effect; empty for reviewers."""
+    check_commit_message(commit_message, write=write)
+    if not write:
+        return []
+    check_role_write(role)
+    if commit_message is None or sandbox is None or not Path(sandbox).is_absolute():
+        raise FactoryError(f"A {provider} writer needs --commit-message and the absolute Codex CLI as its commit sandbox")
+    if base is not None:
+        raise FactoryError("Writers implement from the selected candidate; --base is for code review")
+    return ["--write", "--commit-message", commit_message, "--sandbox", str(Path(sandbox).resolve())]
+
+
+def check_commit_tool(provider, tool):
+    if not Path(tool).is_file() or not os.access(tool, os.X_OK):
+        raise FactoryError(f"Supply the executable Codex CLI as the {provider} writer's commit sandbox")
+
+
+def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None,
+                 write=False, commit_message=None, sandbox=None):
+    """Freeze one explicit Grok effect, reviewer or writer, including its native session."""
     if (not model.strip() or not effort.strip() or not Path(grok).is_absolute()
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
             or type(turns) is not int or not 1 <= turns <= 1000):
         raise FactoryError("Supply an absolute native Grok executable, discovered model/effort and bounded seconds/turns")
+    writer = writer_arguments("Grok", role, write, commit_message, sandbox, base)
     worker = [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
@@ -2119,8 +2131,10 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
                 raise ValueError("Invalid frozen binding")
         except (ValueError, IndexError):
             raise FactoryError("Saved Grok binding is damaged; restore the original command without relaunching") from None
+    if writer and existing is None:
+        check_commit_tool("Grok", writer[-1])
     prefix = path.parent / (task + "." + assignment_id + ".grok")
-    return worker + ([] if base is None else ["--base", base]) + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
+    return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
@@ -2128,8 +2142,8 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
 
 
-def collect_grok(path, assignment_id, rex, record, assignment):
-    """Collect the original Grok report; this never accepts a task."""
+def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+    """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import grok_worker
     import native_grok
 
@@ -2144,7 +2158,13 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     if args.role == "code-review" and args.base is None:
         raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
     valid_base(args.base, args.role)
-    if status(rex, record, assignment)["state"] not in {"exited", "lost"}:
+    if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
+        raise FactoryError("Grok evidence needs strict original collection, never manual result registration")
+    if collected and current and not result_current(record, assignment["result"]):
+        raise FactoryError("Grok result is stale; obtain a judgment of current inputs")
+    if observe is None and not collected:
+        raise FactoryError("First Grok collection requires original successful Rex exit")
+    if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
     try:
         receipt = decode_json(args.receipt.read_text())
@@ -2153,7 +2173,10 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     request = assignment["request"]
     keys = ("report", "request_id", "usage", "model_usage", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != 2 or receipt.get("kind") != "grok-execution"
+            or receipt["schema_version"] != (3 if args.write else 2) or receipt.get("kind") != "grok-execution"
+            or (args.write and (receipt.get("writer") is not True or args.commit_message is None
+                                or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
+                                or "commit" not in receipt))
             or receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
             or any(type(receipt.get(key)) not in (int, float) or not 0 <= receipt[key] <= sys.float_info.max
@@ -2161,7 +2184,7 @@ def collect_grok(path, assignment_id, rex, record, assignment):
             or receipt["finished_at"] < receipt["created_at"] or any(key not in receipt for key in keys)
             or receipt.get("job") != record["task"] + "/" + assignment_id
             or not valid_inputs(receipt.get("inputs")) or receipt["inputs"] != request.get("inputs")
-            or receipt.get("candidate") != request["inputs"]["candidate"]
+            or (not args.write and receipt.get("candidate") != request["inputs"]["candidate"])
             or receipt.get("repository_identity") != record["admission"]["repository_identity"]
             or not valid_repository_identity(receipt.get("repository_identity"))
             or receipt.get("brief_sha256") != request["instructions_sha256"]
@@ -2187,12 +2210,52 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     if json.dumps({key: receipt[key] for key in keys}, sort_keys=True) != json.dumps(
             {key: native[key] for key in keys}, sort_keys=True):
         raise FactoryError("Grok receipt differs from its original events; reconcile the retained attempt before recording a result")
-    if (repository_identity(request["cwd"]) != receipt["repository_identity"]
-            or git_dir(request["cwd"]) != args.worktree_git_dir):
+    if not collected and (repository_identity(request["cwd"]) != receipt["repository_identity"]
+                          or git_dir(request["cwd"]) != args.worktree_git_dir):
         raise FactoryError("Grok worktree binding changed; restore its original repository and Git directory before collection")
-    return record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+    if args.write:
+        from factory_commit import check_commit_receipt
+        args.cwd = Path(request["cwd"])
+        check_commit_receipt(receipt, args, record["admission"]["repository"], historical=collected)
+    expected = dict(inputs=receipt["inputs"], candidate=receipt["candidate"], outcome=native["report"]["outcome"],
+                    artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    if collected and assignment["result"] != expected:
+        raise FactoryError("Collected Grok result differs from the complete original report")
+    return args, receipt, native
+
+
+def collect_grok(path, assignment_id, rex, record, assignment):
+    """Collect the original Grok report; this never accepts a task."""
+    args, receipt, native = grok_evidence(assignment_id, record, assignment,
+        collected=assignment.get("native_collected") is True, current=False,
+        observe=lambda: status(rex, record, assignment))
+    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
         requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
         artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    record["assignments"][assignment_id]["native_collected"] = True
+    save(path, record)
+    return record
+
+
+NATIVE_HARNESSES = ("codex", "claude", "grok")
+
+
+def native_harness(command):
+    """The verified native worker behind a command, or None for any other adapter."""
+    for harness in NATIVE_HARNESSES:
+        worker = str(ROOT / (harness + "_worker.py"))
+        if command[:4] == [sys.executable, "-E", "-s", worker] or (harness == "codex" and command[:2] == [sys.executable, worker]):
+            return harness
+    return None
+
+
+def evidence_reader(harness):
+    """Each harness's strict original-evidence reader, resolved at call time."""
+    return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence)[harness]
+
+
+def collector(harness):
+    return dict(codex=collect_codex, claude=collect_claude, grok=collect_grok)[harness]
 
 
 def tidy_tasks(directory, task=None, binary=None, server=None):
@@ -2251,10 +2314,10 @@ def main(argv=None):
             start.add_argument("--seconds", type=int, default=600)
             start.add_argument("--turns", type=int, default=30)
             start.add_argument("--base", help="Full base commit ID; required for code-review")
+            start.add_argument("--write", action="store_true", help="Implementation specialist with edit tools")
+            start.add_argument("--commit-message", help="With --write, the factory commits a completed result")
+            start.add_argument("--sandbox", help="With --write, the absolute Codex CLI used as the commit's local sandbox")
             if action == "claude-start":
-                start.add_argument("--write", action="store_true", help="Implementation specialist with edit tools")
-                start.add_argument("--commit-message", help="With --write, the factory commits a completed result")
-                start.add_argument("--sandbox", help="With --write, the absolute Codex CLI used as the commit's local sandbox")
                 start.add_argument("--decision-store", type=Path, help="Original Jev decision store for a bounded answer")
                 start.add_argument("--decision", help="Exact original Jev decision ID")
                 start.add_argument("--question", help="One unresolved question from that decision")
@@ -2435,7 +2498,8 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Grok assignment")
                     argv = grok_command(path, task=args.task, assignment_id=args.id, grok=args.grok,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
-                        seconds=args.seconds, turns=args.turns, base=args.base)
+                        seconds=args.seconds, turns=args.turns, base=args.base,
+                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,
