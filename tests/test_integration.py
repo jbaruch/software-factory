@@ -1,4 +1,5 @@
 """Fixed GitHub/process transports and temporary Git only; no external services."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO

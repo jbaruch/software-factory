@@ -4,11 +4,11 @@
 Admission and inspection need no Rex connection or provider account:
 
 ```sh
-python3 factory.py admit --task example --goal 'Implement the agreed behavior' \
+python3 -B skills/factory/runtime/factory.py admit --task example --goal 'Implement the agreed behavior' \
   --repo '/absolute/path/to/checkout' --acceptance 'docs/requirements.md#acceptance'
-python3 factory.py show --task example
-python3 factory.py pause --task example --reason 'Waiting for a scope decision'
-python3 factory.py resume --task example
+python3 -B skills/factory/runtime/factory.py show --task example
+python3 -B skills/factory/runtime/factory.py pause --task example --reason 'Waiting for a scope decision'
+python3 -B skills/factory/runtime/factory.py resume --task example
 ```
 
 Repeat `--acceptance` for multiple original evidence references. Admission captures
@@ -17,7 +17,7 @@ admission snapshot, not review evidence or a live observation of the current hea
 The repository must have a commit. References are operator-supplied; their content
 and engineering adequacy are not assessed by this command.
 
-Limits default to [`config/coordination.json`](../config/coordination.json); `--corrections` and `--investigations`
+Limits default to [`config/coordination.json`](../skills/factory/runtime/config/coordination.json); `--corrections` and `--investigations`
 override them at admission. Zero is valid. Repeating identical admission inputs
 returns the existing record, preserving the initial candidate if Git HEAD advances.
 Changed inputs are refused; admission never resets usage. An existing task with
@@ -50,7 +50,7 @@ are deliberate decisions, never automatic unlimited renewals.
 For an authorized addition to an existing task, use:
 
 ```sh
-python3 factory.py extend-allowance --task example --purpose correction \
+python3 -B skills/factory/runtime/factory.py extend-allowance --task example --purpose correction \
   --additional 1 --expected-limit 1 --request-id approved-correction-one \
   --reason 'Standing authorization: <original reference>; progress: <original evidence>; next: <specific correction>'
 ```
@@ -279,9 +279,9 @@ a saved intent, a reported result or process exit.
 After admission and explicit input selection, provision one named writer checkout:
 
 ```sh
-python3 factory.py --state-dir '/absolute/path/to/private-state' provision \
+python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/path/to/private-state' provision \
   --task example --id backend --path '/absolute/path/to/new-writer'
-python3 factory.py --state-dir '/absolute/path/to/private-state' show --task example
+python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/path/to/private-state' show --task example
 ```
 
 The destination's parent must exist. The destination must be absent and outside
@@ -359,8 +359,8 @@ exception as task state; readers must refuse unknown/damaged records.
 Select the inputs before launching a new assignment:
 
 ```sh
-python3 factory.py inputs --task example --candidate HEAD --requirements requirements-v1
-python3 factory.py result --task example --id qa --candidate '<full-commit-sha>' \
+python3 -B skills/factory/runtime/factory.py inputs --task example --candidate HEAD --requirements requirements-v1
+python3 -B skills/factory/runtime/factory.py result --task example --id qa --candidate '<full-commit-sha>' \
   --requirements requirements-v1 --outcome approved --artifact 'evidence/qa.md'
 ```
 

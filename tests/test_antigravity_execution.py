@@ -1,4 +1,5 @@
 """Fixed sanitized 1.5.3 shapes, independently specified; no archive/provider I/O."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 import json
 import unittest

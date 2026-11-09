@@ -1,4 +1,5 @@
 """Controller contracts use fake Rex and native processes, never providers."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
 from contextlib import nullcontext, redirect_stderr, redirect_stdout

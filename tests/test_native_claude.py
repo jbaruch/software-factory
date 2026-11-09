@@ -1,4 +1,5 @@
 """Fixed sanitized JSON and injected processes only; no Claude, providers or Rex."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json

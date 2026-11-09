@@ -1,4 +1,5 @@
 """Durable decisions use fixed fake clients; no provider or native sessions."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO

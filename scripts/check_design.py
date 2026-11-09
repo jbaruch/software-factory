@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME = ROOT / "skills/factory/runtime"
 
 
 def check():
@@ -18,14 +19,14 @@ def check():
     assert set(ids) == expected, "Role coverage changed; review the design"
     assert all(role["instructions"] and role["decision_authority"] for role in roles)
     assert all(type(role.get("write_allowed")) is bool for role in roles), "Every role needs an explicit write permission"
-    providers = json.loads((ROOT / "config/providers.json").read_text())["routes"]
+    providers = json.loads((RUNTIME / "config/providers.json").read_text())["routes"]
     assert {route["id"] for route in providers} == {
         "claude-native", "codex-native", "grok-native",
         "antigravity-gemini", "antigravity-claude"}
     assert all(route["readiness"] == "unverified" and not route["models"]
                and route["quota_pool"] is None for route in providers), (
                    "Scaffold must not claim account/model/quota verification")
-    questions = json.loads((ROOT / "config/coordination.json").read_text())["questions"]
+    questions = json.loads((RUNTIME / "config/coordination.json").read_text())["questions"]
     assert len({question["id"] for question in questions}) == len(questions)
     assert all(question["options"].get("uncertain") for question in questions), (
         "Every Jev question needs an explicit uncertain outcome")
@@ -35,6 +36,14 @@ def check():
         for target in re.findall(r"\]\(([^)]+)\)", text):
             if "://" not in target:
                 assert (path.parent / target).is_file(), f"Missing skill reference: {target}"
+    # The installed runtime carries its own copies of these repository pins.
+    version = re.search(r"(?m)^version: (\S+)$", (ROOT / "agent-plugin.yaml").read_text())
+    assert version and (RUNTIME / "VERSION").read_text().strip() == version[1], (
+        "Runtime VERSION must equal the agent-plugin.yaml version")
+    gitleaks = re.search(r"(?m)^  - repo: https://github.com/gitleaks/gitleaks\n    rev: v(\S+)$",
+                         (ROOT / ".pre-commit-config.yaml").read_text())
+    assert gitleaks and json.loads((RUNTIME / "config/scanner.json").read_text())["gitleaks"] == gitleaks[1], (
+        "Runtime config/scanner.json must pin the Gitleaks version in .pre-commit-config.yaml")
     print(f"Design catalogs valid: {len(roles)} roles, {len(providers)} routes, "
           f"{len(questions)} Jev questions; one factory skill.")
 

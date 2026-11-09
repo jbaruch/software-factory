@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import sys
+
+sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import time
 
 from factory import decode_json

@@ -6,7 +6,7 @@ not read auth files, start a thread or model turn, edit settings, log out, spend
 reset credits or send account messages.
 
 ```sh
-python3 native_codex.py --codex '/absolute/path/to/codex'
+python3 -B skills/factory/runtime/native_codex.py --codex '/absolute/path/to/codex'
 ```
 
 The probe initializes its own channel, reads the account and rate limits, pages
@@ -44,7 +44,7 @@ provider coverage.
 ## Sanitized native Claude authentication
 
 ```sh
-python3 -B native_claude.py --binary '/absolute/path/to/claude' --cwd '/absolute/trusted/directory'
+python3 -B skills/factory/runtime/native_claude.py --binary '/absolute/path/to/claude' --cwd '/absolute/trusted/directory'
 ```
 
 `probe(binary, cwd)` invokes only `--version` and
@@ -107,7 +107,7 @@ or scheduling decision. The [inventory](implementation.md) owns verification sta
 ## Safe Codex capacity snapshot
 
 ```sh
-python3 codex_capacity.py --codex '/absolute/path/to/codex'
+python3 -B skills/factory/runtime/codex_capacity.py --codex '/absolute/path/to/codex'
 ```
 
 `snapshot(binary)` calls `native_codex.probe` once, with no retry or local state.
@@ -150,8 +150,8 @@ their own decisions. The implementation inventory owns verification status.
 ## Grok and Antigravity catalogs
 
 ```sh
-python3 native_catalog.py grok --binary '/absolute/path/to/grok'
-python3 native_catalog.py antigravity --binary '/absolute/path/to/agy'
+python3 -B skills/factory/runtime/native_catalog.py grok --binary '/absolute/path/to/grok'
+python3 -B skills/factory/runtime/native_catalog.py antigravity --binary '/absolute/path/to/agy'
 ```
 
 The adapter invokes only `--version` and `models`, with closed stdin and a
@@ -175,7 +175,7 @@ Native usage follows [Grok's CLI reference](https://docs.x.ai/build/cli/referenc
 ## Antigravity native quota
 
 ```sh
-python3 native_antigravity.py --binary '/absolute/path/to/agy' --cwd '/absolute/path/to/worktree'
+python3 -B skills/factory/runtime/native_antigravity.py --binary '/absolute/path/to/agy' --cwd '/absolute/path/to/worktree'
 ```
 
 This runs only `--version` and `--print /usage`, which the native CLI handles
@@ -240,7 +240,7 @@ customization checks as the [inspection worker](#explicit-grok-inspection-assign
 before starting its ACP agent. Unsupported profiles remain held without a model turn.
 
 ```sh
-python3 native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
+python3 -B skills/factory/runtime/native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
 ```
 
 The owner script starts one private ACP stdio child and requests only
@@ -300,12 +300,12 @@ candidate/requirements and discovered model/effort, as with
 [native launcher commands](native-rex.md):
 
 ```sh
-python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+python3 -B skills/factory/runtime/factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
   grok-start --task example --id inspect --role qa --goal 'Inspect the selected candidate' \
   --cwd '/absolute/path/to/clean/worktree' --purpose work \
   --grok '/absolute/path/to/native/grok' --model 'discovered-model-id' \
   --effort 'discovered-supported-effort' --seconds 600 --turns 30
-python3 factory.py grok-collect --task example --id inspect
+python3 -B skills/factory/runtime/factory.py grok-collect --task example --id inspect
 ```
 
 For `--role code-review`, also supply `--base` with the full base commit ID.
@@ -396,11 +396,11 @@ delegation before execution. The [implementation inventory](implementation.md)
 records execution evidence and eligibility limits.
 
 ```sh
-python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+python3 -B skills/factory/runtime/factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
   codex-start --task example --id qa-1 --role qa --goal 'Review the selected candidate' \
   --cwd '/absolute/path/to/clean/worktree' --purpose work \
   --codex '/absolute/path/to/codex' --model 'discovered-model-id' --effort high
-python3 factory.py codex-collect --task example --id qa-1
+python3 -B skills/factory/runtime/factory.py codex-collect --task example --id qa-1
 ```
 
 Admission and input selection use the [native launcher commands](native-rex.md).
@@ -550,13 +550,13 @@ For an admitted writer task, replace the paths and discovered model/effort below
 (see [operator-approved exceptions](../AGENTS.md#operator-approved-exceptions)):
 
 ```sh
-python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+python3 -B skills/factory/runtime/factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
   codex-start --task example --id writer-1 --role documentation \
   --goal 'Update the admitted documentation and report original evidence' \
   --cwd '/absolute/path/to/isolated/writer/worktree' --purpose work \
   --codex '/absolute/path/to/discovered/codex' --model 'discovered-model-id' \
   --effort 'discovered-supported-effort' --write --commit-message 'docs: clarify writer invocation'
-python3 factory.py codex-collect --task example --id writer-1
+python3 -B skills/factory/runtime/factory.py codex-collect --task example --id writer-1
 ```
 
 Inspect the retained receipt, stream and worktree before authorizing any retry.

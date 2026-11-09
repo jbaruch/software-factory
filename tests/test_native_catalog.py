@@ -1,4 +1,5 @@
 """Recorded catalog text and fake subprocesses; no live providers or agents."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import subprocess
 import sys
 import unittest

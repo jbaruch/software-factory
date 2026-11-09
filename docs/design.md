@@ -20,7 +20,7 @@ The task is a shared durable record and a dependency graph of specialist assignm
 
 ## Package and application
 
-One repository initially contains the application and its ACR package. `agent-plugin.yaml` distributes only declared skills. The entrypoint and role catalog are self-contained; application-owned configuration is supplied at assignment time rather than assumed to be installed by ACR.
+One repository contains the application and its ACR package. The application ships inside the `factory` skill (`skills/factory/runtime/`), so `acr install` and `acr realize` install it into each project. Task state is per user, and task records freeze absolute worker paths, so a project's copy installs itself as the one per-user runtime (`~/.local/share/software-factory/skill`) and runs from there. That runtime is upgraded in place to the newest version any project brings and is never downgraded; a source checkout runs in place.
 
 The application will own scheduling, provider adapters, Rex integration, durable task state, measurement and the dashboard. Worker hooks will emit bounded lifecycle events after their native harness semantics are verified. Native Claude Code and Codex ACR realization does not establish Grok or Antigravity compatibility. Those harnesses need explicit instruction delivery and lifecycle conformance tests. ACR is not the process supervisor or model broker.
 

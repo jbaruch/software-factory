@@ -4,21 +4,23 @@
 
 ## Launch and inspect
 
+In a project that installed the factory with ACR, run these commands from the realized skill. ACR rewrites the `skills/factory/...` paths in the skill's own instructions to that location, and the first command installs the per-user runtime it then runs from. Upgrade with `acr update` and `acr realize`; the next command upgrades the per-user runtime in place. Restart long-running controllers such as the ready runner or dashboard after an upgrade.
+
 Use Python 3.11+ on macOS/Linux with `fcntl` support. The first launch requires an existing absolute Rex binary and an explicit local Unix-socket endpoint. Commands also use absolute executable paths so the server's PATH cannot select another program. Working directories must exist. Supply an isolated writer worktree for implementation; admitted tasks can explicitly [provision one through the owner](task-state.md#writer-worktree-provisioning) before launch.
 
 ```sh
-python3 factory.py --rex '/absolute/path/to/rex' --server 'unix:///path/to/server.sock' \
+python3 -B skills/factory/runtime/factory.py --rex '/absolute/path/to/rex' --server 'unix:///path/to/server.sock' \
   start --task example --id qa --role qa --goal 'Review the supplied candidate' \
   --cwd '/absolute/path/to/worktree' -- '/absolute/path/to/agent' '{instructions}'
 
-python3 factory.py status --task example --id qa
-python3 factory.py capture --task example --id qa
-python3 factory.py tidy [--task example]
+python3 -B skills/factory/runtime/factory.py status --task example --id qa
+python3 -B skills/factory/runtime/factory.py capture --task example --id qa
+python3 -B skills/factory/runtime/factory.py tidy [--task example]
 ```
 
 The actual native agent flags depend on that harness. `{instructions}` as a whole argument expands to the selected role instructions and assignment goal. `{brief}` expands to a private Markdown file with the same content. Put the appropriate placeholder where that command accepts its prompt or prompt-file argument. Merely labeling an assignment `qa` does not make an arbitrary program read the brief. No provider/model is selected or permission mode weakened by the launcher.
 
-State defaults to `.factory-state/` beside the application; `--state-dir PATH` overrides it. Each task has one private JSON record and a short-lived advisory lock. The record pins the Rex binary, endpoint and host identity and retains assignment inputs, a unique session/window marker and returned full IDs. A short role brief is the only generated handoff artifact.
+State defaults to the per-user `~/.local/state/software-factory` (or `$XDG_STATE_HOME/software-factory`), shared by every project that installs the factory; `--state-dir PATH` overrides it. Each task has one private JSON record and a short-lived advisory lock. The record pins the Rex binary, endpoint and host identity and retains assignment inputs, a unique session/window marker and returned full IDs. A short role brief is the only generated handoff artifact.
 
 Repeat `start` with the same task, assignment ID and inputs to reconnect to the original pane. Changed inputs require a new explicit assignment ID. [Admitted tasks](task-state.md) require an explicit attempt purpose and enforce cumulative correction/investigation limits before new launches. They bind new assignments and reported results to selected revisions and check any `--after` dependencies before launch. Direct `start` without admission retains the original explicit-launch behavior with unknown task allowances. Neither mode selects roles or authorizes additional scope.
 

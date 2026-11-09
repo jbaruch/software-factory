@@ -1,4 +1,5 @@
 """Native metadata transport fixtures; never start Codex or contact an account."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import json
 import sys

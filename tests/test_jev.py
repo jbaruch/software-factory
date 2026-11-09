@@ -1,4 +1,5 @@
 """Fixed transport fixtures only: no credentials, network or live model judgments."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 from contextlib import redirect_stderr, redirect_stdout
 from email.message import Message
 from io import BytesIO, StringIO

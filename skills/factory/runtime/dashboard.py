@@ -15,6 +15,8 @@ import secrets
 import stat
 import subprocess
 import sys
+
+sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import tempfile
 import time
 import uuid
@@ -25,6 +27,7 @@ import jev
 import coordination_evidence
 
 ASSETS = Path(__file__).resolve().parent / "web"
+RUNTIME_LAYOUT = ("skills", "factory", "runtime")  # Runtime location inside a source checkout.
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
 PANE_LIMIT = 64 * 1024
 
@@ -44,18 +47,23 @@ def application_worker(path):
         root = worker.parent
         if root == factory.ROOT:
             return True
+        # A source checkout keeps its runtime at skills/factory/runtime; Git registers
+        # each worktree by its top level, so compare that directory.
+        if root.parts[-3:] != RUNTIME_LAYOUT:
+            return False
+        top = root.parents[2]
         # Inventory comes from the trusted application, never the task's repository
         # label or the caller's path. No repository markers are created/read here.
         inventory = factory.git_run(factory.ROOT, "worktree", "list", "--porcelain", "-z")
         if inventory.returncode:
             return False
         registered = any(
-            fields[0] == "worktree " + str(root)
+            fields[0] == "worktree " + str(top)
             and not any(field == "bare" or field.startswith("prunable") for field in fields)
             for entry in inventory.stdout.split("\0\0") if entry
             for fields in [entry.split("\0")])
-        return (registered and factory.git_worktree(root) == str(root)
-                and factory.git_common_dir(root) == factory.git_common_dir(factory.ROOT))
+        return (registered and factory.git_worktree(top) == str(top)
+                and factory.git_common_dir(top) == factory.git_common_dir(factory.ROOT))
     except (factory.FactoryError, OSError, ValueError, RuntimeError):
         return False
 
@@ -944,8 +952,9 @@ def port_number(value):
 
 
 def main(argv=None):
+    factory.relocate("dashboard.py", sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-dir", type=Path, default=factory.ROOT / ".factory-state")
+    parser.add_argument("--state-dir", type=Path, default=factory.default_state_dir())
     parser.add_argument("--decision-store", type=Path, help="Existing private Jev store; omitted means unknown/not configured")
     parser.add_argument("--port", type=port_number, default=8090)
     args = parser.parse_args(argv)

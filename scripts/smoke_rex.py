@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--state-dir", type=Path, help="Resume an existing smoke check")
     args = parser.parse_args()
     state = (args.state_dir or Path(tempfile.mkdtemp(prefix="factory-rex-smoke-"))).resolve()
-    base = [sys.executable, str(ROOT / "factory.py"), "--state-dir", str(state)]
+    base = [sys.executable, "-B", str(ROOT / "skills/factory/runtime/factory.py"), "--state-dir", str(state)]
     task = "native-smoke"
 
     def call(*arguments):

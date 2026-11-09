@@ -1,4 +1,5 @@
 """View tests use fixed task records and fake observations; never live Rex or providers."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 import base64
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,8 @@ from urllib.parse import urlencode
 
 import dashboard
 import factory
+
+RUNTIME = Path("skills/factory/runtime")  # Runtime location inside a source checkout.
 
 
 class OperatorView(unittest.TestCase):
@@ -141,10 +144,11 @@ class OperatorView(unittest.TestCase):
                 "-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                 *args], env=environment, check=True, capture_output=True, text=True)
         git(original, "init")
+        runtime = original / RUNTIME
+        (runtime / "config").mkdir(parents=True)
         for harness in ("codex", "grok"):
-            (original / (harness + "_worker.py")).write_text('raise AssertionError("Never execute another checkout")\n')
-        (original / "config").mkdir()
-        (original / "config/providers.json").write_bytes((factory.ROOT / "config/providers.json").read_bytes())
+            (runtime / (harness + "_worker.py")).write_text('raise AssertionError("Never execute another checkout")\n')
+        (runtime / "config/providers.json").write_bytes((factory.ROOT / "config/providers.json").read_bytes())
         git(original, "add", ".")
         git(original, "commit", "-m", "Fixed application fixture")
         git(original, "worktree", "add", "--detach", str(isolated))
@@ -157,12 +161,12 @@ class OperatorView(unittest.TestCase):
         git(project, "init")
         self.record["admission"]["repository"] = str(project)
         self.record["admission"]["repository_identity"]["common_dir"] = str(project / ".git")
-        with patch.object(factory, "ROOT", isolated), \
+        with patch.object(factory, "ROOT", isolated / RUNTIME), \
              patch.object(factory, "repository_identity", side_effect=AssertionError("No marker access")):
             for harness, historical in (("codex", False), ("codex", True), ("grok", False)):
                 with self.subTest(harness=harness, historical=historical):
                     command = self.native_command(harness, historical=historical)
-                    command[1 if historical else 3] = str(original / (harness + "_worker.py"))
+                    command[1 if historical else 3] = str(original / RUNTIME / (harness + "_worker.py"))
                     self.record["assignments"]["backend"]["request"]["command"] = command
                     factory.save(self.path, self.record)
                     before = self.path.read_bytes()
@@ -191,12 +195,12 @@ class OperatorView(unittest.TestCase):
         git(original, "worktree", "add", "--detach", str(damaged))
         (damaged / ".git").write_text("gitdir: " + str(foreign / ".git") + "\n")
         impostor = original / "nested"
-        impostor.mkdir()
-        worker = original / "codex_worker.py"
-        (impostor / worker.name).write_bytes(worker.read_bytes())
+        (impostor / RUNTIME).mkdir(parents=True)
+        worker = original / RUNTIME / "codex_worker.py"
+        (impostor / RUNTIME / worker.name).write_bytes(worker.read_bytes())
         alias = self.root.resolve() / "alias"
         alias.symlink_to(original, target_is_directory=True)
-        with patch.object(factory, "ROOT", isolated):
+        with patch.object(factory, "ROOT", isolated / RUNTIME):
             good = self.native_command()
             def unknown(command):
                 self.record["assignments"]["backend"]["request"]["command"] = command
@@ -204,11 +208,11 @@ class OperatorView(unittest.TestCase):
                 self.assertTrue(all(value is None for value in result.values()), command[:4])
             for root in (foreign, retired, damaged, impostor, alias, self.root / "missing"):
                 with self.subTest(root=root.name):
-                    unknown([*good[:3], str(root / worker.name), *good[4:]])
+                    unknown([*good[:3], str(root / RUNTIME / worker.name), *good[4:]])
             # A task's arbitrary project/repository labels cannot grant application ownership.
             self.record["admission"]["repository"] = str(foreign)
             self.record["admission"]["repository_identity"]["common_dir"] = str(foreign / ".git")
-            unknown([*good[:3], str(foreign / worker.name), *good[4:]])
+            unknown([*good[:3], str(foreign / RUNTIME / worker.name), *good[4:]])
             owned = [*good[:3], str(worker), *good[4:]]
             for prefix in ([sys.executable, "-I"], ["/foreign/python", "-E", "-s"], [sys.executable, "-m"]):
                 unknown([*prefix, str(worker), *good[4:]])
@@ -222,10 +226,10 @@ class OperatorView(unittest.TestCase):
             saved = worker.read_bytes()
             worker.unlink()
             unknown(owned)
-            worker.symlink_to(foreign / worker.name)
+            worker.symlink_to(foreign / RUNTIME / worker.name)
             unknown(owned)
             worker.unlink()
-            worker.hardlink_to(foreign / worker.name)
+            worker.hardlink_to(foreign / RUNTIME / worker.name)
             unknown(owned)
             worker.unlink()
             worker.mkdir()
@@ -384,6 +388,26 @@ class OperatorView(unittest.TestCase):
         self.assertEqual(detail["process"]["state"], "lost")
         self.assertIn("without retained output: Rex server restarted", detail["error"])
         self.assertIsNone(detail["output"])
+
+    def test_workers_from_registered_source_worktrees_are_application_workers(self):
+        main, sibling, stray = self.root / "main", self.root / "sibling", self.root / "stray"
+        for directory in (main, stray):
+            runtime = directory / "skills" / "factory" / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "claude_worker.py").write_text("# worker\n")
+            for command in (["init", "-q", "--initial-branch=main"], ["add", "--all"],
+                            ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                             "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "Fixture"]):
+                subprocess.run([factory.git_binary(), "-C", str(directory), *command], check=True, capture_output=True)
+        subprocess.run([factory.git_binary(), "-C", str(main), "worktree", "add", "-q", "--detach", str(sibling)],
+                       check=True, capture_output=True)
+        layout = Path("skills/factory/runtime/claude_worker.py")
+        with patch.object(factory, "ROOT", (main / "skills/factory/runtime").resolve()):
+            self.assertTrue(dashboard.application_worker(str((main / layout).resolve())))
+            self.assertTrue(dashboard.application_worker(str((sibling / layout).resolve())))
+            self.assertFalse(dashboard.application_worker(str((stray / layout).resolve())))
+            (sibling / "claude_worker.py").write_text("# outside the runtime layout\n")
+            self.assertFalse(dashboard.application_worker(str((sibling / "claude_worker.py").resolve())))
 
     def test_render_accepts_old_static_snapshots_and_escapes_new_fields(self):
         view = self.snapshot()

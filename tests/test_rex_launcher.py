@@ -1,4 +1,5 @@
 """Failure/restart tests use a fake server; no live sessions or providers."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import json
 import copy
 from contextlib import redirect_stderr, redirect_stdout

@@ -1,5 +1,13 @@
 {
-  "include": ["*.py", "tests", "scripts"],
+  "include": [
+    "skills/factory/runtime",
+    "tests",
+    "scripts"
+  ],
   "pythonVersion": "3.11",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "extraPaths": [
+    "skills/factory/runtime",
+    "tests"
+  ]
 }
