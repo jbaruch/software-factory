@@ -1,6 +1,6 @@
 # Explicit ready-work runner
 
-`ready_runner.py` executes an operator-selected plan of native Codex and Claude jobs. It observes existing
+`ready_runner.py` executes an operator-selected plan of native Codex, Claude and Grok jobs. It observes existing
 Rex jobs, collects successful native receipts, then launches ready assignments.
 It uses the existing task store and its cumulative attempt limits. It does not
 select models, interpret findings, accept tasks or release changes. The separate
@@ -16,7 +16,7 @@ factory are not part of its work limits.
 ```sh
 python3 -B skills/factory/runtime/ready_runner.py --state-dir '/absolute/path/to/state' \
   --plan '/absolute/path/to/plan.json' \
-  --codex '/absolute/path/to/codex' --claude '/absolute/path/to/claude' \
+  --codex '/absolute/path/to/codex' --claude '/absolute/path/to/claude' --grok '/absolute/path/to/grok' \
   --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
   --seconds 600
 ```
@@ -69,12 +69,13 @@ the actual selected commit and discovered eligible model ID:
 }
 ```
 
-Each job may name its `harness`: `codex` (the default when omitted) or `claude`.
-Model and effort belong to the job; Claude jobs take an effort from `low` to `max`.
+Each job may name its `harness`: `codex` (the default when omitted), `claude`
+or `grok`. Model and effort belong to the job; Claude jobs take an effort from
+`low` to `max`, and Grok jobs take one of the model's discovered efforts.
 `--codex` is always required because it also sandboxes every writer's factory
-commit; `--claude` is required when the plan has Claude jobs. The Codex quota gate
-applies only to Codex jobs. Claude publishes no quota metadata, so the runner does
-not gate Claude jobs on capacity. Collection and `--from-writer` evidence follow
+commit; `--claude` and `--grok` are required when the plan has jobs for them.
+The Codex quota gate applies only to Codex jobs. Claude and Grok publish no quota
+metadata the runner reads, so it does not gate their jobs on capacity. Collection and `--from-writer` evidence follow
 each assignment's harness.
 
 Set `write` to true and supply an explicit `commit_message` to authorize the

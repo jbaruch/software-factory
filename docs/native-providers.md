@@ -303,8 +303,8 @@ is used by the explicit worker and collector below.
 
 ## Explicit Grok inspection assignments
 
-Grok inspection runs under the [execution policy](#execution-policy). The native
-`strict` sandbox blocked the CLI's own startup on 1.0.77, so assignments run in
+Grok assignments run under the [execution policy](#execution-policy). The native
+`strict` sandbox blocked the CLI's own startup on 1.0.77, so reviewers run in
 `bypassPermissions` mode with only the `read_file` tool. The command interface uses an admitted task, selected
 candidate/requirements and discovered model/effort, as with
 [native launcher commands](native-rex.md):
@@ -335,7 +335,17 @@ Reconnecting an existing effect preserves its original brief and range. Historic
 code-review assignments without a base remain inspection-only; they cannot gain
 review evidence retroactively. Historical non-review briefs stay unchanged.
 
-The worker requests only the built-in `read_file` tool in `bypassPermissions`
+`--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
+assignment an implementation specialist for a role whose catalog entry permits
+writing. The brief carries the task goal instead of review evidence, and `--base`
+is refused. Grok then runs with every built-in tool. After a completed report,
+`factory_commit.py` stages, scans, runs hooks, signs and commits the work exactly
+as it does for any other writer. A writer's receipt is version 3: version 2's
+fields plus `writer: true`, the `sandbox` path and nullable `commit` evidence.
+Collection validates that commit, binds the result to the produced candidate and
+refuses reviewer receipts presented as writers or the reverse.
+
+A reviewer requests only the built-in `read_file` tool in `bypassPermissions`
 mode. It disables native subagents, web search and automatic updates, preserves native subscription configuration and excludes host credential
 environment variables. API-key overrides, including empty ones, refuse. Metadata
 preflight requires cached OIDC sign-in, a reported subscription, no access gate,
@@ -362,7 +372,7 @@ does not prove a provider request was cancelled. Inspect the original native
 session, receipt and stream before authorizing a new attempt after an unknown
 outcome. The native CLI installation must remain outside the checkout/Git metadata.
 
-`grok_worker.py` owns version-2 `*.grok.json` receipts and version-1 `*.grok.jsonl` streams.
+`grok_worker.py` owns version-2 reviewer and version-3 writer `*.grok.json` receipts and version-1 `*.grok.jsonl` streams.
 Every stream record has `schema_version: 1`, `kind: grok-event-line` and `data`,
 the unchanged native line including its newline. Invalid bytes stay escaped
 inspection evidence and refuse collection. Native lines are limited to 1 MiB.

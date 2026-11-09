@@ -54,9 +54,11 @@ def collected_native(assignment_id, record, assignment, *, current=True):
     if assignment["result"] is None or (current and not factory.result_current(record, assignment["result"])):
         raise factory.FactoryError("Collect a current original native result before integration")
     try:
+        harness = factory.native_harness(assignment["request"]["command"])
+        if harness is None:
+            raise factory.FactoryError("Not an original native worker: " + assignment_id)
         rex = factory.connect(record)
-        reader = factory.claude_evidence if assignment["request"]["command"][:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "claude_worker.py")] else factory.codex_evidence
-        return reader(assignment_id, record, assignment, collected=True, current=current,
+        return factory.evidence_reader(harness)(assignment_id, record, assignment, collected=True, current=current,
             observe=lambda: factory.status(rex, record, assignment))
     except (OSError, ValueError) as exc:
         raise factory.FactoryError("Cannot validate original native integration evidence: " + str(exc)) from None
@@ -66,21 +68,22 @@ def contributor_context(key, record, assignment):
     # A failed writer remains a contributor; never require or invent a success.
     import claude_worker
     import codex_worker
+    import grok_worker
     command = assignment["request"]["command"]
-    claude = command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "claude_worker.py")]
+    harness = factory.native_harness(command)
     try:
-        if claude:
-            args = claude_worker.parser().parse_args(command[4:])
+        if harness in ("claude", "grok"):
+            args = (claude_worker if harness == "claude" else grok_worker).parser().parse_args(command[4:])
         else:
             args = codex_worker.parser().parse_args(command[4:] if command[1:3] == ["-E", "-s"] else command[2:])
         receipt = factory.decode_json(factory.read_record(args.receipt, private=True))
     except (SystemExit, OSError, ValueError):
         raise factory.FactoryError("Missing original contributor execution metadata") from None
-    if claude:
+    if harness in ("claude", "grok"):
         # The native session is frozen in the original command before launch, so even
         # a failed writer keeps the identity its receipt and events must carry.
         if not isinstance(receipt, dict) or receipt.get("native_session") != args.native_session:
-            raise factory.FactoryError("Claude contributor receipt differs from its frozen native session")
+            raise factory.FactoryError("Contributor receipt differs from its frozen native session")
         if receipt.get("state") != "failed":
             collected_native(key, record, assignment, current=False)
         return args.native_session
@@ -103,10 +106,7 @@ def approvals(record, review, required):
         if mechanical(assignment):
             continue
         command = assignment["request"]["command"]
-        native = (command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
-                  or command[:2] == [sys.executable, str(factory.ROOT / "codex_worker.py")])
-        claude = command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "claude_worker.py")]
-        if not native and not claude:
+        if factory.native_harness(command) is None:
             raise factory.FactoryError("Cannot establish contributor independence for an unverified command adapter: " + key)
         if "--write" in command:
             contributors.add(contributor_context(key, record, assignment))
@@ -119,7 +119,7 @@ def approvals(record, review, required):
         if (args.write or args.role != assignment["request"]["role"]
                 or native["report"]["outcome"] != "approved"
                 or (key == review and (args.role != "release" or not hasattr(args, "codex")))
-                or (hasattr(args, "claude") and args.role not in {"qa", "security", "code-review"})):
+                or (not hasattr(args, "codex") and args.role not in {"qa", "security", "code-review"})):
             raise factory.FactoryError("Selected relevant native judgments must be read-only approved reports, including release")
         context = receipt.get("thread_id") if hasattr(args, "codex") else receipt.get("native_session")
         if not isinstance(context, str) or not context or context in contributors or context in contexts:

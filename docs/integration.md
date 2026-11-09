@@ -222,11 +222,12 @@ source checkout; the minimal isolated worker needs the release modules only when
 these opt-in evidence arguments are present.
 
 Selected ordinary `qa`, `security` and `code-review` approvals may also come from
-strictly collected version-1 read-only Claude execution receipts and original
-version-1 event envelopes. Their native session is the independent context;
+strictly collected read-only Claude (version-1) or Grok (version-2) execution
+receipts and their original version-1 event envelopes. Claude and Grok writers are
+contributors like Codex writers. The native session is the independent context;
 original init/assistant/result identities and frozen task/brief/repository/worktree
 bindings are revalidated along with the successful original Rex pane. Contexts
 must differ from every contributor and other selected approval, including Codex.
 Manual/legacy/stale/failed/uncollected evidence refuses. Pre-release and final
 release judgments continue to require the existing Codex path and complete
-release/delivery evidence; Claude ordinary approvals grant no release authority.
+release/delivery evidence; Claude and Grok ordinary approvals grant no release authority.
