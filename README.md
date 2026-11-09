@@ -41,16 +41,20 @@ The Python checks use the standard library. `acr` is a separate prerequisite for
 
 | Skill | Purpose |
 | --- | --- |
-| `factory` | Inspect or coordinate an explicitly assigned factory task |
+| `factory` | Coordinate delivery through the factory, launch one assignment or inspect a task |
 
-The package declares no global rules. Install its skill with:
+| Rule | Purpose |
+| --- | --- |
+| `factory-process` | Always on: the factory is this project's delivery process; coordinate through the skill's Step 1 |
+
+Install the package with:
 
 ```sh
 acr install github:jbaruch/software-factory
 acr realize
 ```
 
-The root `agent-plugin.yaml` declares the agent-facing skills. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); no package release is published yet. ACR validation proves source structure, not publication, real-agent operation or live model access.
+The root `agent-plugin.yaml` declares the agent-facing rule and skill. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); releases are published there. ACR validation proves source structure, not publication, real-agent operation or live model access.
 
 The application, dashboard, catalogs and evaluation suite remain application source. ACR does not automatically install an application daemon or undeclared source files. Runtime packaging and native harness integration are separate implementation slices. No hooks are declared until there are real, tested entrypoints to wire.
 

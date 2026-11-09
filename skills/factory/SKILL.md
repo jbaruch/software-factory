@@ -1,44 +1,50 @@
 ---
 name: factory
-description: "Coordinate an explicitly assigned software-factory task or inspect its current delivery and exception state."
+description: "Deliver changes through the software factory: take over, continue or hand off a task or backlog, work in the factory, coordinate specialist writers and independent verifiers through ready plans and integration, launch one explicit assignment, or inspect a task's delivery and exception state."
 ---
 
 # Factory entrypoint
 
-This skill is an action router — pick the step that matches the user's intent and execute only that step. Do not run other steps; do not parallelize.
+This skill is an action router: pick the step that matches the user's intent and execute only that step. Implementing, reviewing or delivering a change, and taking over, continuing or handing off work, is Step 1. Task authority and repository coding/release requirements remain binding.
 
-Use the connected factory application's task and assignment state when available. Without a connected application, identify this as a design/skill installation and handle the requested planning or inspection directly. Task authority and repository coding/release requirements remain binding.
+The application ships in this skill's `runtime/` directory. Set `SKILL_DIR` to this skill's directory, such as `.claude/skills/acr__jbaruch__software-factory__factory` in an installed project or `skills/factory` in the factory's own checkout. Below, `factory.py` means `python3 -B "$SKILL_DIR/runtime/factory.py"` and `ready_runner.py` means `python3 -B "$SKILL_DIR/runtime/ready_runner.py"`. Either installs or upgrades the per-user runtime on first use and runs from there; task state lives in `~/.local/state/software-factory`.
 
 For specialty selection or an assigned role, consult only the relevant entries in [the role catalog](references/roles.json). Each entry defines activation, capabilities, decision authority and focused instructions; it does not require a permanently occupied agent.
 
 ## Step 1 — Coordinate a task
 
-Establish the authorized goal and relevant acceptance evidence, then select only the needed specialists. Preserve their decision authority and independent verification.
+You coordinate; specialists do the work. Do not edit, commit, rebase, review or merge by hand where a step below exists.
 
-Scripts own deterministic execution and known transitions. Jev handles bounded semantic coordination; every question offers `uncertain`. Generic uncertainty goes to the standby reasoner. A substantive dispute follows investigator -> Jev reassessment -> resolution or judge. A remaining specialist objection prevents automatic closure. Use the expensive maximum-thinking judge only after that sequence.
+1. Establish the authorized goal and its acceptance references. Commit any work being handed over and note the commit ID; the task record is the handover, so write no separate document.
+2. Admit the task and select its inputs:
+   - `factory.py admit --task TASK --goal GOAL --repo /absolute/repo --acceptance REFERENCE`
+   - `factory.py inputs --task TASK --candidate COMMIT --requirements REQUIREMENTS-ID`
+3. Select specialists from the role catalog: at least one writer and one independent verifier, plus the specialists the change's effects call for, such as security for trust boundaries. Choose a harness, a discovered model and an effort per job; a verifier never reuses the writer's session.
+4. Provision the writer's worktree: `factory.py provision --task TASK --id WRITER_ID --path /absolute/new/worktree`.
+5. Write the implementation plan per [the ready-plan reference](references/ready-plan.md): the writer job with `write: true`, a `commit_message`, the worktree as `cwd`, and `turns` for long Claude or Grok work.
+6. Run it: `ready_runner.py --plan PLAN --codex /absolute/codex --rex "$(command -v rex)" --server ENDPOINT`, adding `--claude`, `--grok` or `--antigravity` for their jobs and taking the endpoint from `rex whoami --json`. Repeat the same command until it returns `complete` or `needs_action`; the runner launches, collects and tidies by itself.
+7. Verify the writer's commit: a plan of read-only `qa`, `code-review` and `test-automation` jobs that depend on the writer, run with `--from-writer WRITER_ID`. Run other verifiers, such as security, in a following plan against the produced commit.
+8. Route findings to the responsible specialist: a correction job (`purpose: correction`, writing role, the writer's worktree) in a new plan, then verify the correction with `--from-writer CORRECTION_ID`. Corrections consume the task's allowance; changing agents never resets it.
+9. Deliver per [the delivery reference](references/delivery.md): open the PR through the release skill, run the release judgment, then `factory.py integrate`.
 
-Read current artifacts by reference, route findings directly to their responsible specialist and let independent tasks proceed. Do not rewrite reports, narrate rounds, maintain duplicate ledgers or poll workers with model turns. Unknown external effects are reconciled before retrying, and changing agents never resets task allowances.
+When a step cannot run, file the gap at jbaruch/software-factory with the evidence, do the minimum by hand, and tell the user which step was done by hand and why.
 
-Finish here.
+Scripts own deterministic execution and known transitions. Jev handles bounded semantic coordination; every question offers `uncertain`, and generic uncertainty goes to the standby reasoner. A substantive dispute follows investigator → Jev reassessment → resolution or judge, and a remaining specialist objection prevents automatic closure. Read artifacts by reference; do not rewrite reports, narrate rounds, keep duplicate ledgers or poll workers with model turns. Reconcile unknown external effects before retrying.
 
-## Step 2 — Hand off work
+Report the task ID, its state and the PR. A collected result is not task acceptance. Finish here.
 
-Use this when the user asks to hand the current work to the factory. The factory's intake is its task record; do not write a separate handover document.
+## Step 2 — Launch one assignment
 
-1. Commit the work to hand off in this repository and note the commit ID.
-2. Run the factory as `python3 -B skills/factory/runtime/factory.py`. It installs or upgrades the per-user runtime on first use and keeps task state in `~/.local/state/software-factory`.
-3. Record the task, its inputs and a writer worktree:
-   - `admit --task TASK --goal GOAL --repo /absolute/repo --acceptance REFERENCE`
-   - `inputs --task TASK --candidate COMMIT --requirements REQUIREMENTS-ID`
-   - `provision --task TASK --id writer --path /absolute/new/worktree`
-4. Start a writer on that worktree with a model and effort that fit the role. The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOINT`, with the endpoint from `rex whoami --json`.
-   - Claude: `claude-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --claude /absolute/claude --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`
-   - Grok: `grok-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --grok /absolute/grok --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`
-   - Antigravity: `antigravity-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --agy /absolute/agy --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`. Omit `--effort` for a model that refuses it, such as `claude-opus-4-6-thinking`.
-   - Codex: `codex-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --codex /absolute/codex --model MODEL --effort EFFORT --write --commit-message MESSAGE`
-5. Check it with `status --task TASK --id ID`, collect it with `claude-collect`, `grok-collect`, `antigravity-collect` or `codex-collect`, and close finished tabs with `tidy`.
+Use this only for a single assignment a ready plan cannot express, such as a release judgment or a recovery launch. It never completes a task; return to Step 1 for the rest.
 
-Report the task ID and its current state. A collected result is not task acceptance. Finish here.
+The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOINT`.
+
+- Claude: `factory.py claude-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --claude /absolute/claude --model MODEL --effort EFFORT`
+- Grok: `factory.py grok-start` with `--grok /absolute/grok` and the same task, role and model flags.
+- Antigravity: `factory.py antigravity-start` with `--agy /absolute/agy`. Omit `--effort` for a model that refuses it, such as `claude-opus-4-6-thinking`.
+- Codex: `factory.py codex-start` with `--codex /absolute/codex`.
+
+Writers add `--write --commit-message MESSAGE`, plus `--sandbox /absolute/codex` outside Codex; code reviews add `--base COMMIT`. Check it with `factory.py status --task TASK --id ID`, collect it with the matching `*-collect` command, and close finished tabs with `factory.py tidy`. Finish here.
 
 ## Step 3 — Inspect current state
 
