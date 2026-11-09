@@ -469,6 +469,22 @@ class WriterDecoder(unittest.TestCase):
         self.assertEqual(settings, dict(sandbox=dict(enabled=True, autoAllowBashIfSandboxed=True, allowUnsandboxedCommands=False)))
         self.assertNotIn("--settings", native_claude.read_command(MODEL, "low", SESSION, 3))
 
+    def test_refused_attempts_outside_the_checkout_do_not_fail_the_writer(self):
+        # Observed live: a mistyped path the harness refused, then the corrected edit.
+        data = writer_events("/fixture")
+        refused = [dict(type="assistant", session_id=SESSION, parent_tool_use_id=None,
+                        message=dict(model=MODEL, content=[dict(type="tool_use", id="typo-1", name="Edit",
+                            input=dict(file_path="/fixture-typo/NOTES.md", old_string="a", new_string="b"))])),
+                   dict(type="user", session_id=SESSION, parent_tool_use_id=None, tool_use_result="Error: File does not exist.",
+                        message=dict(content=[dict(type="tool_result", tool_use_id="typo-1", is_error=True,
+                                                   content="<tool_use_error>File does not exist.</tool_use_error>")])),
+                   dict(type="assistant", session_id=SESSION, parent_tool_use_id=None,
+                        message=dict(model=MODEL, content=[dict(type="tool_use", id="search-1", name="Glob",
+                                                                input=dict(pattern="../**"))])),
+                   dict(type="user", session_id=SESSION, parent_tool_use_id=None, tool_use_result="Error: outside the working directory",
+                        message=dict(content=[dict(type="tool_result", tool_use_id="search-1", is_error=True, content="denied")]))]
+        self.assertEqual(self.parse(data[:1] + refused + data[1:])["report"]["outcome"], "completed")
+
     def test_edits_outside_the_checkout_or_with_mismatched_results_refuse(self):
         outside = writer_events("/fixture", path="/elsewhere/NOTES.md")
         escaped = writer_events("/fixture", path="/fixture/../elsewhere/NOTES.md")

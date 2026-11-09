@@ -249,18 +249,18 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
                             or not isinstance(block["input"].get("file_path"), str)
                             or not Path(block["input"]["file_path"]).is_absolute()):
                         refuse()
+                    # A mistyped or outside path the harness refuses is harmless; the
+                    # successful result below must stay inside the checkout.
                     if name in ("Edit", "Write") and (not isinstance(block.get("input"), dict)
-                            or not inside(block["input"].get("file_path"))):
+                            or not isinstance(block["input"].get("file_path"), str)
+                            or not Path(block["input"]["file_path"]).is_absolute()):
                         refuse()
                     if name == "Bash" and (not isinstance(block.get("input"), dict)
                             or not isinstance(block["input"].get("command"), str)
                             or block["input"].get("dangerouslyDisableSandbox") not in (None, False)
                             or block["input"].get("run_in_background") not in (None, False)):
                         refuse()
-                    if name in ("Glob", "Grep") and (not isinstance(block.get("input"), dict)
-                            or ("path" in block["input"] and not searched(block["input"]["path"]))
-                            or (name == "Glob" and not confined(block["input"].get("pattern")))
-                            or (name == "Grep" and "glob" in block["input"] and not confined(block["input"]["glob"]))):
+                    if name in ("Glob", "Grep") and not isinstance(block.get("input"), dict):
                         refuse()
                     if name == "StructuredOutput":
                         if report is not None:
@@ -293,6 +293,11 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
                     if (not isinstance(result, dict) or result.get("filePath") != call["input"]["file_path"]
                             or not inside(result["filePath"])):
                         refuse()
+                if name in ("Glob", "Grep") and block.get("is_error", False) is False and (
+                        ("path" in call["input"] and not searched(call["input"]["path"]))
+                        or (name == "Glob" and not confined(call["input"].get("pattern")))
+                        or (name == "Grep" and "glob" in call["input"] and not confined(call["input"]["glob"]))):
+                    refuse()
                 if name == "StructuredOutput" and block.get("is_error", False) is not False:
                     refuse()
         elif kind == "rate_limit_event":
