@@ -398,6 +398,28 @@ class WriterDecoder(unittest.TestCase):
         with self.assertRaises(native_claude.ClaudeProbeError):
             self.parse(events("/fixture"), writer=True)
 
+    def search(self, name, **arguments):
+        data = writer_events("/fixture")
+        data[1]["message"]["content"] = [dict(type="tool_use", id="search-1", name=name, input=arguments)]
+        data[2]["message"]["content"] = [dict(type="tool_result", tool_use_id="search-1", content="NOTES.md")]
+        del data[2]["tool_use_result"]
+        return data
+
+    def test_relative_search_paths_resolve_inside_the_checkout(self):
+        for name, arguments in (("Glob", dict(pattern="**/*.md")), ("Glob", dict(pattern="*.md", path=".")),
+                                ("Glob", dict(pattern="*.py", path="src")), ("Glob", dict(pattern="/fixture/**/*.md")),
+                                ("Grep", dict(pattern="TODO")), ("Grep", dict(pattern="TODO", path="src", glob="*.py"))):
+            with self.subTest(name=name, arguments=arguments):
+                self.assertEqual(self.parse(self.search(name, **arguments))["report"]["outcome"], "completed")
+
+    def test_searches_that_escape_the_checkout_refuse(self):
+        for name, arguments in (("Glob", dict(pattern="../**")), ("Glob", dict(pattern="/etc/**")),
+                                ("Glob", dict(pattern="*.md", path="../outside")), ("Glob", dict(path=".")),
+                                ("Grep", dict(pattern="x", path="/")), ("Grep", dict(pattern="x", glob="../*.py")),
+                                ("Grep", dict(pattern="x", path=""))):
+            with self.subTest(name=name, arguments=arguments), self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse(self.search(name, **arguments))
+
     def test_edits_outside_the_checkout_or_with_mismatched_results_refuse(self):
         outside = writer_events("/fixture", path="/elsewhere/NOTES.md")
         escaped = writer_events("/fixture", path="/fixture/../elsewhere/NOTES.md")

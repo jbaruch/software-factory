@@ -190,6 +190,14 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
         raise ClaudeProbeError("Unsupported or conflicting Claude lifecycle; inspect the original stream and pane without retrying")
     def inside(path):
         return isinstance(path, str) and Path(path).is_absolute() and Path(os.path.normpath(path)).is_relative_to(cwd)
+    def searched(path):
+        # Search paths are optional and may be relative, as Claude Code resolves them
+        # against its working directory. --restricted confines the tools themselves;
+        # this keeps the recorded evidence inside the checkout too.
+        return isinstance(path, str) and bool(path) and inside(os.path.normpath(os.path.join(cwd, path)))
+    def confined(pattern):
+        return (isinstance(pattern, str) and bool(pattern) and ".." not in Path(pattern).parts
+                and (not Path(pattern).is_absolute() or inside(pattern)))
     expected_tools = WRITE_TOOLS if writer else READ_TOOLS
     callable_tools = set(expected_tools)
     report, final, pending, tools, rates = None, None, {}, {}, []
@@ -230,7 +238,9 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
                             or not inside(block["input"].get("file_path"))):
                         refuse()
                     if name in ("Glob", "Grep") and (not isinstance(block.get("input"), dict)
-                            or ("path" in block["input"] and not inside(block["input"]["path"]))):
+                            or ("path" in block["input"] and not searched(block["input"]["path"]))
+                            or (name == "Glob" and not confined(block["input"].get("pattern")))
+                            or (name == "Grep" and "glob" in block["input"] and not confined(block["input"]["glob"]))):
                         refuse()
                     if name == "StructuredOutput":
                         if report is not None:

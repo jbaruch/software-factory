@@ -666,7 +666,9 @@ assignment an implementation specialist for a role whose catalog entry permits
 writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob` and `Grep` in
 `acceptEdits` mode. `--restricted` confines those tools to the assigned checkout
 and refuses writes to Git and settings files without a person, so the agent cannot
-stage or commit. It has no shell. After a completed report, `factory_commit.py`
+stage or commit. It has no shell. Recorded Glob/Grep paths may be relative and
+resolve against the checkout; search paths and Glob patterns that escape it refuse
+collection. After a completed report, `factory_commit.py`
 stages, scans, runs hooks, signs and commits the work exactly as it does for any
 other writer, using the Codex CLI only as its local sandbox. Writer briefs carry
 the task goal instead of review evidence, and `--base` is refused.
