@@ -35,8 +35,6 @@ GIT_ROUTING_VARIABLES = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDE
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
     "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_IMPLICIT_WORK_TREE",
     "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_QUARANTINE_PATH"}
-# Assignment window markers: "<role>-<assignment>-<8 hex>".
-FACTORY_WINDOW = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{8}")
 GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatversion",
     "extensions.objectformat", "extensions.refstorage", "extensions.worktreeconfig"}
 
@@ -1111,6 +1109,13 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
     return record
 
 
+def factory_marker(label):
+    """A window label the factory could have created: "<catalog role>-<assignment>-<8 hex>"."""
+    roles = json.loads((ROOT / "skills/factory/references/roles.json").read_text())["roles"]
+    return any(re.fullmatch(re.escape(item["id"]) + r"-[a-z0-9][a-z0-9-]{0,63}-[0-9a-f]{8}", label)
+               for item in roles)
+
+
 def role_spec(role_id):
     roles = json.loads((ROOT / "skills/factory/references/roles.json").read_text())["roles"]
     role = next((item for item in roles if item["id"] == role_id), None)
@@ -1134,12 +1139,18 @@ def brief(role_id, goal):
             + "Existing repository policy and user authorization remain binding.\n")
 
 
-def connect(record, binary=None, server=None):
+def check_pins(record, binary=None, server=None):
+    """Offline check that an explicitly supplied Rex binary/endpoint is the task's pinned one."""
     connection = record["rex"]
     if binary and str(Path(binary).resolve()) != connection["binary"]:
         raise FactoryError("Task is pinned to another Rex binary")
     if server and server != connection["server"]:
         raise FactoryError("Task is pinned to another Rex endpoint")
+    return connection
+
+
+def connect(record, binary=None, server=None):
+    connection = check_pins(record, binary, server)
     rex = Rex(connection["binary"], connection["server"])
     who = rex_object(rex.call("whoami", "--json"), strings=("host_id",))
     if who["host_id"] != connection["host_id"]:
@@ -1202,7 +1213,7 @@ def check_session(rex, record, session_id):
             raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
         if window["window_id"] in ids or (label in owned and label in labels):
             raise FactoryError("Duplicate Rex window identity; inspect the original session before continuing")
-        if label is not None and label not in owned and FACTORY_WINDOW.fullmatch(label):
+        if label is not None and label not in owned and factory_marker(label):
             # Operator tabs are fine; an unrecorded factory marker means lost task history.
             raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
         labels.add(label)
@@ -1543,6 +1554,8 @@ def status(rex, record, assignment) -> dict:
 
 def captured(rex, record, assignment):
     """Original terminal output: live while the tab is open, retained once it is tidied."""
+    if assignment["state"] == "abandoned":
+        raise FactoryError("No pane: the launch was abandoned. " + assignment["abandoned"]["reason"])
     closed = assignment.get("closed")
     if closed is not None:
         if closed["capture"] is None:
@@ -2322,7 +2335,13 @@ def main(argv=None):
                 if args.id not in record["assignments"]:
                     raise FactoryError(f"Unknown assignment {args.id!r}; use show --task {args.task} to find its ID")
                 assignment = record["assignments"][args.id]
-                rex = connect(record, args.rex, args.server)
+                if args.action in {"status", "capture"} and (
+                        assignment["state"] == "abandoned" or assignment.get("closed") is not None):
+                    # Answered from the task record alone, even while Rex is unavailable.
+                    check_pins(record, args.rex, args.server)
+                    rex = None
+                else:
+                    rex = connect(record, args.rex, args.server)
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
@@ -2330,7 +2349,14 @@ def main(argv=None):
                 collect = (collect_codex if args.action == "codex-collect"
                            else collect_claude if args.action == "claude-collect" else collect_grok)
                 record = collect(path, args.id, rex, record, assignment)
-                tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                try:
+                    tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                except (FactoryError, OSError) as exc:
+                    # The result is already saved; show it, then fail so the open tab is noticed.
+                    print(json.dumps(task_view(record), indent=2))
+                    print("factory: Collected result saved, but its tab was not tidied; run tidy: " + str(exc),
+                          file=sys.stderr)
+                    return 1
                 print(json.dumps(task_view(record), indent=2))
             elif args.action == "capture":
                 print(captured(rex, record, assignment), end="")

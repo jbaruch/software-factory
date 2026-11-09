@@ -244,8 +244,9 @@ connections verify the saved session label before reusing its ID.
 Commands then act only on their own saved block in that session; operator splits,
 renames, moves, closed panes and extra tabs never block other assignments, and a
 missing block or session reports `lost`. Duplicate JSON keys or pane identities
-refuse loading; pending launches cannot have pane IDs. A session window carrying an
-unrecorded factory marker refuses as lost history. Malformed Rex shapes require
+refuse loading; pending launches cannot have pane IDs. A session window labeled
+`<catalog role>-<assignment>-<8 hex>` but missing from history refuses as lost
+history; other operator tab names are ignored. Malformed Rex shapes require
 API compatibility inspection.
 Assignment-map order preserves launch order; dependencies
 must reference earlier entries. Task inputs are null only without admission, and

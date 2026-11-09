@@ -632,6 +632,44 @@ class NativeLauncher(unittest.TestCase):
             self.assertEqual(factory.main(["--state-dir", str(self.root), "status", "--task", "task", "--id", "qa"]), 0)
         self.assertEqual(json.loads(output.getvalue())["state"], "abandoned")
 
+    def test_retained_tabs_and_abandoned_launches_answer_while_rex_is_down(self):
+        record, qa = self.start()
+        self.finish(qa)
+        factory.tidy(self.path, factory.connect(record), record)
+        patcher = self.reject_creation()
+        with self.assertRaises(factory.FactoryError):
+            self.start(assignment_id="security", role="security")
+        patcher.stop()
+        record = factory.load_task(self.path)
+        factory.abandon_launch(self.path, factory.connect(record), assignment_id="security", reason="Rex rejected it")
+        down = patch.object(FakeRex, "call", side_effect=factory.FactoryError("Cannot reach the pinned Rex binary/server"))
+        with down:
+            for action, identity, expected in (("status", "qa", '"state": "exited"'), ("capture", "qa", "output of block-1"),
+                                               ("status", "security", '"state": "abandoned"')):
+                output = StringIO()
+                with self.subTest(action=action, identity=identity), redirect_stdout(output):
+                    self.assertEqual(factory.main(["--state-dir", str(self.root), action, "--task", "task", "--id", identity]), 0)
+                    self.assertIn(expected, output.getvalue())
+            error = StringIO()
+            with redirect_stderr(error):
+                self.assertEqual(factory.main(["--state-dir", str(self.root), "--server", "unix:///other.sock",
+                                               "status", "--task", "task", "--id", "qa"]), 1)
+                self.assertEqual(factory.main(["--state-dir", str(self.root), "capture", "--task", "task", "--id", "security"]), 1)
+        self.assertIn("pinned to another Rex endpoint", error.getvalue())
+        self.assertIn("launch was abandoned", error.getvalue())
+
+    def test_operator_tab_names_resembling_markers_never_block_the_task(self):
+        record, _ = self.start()
+        for label in ("notes-20261108", "build-deadbeef", "my-qa-tab-0badcafe"):
+            FakeRex.sessions[0]["windows"].append(dict(window_id="operator-" + label, label=label,
+                                                       layers=[dict(blocks=[dict(block_id="operator-" + label)])]))
+        _, security = self.start(assignment_id="security", role="security")
+        self.assertEqual(security["state"], "launched")
+        FakeRex.sessions[0]["windows"].append(dict(window_id="ghost", label="qa-ghost-deadbeef",
+                                                   layers=[dict(blocks=[dict(block_id="ghost-block")])]))
+        with self.assertRaisesRegex(factory.FactoryError, "windows differ from saved history"):
+            factory.connect(factory.load_task(self.path))
+
     def test_malformed_rex_views_have_actionable_compatibility_diagnostics(self):
         record, _ = self.start()
         original = copy.deepcopy(FakeRex.sessions[0])

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.1 — Unpublished
+
+- Answer `status` and `capture` of tidied tabs and abandoned launches from the task record without contacting Rex, even while the server is down.
+- Refuse only unrecorded windows labeled `<catalog role>-<assignment>-<8 hex>` as lost history; operator tab names such as `notes-20261108` no longer block a task.
+- When tidying after a successful collect fails, still print the saved result, report the tidy error and exit 1.
+
 ## 0.17.0 — Unpublished
 
 - Close finished Rex tabs automatically. Exited, failed and lost assignment tabs keep their final process observation and terminal output in the task record, then close; `status` and `capture` answer from that retained copy. The ready runner tidies every tick, provider collect commands close their own tab, `factory.py tidy` sweeps a task or state directory, and an empty task session is killed so the next launch opens a fresh one.
