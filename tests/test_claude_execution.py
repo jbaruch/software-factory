@@ -596,6 +596,32 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
         self.assertTrue(collected["assignments"]["implement"]["native_collected"])
 
+    def test_sandbox_bookkeeping_is_removed_before_the_factory_commit(self):
+        args = self.launch_writer()
+        async def spawn(*command, **options):
+            (self.repo / "NOTES.md").write_text("Notes\n")
+            (self.repo / ".claude" / ".cc-writes").mkdir(parents=True)
+            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
+                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "created"), receipt["error"])
+        self.assertFalse((self.repo / ".claude").exists())
+
+    def test_files_left_in_sandbox_bookkeeping_refuse_the_commit(self):
+        args = self.launch_writer()
+        async def spawn(*command, **options):
+            (self.repo / ".claude" / ".cc-writes").mkdir(parents=True)
+            (self.repo / ".claude" / ".cc-writes" / "trace").write_text("harness\n")
+            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
+                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn(".cc-writes", receipt["error"])
+        self.assertIsNone(receipt["commit"])
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
     def test_writer_without_edits_records_an_unchanged_commit(self):
         receipt = self.execute_writer(self.launch_writer(), edit=False)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
