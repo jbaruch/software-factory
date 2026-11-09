@@ -1344,8 +1344,11 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
                        expected_identity=record["admission"]["repository_identity"],
                        expected_git_dir=native_args.worktree_git_dir)
-        instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
-            requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
+        if native_args.write:
+            check_role_write(role)
+        else:
+            instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
+                requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
         require_grok_execution()
         import grok_worker
@@ -1837,7 +1840,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
 
 
 def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
-    """Strict original read-only evidence; history is granted only by actual collection."""
+    """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import claude_worker
     import native_claude
     import review_evidence
@@ -1864,7 +1867,11 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         instructions = read_record(Path(assignment["brief"]), private=True)
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Restore original private Claude receipt and brief before collection") from None
-    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != (2 if args.write else 1)
+            or (args.write and (receipt.get("writer") is not True or args.commit_message is None
+                                or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
+                                or "commit" not in receipt))
             or receipt.get("kind") != "claude-execution" or receipt.get("state") != "completed"
             or "error" not in receipt or receipt["error"] is not None
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
@@ -1874,7 +1881,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
             or args.job != record["task"] + "/" + assignment_id or receipt.get("job") != args.job
             or receipt.get("inputs") != request.get("inputs") or not valid_inputs(receipt.get("inputs"))
             or args.candidate != "{candidate}" or args.requirements != "{requirements}"
-            or receipt.get("candidate") != receipt["inputs"]["candidate"]
+            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
             or receipt.get("role") != request["role"] or args.role != request["role"]
             or receipt.get("brief_sha256") != request["instructions_sha256"]
             or hashlib.sha256(instructions.encode()).hexdigest() != request["instructions_sha256"]
@@ -1884,7 +1891,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
             or str(args.cwd) != "{cwd}" or receipt.get("cwd") != request["cwd"]
             or not args.worktree_git_dir.is_absolute() or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
             or not args.claude.is_absolute() or receipt.get("binary") != str(args.claude)
-            or args.model != "claude-sonnet-5-5" or args.effort != "low"
+            or not args.model.strip() or args.effort not in native_claude.EFFORTS
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
             or type(args.seconds) is not int or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
             or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
@@ -1898,24 +1905,30 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         if str(uuid.UUID(args.native_session)) != args.native_session:
             raise ValueError("Invalid session")
         native_claude.validate_auth(receipt.get("discovery"), args.claude, Path(request["cwd"]))
-        review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
+        if not args.write:
+            review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
         native = native_claude.parse_execution(claude_worker.read_events(args.events),
-            session_id=args.native_session, cwd=request["cwd"], model=args.model, max_turns=args.turns)
+            session_id=args.native_session, cwd=request["cwd"], model=args.model, max_turns=args.turns,
+            writer=args.write)
     except (ValueError, native_claude.ClaudeProbeError) as exc:
         raise FactoryError(str(exc)) from None
     if any(receipt.get(k) != native[k] for k in ("report", "usage", "model_usage", "turns", "rate_limits")):
         raise FactoryError("Claude receipt conflicts with original native events; restore original evidence")
-    args.cwd, args.write = Path(request["cwd"]), False
+    args.cwd = Path(request["cwd"])
     repository = record["admission"]["repository"]
     if repository_identity(repository) != receipt["repository_identity"]:
         raise FactoryError("Restore the admitted repository marker before validating Claude provenance")
     if (git_commit(repository, args.candidate) != args.candidate
             or git_run(repository, "cat-file", "-e", args.candidate + "^{tree}").returncode):
         raise FactoryError("Restore original Claude candidate Git objects before validating historical provenance")
+    if args.write:
+        from factory_commit import check_commit_receipt
+        check_commit_receipt(receipt, args, repository, historical=collected)
+    candidate = receipt["candidate"] if args.write else args.candidate
     if not collected:
-        check_checkout(record["admission"]["repository"], request["cwd"], args.candidate,
+        check_checkout(record["admission"]["repository"], request["cwd"], candidate,
             expected_identity=receipt["repository_identity"], expected_git_dir=args.worktree_git_dir)
-    expected = dict(inputs=receipt["inputs"], candidate=args.candidate, outcome=native["report"]["outcome"],
+    expected = dict(inputs=receipt["inputs"], candidate=candidate, outcome=native["report"]["outcome"],
                     artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
     if collected and assignment["result"] != expected:
         raise FactoryError("Collected Claude result differs from the complete original report")
@@ -1942,12 +1955,24 @@ def require_grok_execution():
         raise FactoryError(str(exc)) from None
 
 
-def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None):
-    """Freeze one explicit read-only Claude effect, including its native session."""
-    if (model != "claude-sonnet-5-5" or effort != "low" or not Path(claude).is_absolute()
+def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None,
+                   write=False, commit_message=None, sandbox=None):
+    """Freeze one explicit Claude effect, reviewer or writer, including its native session."""
+    import native_claude
+    if (not isinstance(model, str) or not model.strip() or effort not in native_claude.EFFORTS
+            or not Path(claude).is_absolute()
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
             or type(turns) is not int or not 1 <= turns <= 1000):
-        raise FactoryError("Supply an absolute native Claude executable, discovered model/effort and bounded seconds/turns")
+        raise FactoryError("Supply an absolute native Claude executable, a discovered model, a supported effort and bounded seconds/turns")
+    check_commit_message(commit_message, write=write)
+    tool = None
+    if write:
+        check_role_write(role)
+        if commit_message is None or sandbox is None or not Path(sandbox).is_absolute():
+            raise FactoryError("A Claude writer needs --commit-message and the absolute Codex CLI as its commit sandbox")
+        tool = Path(sandbox).resolve()
+    if base is not None and write:
+        raise FactoryError("Writers implement from the selected candidate; --base is for code review")
     worker = [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
@@ -1973,8 +1998,13 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
                 raise ValueError("Invalid frozen binding")
         except (ValueError, IndexError):
             raise FactoryError("Saved Claude binding is damaged; restore the original command without relaunching") from None
+    writer = []
+    if tool is not None:
+        if existing is None and (not tool.is_file() or not os.access(tool, os.X_OK)):
+            raise FactoryError("Supply the executable Codex CLI as the Claude writer's commit sandbox")
+        writer = ["--write", "--commit-message", commit_message, "--sandbox", str(tool)]
     prefix = path.parent / (task + "." + assignment_id + ".claude")
-    return worker + ([] if base is None else ["--base", base]) + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
+    return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
@@ -2147,6 +2177,10 @@ def main(argv=None):
             start.add_argument("--seconds", type=int, default=600)
             start.add_argument("--turns", type=int, default=30)
             start.add_argument("--base", help="Full base commit ID; required for code-review")
+            if action == "claude-start":
+                start.add_argument("--write", action="store_true", help="Implementation specialist with edit tools")
+                start.add_argument("--commit-message", help="With --write, the factory commits a completed result")
+                start.add_argument("--sandbox", help="With --write, the absolute Codex CLI used as the commit's local sandbox")
     delivery = sub.add_parser("integrate", help="Integrate selected exact-input native approvals; existing IDs reconcile read-only")
     delivery.add_argument("--task", required=True)
     delivery.add_argument("--id", required=True)
@@ -2211,10 +2245,9 @@ def main(argv=None):
             raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
         if args.action == "codex-start":
             check_commit_message(args.commit_message, write=args.write)
-        if args.action == "claude-start" and (args.model != "claude-sonnet-5-5" or args.effort != "low"
-                or not Path(args.claude).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
-                or not 1 <= args.turns <= 1000):
-            raise FactoryError("Select observed Claude model claude-sonnet-5-5/low, absolute binary and bounded seconds/turns; requalify other choices")
+        if args.action == "claude-start" and (not args.model.strip() or not Path(args.claude).is_absolute()
+                or not 1 <= args.seconds <= MAX_NATIVE_SECONDS or not 1 <= args.turns <= 1000):
+            raise FactoryError("Supply a discovered Claude model, an absolute binary and bounded seconds/turns")
         if args.action == "grok-start" and (not args.model.strip() or not args.effort.strip()
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
@@ -2317,7 +2350,8 @@ def main(argv=None):
                         raise FactoryError("Admit a task before starting a native Claude assignment")
                     argv = claude_command(path, task=args.task, assignment_id=args.id, claude=args.claude,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
-                        seconds=args.seconds, turns=args.turns, base=args.base)
+                        seconds=args.seconds, turns=args.turns, base=args.base,
+                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
                 elif args.action == "grok-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")

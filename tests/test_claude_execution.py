@@ -1,7 +1,7 @@
 """Fixed observed native shapes; no provider or live Rex calls."""
 import asyncio
 import copy
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import nullcontext, redirect_stdout, redirect_stderr
 from io import StringIO
 import json
 import os
@@ -56,6 +56,30 @@ def events(cwd, session=SESSION):
                  api_error_status=None, safety_stops=0, permission_denials=[], subagent_stats=dict(spawned=0), num_turns=1,
                  result=json.dumps(report), structured_output=report, usage=dict(input_tokens=2, output_tokens=20),
                  modelUsage={MODEL: dict(provider="firstParty", canonicalModel=MODEL, costBasis="list", costUSD=0.01, inputTokens=2, outputTokens=20)})]
+
+
+def writer_events(cwd, session=SESSION, *, path=None, model=MODEL):
+    """Observed 2.1.319 writer shapes: edit tools confined to the checkout, then a report."""
+    path = path or str(Path(cwd) / "NOTES.md")
+    report = dict(outcome="completed", artifacts=["NOTES.md"])
+    return [dict(type="system", subtype="init", cwd=cwd, session_id=session, model=model,
+                 tools=list(native_claude.WRITE_TOOLS), mcp_servers=[], permissionMode="acceptEdits",
+                 slash_commands=[], apiKeySource="none", claude_code_version="2.1.319", additional_directories=[]),
+            dict(type="assistant", session_id=session, parent_tool_use_id=None,
+                 message=dict(model=model, content=[dict(type="tool_use", id="write-1", name="Write",
+                                                         input=dict(file_path=path, content="Notes\n"))])),
+            dict(type="user", session_id=session, parent_tool_use_id=None,
+                 message=dict(content=[dict(type="tool_result", tool_use_id="write-1", content="File created")]),
+                 tool_use_result=dict(type="create", filePath=path, content="Notes\n", structuredPatch=[],
+                                      originalFile=None, userModified=False)),
+            dict(type="assistant", session_id=session, parent_tool_use_id=None,
+                 message=dict(model=model, content=[dict(type="tool_use", id="output-1", name="StructuredOutput", input=report)])),
+            dict(type="user", session_id=session, parent_tool_use_id=None,
+                 message=dict(content=[dict(type="tool_result", tool_use_id="output-1", content="Structured output provided successfully")])),
+            dict(type="result", session_id=session, subtype="success", is_error=False, terminal_reason="completed",
+                 api_error_status=None, safety_stops=0, permission_denials=[], subagent_stats=dict(spawned=0), num_turns=2,
+                 result=json.dumps(report), structured_output=report, usage=dict(input_tokens=5, output_tokens=40),
+                 modelUsage={model: dict(provider="firstParty", canonicalModel=model, costBasis="list", costUSD=0.02, inputTokens=5, outputTokens=40)})]
 
 
 def thinking_events(session=SESSION) -> list[dict]:
@@ -361,6 +385,31 @@ class Decoder(unittest.TestCase):
                             claude_worker.read_events(path)
 
 
+class WriterDecoder(unittest.TestCase):
+    def parse(self, data, *, writer=True):
+        return native_claude.parse_execution(data, session_id=SESSION, cwd="/fixture", model=MODEL, max_turns=3, writer=writer)
+
+    def test_writer_stream_decodes_with_edit_tools_inside_the_checkout(self):
+        self.assertEqual(self.parse(writer_events("/fixture"))["report"]["outcome"], "completed")
+
+    def test_writer_and_reviewer_shapes_never_substitute_for_each_other(self):
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(writer_events("/fixture"), writer=False)
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(events("/fixture"), writer=True)
+
+    def test_edits_outside_the_checkout_or_with_mismatched_results_refuse(self):
+        outside = writer_events("/fixture", path="/elsewhere/NOTES.md")
+        escaped = writer_events("/fixture", path="/fixture/../elsewhere/NOTES.md")
+        mismatch = writer_events("/fixture")
+        mismatch[2]["tool_use_result"]["filePath"] = "/fixture/OTHER.md"
+        searching = writer_events("/fixture")
+        searching[1]["message"]["content"] = [dict(type="tool_use", id="write-1", name="Grep", input=dict(pattern="x", path="/"))]
+        for data in (outside, escaped, mismatch, searching):
+            with self.subTest(data=data[1]["message"]["content"][0]["input"]), self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse(data)
+
+
 class ClaudeWorker(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -433,6 +482,68 @@ class ClaudeWorker(unittest.TestCase):
         with redirect_stdout(StringIO()):
             return asyncio.run(claude_worker.execute(self.args, spawn=self.spawn, probe=self.probe,
                 clock=lambda:1000, timer=lambda:10))
+
+    def launch_writer(self, **changes):
+        command = self.make_command(**{**dict(assignment_id="implement", role="backend", model="claude-opus-5-5",
+                                              effort="high", write=True, commit_message="Add fixture notes",
+                                              sandbox=sys.executable), **changes})
+        with patch.object(factory, "Rex", FakeRex):
+            factory.launch(self.path, task="task", assignment_id="implement", role="backend", goal="Add fixture notes",
+                cwd=str(self.repo), command=command, purpose="work", binary=sys.executable, server="unix:///test.sock")
+        actual = [call for call in FakeRex.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
+        argv = actual[actual.index("--") + 1:]
+        argv = argv[argv.index("--") + 1:]
+        return claude_worker.parser().parse_args(argv[4:])
+
+    def execute_writer(self, args, *, edit=True):
+        async def spawn(*command, **options):
+            self.spawns.append((command, options))
+            if edit:
+                (self.repo / "NOTES.md").write_text("Notes\n")
+            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
+        with redirect_stdout(StringIO()):
+            return asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
+                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+
+    def test_writer_edits_are_committed_by_the_factory_and_collected(self):
+        args = self.launch_writer()
+        receipt = self.execute_writer(args)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (2, True, "created"))
+        self.assertEqual(receipt["commit"]["parent"], self.candidate)
+        self.assertNotEqual(receipt["candidate"], self.candidate)
+        self.assertEqual(factory.git_commit(".", "HEAD"), receipt["candidate"])
+        self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
+        command = self.spawns[-1][0]
+        self.assertEqual(command[command.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(command[command.index("--tools") + 1:command.index("--tools") + 6], ("Read", "Edit", "Write", "Glob", "Grep"))
+        self.assertEqual((command[command.index("--model") + 1], command[command.index("--effort") + 1]), ("claude-opus-5-5", "high"))
+        record = factory.load_task(self.path)
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            collected = factory.collect_claude(self.path, "implement", self.rex, record, record["assignments"]["implement"])
+        result = collected["assignments"]["implement"]["result"]
+        self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
+        self.assertTrue(collected["assignments"]["implement"]["native_collected"])
+
+    def test_writer_without_edits_records_an_unchanged_commit(self):
+        receipt = self.execute_writer(self.launch_writer(), edit=False)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((receipt["commit"]["state"], receipt["candidate"]), ("unchanged", self.candidate))
+
+    def test_writer_mode_requires_a_writing_role_commit_message_and_supported_effort(self):
+        for changes, message in ((dict(role="qa"), "does not permit writer"),
+                                 (dict(commit_message=None), "--commit-message"),
+                                 (dict(sandbox=None), "commit sandbox"),
+                                 (dict(effort="turbo"), "supported effort"),
+                                 (dict(base=self.candidate), "--base is for code review")):
+            with self.subTest(changes=changes), self.assertRaisesRegex(factory.FactoryError, message):
+                self.make_command(**{**dict(assignment_id="implement", role="backend", write=True,
+                                            commit_message="Add fixture notes", sandbox=sys.executable), **changes})
+
+    def test_reviewers_accept_any_discovered_model_and_supported_effort(self):
+        command = self.make_command(assignment_id="opus-review", model="claude-opus-5-5", effort="max")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5-5")
+        self.assertNotIn("--write", command)
 
     def collect(self):
         self.record=factory.load_task(self.path)
@@ -784,3 +895,52 @@ class ClaudeApprovals(unittest.TestCase):
 
     def test_claude_cannot_replace_release_judgment(self):
         with self.assertRaises(factory.FactoryError):integration.approvals(self.record,"claude-qa",["qa"])
+
+    def run_claude_writer(self, session, *, exit_code=0):
+        f = self.fixture
+        with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(session)):
+            command = factory.claude_command(f.path, task="deliver", assignment_id="claude-writer", claude=sys.executable,
+                model="claude-opus-5-5", effort="high", cwd=str(f.repo), role="backend", write=True,
+                commit_message="Add fixture notes", sandbox=sys.executable)
+        record, assignment = factory.launch(f.path, task="deliver", assignment_id="claude-writer", role="backend",
+            goal="Implement the fixture change", cwd=str(f.repo), command=command, purpose="work",
+            binary=sys.executable, server="unix:///fixture.sock")
+        replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
+            "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
+            "{requirements}": record["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = claude_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
+        async def spawn(*command, **options):
+            return FakeProcess(writer_events(str(f.repo), session, model="claude-opus-5-5"), exit_code=exit_code)
+        def probe(binary, cwd):
+            return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
+                cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,
+                auth=dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty"))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=probe, clock=lambda: 1000, timer=lambda: 10,
+                git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        return record, assignment, receipt
+
+    def test_claude_writer_contributes_without_breaking_integration_approvals(self):
+        writer_session = "00000000-0000-0000-0000-000000000002"
+        record, assignment, receipt = self.run_claude_writer(writer_session)
+        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "unchanged"), receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            record = factory.collect_claude(self.fixture.path, "claude-writer", None, record, assignment)
+            self.assertEqual(integration.contributor_context("claude-writer", record, record["assignments"]["claude-writer"]),
+                             writer_session)
+            selected = integration.approvals(record, "release", ["claude-qa"])
+        self.assertEqual(selected["claude-qa"]["context"], SESSION)
+
+    def test_failed_claude_writer_stays_a_contributor_under_its_frozen_session(self):
+        writer_session = "00000000-0000-0000-0000-000000000003"
+        record, assignment, receipt = self.run_claude_writer(writer_session, exit_code=1)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+
+    def test_claude_writer_cannot_approve_its_own_work(self):
+        record, assignment, _ = self.run_claude_writer(SESSION)
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            record = factory.collect_claude(self.fixture.path, "claude-writer", None, record, assignment)
+            with self.assertRaisesRegex(factory.FactoryError, "independent of contributors"):
+                integration.approvals(record, "release", ["claude-qa"])
