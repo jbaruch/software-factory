@@ -667,8 +667,10 @@ writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob`, `Grep` and `Bash
 in `acceptEdits` mode. `--restricted` confines those tools to the assigned checkout
 and refuses writes to Git and settings files without a person, so the agent cannot
 stage or commit. Its `Bash` tool runs in Claude Code's sandbox: writes stay in the
-checkout and temporary directories, network connections are refused, and commands
-cannot ask to run unsandboxed or in the background. A writer that still changes
+checkout and temporary directories, network connections are refused, commands
+cannot ask to run unsandboxed or in the background, Claude Code refuses to run the
+shell if the sandbox cannot start, and well-known credential stores such as
+`~/.ssh`, `~/.claude`, cloud CLI and package-registry credentials are unreadable. A writer that still changes
 Git HEAD fails the factory commit's HEAD check. Recorded Glob/Grep paths may be relative and
 resolve against the checkout; search paths and Glob patterns that escape it refuse
 collection. After a completed report, `factory_commit.py`

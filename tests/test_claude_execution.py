@@ -466,7 +466,10 @@ class WriterDecoder(unittest.TestCase):
         command = native_claude.write_command(MODEL, "high", SESSION, 10)
         self.assertIn("Bash", command[command.index("--tools") + 1:command.index("--settings")])
         settings = json.loads(command[command.index("--settings") + 1])
-        self.assertEqual(settings, dict(sandbox=dict(enabled=True, autoAllowBashIfSandboxed=True, allowUnsandboxedCommands=False)))
+        sandbox = settings["sandbox"]
+        self.assertEqual({key: sandbox[key] for key in ("enabled", "autoAllowBashIfSandboxed", "allowUnsandboxedCommands", "failIfUnavailable")},
+                         dict(enabled=True, autoAllowBashIfSandboxed=True, allowUnsandboxedCommands=False, failIfUnavailable=True))
+        self.assertTrue({"~/.ssh", "~/.claude", "~/.codex", "~/.aws", "~/.config/gh"} <= set(sandbox["filesystem"]["denyRead"]))
         self.assertNotIn("--settings", native_claude.read_command(MODEL, "low", SESSION, 3))
 
     def test_refused_attempts_outside_the_checkout_do_not_fail_the_writer(self):

@@ -155,8 +155,13 @@ MINIMUM_VERSION = (2, 1, 319)
 READ_TOOLS = ["Read", "StructuredOutput"]
 WRITE_TOOLS = ["Bash", "Edit", "Glob", "Grep", "Read", "StructuredOutput", "Write"]
 # Writers' shell runs in Claude Code's sandbox: writes stay in the checkout and temporary
-# directories, network is refused, and commands cannot ask to leave the sandbox.
-WRITER_SETTINGS = '{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}}'
+# directories, network is refused, commands cannot ask to leave the sandbox, the harness
+# refuses to run without it, and credential stores are unreadable.
+CREDENTIAL_PATHS = ["~/.ssh", "~/.gnupg", "~/.aws", "~/.azure", "~/.config/gcloud", "~/.config/gh", "~/.claude",
+                    "~/.codex", "~/.docker", "~/.kube", "~/.netrc", "~/.git-credentials", "~/.npmrc", "~/.pypirc"]
+WRITER_SETTINGS = json.dumps(dict(sandbox=dict(enabled=True, autoAllowBashIfSandboxed=True, allowUnsandboxedCommands=False,
+                                               failIfUnavailable=True, filesystem=dict(denyRead=CREDENTIAL_PATHS))),
+                             separators=(",", ":"))
 
 
 def supported_version(value, *, suffix=""):
