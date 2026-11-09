@@ -452,6 +452,61 @@ class WriterDecoder(unittest.TestCase):
         with self.assertRaises(native_claude.ClaudeProbeError):
             self.parse(reviewer, writer=False)
 
+    def test_transient_api_retries_decode_and_malformed_retries_refuse(self):
+        # Observed live (#45): a completed 100-turn writer retried the API mid-run.
+        retry = dict(type="system", subtype="api_retry", attempt=1, max_retries=10, retry_delay_ms=621, error_status=None,
+                     error="unknown", session_id=SESSION, uuid="00000000-0000-4000-8000-000000000081")
+        data = writer_events("/fixture")
+        self.assertEqual(self.parse([*data[:3], dict(retry), *data[3:]])["report"]["outcome"], "completed")
+        without_delay = {key: value for key, value in retry.items() if key != "retry_delay_ms"}
+        for damaged in ({**retry, "attempt": "1"}, {**retry, "attempt": True}, {**retry, "max_retries": None},
+                        {**retry, "retry_delay_ms": -1}, without_delay, {**retry, "session_id": "other"}):
+            with self.subTest(damaged=damaged), self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse([*data[:3], damaged, *data[3:]])
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse([dict(retry), *data])
+
+    def shell_task(self):
+        """Observed 2.1.319 lifecycle of a Bash call Claude Code moved to the background."""
+        data = self.shell(command="sleep 90")
+        task = dict(task_id="bf5wd7jy7", run_id="0mw9hzo0h-5c2ecaff", session_id=SESSION)
+        running = [dict(type="system", subtype="task_started", tool_use_id="shell-1", description="sleep 90",
+                        is_backgrounded=False, task_type="local_bash", **task),
+                   dict(type="tool_progress", tool_use_id="shell-1-heartbeat-0", tool_name="Bash", parent_tool_use_id="shell-1",
+                        elapsed_time_seconds=30, heartbeat=True, session_id=SESSION),
+                   dict(type="system", subtype="background_tasks_changed", session_id=SESSION,
+                        tasks=[dict(task_id="bf5wd7jy7", run_id="0mw9hzo0h-5c2ecaff", task_type="local_bash", description="sleep 90")]),
+                   dict(type="system", subtype="task_updated", patch=dict(is_backgrounded=True), **task)]
+        finished = [dict(type="system", subtype="task_updated", patch=dict(status="failed", end_time=1794243684863), **task),
+                    dict(type="system", subtype="task_notification", tool_use_id="shell-1", status="failed", output_file="",
+                         summary="sleep 90", **task),
+                    dict(type="system", subtype="background_tasks_changed", tasks=[], session_id=SESSION)]
+        return [*data[:2], *running, data[2], *finished, *data[3:]]
+
+    def test_long_shell_task_lifecycles_decode(self):
+        self.assertEqual(self.parse(self.shell_task())["report"]["outcome"], "completed")
+
+    def test_shell_task_events_must_name_a_known_bash_call_or_task(self):
+        for index, change in ((2, dict(tool_use_id="other-1")), (2, dict(task_type="local_agent")), (2, dict(task_id="")),
+                              (3, dict(parent_tool_use_id="other-1")), (3, dict(tool_name="Write")),
+                              (3, dict(parent_tool_use_id=["shell-1"])), (3, dict(elapsed_time_seconds="30")),
+                              (4, dict(tasks=[dict(task_id="unknown")])), (4, dict(tasks=None)),
+                              (5, dict(task_id="unknown")), (5, dict(patch=None)), (8, dict(status="")),
+                              (8, dict(task_id=["bf5wd7jy7"]))):
+            data = self.shell_task()
+            data[index] = {**data[index], **change}
+            with self.subTest(index=index, change=change), self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse(data)
+        data = self.shell_task()
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse([*data[:3], dict(data[2]), *data[3:]])
+        edit = writer_events("/fixture")
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse([*edit[:2], {**data[2], "tool_use_id": "write-1"}, *edit[2:]])
+        reviewer = events("/fixture")
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse([*reviewer[:1], dict(data[3]), *reviewer[1:]], writer=False)
+
     def test_newer_claude_code_is_accepted_and_older_or_malformed_refuse(self):
         for version, accepted in (("2.1.319", True), ("2.1.400", True), ("2.2.0", True), ("3.0.1", True),
                                   ("2.1.300", False), ("2.1", False), ("latest", False)):

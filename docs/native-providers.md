@@ -749,7 +749,13 @@ disabled slash commands/Chrome, `bypassPermissions` and no session persistence
 are per-invocation controls. They do not establish subscription eligibility.
 Claude Code 2.1.319 emits `system`/`ui_invalidate` rendering notices in bypass
 mode, sometimes before `init`; the decoder accepts them as inspection-only
-telemetry.
+telemetry. After `init` it also accepts `system/api_retry` (the CLI retrying a
+transient API failure; `attempt`, `max_retries` and `retry_delay_ms` must be
+nonnegative integers) and the lifecycle of long or backgrounded Bash calls:
+`tool_progress` heartbeats, `system/task_started`, `task_updated`,
+`task_notification` and `background_tasks_changed`. Each must name a Bash call or
+task the stream already showed. None of these supplies a report, usage or
+permission, and the final result stays authoritative.
 
 A writer's receipt is version 2: version 1's fields plus `writer: true`, the
 `sandbox` path and nullable `commit` evidence with the same shape and checks as a

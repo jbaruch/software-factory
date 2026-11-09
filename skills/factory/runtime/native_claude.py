@@ -205,10 +205,14 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
     # any shell command can. Only shapes are checked; the factory commit takes the worktree alone.
     def text(value):
         return isinstance(value, str) and bool(value)
+    def bash_call(identity):
+        return text(identity) and tools.get(identity) == "Bash"
+    def known_task(identity):
+        return text(identity) and identity in tasks
     expected_tools = WRITE_TOOLS if writer else READ_TOOLS
     callable_tools = set(expected_tools)
     report, final, pending, tools, rates = None, None, {}, {}, []
-    initialized, denied = False, {}
+    initialized, denied, tasks = False, {}, set()
     for event in events:
         if (not isinstance(event, dict) or final is not None or event.get("session_id") != session_id):
             refuse()
@@ -300,6 +304,33 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
             # Inspection-only estimates; final actual usage remains authoritative.
             if any(type(event.get(key)) is not int or event[key] < 0
                    for key in ("estimated_tokens", "estimated_tokens_delta")):
+                refuse()
+        elif kind == "system" and event.get("subtype") == "api_retry":
+            # The CLI retries transient API failures on its own; the final result stays authoritative.
+            if any(type(event.get(key)) is not int or event[key] < 0
+                   for key in ("attempt", "max_retries", "retry_delay_ms")):
+                refuse()
+        elif kind == "tool_progress":
+            # Heartbeats while a long Bash call runs.
+            if (event.get("tool_name") != "Bash" or not bash_call(event.get("parent_tool_use_id"))
+                    or not text(event.get("tool_use_id")) or type(event.get("elapsed_time_seconds")) is not int):
+                refuse()
+        elif kind == "system" and event.get("subtype") == "task_started":
+            # Claude Code tracks long or backgrounded Bash calls as tasks. Their output still reaches
+            # the agent as tool results, so task lifecycle events carry no report or usage authority.
+            if (not bash_call(event.get("tool_use_id")) or event.get("task_type") != "local_bash"
+                    or not text(event.get("task_id")) or event["task_id"] in tasks):
+                refuse()
+            tasks.add(event["task_id"])
+        elif kind == "system" and event.get("subtype") == "task_updated":
+            if not known_task(event.get("task_id")) or not isinstance(event.get("patch"), dict):
+                refuse()
+        elif kind == "system" and event.get("subtype") == "task_notification":
+            if not known_task(event.get("task_id")) or not text(event.get("status")):
+                refuse()
+        elif kind == "system" and event.get("subtype") == "background_tasks_changed":
+            if (not isinstance(event.get("tasks"), list)
+                    or any(not isinstance(task, dict) or not known_task(task.get("task_id")) for task in event["tasks"])):
                 refuse()
         elif (kind == "system" and event.get("subtype") == "permission_denied"
                 and event.get("tool_name") == "SandboxNetworkAccess"):
