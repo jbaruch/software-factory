@@ -678,6 +678,12 @@ stages, scans, runs hooks, signs and commits the work exactly as it does for any
 other writer, using the Codex CLI only as its local sandbox. Writer briefs carry
 the task goal instead of review evidence, and `--base` is refused.
 
+`--decision-store STORE --decision ID --question QUESTION` makes a read-only Claude
+assignment answer one bounded Jev question as the standby reasoner or the judge,
+like the Codex coordination path. Launch freezes the original question in the brief
+instead of review evidence, the report schema adds the bounded `answer`, and the
+version-3 receipt carries it. Collected answers close their decision-inbox item.
+
 `claude_worker.py` preserves native HOME/config selection and checks the sanitized
 `native_claude.probe` before inference. Execution accepts Claude Code 2.1.319 or newer
 with claude.ai/firstParty sign-in only. Newer releases run until the strict decoder

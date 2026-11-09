@@ -88,9 +88,18 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             or not factory.valid_repository_identity(identity) or not args.worktree_git_dir.is_absolute()):
         raise factory.FactoryError("Claude assignment binding changed; inspect its original brief, role and repository pin")
     factory.role_spec(args.role)
+    coordination = None
+    if any(getattr(args, key) is not None for key in ("decision_store", "decision", "question")):
+        import coordination_evidence
+        if args.write or not coordination_evidence.binding(args.decision, args.question, args.role):
+            raise factory.FactoryError("Bind the original decision and question before a coordination worker starts")
+        coordination = coordination_evidence.read(instructions, args.decision, args.question, args.role,
+                                                  dict(candidate=args.candidate, requirements=args.requirements))
+        if args.role == "judge":
+            coordination_evidence.validate_claude_judge(coordination, args.model, args.effort)
     if args.write:
         factory.check_role_write(args.role)
-    else:
+    elif coordination is None:
         review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
                                  base=args.base, role=args.role)
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
@@ -112,7 +121,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         native_claude.validate_auth(observation, binary, args.cwd)
     except native_claude.ClaudeProbeError as exc:
         raise factory.FactoryError(str(exc)) from None
-    receipt = dict(schema_version=2 if args.write else 1, kind="claude-execution", state="starting", job=args.job,
+    # Version 1 reviews, version 2 writes and version 3 answers one bounded coordination question.
+    receipt = dict(schema_version=2 if args.write else 3 if coordination else 1, kind="claude-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -138,9 +148,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             with tempfile.TemporaryFile() as prompt:
                 prompt.write(instructions.encode("utf-8"))
                 prompt.seek(0)
-                command = native_claude.write_command if args.write else native_claude.read_command
-                process = await spawn(str(binary), *command(args.model, args.effort,
-                    args.native_session, args.turns), cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
+                command = (native_claude.write_command(args.model, args.effort, args.native_session, args.turns) if args.write
+                           else native_claude.read_command(args.model, args.effort, args.native_session, args.turns, coordination))
+                process = await spawn(str(binary), *command, cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
                     stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
                 retained_bytes = 0
@@ -171,7 +181,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Claude exited unsuccessfully; inspect its retained events and original Rex pane")
         native = native_claude.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), model=args.model,
-                                               max_turns=args.turns, writer=args.write)
+                                               max_turns=args.turns, writer=args.write, coordination=coordination)
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
@@ -211,6 +221,9 @@ def parser():
     command.add_argument("--write", action="store_true", help="Implementation specialist with edit tools in its worktree")
     command.add_argument("--commit-message", help="With --write, the factory commits a completed result using this message")
     command.add_argument("--sandbox", type=Path, help="With --write, the Codex CLI used as the factory commit's local sandbox")
+    command.add_argument("--decision-store", type=Path, help="Original Jev decision store; frozen before the native launch")
+    command.add_argument("--decision", help="Exact original Jev decision ID")
+    command.add_argument("--question", help="One unresolved question from that decision")
     return command
 
 

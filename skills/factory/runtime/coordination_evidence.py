@@ -19,15 +19,25 @@ def owner(question):
     return "judge" if question == "investigation-resolution" else "standby-reasoner"
 
 
-def judge_model():
+def judge_model(harness="codex"):
     try:
         policy = factory.decode_json((factory.ROOT / "config/coordination.json").read_text())
-        model = policy["policies"]["judge_model"]
+        model = policy["policies"]["judge_models"][harness]
         if not isinstance(model, str) or not model.strip():
             raise ValueError("Missing judge model")
         return model
     except (OSError, ValueError, KeyError, TypeError):
-        raise factory.FactoryError("Configure judge_model from eligible highly capable native models before judging") from None
+        raise factory.FactoryError(f"Configure judge_models.{harness} from eligible highly capable native models before judging") from None
+
+
+def validate_claude_judge(evidence, model, effort):
+    """A Claude judge runs the configured model at Claude Code's maximum effort; Claude publishes no quota."""
+    configured = judge_model("claude")
+    if (evidence.get("judge_harness") != "claude" or "judge_capacity" in evidence
+            or evidence.get("judge_model") != configured or model != configured):
+        raise factory.FactoryError("Select the configured judge_model; arbitrary model choices cannot adjudicate this case")
+    if effort != "max":
+        raise factory.FactoryError("Judge requires the selected model's maximum supported effort")
 
 
 def validate_judge_capacity(capacity, binary, model, effort, configured_model, now):
@@ -90,7 +100,7 @@ def check_investigation(request, record):
     dispute(request)
 
 
-def render(store, decision, question, role, inputs, *, task_record=None, native=None):
+def render(store, decision, question, role, inputs, *, task_record=None, native=None, harness="codex"):
     if not binding(decision, question, role):
         raise factory.FactoryError("Supply the original decision and question before freezing coordination evidence")
     try:
@@ -107,7 +117,11 @@ def render(store, decision, question, role, inputs, *, task_record=None, native=
         check_investigation(record["request"], task_record)
     value: dict = dict(schema_version=1, decision=decision, question=question, inputs=inputs,
                  request=record["request"], response=record["response"])
-    if role == "judge":
+    if role == "judge" and harness == "claude":
+        if native is None or native.model != judge_model("claude") or native.effort != "max":
+            raise factory.FactoryError("Select the configured judge_model at maximum effort before freezing judge evidence")
+        value.update(judge_model=judge_model("claude"), judge_harness="claude")
+    elif role == "judge":
         import codex_capacity
         import native_codex
         if native is None or native.model != judge_model():
@@ -193,6 +207,7 @@ def validate_answer(answer, evidence, outcome):
 
 def collected_attempts(directory):
     """Generate answer views from task/receipt owners, without contacting Rex."""
+    import claude_worker
     import codex_worker
     attempts = {}
     try:
@@ -211,9 +226,10 @@ def collected_attempts(directory):
             for identity, assignment in record["assignments"].items():
                 command = assignment["request"]["command"]
                 if (len(command) < 4 or command[1:3] != ["-E", "-s"]
-                        or Path(command[3]).name != "codex_worker.py" or "--decision" not in command):
+                        or Path(command[3]).name not in ("codex_worker.py", "claude_worker.py") or "--decision" not in command):
                     continue
-                parser = codex_worker.parser()
+                harness = "claude" if Path(command[3]).name == "claude_worker.py" else "codex"
+                parser = claude_worker.parser() if harness == "claude" else codex_worker.parser()
                 parser.allow_abbrev = False
                 def invalid(message=None):
                     raise factory.FactoryError("Restore the original bounded reasoner command before reading its answer")
@@ -224,12 +240,15 @@ def collected_attempts(directory):
                 args = parser.parse_args(command[4:])
                 binding(args.decision, args.question, assignment["request"]["role"], write=args.write)
                 item = dict(task=record["task"], assignment=identity, evidence=str(path), state="awaiting_collection", answer=None)
-                if command[:4] != [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]:
+                if command[:4] != [sys.executable, "-E", "-s", str(factory.ROOT / (harness + "_worker.py"))]:
                     item["state"] = "engine_unavailable"
                 elif assignment["request"].get("inputs") != record["inputs"]:
                     item["state"] = "stale"
                 elif assignment["result"] is not None:
-                    _, receipt, native = factory.codex_evidence(identity, record, assignment)
+                    if harness == "claude":
+                        _, receipt, native = factory.claude_evidence(identity, record, assignment, collected=True)
+                    else:
+                        _, receipt, native = factory.codex_evidence(identity, record, assignment)
                     item.update(state=native["report"]["outcome"], answer=native["report"]["answer"],
                                 evidence=str(args.receipt), inputs=receipt["inputs"])
                 attempts.setdefault((args.decision, args.question), []).append(item)
