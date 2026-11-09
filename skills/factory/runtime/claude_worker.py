@@ -44,6 +44,22 @@ def read_events(path):
         raise native_claude.ClaudeProbeError("Cannot decode retained Claude events within the retained-stream byte limit; restore or inspect the original stream without relaunching") from None
 
 
+def remove_sandbox_bookkeeping(root):
+    """Claude Code's shell sandbox leaves an empty .claude/.cc-writes in the checkout.
+
+    Remove only that empty bookkeeping (and .claude when it was nothing else), so the
+    factory commit sees the writer's real changes. Anything inside it refuses instead.
+    """
+    bookkeeping = root / ".claude" / ".cc-writes"
+    if not os.path.lexists(bookkeeping):
+        return
+    if bookkeeping.is_symlink() or not bookkeeping.is_dir() or any(bookkeeping.iterdir()):
+        raise factory.FactoryError("Claude Code left files in .claude/.cc-writes; inspect them before a factory commit")
+    bookkeeping.rmdir()
+    if not (root / ".claude").is_symlink() and not any((root / ".claude").iterdir()):
+        (root / ".claude").rmdir()
+
+
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_claude.probe, clock=time.time, timer=time.monotonic,
                   git_scope=None, scan=None):
     git_scope = git_scope or factory_commit.isolated_git
@@ -159,6 +175,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
+            remove_sandbox_bookkeeping(Path(factory.git_worktree(".")))
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
                                                         receipt, identity, git_scope=git_scope, scan=scan)
         else:

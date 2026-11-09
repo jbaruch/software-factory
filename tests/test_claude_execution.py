@@ -421,6 +421,73 @@ class WriterDecoder(unittest.TestCase):
             with self.subTest(name=name, arguments=arguments), self.assertRaises(native_claude.ClaudeProbeError):
                 self.parse(self.search(name, **arguments))
 
+    def shell(self, **arguments):
+        data = writer_events("/fixture")
+        data[1]["message"]["content"] = [dict(type="tool_use", id="shell-1", name="Bash", input=arguments)]
+        data[2]["message"]["content"] = [dict(type="tool_result", tool_use_id="shell-1", content="ok", is_error=False)]
+        data[2]["tool_use_result"] = dict(stdout="ok\n", stderr="", interrupted=False, isImage=False, noOutputExpected=False)
+        return data
+
+    def test_writers_run_sandboxed_shell_commands(self):
+        self.assertEqual(self.parse(self.shell(command="python3 -m unittest", description="Run tests"))["report"]["outcome"], "completed")
+
+    def test_shell_commands_cannot_leave_the_sandbox_or_outlive_the_attempt(self):
+        for arguments in (dict(command="curl x", dangerouslyDisableSandbox=True), dict(command="sleep 9", run_in_background=True),
+                          dict(description="no command")):
+            with self.subTest(arguments=arguments), self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse(self.shell(**arguments))
+
+    def test_sandbox_network_refusals_are_inspection_only_for_writers(self):
+        data = self.shell(command="curl -sS https://example.com")
+        data[2]["message"]["content"][0]["is_error"] = True
+        data.insert(2, dict(type="system", subtype="permission_denied", session_id=SESSION, tool_name="SandboxNetworkAccess",
+                            tool_use_id="00000000-0000-4000-8000-000000000056", decision_reason_type="asyncAgent"))
+        self.assertEqual(self.parse(data)["report"]["outcome"], "completed")
+        reviewer = events("/fixture")
+        reviewer.insert(1, dict(data[2]))
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(reviewer, writer=False)
+
+    def test_newer_claude_code_is_accepted_and_older_or_malformed_refuse(self):
+        for version, accepted in (("2.1.319", True), ("2.1.400", True), ("2.2.0", True), ("3.0.1", True),
+                                  ("2.1.300", False), ("2.1", False), ("latest", False)):
+            data = writer_events("/fixture")
+            data[0]["claude_code_version"] = version
+            with self.subTest(version=version):
+                if accepted:
+                    self.assertEqual(self.parse(data)["report"]["outcome"], "completed")
+                else:
+                    with self.assertRaises(native_claude.ClaudeProbeError):
+                        self.parse(data)
+                self.assertEqual(native_claude.supported_version(version + " (Claude Code)", suffix=" (Claude Code)"), accepted)
+        self.assertFalse(native_claude.supported_version("2.1.400", suffix=" (Claude Code)"))
+
+    def test_writer_command_names_the_shell_and_its_sandbox(self):
+        command = native_claude.write_command(MODEL, "high", SESSION, 10)
+        self.assertIn("Bash", command[command.index("--tools") + 1:command.index("--settings")])
+        settings = json.loads(command[command.index("--settings") + 1])
+        sandbox = settings["sandbox"]
+        self.assertEqual({key: sandbox[key] for key in ("enabled", "autoAllowBashIfSandboxed", "allowUnsandboxedCommands", "failIfUnavailable")},
+                         dict(enabled=True, autoAllowBashIfSandboxed=True, allowUnsandboxedCommands=False, failIfUnavailable=True))
+        self.assertTrue({"~/.ssh", "~/.claude", "~/.codex", "~/.aws", "~/.config/gh"} <= set(sandbox["filesystem"]["denyRead"]))
+        self.assertNotIn("--settings", native_claude.read_command(MODEL, "low", SESSION, 3))
+
+    def test_refused_attempts_outside_the_checkout_do_not_fail_the_writer(self):
+        # Observed live: a mistyped path the harness refused, then the corrected edit.
+        data = writer_events("/fixture")
+        refused = [dict(type="assistant", session_id=SESSION, parent_tool_use_id=None,
+                        message=dict(model=MODEL, content=[dict(type="tool_use", id="typo-1", name="Edit",
+                            input=dict(file_path="/fixture-typo/NOTES.md", old_string="a", new_string="b"))])),
+                   dict(type="user", session_id=SESSION, parent_tool_use_id=None, tool_use_result="Error: File does not exist.",
+                        message=dict(content=[dict(type="tool_result", tool_use_id="typo-1", is_error=True,
+                                                   content="<tool_use_error>File does not exist.</tool_use_error>")])),
+                   dict(type="assistant", session_id=SESSION, parent_tool_use_id=None,
+                        message=dict(model=MODEL, content=[dict(type="tool_use", id="search-1", name="Glob",
+                                                                input=dict(pattern="../**"))])),
+                   dict(type="user", session_id=SESSION, parent_tool_use_id=None, tool_use_result="Error: outside the working directory",
+                        message=dict(content=[dict(type="tool_result", tool_use_id="search-1", is_error=True, content="denied")]))]
+        self.assertEqual(self.parse(data[:1] + refused + data[1:])["report"]["outcome"], "completed")
+
     def test_edits_outside_the_checkout_or_with_mismatched_results_refuse(self):
         outside = writer_events("/fixture", path="/elsewhere/NOTES.md")
         escaped = writer_events("/fixture", path="/fixture/../elsewhere/NOTES.md")
@@ -547,6 +614,32 @@ class ClaudeWorker(unittest.TestCase):
         result = collected["assignments"]["implement"]["result"]
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
         self.assertTrue(collected["assignments"]["implement"]["native_collected"])
+
+    def test_sandbox_bookkeeping_is_removed_before_the_factory_commit(self):
+        args = self.launch_writer()
+        async def spawn(*command, **options):
+            (self.repo / "NOTES.md").write_text("Notes\n")
+            (self.repo / ".claude" / ".cc-writes").mkdir(parents=True)
+            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
+                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "created"), receipt["error"])
+        self.assertFalse((self.repo / ".claude").exists())
+
+    def test_files_left_in_sandbox_bookkeeping_refuse_the_commit(self):
+        args = self.launch_writer()
+        async def spawn(*command, **options):
+            (self.repo / ".claude" / ".cc-writes").mkdir(parents=True)
+            (self.repo / ".claude" / ".cc-writes" / "trace").write_text("harness\n")
+            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
+                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn(".cc-writes", receipt["error"])
+        self.assertIsNone(receipt["commit"])
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
 
     def test_writer_without_edits_records_an_unchanged_commit(self):
         receipt = self.execute_writer(self.launch_writer(), edit=False)

@@ -663,10 +663,15 @@ scheduling route, API fallback or release-judgment path.
 
 `--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
 assignment an implementation specialist for a role whose catalog entry permits
-writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob` and `Grep` in
-`acceptEdits` mode. `--restricted` confines those tools to the assigned checkout
+writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob`, `Grep` and `Bash`
+in `acceptEdits` mode. `--restricted` confines those tools to the assigned checkout
 and refuses writes to Git and settings files without a person, so the agent cannot
-stage or commit. It has no shell. Recorded Glob/Grep paths may be relative and
+stage or commit. Its `Bash` tool runs in Claude Code's sandbox: writes stay in the
+checkout and temporary directories, network connections are refused, commands
+cannot ask to run unsandboxed or in the background, Claude Code refuses to run the
+shell if the sandbox cannot start, and well-known credential stores such as
+`~/.ssh`, `~/.claude`, cloud CLI and package-registry credentials are unreadable. A writer that still changes
+Git HEAD fails the factory commit's HEAD check. Recorded Glob/Grep paths may be relative and
 resolve against the checkout; search paths and Glob patterns that escape it refuse
 collection. After a completed report, `factory_commit.py`
 stages, scans, runs hooks, signs and commits the work exactly as it does for any
@@ -674,9 +679,9 @@ other writer, using the Codex CLI only as its local sandbox. Writer briefs carry
 the task goal instead of review evidence, and `--base` is refused.
 
 `claude_worker.py` preserves native HOME/config selection and checks the sanitized
-`native_claude.probe` before inference. Execution currently accepts the observed
-2.1.319 CLI and claude.ai/firstParty sign-in only. Changed CLI/model/effort needs
-explicit requalification. API/provider/auth environment overrides refuse even when
+`native_claude.probe` before inference. Execution accepts Claude Code 2.1.319 or newer
+with claude.ai/firstParty sign-in only. Newer releases run until the strict decoder
+meets a shape it does not recognize, which refuses visibly rather than guessing. API/provider/auth environment overrides refuse even when
 empty. The private frozen brief goes to stdin with EOF. Safe-mode/restricted,
 Read-only tools plus internal StructuredOutput, empty strict MCP configuration,
 denied MCP tools, disabled slash commands/Chrome, dontAsk/no permission host and
