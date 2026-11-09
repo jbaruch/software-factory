@@ -518,9 +518,6 @@ class GrokWorker(unittest.TestCase):
             self.assertEqual(self.path.read_bytes(), before)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 def fake_grok_discovery(repo, root):
     async def configuration(binary, cwd):
@@ -610,3 +607,7 @@ class GrokApprovals(unittest.TestCase):
     def test_grok_cannot_be_the_release_judgment(self):
         with self.assertRaises(factory.FactoryError):
             integration.approvals(self.record, "grok-qa", ["qa"])
+
+
+if __name__ == "__main__":
+    unittest.main()
