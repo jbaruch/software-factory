@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.18.1 — Unpublished
+
+- Accept relative Glob/Grep paths from Claude writers, resolved against the checkout, instead of failing the attempt after its edits; refuse Glob patterns and Grep file filters that escape the checkout.
+
 ## 0.18.0 — Unpublished
 
 - Claude can write code. `claude-start --write --commit-message M --sandbox /path/to/codex` runs a writing role with `Read`, `Edit`, `Write`, `Glob` and `Grep` confined to its checkout, then the shared `factory_commit.py` step stages, scans, runs hooks, signs and commits the result. Writers produce version-2 receipts that collection validates like any factory commit.
