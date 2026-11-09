@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- The Antigravity decoder accepts a tool step that ends in `ERROR` with a `tool_info.error` record (the agent saw the failure and carried on) and the empty `system_message` steps agy 1.5.3 records. A Gemini QA run that retried a relative-path read and finished `approved` failed collection on the error and would have failed again on the system step (#51).
+
 ## 0.26.0 — 2026-11-09
 
 - The package ships an always-on rule, `factory-process`. In a project that installs the factory, implementation, review and delivery go through the `factory` skill's coordinator step, never by hand where a factory step exists; specialists the factory launches ignore it. A coordinator taking over a backlog had matched the single-writer recipe and skipped verification and integration (#46).
