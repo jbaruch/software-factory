@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.24.1 — 2026-11-09
 
 - The Claude decoder accepts `system/api_retry` and the task events Claude Code emits for long or backgrounded Bash calls (`tool_progress`, `task_started`, `task_updated`, `task_notification`, `background_tasks_changed`). A completed 100-turn writer failed collection on a transient API retry and would have failed again on its long Bash calls (#45).
 
