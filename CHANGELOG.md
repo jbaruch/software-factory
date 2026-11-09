@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.19.0 — Unpublished
+## 0.19.0 — 2026-11-08
+
+First published ACR release; it includes the unpublished 0.16.0–0.18.1 changes below.
 
 - `acr install github:jbaruch/software-factory` and `acr realize` now install the factory itself: the application moved into the `factory` skill as `skills/factory/runtime/`, with its configuration, dashboard assets and scanner pin.
 - A project's installed copy installs itself as the one per-user runtime in `~/.local/share/software-factory/skill` and runs from there, so tasks keep stable worker paths across projects. The runtime is upgraded in place to the newest version any project brings and never downgraded; a source checkout runs in place.
