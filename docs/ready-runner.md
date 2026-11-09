@@ -1,6 +1,6 @@
 # Explicit ready-work runner
 
-`ready_runner.py` executes an operator-selected plan of native Codex, Claude and Grok jobs. It observes existing
+`ready_runner.py` executes an operator-selected plan of native Codex, Claude, Grok and Antigravity jobs. It observes existing
 Rex jobs, collects successful native receipts, then launches ready assignments.
 It uses the existing task store and its cumulative attempt limits. It does not
 select models, interpret findings, accept tasks or release changes. The separate
@@ -17,6 +17,7 @@ factory are not part of its work limits.
 python3 -B skills/factory/runtime/ready_runner.py --state-dir '/absolute/path/to/state' \
   --plan '/absolute/path/to/plan.json' \
   --codex '/absolute/path/to/codex' --claude '/absolute/path/to/claude' --grok '/absolute/path/to/grok' \
+  --antigravity '/absolute/path/to/agy' \
   --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
   --seconds 600
 ```
@@ -69,13 +70,14 @@ the actual selected commit and discovered eligible model ID:
 }
 ```
 
-Each job may name its `harness`: `codex` (the default when omitted), `claude`
-or `grok`. Model and effort belong to the job; Claude jobs take an effort from
-`low` to `max`, and Grok jobs take one of the model's discovered efforts.
-`--codex` is always required because it also sandboxes every writer's factory
-commit; `--claude` and `--grok` are required when the plan has jobs for them.
-The Codex quota gate applies only to Codex jobs. Claude and Grok publish no quota
-metadata the runner reads, so it does not gate their jobs on capacity. Collection and `--from-writer` evidence follow
+Each job may name its `harness`: `codex` (the default when omitted), `claude`,
+`grok` or `antigravity`. Model and effort belong to the job; Claude and
+Antigravity jobs take an effort from `low` to `max`, and Grok jobs take one of the
+model's discovered efforts. `--codex` is always required because it also
+sandboxes every writer's factory commit; `--claude`, `--grok` and `--antigravity`
+are required when the plan has jobs for them. The Codex quota gate applies only to
+Codex jobs; the runner reads no quota metadata for the others, so it does not gate
+their jobs on capacity. Collection and `--from-writer` evidence follow
 each assignment's harness.
 
 Set `write` to true and supply an explicit `commit_message` to authorize the

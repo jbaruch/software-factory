@@ -864,10 +864,50 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"],
                          dict(candidate=target, requirements="requirements-1"))
 
+    def finish_antigravity(self, task, identity, outcome="approved"):
+        import antigravity_worker
+        from test_antigravity_worker import stream, usage_probe
+        record = factory.load_task(self.directory / (task + ".json"))
+        assignment = record["assignments"][identity]
+        request = assignment["request"]
+        replacements = {"{repository}": str(self.repo), "{cwd}": request["cwd"],
+            "{brief}": assignment["brief"], "{brief_sha256}": request["instructions_sha256"],
+            "{candidate}": request["inputs"]["candidate"], "{requirements}": request["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = antigravity_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
+        async def spawn(*command, **options):
+            return FakeProcess(stream(request["cwd"], outcome=outcome))
+        before = Path.cwd()
+        try:
+            os.chdir(self.repo)
+            with redirect_stdout(StringIO()):
+                receipt = asyncio.run(antigravity_worker.execute(args, spawn=spawn, probe=usage_probe,
+                    clock=lambda: 1000.0, timer=lambda: 10.0))
+        finally:
+            os.chdir(before)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        PlanRex.processes[(record["session_id"], assignment["block_id"])] = "exited"
+
+    def test_antigravity_jobs_launch_collect_and_advance_without_codex_capacity(self):
+        job = dict(harness="antigravity", model="gemini-3.8-flash-high", effort="high")
+        controller = runner.Runner(self.directory, self.plan([self.job("first", **job), self.job("second", after=["first"], **job)]),
+            codex=sys.executable, antigravity=sys.executable, rex=sys.executable, server="unix:///test.sock",
+            probe=self.probe, clock=lambda: self.now)
+        self.assertEqual(self.states(self.tick(controller)), {("task", "first"): "running", ("task", "second"): "waiting"})
+        command = factory.load_task(self.directory / "task.json")["assignments"]["first"]["request"]["command"]
+        self.assertEqual(Path(command[3]).name, "antigravity_worker.py")
+        self.finish_antigravity("task", "first")
+        self.assertEqual(self.states(self.tick(controller)), {("task", "first"): "approved", ("task", "second"): "running"})
+        self.assertEqual(self.probes, 0)
+        with self.assertRaisesRegex(factory.FactoryError, "--antigravity executable"):
+            self.controller(self.plan([self.job("first", **job)]))
+        with self.assertRaisesRegex(factory.FactoryError, "supported effort"):
+            self.controller(self.plan([self.job("first", **{**job, "effort": "turbo"})]))
+
     def test_grok_jobs_need_their_binary_and_writer_commit_message(self):
         with self.assertRaisesRegex(factory.FactoryError, "--grok executable"):
             self.controller(self.plan([self.grok_job("first", role="qa")]))
-        with self.assertRaisesRegex(factory.FactoryError, "Grok writers need a commit message"):
+        with self.assertRaisesRegex(factory.FactoryError, "Grok and Antigravity writers need a commit message"):
             self.grok_controller(self.plan([self.grok_job("first", write=True)]))
 
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):

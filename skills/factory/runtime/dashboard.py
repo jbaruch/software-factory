@@ -82,6 +82,7 @@ def requested_native(record, identity, assignment):
                     "{candidate}": inputs["candidate"], "{requirements}": inputs["requirements"],
                     "{repository_identity}": json.dumps(admission.get("repository_identity"), sort_keys=True)}
     command = [replacements.get(part, part) for part in request["command"]]
+    import antigravity_worker
     import codex_worker
     import grok_worker
     import claude_worker
@@ -98,6 +99,8 @@ def requested_native(record, identity, assignment):
         parser, harness = grok_worker.parser(), "grok"
     elif worker.name == "claude_worker.py" and offset == 4:
         parser, harness = claude_worker.parser(), "claude"
+    elif worker.name == "antigravity_worker.py" and offset == 4:
+        parser, harness = antigravity_worker.parser(), "antigravity"
     else:
         return unknown
     if not application_worker(command[offset - 1]):
@@ -118,7 +121,8 @@ def requested_native(record, identity, assignment):
         repository_identity = factory.decode_json(args.repo_identity)
         if harness == "codex":
             factory.check_commit_message(args.commit_message, write=args.write)
-        elif str(uuid.UUID(args.native_session)) != args.native_session or not 1 <= args.turns <= 1000:
+        elif harness != "antigravity" and (str(uuid.UUID(args.native_session)) != args.native_session
+                                           or not 1 <= args.turns <= 1000):
             return unknown
     except (ValueError, factory.FactoryError):
         return unknown
@@ -131,7 +135,7 @@ def requested_native(record, identity, assignment):
             or (args.role is not None and args.role != request["role"])
             or not args.model.strip() or not args.effort.strip()
             or not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS
-            or any(not path.is_absolute() for path in (getattr(args, harness), args.worktree_git_dir,
+            or any(not path.is_absolute() for path in (getattr(args, "agy" if harness == "antigravity" else harness), args.worktree_git_dir,
                                                        args.events, args.receipt))):
         return unknown
     return dict(adapter=harness + "_worker", harness=harness, route=harness + "-native",

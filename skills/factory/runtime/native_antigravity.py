@@ -17,6 +17,7 @@ from codex_worker import native_environment
 from factory import decode_json, RESULT_OUTCOMES
 
 API_ENVIRONMENT = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "AGY_ADC_AUTH")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # As `agy --effort` documents them.
 
 
 class UsageError(Exception):
@@ -211,6 +212,16 @@ def probe(binary, cwd, *, run=subprocess.run, clock=time.time, timer=time.monoto
                 groups=parse_usage(outputs["--print"]), native_output=outputs["--print"],
                 readiness="unverified",
                 note="Quota groups only; account eligibility, model-to-group binding, reservations and worker readiness require separate evidence.")
+
+
+def validate_usage(value, binary):
+    """Validate a retained usage observation without rereading the native CLI."""
+    if (not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] != 1
+            or value.get("kind") != "antigravity-native-usage" or value.get("binary") != str(Path(binary).resolve())
+            or not isinstance(value.get("cli_version"), str) or not value["cli_version"].strip()
+            or not isinstance(value.get("groups"), list) or not value["groups"]
+            or not isinstance(value.get("cwd"), str) or not Path(value["cwd"]).is_absolute()):
+        raise UsageError("Antigravity usage observation differs from its native binary; refresh it before execution")
 
 
 def main(argv=None):

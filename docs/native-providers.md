@@ -4,7 +4,8 @@
 
 Every native agent runs unattended, without approval prompts or a harness
 sandbox: Codex with `--dangerously-bypass-approvals-and-sandbox`, Claude Code and
-Grok with `--permission-mode bypassPermissions`. A factory nobody sits in front
+Grok with `--permission-mode bypassPermissions`, Antigravity with
+`--dangerously-skip-permissions`. A factory nobody sits in front
 of cannot wait on permission dialogs, and a sandbox that refuses ordinary build,
 test and network commands turns every assignment into an approval queue. The
 boundary is structural instead:
@@ -248,7 +249,50 @@ This additive parser changes no CLI, usage snapshot, task or receipt format and
 migrates no stored data. Rollback is removal of the decoder/version change by the
 integration owner; no irreversible data effects occur. Keep historical failures
 unchanged. The canonical [inventory](implementation.md) records qualification
-limits. This decoder has no worker yet.
+limits. The [Antigravity worker](#explicit-antigravity-assignments) uses it.
+
+## Explicit Antigravity assignments
+
+Antigravity assignments run under the [execution policy](#execution-policy) with
+every native tool. They use an admitted task, selected candidate/requirements and
+a discovered model and effort (`low` to `max`), as with
+[native launcher commands](native-rex.md):
+
+```sh
+python3 -B skills/factory/runtime/factory.py --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
+  antigravity-start --task example --id inspect --role qa --goal 'Inspect the selected candidate' \
+  --cwd '/absolute/path/to/clean/worktree' --purpose work \
+  --agy '/absolute/path/to/agy' --model 'discovered-model-id' --effort high --seconds 600
+python3 -B skills/factory/runtime/factory.py antigravity-collect --task example --id inspect
+```
+
+`antigravity_worker.py` runs `agy --print= --input-format stream-json
+--output-format stream-json --json-schema SCHEMA --model MODEL --effort EFFORT
+--dangerously-skip-permissions` and writes the frozen brief to stdin as one
+`{"event":"user","message":{"role":"user","content":[{"type":"text",...}]}}`
+line, so briefs never meet argument-length limits. The CLI names the conversation
+at `init`; there is no session flag or turn bound. Gemini API and ADC environment
+overrides refuse. Before the model turn the worker records a fresh
+[usage observation](#antigravity-native-quota). The strict decoder above reads
+the original lines; collection re-reads them, binds the receipt and requires the
+original successful Rex exit.
+
+Code review requires `--base`, whose evidence is embedded in the frozen brief.
+`--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
+assignment an implementation specialist for a writing role: the brief carries the
+task goal plus the shared writer contract, and `factory_commit.py` stages, scans,
+signs and commits a completed report. Receipts are version 1 for reviewers and
+version 2 for writers (`writer`, `sandbox`, nullable `commit`). Events are
+version-1 `antigravity-event-line` envelopes holding each original line.
+Integration counts collected `qa`, `security` and `code-review` approvals under
+their conversation ID and treats writers as contributors; a writer that failed
+before `init` is identified by its assignment.
+
+On 2026-11-09, live 1.5.3 runs in this mode with Gemini 3.8 Flash (High) went
+through `antigravity-start`/`antigravity-collect`. A reviewer approved a fixture
+candidate. A writer ran the tests with `run_command`, fixed the code with
+`edit_file` and left Git alone. The factory then committed the same tree the
+Claude and Grok writers produced, and both panes closed on collection.
 
 ## Grok authenticated metadata
 
