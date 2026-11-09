@@ -461,7 +461,11 @@ assignments retain their original reconnect and collection behavior.
 
 For a factory-owned writer commit, supply `--write --commit-message` with the
 intended commit message. The specialist edits/tests within its workspace sandbox
-and leaves Git staging/commit to the runtime. Only a successful native run with a
+and leaves Git staging/commit to the runtime. `factory_commit.py` owns that step
+independently of which agent edited the worktree. It confines Git, hooks and
+signing with the native Codex CLI's local `sandbox` command, which makes no model
+call and uses no subscription allowance; that sandbox binary is a factory tool,
+not the writing agent. Only a successful native run with a
 `completed` report can enter this step. The runtime retains an intent before
 status/staging can execute a configured filter, copies shared regular outputs to
 independent files without changing their other links, rejects non-regular files,

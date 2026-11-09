@@ -1696,7 +1696,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
 
 def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False):
     """Verify original native evidence; offline callers require a collected current result."""
-    from codex_worker import check_commit_receipt, parse_events, parser, read_events
+    from codex_worker import parse_events, parser, read_events
+    from factory_commit import check_commit_receipt
 
     command = assignment["request"]["command"]
     if command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:

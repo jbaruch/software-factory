@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import codex_worker
 import factory
+import factory_commit
 
 
 HOOK = """import json,os,pathlib,socket,subprocess,sys
@@ -110,14 +110,14 @@ def conformance(binary) -> dict:
                 os.chdir(repo)
                 identity = factory.repository_identity(".", create=True)
                 parent = factory.git_commit(".", "HEAD")
-                args = SimpleNamespace(codex=binary, worktree_git_dir=factory.git_dir("."),
+                args = SimpleNamespace(sandbox=binary, worktree_git_dir=factory.git_dir("."),
                     candidate=parent, commit_message="Signed fixture", receipt=root / "receipt.json")
                 receipt = dict(repository_identity=identity, commit=dict(state="preparing", parent=parent,
                     message=args.commit_message, staged_tree=None, candidate=None))
                 factory.save(args.receipt, receipt)
                 control_public = root / "control.pub"
                 control_public.write_bytes(key.with_suffix(".pub").read_bytes())
-                with codex_worker.private_signer(key, str(Path(sys.executable).resolve())) as attack_agent:
+                with factory_commit.private_signer(key, str(Path(sys.executable).resolve())) as attack_agent:
                     control = subprocess.run([keygen, "-Y", "sign", "-n", "fixture-probe", "-f", str(control_public)],
                         input=b"not a git commit", capture_output=True, timeout=10,
                         env={**os.environ, "SSH_AUTH_SOCK": attack_agent})
@@ -129,8 +129,8 @@ def conformance(binary) -> dict:
                         str(listener.getsockname()[1]), attack_agent, control_public.read_text(), str(sibling_index), str(repo / ".git/config")]) + "\n")
                     hook.chmod(0o700)
                     (repo / "source.txt").write_text("changed fixture source\n")
-                    with codex_worker.isolated_git(args, identity):
-                        hooked = codex_worker.commit_changes(args, receipt)
+                    with factory_commit.isolated_git(args, identity):
+                        hooked = factory_commit.commit_changes(args, receipt)
                 if hooked is None:
                     raise factory.FactoryError("Fixture pre-commit produced no evidence; inspect native sandbox execution")
                 lines = (hooked.stdout + "\n" + hooked.stderr).splitlines()
@@ -161,8 +161,8 @@ def conformance(binary) -> dict:
                 factory.save(outside_args.receipt, outside_receipt)
                 index_before = (args.worktree_git_dir / "index").read_bytes()
                 try:
-                    with codex_worker.isolated_git(outside_args, identity):
-                        codex_worker.commit_changes(outside_args, outside_receipt)
+                    with factory_commit.isolated_git(outside_args, identity):
+                        factory_commit.commit_changes(outside_args, outside_receipt)
                     raise factory.FactoryError("External hook fixture unexpectedly proceeded")
                 except factory.FactoryError as exc:
                     if "external hook paths" not in str(exc):
@@ -192,14 +192,14 @@ def conformance(binary) -> dict:
                 sentinel = "ghp_" + hashlib.sha256(b"Software Factory offline credential fixture").hexdigest()[:36]
                 (negative / "token.txt").write_text("token = " + sentinel + " # gitleaks:allow\n")
                 (negative / ".gitleaks.toml").write_text("[allowlist]\nregexes = ['.*']\n")
-                scan_args = SimpleNamespace(codex=binary, worktree_git_dir=factory.git_dir("."),
+                scan_args = SimpleNamespace(sandbox=binary, worktree_git_dir=factory.git_dir("."),
                     candidate=negative_parent, commit_message="Must refuse", receipt=root / "secret-receipt.json")
                 scan_receipt = dict(repository_identity=negative_identity, commit=dict(state="preparing",
                     parent=negative_parent, message=scan_args.commit_message, staged_tree=None, candidate=None))
                 factory.save(scan_args.receipt, scan_receipt)
                 try:
-                    with codex_worker.isolated_git(scan_args, negative_identity):
-                        codex_worker.commit_changes(scan_args, scan_receipt)
+                    with factory_commit.isolated_git(scan_args, negative_identity):
+                        factory_commit.commit_changes(scan_args, scan_receipt)
                     raise factory.FactoryError("The credential fixture unexpectedly committed")
                 except factory.FactoryError as exc:
                     if "Secret scan refused" not in str(exc):
