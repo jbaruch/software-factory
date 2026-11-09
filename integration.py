@@ -62,13 +62,26 @@ def collected_native(assignment_id, record, assignment, *, current=True):
 
 def contributor_context(key, record, assignment):
     # A failed writer remains a contributor; never require or invent a success.
+    import claude_worker
     import codex_worker
     command = assignment["request"]["command"]
+    claude = command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "claude_worker.py")]
     try:
-        args = codex_worker.parser().parse_args(command[4:] if command[1:3] == ["-E", "-s"] else command[2:])
+        if claude:
+            args = claude_worker.parser().parse_args(command[4:])
+        else:
+            args = codex_worker.parser().parse_args(command[4:] if command[1:3] == ["-E", "-s"] else command[2:])
         receipt = factory.decode_json(factory.read_record(args.receipt, private=True))
     except (SystemExit, OSError, ValueError):
         raise factory.FactoryError("Missing original contributor execution metadata") from None
+    if claude:
+        # The native session is frozen in the original command before launch, so even
+        # a failed writer keeps the identity its receipt and events must carry.
+        if not isinstance(receipt, dict) or receipt.get("native_session") != args.native_session:
+            raise factory.FactoryError("Claude contributor receipt differs from its frozen native session")
+        if receipt.get("state") != "failed":
+            collected_native(key, record, assignment, current=False)
+        return args.native_session
     if isinstance(receipt, dict) and receipt.get("state") == "failed":
         rex = factory.connect(record)
         _, _, native = factory.codex_evidence(key, record, assignment, failed_identity=True,

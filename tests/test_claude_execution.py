@@ -895,3 +895,52 @@ class ClaudeApprovals(unittest.TestCase):
 
     def test_claude_cannot_replace_release_judgment(self):
         with self.assertRaises(factory.FactoryError):integration.approvals(self.record,"claude-qa",["qa"])
+
+    def run_claude_writer(self, session, *, exit_code=0):
+        f = self.fixture
+        with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(session)):
+            command = factory.claude_command(f.path, task="deliver", assignment_id="claude-writer", claude=sys.executable,
+                model="claude-opus-5-5", effort="high", cwd=str(f.repo), role="backend", write=True,
+                commit_message="Add fixture notes", sandbox=sys.executable)
+        record, assignment = factory.launch(f.path, task="deliver", assignment_id="claude-writer", role="backend",
+            goal="Implement the fixture change", cwd=str(f.repo), command=command, purpose="work",
+            binary=sys.executable, server="unix:///fixture.sock")
+        replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
+            "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
+            "{requirements}": record["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = claude_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
+        async def spawn(*command, **options):
+            return FakeProcess(writer_events(str(f.repo), session, model="claude-opus-5-5"), exit_code=exit_code)
+        def probe(binary, cwd):
+            return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
+                cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,
+                auth=dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty"))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=probe, clock=lambda: 1000, timer=lambda: 10,
+                git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+        return record, assignment, receipt
+
+    def test_claude_writer_contributes_without_breaking_integration_approvals(self):
+        writer_session = "00000000-0000-0000-0000-000000000002"
+        record, assignment, receipt = self.run_claude_writer(writer_session)
+        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "unchanged"), receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            record = factory.collect_claude(self.fixture.path, "claude-writer", None, record, assignment)
+            self.assertEqual(integration.contributor_context("claude-writer", record, record["assignments"]["claude-writer"]),
+                             writer_session)
+            selected = integration.approvals(record, "release", ["claude-qa"])
+        self.assertEqual(selected["claude-qa"]["context"], SESSION)
+
+    def test_failed_claude_writer_stays_a_contributor_under_its_frozen_session(self):
+        writer_session = "00000000-0000-0000-0000-000000000003"
+        record, assignment, receipt = self.run_claude_writer(writer_session, exit_code=1)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+
+    def test_claude_writer_cannot_approve_its_own_work(self):
+        record, assignment, _ = self.run_claude_writer(SESSION)
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            record = factory.collect_claude(self.fixture.path, "claude-writer", None, record, assignment)
+            with self.assertRaisesRegex(factory.FactoryError, "independent of contributors"):
+                integration.approvals(record, "release", ["claude-qa"])
