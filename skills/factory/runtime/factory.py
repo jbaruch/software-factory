@@ -25,7 +25,6 @@ if __name__ == "__main__":
 ROOT = Path(__file__).resolve().parent
 # The runtime ships inside the factory skill; its role catalog sits beside it.
 ROLES_PATH = ROOT.parent / "references" / "roles.json"
-VERSION = (ROOT / "VERSION").read_text().strip()
 GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
