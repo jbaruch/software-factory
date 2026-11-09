@@ -1,4 +1,4 @@
-"""One explicit read-only native Claude assignment with retained original events."""
+"""One explicit native Claude assignment, reviewer or writer, with retained original events."""
 import argparse
 import asyncio
 import hashlib
@@ -14,6 +14,7 @@ import uuid
 sys.dont_write_bytecode = True
 
 import factory
+import factory_commit
 import native_claude
 import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, stop_child
@@ -43,13 +44,19 @@ def read_events(path):
         raise native_claude.ClaudeProbeError("Cannot decode retained Claude events within the retained-stream byte limit; restore or inspect the original stream without relaunching") from None
 
 
-async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_claude.probe, clock=time.time, timer=time.monotonic):
+async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_claude.probe, clock=time.time, timer=time.monotonic,
+                  git_scope=None, scan=None):
+    git_scope = git_scope or factory_commit.isolated_git
+    scan = scan or factory_commit.scan_staged
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Claude attempt already has artifacts; inspect or collect it without relaunching")
     if (type(args.seconds) is not int or not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS
             or type(args.turns) is not int or not 1 <= args.turns <= 1000
-            or args.model != "claude-sonnet-5-5" or args.effort != "low"):
-        raise factory.FactoryError("Supply discovered Claude model/effort choices and positive bounded seconds/turns before execution")
+            or not isinstance(args.model, str) or not args.model.strip() or args.effort not in native_claude.EFFORTS):
+        raise factory.FactoryError("Supply a discovered Claude model, a supported effort and positive bounded seconds/turns before execution")
+    factory.check_commit_message(args.commit_message, write=args.write)
+    if args.write and (args.commit_message is None or args.sandbox is None or not args.sandbox.is_absolute()):
+        raise factory.FactoryError("A Claude writer needs --commit-message and the absolute Codex sandbox binary for the factory commit")
     try:
         if str(uuid.UUID(args.native_session)) != args.native_session:
             raise ValueError("Noncanonical session")
@@ -65,20 +72,31 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             or not factory.valid_repository_identity(identity) or not args.worktree_git_dir.is_absolute()):
         raise factory.FactoryError("Claude assignment binding changed; inspect its original brief, role and repository pin")
     factory.role_spec(args.role)
-    review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
-                             base=args.base, role=args.role)
+    if args.write:
+        factory.check_role_write(args.role)
+    else:
+        review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
+                                 base=args.base, role=args.role)
     factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
                            expected_git_dir=args.worktree_git_dir)
     factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
     if any(binary.is_relative_to(root) for root in (
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Claude installation outside the assigned checkout and Git metadata")
+    if args.write:
+        try:
+            sandbox = args.sandbox.resolve(strict=True)
+        except OSError:
+            raise factory.FactoryError("Restore the Codex sandbox binary before a Claude writer attempt") from None
+        factory_commit.prepare_writer(args, sandbox, (
+            Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir))
+        factory_commit.prepare_commit(args, scan=scan)
     try:
         observation = probe(binary, args.cwd)
         native_claude.validate_auth(observation, binary, args.cwd)
     except native_claude.ClaudeProbeError as exc:
         raise factory.FactoryError(str(exc)) from None
-    receipt = dict(schema_version=1, kind="claude-execution", state="starting", job=args.job,
+    receipt = dict(schema_version=2 if args.write else 1, kind="claude-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -87,6 +105,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         created_at=clock(), finished_at=None, elapsed_seconds=None, exit_code=None,
         report=None, usage=None, model_usage=None, turns=None, rate_limits=None,
         candidate=None, events=str(args.events), error=None)
+    if args.write:
+        # Version 2 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
+        receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         factory.save(args.receipt, receipt, exclusive=True)
@@ -101,7 +122,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             with tempfile.TemporaryFile() as prompt:
                 prompt.write(instructions.encode("utf-8"))
                 prompt.seek(0)
-                process = await spawn(str(binary), *native_claude.read_command(args.model, args.effort,
+                command = native_claude.write_command if args.write else native_claude.read_command
+                process = await spawn(str(binary), *command(args.model, args.effort,
                     args.native_session, args.turns), cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
                     stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
@@ -132,12 +154,19 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Claude exited unsuccessfully; inspect its retained events and original Rex pane")
-        native = native_claude.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), model=args.model, max_turns=args.turns)
+        native = native_claude.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), model=args.model,
+                                               max_turns=args.turns, writer=args.write)
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
-        factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
-        if factory.git_commit(".", "HEAD") != args.candidate:
-            raise factory.FactoryError("Read-only Claude candidate changed; inspect its original checkout without reusing the report")
-        receipt.update(state="completed", candidate=args.candidate)
+        if args.write:
+            # The native process has exited; the factory alone stages, scans and commits its work.
+            candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
+                                                        receipt, identity, git_scope=git_scope, scan=scan)
+        else:
+            factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
+            if factory.git_commit(".", "HEAD") != args.candidate:
+                raise factory.FactoryError("Read-only Claude candidate changed; inspect its original checkout without reusing the report")
+            candidate = args.candidate
+        receipt.update(state="completed", candidate=candidate)
     except TimeoutError:
         receipt.update(state="failed", error="Claude execution allowance expired; inspect the original attempt without retrying")
     except OSError:
@@ -162,6 +191,9 @@ def parser():
     command.add_argument("--seconds", type=int, default=600)
     command.add_argument("--turns", type=int, default=30)
     command.add_argument("--base")
+    command.add_argument("--write", action="store_true", help="Implementation specialist with edit tools in its worktree")
+    command.add_argument("--commit-message", help="With --write, the factory commits a completed result using this message")
+    command.add_argument("--sandbox", type=Path, help="With --write, the Codex CLI used as the factory commit's local sandbox")
     return command
 
 

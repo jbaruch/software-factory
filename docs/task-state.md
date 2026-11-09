@@ -433,7 +433,7 @@ launch guards; no background scheduler or automatic acceptance is implemented.
 Explicit read-only Claude commands use the same schema-9 assignment owner,
 input invalidation, holds, dependencies, immutable results and cumulative attempt
 allowances. `claude_worker.py` owns its version-1 execution artifacts; the
-[receipt/event reader contract](native-providers.md#explicit-read-only-claude-assignments)
+[receipt/event reader contract](native-providers.md#explicit-claude-assignments)
 requires original artifacts for every collection or historical approval. No
 additional task store or mutable approval record is introduced. Team requested
 metadata uses the worker's parser without provider probes; observed model and

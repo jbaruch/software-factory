@@ -146,6 +146,30 @@ def validate_auth(observation, binary, cwd):
         raise ClaudeProbeError("Restore observed Claude 2.1.319 native claude.ai/firstParty sign-in; requalify changed CLI behavior before execution")
 
 
+# Tool lists exactly as Claude Code 2.1.319 reports them in its init event.
+READ_TOOLS = ["Read", "StructuredOutput"]
+WRITE_TOOLS = ["Edit", "Glob", "Grep", "Read", "StructuredOutput", "Write"]
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def write_command(model, effort, session, turns):
+    """An implementation specialist: edit tools confined to the checkout, no Git or shell."""
+    from codex_worker import outcome_schema
+    # --restricted confines file tools to the working directory and refuses writes
+    # to Git and settings files without a person, so the factory alone commits.
+    return ["--safe-mode", "--restricted", "--print", "--tools", "Read", "Edit", "Write", "Glob", "Grep",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--disallowedTools", "mcp__*", "--disable-slash-commands", "--no-chrome",
+            "--permission-mode", "acceptEdits", "--permission-prompts", "none",
+            "--model", model, "--effort", effort, "--session-id", session,
+            "--max-turns", str(turns), "--no-session-persistence",
+            "--system-prompt", "You are the assigned implementation specialist. Follow the supplied assignment. "
+            "Edit only inside this checkout. Do not delegate, stage, commit or change Git state; the factory "
+            "commits your finished work after a completed report.",
+            "--json-schema", json.dumps(outcome_schema()), "--output-format", "stream-json",
+            "--verbose", "--include-hook-events"]
+
+
 def read_command(model, effort, session, turns):
     from codex_worker import outcome_schema
     return ["--safe-mode", "--restricted", "--print", "--tools", "Read",
@@ -160,10 +184,14 @@ def read_command(model, effort, session, turns):
             "--verbose", "--include-hook-events"]
 
 
-def parse_execution(events, *, session_id, cwd, model, max_turns):
+def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
     """Decode the observed native lifecycle without supplying process/provenance authority."""
     def refuse() -> NoReturn:
         raise ClaudeProbeError("Unsupported or conflicting Claude lifecycle; inspect the original stream and pane without retrying")
+    def inside(path):
+        return isinstance(path, str) and Path(path).is_absolute() and Path(os.path.normpath(path)).is_relative_to(cwd)
+    expected_tools = WRITE_TOOLS if writer else READ_TOOLS
+    callable_tools = set(expected_tools)
     report, final, pending, tools, rates = None, None, {}, {}, []
     initialized, denied = False, {}
     for event in events:
@@ -172,8 +200,9 @@ def parse_execution(events, *, session_id, cwd, model, max_turns):
         kind = event.get("type")
         if not initialized:
             if (kind != "system" or event.get("subtype") != "init" or event.get("cwd") != cwd
-                    or event.get("model") != model or event.get("tools") != ["Read", "StructuredOutput"]
-                    or event.get("mcp_servers") != [] or event.get("permissionMode") != "dontAsk"
+                    or event.get("model") != model or event.get("tools") != expected_tools
+                    or event.get("mcp_servers") != []
+                    or event.get("permissionMode") != ("acceptEdits" if writer else "dontAsk")
                     or event.get("slash_commands") != [] or event.get("apiKeySource") != "none"
                     or event.get("claude_code_version") != "2.1.319"
                     or event.get("additional_directories") != []):
@@ -189,13 +218,19 @@ def parse_execution(events, *, session_id, cwd, model, max_turns):
                     refuse()
                 if block["type"] == "tool_use":
                     name, identity = block.get("name"), block.get("id")
-                    if name not in ("Read", "StructuredOutput") or not isinstance(identity, str) or not identity or identity in tools:
+                    if name not in callable_tools or not isinstance(identity, str) or not identity or identity in tools:
                         refuse()
                     tools[identity] = name
                     pending[identity] = block
                     if name == "Read" and (not isinstance(block.get("input"), dict)
                             or not isinstance(block["input"].get("file_path"), str)
                             or not Path(block["input"]["file_path"]).is_absolute()):
+                        refuse()
+                    if name in ("Edit", "Write") and (not isinstance(block.get("input"), dict)
+                            or not inside(block["input"].get("file_path"))):
+                        refuse()
+                    if name in ("Glob", "Grep") and (not isinstance(block.get("input"), dict)
+                            or ("path" in block["input"] and not inside(block["input"]["path"]))):
                         refuse()
                     if name == "StructuredOutput":
                         if report is not None:
@@ -223,6 +258,11 @@ def parse_execution(events, *, session_id, cwd, model, max_turns):
                             or any(not Path(os.path.normpath(p)).is_relative_to(cwd)
                                    for p in (path, call["input"]["file_path"]))):
                         refuse()
+                if name in ("Edit", "Write") and block.get("is_error", False) is False:
+                    result = event.get("tool_use_result")
+                    if (not isinstance(result, dict) or result.get("filePath") != call["input"]["file_path"]
+                            or not inside(result["filePath"])):
+                        refuse()
                 if name == "StructuredOutput" and block.get("is_error", False) is not False:
                     refuse()
         elif kind == "rate_limit_event":
@@ -235,11 +275,11 @@ def parse_execution(events, *, session_id, cwd, model, max_turns):
                    for key in ("estimated_tokens", "estimated_tokens_delta")):
                 refuse()
         elif kind == "system" and event.get("subtype") == "permission_denied":
-            identity = event.get("tool_use_id")
-            if (event.get("tool_name") != "Read" or not isinstance(identity, str)
-                    or tools.get(identity) != "Read" or identity not in pending or identity in denied):
+            identity, name = event.get("tool_use_id"), event.get("tool_name")
+            if (name not in callable_tools - {"StructuredOutput"} or not isinstance(identity, str)
+                    or tools.get(identity) != name or identity not in pending or identity in denied):
                 refuse()
-            denied[identity] = dict(tool_name="Read", tool_use_id=identity, tool_input=pending[identity]["input"])
+            denied[identity] = dict(tool_name=name, tool_use_id=identity, tool_input=pending[identity]["input"])
         elif kind == "result":
             if (pending or report is None or event.get("subtype") != "success" or event.get("is_error") is not False
                     or event.get("terminal_reason") != "completed" or event.get("api_error_status") is not None

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0 — Unpublished
+
+- Claude can write code. `claude-start --write --commit-message M --sandbox /path/to/codex` runs a writing role with `Read`, `Edit`, `Write`, `Glob` and `Grep` confined to its checkout, then the shared `factory_commit.py` step stages, scans, runs hooks, signs and commits the result. Writers produce version-2 receipts that collection validates like any factory commit.
+- Choose Claude's model and effort per assignment from the discovered catalog (`low` through `max`) instead of the hardcoded `claude-sonnet-5-5`/`low` pin.
+- Move factory-owned commits out of the Codex worker into `factory_commit.py`, which confines Git with the Codex CLI's local `sandbox` command as a tool rather than as the writing agent.
+
 ## 0.17.1 — Unpublished
 
 - Answer `status` and `capture` of tidied tabs and abandoned launches from the task record without contacting Rex, even while the server is down.

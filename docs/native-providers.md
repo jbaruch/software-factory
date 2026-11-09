@@ -648,16 +648,28 @@ accept the task, establish independent verification or satisfy release gates.
 See the [implementation inventory](implementation.md) for mechanical integration
 observations and the remaining live specialist verification.
 
-## Explicit read-only Claude assignments
+## Explicit Claude assignments
 
 `factory.py claude-start` and `claude-collect` use the existing admitted task,
 locks, cumulative attempts, frozen brief and Rex pane. Select `--claude` with an
-absolute installed executable, `--model claude-sonnet-5-5 --effort low`, explicit
-`--role`, `--goal`, `--cwd`, `--purpose` and stable task/assignment IDs. Optional
+absolute installed executable, a discovered `--model`, an `--effort` of `low`,
+`medium`, `high`, `xhigh` or `max`, explicit `--role`, `--goal`, `--cwd`,
+`--purpose` and stable task/assignment IDs. The model and thinking effort belong
+to the assignment, not the provider: pick what the role's work needs. Optional
 `--seconds` (1–86400, default 600) and `--turns` (1–1000, default 30) bound the
 attempt. Code review requires a full `--base`; the existing revision-evidence
 owner embeds that exact range in the original brief. There is no automatic retry,
-scheduling route, writer, API fallback or release-judgment path.
+scheduling route, API fallback or release-judgment path.
+
+`--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
+assignment an implementation specialist for a role whose catalog entry permits
+writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob` and `Grep` in
+`acceptEdits` mode. `--restricted` confines those tools to the assigned checkout
+and refuses writes to Git and settings files without a person, so the agent cannot
+stage or commit. It has no shell. After a completed report, `factory_commit.py`
+stages, scans, runs hooks, signs and commits the work exactly as it does for any
+other writer, using the Codex CLI only as its local sandbox. Writer briefs carry
+the task goal instead of review evidence, and `--base` is refused.
 
 `claude_worker.py` preserves native HOME/config selection and checks the sanitized
 `native_claude.probe` before inference. Execution currently accepts the observed
@@ -668,6 +680,11 @@ Read-only tools plus internal StructuredOutput, empty strict MCP configuration,
 denied MCP tools, disabled slash commands/Chrome, dontAsk/no permission host and
 no session persistence are per-invocation controls. They do not establish general
 confinement or subscription eligibility.
+
+A writer's receipt is version 2: version 1's fields plus `writer: true`, the
+`sandbox` path and nullable `commit` evidence with the same shape and checks as a
+Codex writer's. Collection validates that commit, binds the result to the produced
+candidate and still refuses reviewer receipts presented as writers or the reverse.
 
 The worker owns private version-1 `<task>.<id>.claude.json` receipts and
 `<task>.<id>.claude.jsonl` events. Receipts require kind `claude-execution`, state
