@@ -141,33 +141,46 @@ def validate_auth(observation, binary, cwd):
             or observation.get("harness") != "claude" or observation.get("binary") != str(binary)
             or observation.get("cwd") != str(cwd)
             or observation.get("auth") != dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty")
-            or observation.get("cli_version") != "2.1.319 (Claude Code)"
+            or not supported_version(observation.get("cli_version"), suffix=" (Claude Code)")
             or any(type(observation.get(k)) not in (int, float) or not 0 <= observation[k] <= sys.float_info.max
                    for k in ("started_at", "observed_at", "probe_seconds"))
             or observation["observed_at"] < observation["started_at"]):
-        raise ClaudeProbeError("Restore observed Claude 2.1.319 native claude.ai/firstParty sign-in; requalify changed CLI behavior before execution")
+        raise ClaudeProbeError("Restore native claude.ai/firstParty sign-in on Claude Code 2.1.319 or newer before execution")
 
 
-# Tool lists exactly as Claude Code 2.1.319 reports them in its init event.
+# The oldest Claude Code whose event shapes were observed. Newer releases are accepted;
+# the strict decoder still refuses any shape it does not recognize.
+MINIMUM_VERSION = (2, 1, 319)
+# Tool lists exactly as Claude Code reports them in its init event.
 READ_TOOLS = ["Read", "StructuredOutput"]
-WRITE_TOOLS = ["Edit", "Glob", "Grep", "Read", "StructuredOutput", "Write"]
+WRITE_TOOLS = ["Bash", "Edit", "Glob", "Grep", "Read", "StructuredOutput", "Write"]
+# Writers' shell runs in Claude Code's sandbox: writes stay in the checkout and temporary
+# directories, network is refused, and commands cannot ask to leave the sandbox.
+WRITER_SETTINGS = '{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false}}'
+
+
+def supported_version(value, *, suffix=""):
+    if not isinstance(value, str) or not value.endswith(suffix):
+        return False
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", value[:len(value) - len(suffix)])
+    return match is not None and tuple(int(part) for part in match.groups()) >= MINIMUM_VERSION
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def write_command(model, effort, session, turns):
-    """An implementation specialist: edit tools confined to the checkout, no Git or shell."""
+    """An implementation specialist: edit tools and a sandboxed shell confined to the checkout."""
     from codex_worker import outcome_schema
     # --restricted confines file tools to the working directory and refuses writes
     # to Git and settings files without a person, so the factory alone commits.
-    return ["--safe-mode", "--restricted", "--print", "--tools", "Read", "Edit", "Write", "Glob", "Grep",
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+    return ["--safe-mode", "--restricted", "--print", "--tools", "Read", "Edit", "Write", "Glob", "Grep", "Bash",
+            "--settings", WRITER_SETTINGS, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--disallowedTools", "mcp__*", "--disable-slash-commands", "--no-chrome",
             "--permission-mode", "acceptEdits", "--permission-prompts", "none",
             "--model", model, "--effort", effort, "--session-id", session,
             "--max-turns", str(turns), "--no-session-persistence",
             "--system-prompt", "You are the assigned implementation specialist. Follow the supplied assignment. "
-            "Edit only inside this checkout. Do not delegate, stage, commit or change Git state; the factory "
-            "commits your finished work after a completed report.",
+            "Edit and test only inside this checkout. Do not delegate, stage, commit or change Git state; the "
+            "factory commits your finished work after a completed report.",
             "--json-schema", json.dumps(outcome_schema()), "--output-format", "stream-json",
             "--verbose", "--include-hook-events"]
 
@@ -214,7 +227,7 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
                     or event.get("mcp_servers") != []
                     or event.get("permissionMode") != ("acceptEdits" if writer else "dontAsk")
                     or event.get("slash_commands") != [] or event.get("apiKeySource") != "none"
-                    or event.get("claude_code_version") != "2.1.319"
+                    or not supported_version(event.get("claude_code_version"))
                     or event.get("additional_directories") != []):
                 refuse()
             initialized = True
@@ -238,6 +251,11 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
                         refuse()
                     if name in ("Edit", "Write") and (not isinstance(block.get("input"), dict)
                             or not inside(block["input"].get("file_path"))):
+                        refuse()
+                    if name == "Bash" and (not isinstance(block.get("input"), dict)
+                            or not isinstance(block["input"].get("command"), str)
+                            or block["input"].get("dangerouslyDisableSandbox") not in (None, False)
+                            or block["input"].get("run_in_background") not in (None, False)):
                         refuse()
                     if name in ("Glob", "Grep") and (not isinstance(block.get("input"), dict)
                             or ("path" in block["input"] and not searched(block["input"]["path"]))
@@ -285,6 +303,12 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
             # Inspection-only estimates; final actual usage remains authoritative.
             if any(type(event.get(key)) is not int or event[key] < 0
                    for key in ("estimated_tokens", "estimated_tokens_delta")):
+                refuse()
+        elif (kind == "system" and event.get("subtype") == "permission_denied"
+                and event.get("tool_name") == "SandboxNetworkAccess"):
+            # A writer's sandbox refused a network connection. It is not a tool call and
+            # never appears in the final permission_denials; the command itself saw the error.
+            if not writer or not isinstance(event.get("tool_use_id"), str) or not event["tool_use_id"]:
                 refuse()
         elif kind == "system" and event.get("subtype") == "permission_denied":
             identity, name = event.get("tool_use_id"), event.get("tool_name")

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.20.0 — Unpublished
+
+- Claude writers get a `Bash` tool in Claude Code's sandbox, so they can run tests: writes stay in the checkout and temporary directories, network is refused, and commands cannot leave the sandbox or run in the background. Sandbox network refusals decode as inspection-only events.
+- Accept Claude Code 2.1.319 or newer instead of exactly 2.1.319; the strict decoder still refuses unrecognized shapes.
+
 ## 0.19.0 — 2026-11-08
 
 First published ACR release; it includes the unpublished 0.16.0–0.18.1 changes below.
