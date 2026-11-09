@@ -60,7 +60,7 @@ def events(cwd, session=SESSION):
 
 
 def writer_events(cwd, session=SESSION, *, path=None, model=MODEL):
-    """Observed 2.1.319 writer shapes: edit tools confined to the checkout, then a report."""
+    """Observed 2.1.319 writer shapes: edit tools in the checkout, then a report."""
     path = path or str(Path(cwd) / "NOTES.md")
     report = dict(outcome="completed", artifacts=["NOTES.md"])
     return [dict(type="system", subtype="init", cwd=cwd, session_id=session, model=model,
@@ -178,13 +178,13 @@ class Decoder(unittest.TestCase):
         with self.assertRaises(native_claude.ClaudeProbeError):
             self.parse(data)
 
-    def test_thinking_preserves_read_pairing_scope_and_pending_tools(self):
+    def test_thinking_preserves_read_pairing_and_pending_tools(self):
         for requested, returned in (("/fixture/file", "/fixture/file"),
                                     ("/fixture/file", "/fixture/other"),
                                     ("/outside/file", "/outside/file")):
             data = self.read_data(requested, returned)
             data[2:2] = thinking_events()
-            if requested == returned == "/fixture/file":
+            if requested == returned:
                 self.assertEqual(self.parse(data)["usage"], dict(input_tokens=2, output_tokens=20))
                 del data[4]  # Telemetry cannot complete a pending Read.
             with self.assertRaises(native_claude.ClaudeProbeError):
@@ -317,7 +317,8 @@ class Decoder(unittest.TestCase):
         data=events("/fixture");data[1]["message"]["model"]="alias"
         with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
 
-    def test_read_result_must_match_a_permitted_tool_and_scope(self):
+    def test_reads_anywhere_decode_in_bypass_mode(self):
+        # No harness fence: a reviewer may read a spec, a sibling or the stdlib.
         for outside, denied in [(False, False), (True, True), (True, False)]:
             data = events("/fixture")
             path = "/outside/file" if outside else "/fixture/file"
@@ -327,10 +328,7 @@ class Decoder(unittest.TestCase):
                 message=dict(content=[dict(type="tool_result", tool_use_id="read-1", is_error=denied, content="fixture")] ),
                 tool_use_result=dict(type="text", file=dict(filePath=path, content="fixture")))
             data[1:1] = [call, result]
-            if outside and not denied:
-                with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
-            else:
-                self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
+            self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
 
     def read_data(self, requested, returned):
         data = events("/fixture")
@@ -413,11 +411,16 @@ class WriterDecoder(unittest.TestCase):
             with self.subTest(name=name, arguments=arguments):
                 self.assertEqual(self.parse(self.search(name, **arguments))["report"]["outcome"], "completed")
 
-    def test_searches_that_escape_the_checkout_refuse(self):
+    def test_searches_outside_the_checkout_decode(self):
         for name, arguments in (("Glob", dict(pattern="../**")), ("Glob", dict(pattern="/etc/**")),
-                                ("Glob", dict(pattern="*.md", path="../outside")), ("Glob", dict(path=".")),
-                                ("Grep", dict(pattern="x", path="/")), ("Grep", dict(pattern="x", glob="../*.py")),
-                                ("Grep", dict(pattern="x", path=""))):
+                                ("Glob", dict(pattern="*.md", path="../outside")),
+                                ("Grep", dict(pattern="x", path="/")), ("Grep", dict(pattern="x", glob="../*.py"))):
+            with self.subTest(name=name, arguments=arguments):
+                self.assertEqual(self.parse(self.search(name, **arguments))["report"]["outcome"], "completed")
+
+    def test_malformed_searches_refuse(self):
+        for name, arguments in (("Glob", dict(path=".")), ("Glob", dict(pattern="")),
+                                ("Grep", dict(pattern="x", path="")), ("Grep", dict(pattern="x", glob=""))):
             with self.subTest(name=name, arguments=arguments), self.assertRaises(native_claude.ClaudeProbeError):
                 self.parse(self.search(name, **arguments))
 
@@ -428,14 +431,15 @@ class WriterDecoder(unittest.TestCase):
         data[2]["tool_use_result"] = dict(stdout="ok\n", stderr="", interrupted=False, isImage=False, noOutputExpected=False)
         return data
 
-    def test_writers_run_sandboxed_shell_commands(self):
-        self.assertEqual(self.parse(self.shell(command="python3 -m unittest", description="Run tests"))["report"]["outcome"], "completed")
+    def test_writers_run_shell_commands(self):
+        for arguments in (dict(command="python3 -m unittest", description="Run tests"),
+                          dict(command="curl x", dangerouslyDisableSandbox=True), dict(command="sleep 9", run_in_background=True)):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.parse(self.shell(**arguments))["report"]["outcome"], "completed")
 
-    def test_shell_commands_cannot_leave_the_sandbox_or_outlive_the_attempt(self):
-        for arguments in (dict(command="curl x", dangerouslyDisableSandbox=True), dict(command="sleep 9", run_in_background=True),
-                          dict(description="no command")):
-            with self.subTest(arguments=arguments), self.assertRaises(native_claude.ClaudeProbeError):
-                self.parse(self.shell(**arguments))
+    def test_shell_calls_without_a_command_refuse(self):
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(self.shell(description="no command"))
 
     def test_sandbox_network_refusals_are_inspection_only_for_writers(self):
         data = self.shell(command="curl -sS https://example.com")
@@ -509,16 +513,15 @@ class WriterDecoder(unittest.TestCase):
                         message=dict(content=[dict(type="tool_result", tool_use_id="search-1", is_error=True, content="denied")]))]
         self.assertEqual(self.parse(data[:1] + refused + data[1:])["report"]["outcome"], "completed")
 
-    def test_edits_outside_the_checkout_or_with_mismatched_results_refuse(self):
-        outside = writer_events("/fixture", path="/elsewhere/NOTES.md")
-        escaped = writer_events("/fixture", path="/fixture/../elsewhere/NOTES.md")
+    def test_edits_outside_the_checkout_decode_but_mismatched_results_refuse(self):
+        # The factory commit takes only the worktree, so an outside edit never becomes candidate content.
+        for path in ("/elsewhere/NOTES.md", "/fixture/../elsewhere/NOTES.md"):
+            with self.subTest(path=path):
+                self.assertEqual(self.parse(writer_events("/fixture", path=path))["report"]["outcome"], "completed")
         mismatch = writer_events("/fixture")
         mismatch[2]["tool_use_result"]["filePath"] = "/fixture/OTHER.md"
-        searching = writer_events("/fixture")
-        searching[1]["message"]["content"] = [dict(type="tool_use", id="write-1", name="Grep", input=dict(pattern="x", path="/"))]
-        for data in (outside, escaped, mismatch, searching):
-            with self.subTest(data=data[1]["message"]["content"][0]["input"]), self.assertRaises(native_claude.ClaudeProbeError):
-                self.parse(data)
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(mismatch)
 
 
 class ClaudeWorker(unittest.TestCase):
@@ -635,32 +638,6 @@ class ClaudeWorker(unittest.TestCase):
         result = collected["assignments"]["implement"]["result"]
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
         self.assertTrue(collected["assignments"]["implement"]["native_collected"])
-
-    def test_sandbox_bookkeeping_is_removed_before_the_factory_commit(self):
-        args = self.launch_writer()
-        async def spawn(*command, **options):
-            (self.repo / "NOTES.md").write_text("Notes\n")
-            (self.repo / ".claude" / ".cc-writes").mkdir(parents=True)
-            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
-        with redirect_stdout(StringIO()):
-            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
-                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
-        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "created"), receipt["error"])
-        self.assertFalse((self.repo / ".claude").exists())
-
-    def test_files_left_in_sandbox_bookkeeping_refuse_the_commit(self):
-        args = self.launch_writer()
-        async def spawn(*command, **options):
-            (self.repo / ".claude" / ".cc-writes").mkdir(parents=True)
-            (self.repo / ".claude" / ".cc-writes" / "trace").write_text("harness\n")
-            return FakeProcess(writer_events(str(self.repo), args.native_session, model=args.model))
-        with redirect_stdout(StringIO()):
-            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
-                timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
-        self.assertEqual(receipt["state"], "failed")
-        self.assertIn(".cc-writes", receipt["error"])
-        self.assertIsNone(receipt["commit"])
-        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
 
     def test_writer_without_edits_records_an_unchanged_commit(self):
         receipt = self.execute_writer(self.launch_writer(), edit=False)

@@ -672,9 +672,9 @@ assignment an implementation specialist for a role whose catalog entry permits
 writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob`, `Grep` and `Bash`
 in `bypassPermissions` mode with no permission prompts, under the
 [execution policy](#execution-policy). A writer that changes Git HEAD fails the
-factory commit's HEAD check. Recorded Glob/Grep paths may be relative and
-resolve against the checkout; search paths and Glob patterns that escape it refuse
-collection. After a completed report, `factory_commit.py`
+factory commit's HEAD check. The decoder checks tool-call shapes, not paths:
+reads, searches and edits outside the checkout decode, as a shell command could
+reach them anyway, and the factory commit takes only the worktree. After a completed report, `factory_commit.py`
 stages, scans, runs hooks, signs and commits the work exactly as it does for any
 other writer, using the Codex CLI only as its local sandbox. Writer briefs carry
 the task goal instead of review evidence, and `--base` is refused.

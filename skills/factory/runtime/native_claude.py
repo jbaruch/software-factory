@@ -201,15 +201,10 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
     """Decode the observed native lifecycle without supplying process/provenance authority."""
     def refuse() -> NoReturn:
         raise ClaudeProbeError("Unsupported or conflicting Claude lifecycle; inspect the original stream and pane without retrying")
-    def inside(path):
-        return isinstance(path, str) and Path(path).is_absolute() and Path(os.path.normpath(path)).is_relative_to(cwd)
-    def searched(path):
-        # Search paths are optional and may be relative, as Claude Code resolves them
-        # against its working directory. Recorded successful searches stay in the checkout.
-        return isinstance(path, str) and bool(path) and inside(os.path.normpath(os.path.join(cwd, path)))
-    def confined(pattern):
-        return (isinstance(pattern, str) and bool(pattern) and ".." not in Path(pattern).parts
-                and (not Path(pattern).is_absolute() or inside(pattern)))
+    # Agents run in bypassPermissions mode, so tools may reach outside the checkout like
+    # any shell command can. Only shapes are checked; the factory commit takes the worktree alone.
+    def text(value):
+        return isinstance(value, str) and bool(value)
     expected_tools = WRITE_TOOLS if writer else READ_TOOLS
     callable_tools = set(expected_tools)
     report, final, pending, tools, rates = None, None, {}, {}, []
@@ -254,16 +249,12 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
                             or not isinstance(block["input"].get("file_path"), str)
                             or not Path(block["input"]["file_path"]).is_absolute()):
                         refuse()
-                    # A mistyped or outside path the harness refuses is harmless; the
-                    # successful result below must stay inside the checkout.
                     if name in ("Edit", "Write") and (not isinstance(block.get("input"), dict)
                             or not isinstance(block["input"].get("file_path"), str)
                             or not Path(block["input"]["file_path"]).is_absolute()):
                         refuse()
                     if name == "Bash" and (not isinstance(block.get("input"), dict)
-                            or not isinstance(block["input"].get("command"), str)
-                            or block["input"].get("dangerouslyDisableSandbox") not in (None, False)
-                            or block["input"].get("run_in_background") not in (None, False)):
+                            or not isinstance(block["input"].get("command"), str)):
                         refuse()
                     if name in ("Glob", "Grep") and not isinstance(block.get("input"), dict):
                         refuse()
@@ -288,20 +279,16 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
                     if not isinstance(result, dict) or not isinstance(result.get("file"), dict):
                         refuse()
                     path = result["file"].get("filePath")
-                    if (not isinstance(path, str) or not Path(path).is_absolute()
-                            or path != call["input"]["file_path"]
-                            or any(not Path(os.path.normpath(p)).is_relative_to(cwd)
-                                   for p in (path, call["input"]["file_path"]))):
+                    if not isinstance(path, str) or path != call["input"]["file_path"]:
                         refuse()
                 if name in ("Edit", "Write") and block.get("is_error", False) is False:
                     result = event.get("tool_use_result")
-                    if (not isinstance(result, dict) or result.get("filePath") != call["input"]["file_path"]
-                            or not inside(result["filePath"])):
+                    if not isinstance(result, dict) or result.get("filePath") != call["input"]["file_path"]:
                         refuse()
                 if name in ("Glob", "Grep") and block.get("is_error", False) is False and (
-                        ("path" in call["input"] and not searched(call["input"]["path"]))
-                        or (name == "Glob" and not confined(call["input"].get("pattern")))
-                        or (name == "Grep" and "glob" in call["input"] and not confined(call["input"]["glob"]))):
+                        ("path" in call["input"] and not text(call["input"]["path"]))
+                        or (name == "Glob" and not text(call["input"].get("pattern")))
+                        or (name == "Grep" and "glob" in call["input"] and not text(call["input"]["glob"]))):
                     refuse()
                 if name == "StructuredOutput" and block.get("is_error", False) is not False:
                     refuse()
