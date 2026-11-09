@@ -28,6 +28,9 @@ class ExecutionError(Exception):
     pass
 
 
+CLOSED_STEPS = ("DONE", "ERROR")  # States that end a step; ERROR only ends a tool step.
+
+
 def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
     """Decode original 1.5.3 JSON lines only; callers retain provenance and exit.
 
@@ -69,6 +72,12 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
         if duration is not None and (type(duration) not in (int, float)
                 or not 0 <= duration <= sys.float_info.max or not math.isfinite(duration)):
             refuse(f"has malformed {where} duration_seconds")
+
+    def tool_error(payload):
+        info = payload.get("tool_info")
+        error = info.get("error") if isinstance(info, dict) else None
+        return (payload.get("step_type") == "tool" and isinstance(error, dict)
+                and all(isinstance(error.get(key), str) and error[key].strip() for key in ("type", "message")))
 
     conversation_id, final = None, None
     step_index, step_state, step_type, user_turns = -1, None, None, 0
@@ -112,14 +121,17 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
         observations(payload, kind)
         if kind == "step_update":
             index, state, category = payload.get("step_index"), payload.get("state"), payload.get("step_type")
-            if (type(index) is not int or index < 0 or state not in ("ACTIVE", "DONE")
-                    or category not in ("user_input", "agent_response", "tool", "finish")):
+            # A tool step can end in ERROR (the agent saw the failure and carried on), and agy
+            # 1.5.3 records empty system_message steps. Neither carries a report or authority.
+            if (type(index) is not int or index < 0 or state not in ("ACTIVE", "DONE", "ERROR")
+                    or category not in ("user_input", "agent_response", "tool", "finish", "system_message")
+                    or state == "ERROR" and not tool_error(payload)):
                 refuse(f"has malformed step_update at line {line_number}")
             if index == step_index:
-                if (step_state != "ACTIVE" or state != "DONE"
+                if (step_state != "ACTIVE" or state not in CLOSED_STEPS
                         or category != step_type and (step_type, category) != ("tool", "finish")):
                     refuse(f"has duplicate or out-of-order step_update at line {line_number}")
-            elif index != step_index + 1 or step_index >= 0 and step_state != "DONE" or step_type == "finish":
+            elif index != step_index + 1 or step_index >= 0 and step_state not in CLOSED_STEPS or step_type == "finish":
                 refuse(f"has out-of-order step_update at line {line_number}")
             if category == "user_input":
                 if index != 0 or state != "DONE" or user_turns:
