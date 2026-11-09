@@ -37,73 +37,11 @@ rewriting occurs. Unknown versions, unknown fields, duplicate JSON keys,
 non-finite values and invalid job graphs refuse before execution. Keep plans
 private when goals or paths are sensitive; never include credentials.
 
-Every job supplies all fields shown here. Replace the candidate and model with
-the actual selected commit and discovered eligible model ID:
-
-```json
-{
-  "schema_version": 1,
-  "limits": {
-    "workers": 2,
-    "tasks": 4,
-    "reserve_workers": 1,
-    "minimum_remaining_percent": 15
-  },
-  "jobs": [
-    {
-      "task": "example",
-      "id": "qa",
-      "role": "qa",
-      "goal": "Verify the selected candidate against the admitted acceptance references",
-      "cwd": "/absolute/path/to/clean/worktree",
-      "candidate": "<full-commit-sha>",
-      "requirements": "requirements-v1",
-      "model": "<discovered-eligible-model-id>",
-      "effort": "high",
-      "seconds": 180,
-      "purpose": "work",
-      "write": false,
-      "commit_message": null,
-      "after": []
-    }
-  ]
-}
-```
-
-Each job may name its `harness`: `codex` (the default when omitted), `claude`,
-`grok` or `antigravity`. Model and effort belong to the job; Claude and
-Antigravity jobs take an effort from `low` to `max` (an Antigravity job may set
-`effort` to null for a model that refuses `--effort`, such as
-`claude-opus-4-6-thinking`), and Grok jobs take one of the
-model's discovered efforts. `--codex` is always required because it also
-sandboxes every writer's factory commit; `--claude`, `--grok` and `--antigravity`
-are required when the plan has jobs for them. The Codex quota gate applies only to
-Codex jobs; the runner reads no quota metadata for the others, so it does not gate
-their jobs on capacity. Collection and `--from-writer` evidence follow
-each assignment's harness.
-
-Two more fields are optional. `turns` sets a Claude or Grok job's turn budget,
-from 1 to 1000; without it the job gets the worker's default of 30, so set it for
-long writers. Codex and Antigravity jobs refuse it. `base` is the full commit ID a
-Claude, Grok or Antigravity `code-review` job reviews from; those code reviews
-require it, writers refuse it and Codex jobs take none. Invalid values refuse
-before execution, like any other plan error.
-
-Set `write` to true and supply an explicit `commit_message` to authorize the
-factory-owned local commit after a successful writer report. This uses the
-[approved writer contract](native-providers.md#explicit-codex-assignments),
-including configured Git helpers. Read-only jobs use `commit_message: null`.
-Changing the message changes the immutable assignment request.
-After a writer creates a commit, explicitly select that produced candidate and
-submit a verification phase, or use the opt-in handoff below. The original writer
-plan then reports stale.
-
-Jobs have distinct `(task, id)` pairs. `after` names earlier jobs in this plan or
-existing assignments in the same task. A dependency needs a successful current
-report and an observed successful process exit. Findings, failures, stale reports
-and changed requests do not advance it. One plan uses one candidate/requirements
-pair per task. A later phase can depend on an existing implementation's produced
-commit after explicit input selection, without relabeling the original request.
+The job fields, an example plan and the per-harness rules ship with the skill in
+[the ready-plan reference](../skills/factory/references/ready-plan.md), so an installed
+coordinator can read them. After a writer creates a commit, explicitly select that
+produced candidate and submit a verification phase, or use the opt-in handoff below.
+The original writer plan then reports stale.
 
 ## Opt-in writer candidate handoff
 

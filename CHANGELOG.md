@@ -1,5 +1,11 @@
 # Changelog
 
+## Next
+
+- The package ships an always-on rule, `factory-process`. In a project that installs the factory, implementation, review and delivery go through the `factory` skill's coordinator step, never by hand where a factory step exists; specialists the factory launches ignore it. A coordinator taking over a backlog had matched the single-writer recipe and skipped verification and integration (#46).
+- The `factory` skill's Step 1 is the concrete coordinator procedure, commands in order: admit, inputs, provision, ready plan, `ready_runner.py`, `--from-writer` verification, corrections, delivery, and what to do when a step cannot run. The single-writer recipe is now a single launch that never completes a task. The ready-plan schema and the delivery prerequisites ship with the skill as references (#46).
+- The skill's commands use the installed skill directory. They pointed at `skills/factory/runtime/`, which exists only in the factory's own checkout, not in a project that installs it.
+
 ## 0.25.0 — 2026-11-09
 
 - Ready-plan jobs take optional `turns` (Claude and Grok, 1 to 1000) and `base` (the review base for Claude, Grok and Antigravity code reviews). A plan can now run a long writer and a code review instead of freezing 30 turns and having no way to express a review range; invalid values refuse before execution (#47).

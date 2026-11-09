@@ -1,7 +1,8 @@
 # Exact-candidate integration
 
 PR preparation, issue declarations and feedback correction stay with the installed
-release skill. This adapter implements the selected repository's `checks.yml`
+release skill. The coordinator's delivery steps and prerequisites ship with the skill
+in [the delivery reference](../skills/factory/references/delivery.md). This adapter implements the selected repository's `checks.yml`
 contract with no publication channel. It does not provision worktrees, publish,
 dismiss reviews, close issues, comment, delete branches or perform cleanup.
 

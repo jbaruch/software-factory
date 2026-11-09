@@ -24,7 +24,7 @@ One repository contains the application and its ACR package. The application shi
 
 The application will own scheduling, provider adapters, Rex integration, durable task state, measurement and the dashboard. Worker hooks will emit bounded lifecycle events after their native harness semantics are verified. Native Claude Code and Codex ACR realization does not establish Grok or Antigravity compatibility. Those harnesses need explicit instruction delivery and lifecycle conformance tests. ACR is not the process supervisor or model broker.
 
-The plugin starts without global always-loaded rules and without unimplemented hook stubs. Skills describe a discipline's work. Coordination algorithms live in code and versioned Jev questions, not a growing prose choreography interpreted on every turn.
+The plugin ships one always-on rule, `rules/factory-process.md`, and no unimplemented hook stubs. It started with no global rules. That failed on 2026-11-09 (#46): asked to take over a nanoclaw backlog, a coordinator matched the request to the single-writer recipe, never opened the ready runner or integration, and hand-committed, hand-rebased and hand-opened PRs with no factory verification. The rule tells every agent in an installing project that the factory is the delivery process and points it at the skill's coordinator step; specialists the factory launches ignore it. Skills describe a discipline's work. Coordination algorithms live in code and versioned Jev questions, not a growing prose choreography interpreted on every turn.
 
 ## Admission and normal delivery
 
