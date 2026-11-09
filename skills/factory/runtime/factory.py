@@ -1415,15 +1415,17 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         else:
             instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
                 requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
-    if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
+    if not existing and native_harness(command) in ("grok", "antigravity"):
+        import antigravity_worker
         import grok_worker
         import review_evidence
+        name = "Grok" if native_harness(command) == "grok" else "Antigravity"
         try:
-            native_args = grok_worker.parser().parse_args(command[4:])
+            native_args = (grok_worker if name == "Grok" else antigravity_worker).parser().parse_args(command[4:])
         except SystemExit:
-            raise FactoryError("Grok command is damaged; restore its arguments before creating an assignment") from None
+            raise FactoryError(f"{name} command is damaged; restore its arguments before creating an assignment") from None
         if record["admission"] is None or not valid_inputs(record["inputs"]) or native_args.role != role:
-            raise FactoryError("Admit the Grok task and select matching role/revision inputs before launching")
+            raise FactoryError(f"Admit the {name} task and select matching role/revision inputs before launching")
         check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
                        expected_identity=record["admission"]["repository_identity"],
                        expected_git_dir=native_args.worktree_git_dir)
@@ -2237,7 +2239,138 @@ def collect_grok(path, assignment_id, rex, record, assignment):
     return record
 
 
-NATIVE_HARNESSES = ("codex", "claude", "grok")
+def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, role, seconds=600, base=None,
+                        write=False, commit_message=None, sandbox=None):
+    """Freeze one explicit Antigravity effect, reviewer or writer; the CLI assigns its conversation ID."""
+    import native_antigravity
+    if (not isinstance(model, str) or not model.strip() or effort not in native_antigravity.EFFORTS
+            or not Path(agy).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS):
+        raise FactoryError("Supply an absolute native Antigravity executable, a discovered model, a supported effort and bounded seconds")
+    writer = writer_arguments("Antigravity", role, write, commit_message, sandbox, base)
+    worker = [sys.executable, "-E", "-s", str(ROOT / "antigravity_worker.py")]
+    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    if existing is None or base is not None:
+        from review_evidence import valid_base
+        valid_base(base, role)
+    binary = Path(agy).resolve()
+    if existing is None:
+        try:
+            binary = Path(agy).resolve(strict=True)
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                raise FactoryError("Supply an executable native Antigravity file before creating an assignment")
+        except OSError:
+            raise FactoryError("Restore the selected native Antigravity installation before creating an assignment") from None
+        gitdir = str(git_dir(cwd))
+        if writer:
+            check_commit_tool("Antigravity", writer[-1])
+    else:
+        saved = existing["request"]["command"]
+        if saved[:4] != worker:
+            raise FactoryError("Existing assignment uses another command; inspect its original effect without relaunching")
+        try:
+            gitdir = saved[saved.index("--worktree-git-dir") + 1]
+            if not Path(gitdir).is_absolute():
+                raise ValueError("Invalid frozen binding")
+        except (ValueError, IndexError):
+            raise FactoryError("Saved Antigravity binding is damaged; restore the original command without relaunching") from None
+    prefix = path.parent / (task + "." + assignment_id + ".antigravity")
+    return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id,
+        "--agy", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds), "--role", role,
+        "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}", "--brief-sha256", "{brief_sha256}",
+        "--candidate", "{candidate}", "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
+        "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
+
+
+def antigravity_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+    """Strict original reviewer or writer evidence; history is granted only by actual collection."""
+    import antigravity_worker
+    import native_antigravity
+    from codex_worker import outcome_schema
+    from review_evidence import valid_base
+    command, request = assignment["request"]["command"], assignment["request"]
+    if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "antigravity_worker.py")]:
+        raise FactoryError("Assignment is not an Antigravity worker; use its original provider's result adapter")
+    try:
+        args = antigravity_worker.parser().parse_args(command[4:])
+    except SystemExit:
+        raise FactoryError("Saved Antigravity command is damaged; restore its original arguments before collection") from None
+    valid_base(args.base, args.role)
+    if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
+        raise FactoryError("Antigravity evidence needs strict original collection, never manual result registration")
+    if collected and current and not result_current(record, assignment["result"]):
+        raise FactoryError("Antigravity result is stale; obtain a judgment of current inputs")
+    if observe is None and not collected:
+        raise FactoryError("First Antigravity collection requires original successful Rex exit")
+    if observe is not None and observe()["state"] not in {"exited", "lost"}:
+        raise FactoryError("Antigravity worker has not exited successfully; inspect its original status and capture")
+    try:
+        receipt = decode_json(read_record(args.receipt, private=True))
+    except (OSError, ValueError, UnicodeError):
+        raise FactoryError("Cannot read the original Antigravity receipt; inspect or restore it without relaunching") from None
+    keys = ("report", "conversation_id", "usage", "duration_seconds", "turns")
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] != (2 if args.write else 1) or receipt.get("kind") != "antigravity-execution"
+            or (args.write and (receipt.get("writer") is not True or args.commit_message is None
+                                or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
+                                or "commit" not in receipt))
+            or (not args.write and "writer" in receipt)
+            or receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or any(type(receipt.get(key)) not in (int, float) or not 0 <= receipt[key] <= sys.float_info.max
+                   for key in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"] or any(key not in receipt for key in keys)
+            or args.job != record["task"] + "/" + assignment_id or receipt.get("job") != args.job
+            or not valid_inputs(receipt.get("inputs")) or receipt["inputs"] != request.get("inputs")
+            or args.candidate != "{candidate}" or args.requirements != "{requirements}"
+            or (not args.write and receipt.get("candidate") != request["inputs"]["candidate"])
+            or receipt.get("repository_identity") != record["admission"]["repository_identity"]
+            or receipt.get("brief_sha256") != request["instructions_sha256"]
+            or args.role != request["role"] or receipt.get("role") != args.role
+            or receipt.get("cwd") != request["cwd"] or not args.worktree_git_dir.is_absolute()
+            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or not args.agy.is_absolute() or receipt.get("binary") != str(args.agy)
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or args.effort not in native_antigravity.EFFORTS
+            or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
+            or not args.events.is_absolute() or receipt.get("events") != str(args.events)):
+        raise FactoryError("Antigravity receipt differs from its frozen completed assignment; inspect the original artifacts")
+    try:
+        native_antigravity.validate_usage(receipt.get("discovery"), args.agy)
+        native = native_antigravity.parse_execution(antigravity_worker.read_events(args.events),
+            expected_model=args.model, expected_cwd=request["cwd"], expected_schema=outcome_schema())
+    except (native_antigravity.UsageError, native_antigravity.ExecutionError) as exc:
+        raise FactoryError(str(exc)) from None
+    if json.dumps({key: receipt[key] for key in keys}, sort_keys=True) != json.dumps(
+            {key: native[key] for key in keys}, sort_keys=True):
+        raise FactoryError("Antigravity receipt differs from its original events; reconcile the retained attempt before recording a result")
+    if not collected and (repository_identity(request["cwd"]) != receipt["repository_identity"]
+                          or git_dir(request["cwd"]) != args.worktree_git_dir):
+        raise FactoryError("Antigravity worktree binding changed; restore its original repository and Git directory before collection")
+    if args.write:
+        from factory_commit import check_commit_receipt
+        args.cwd = Path(request["cwd"])
+        check_commit_receipt(receipt, args, record["admission"]["repository"], historical=collected)
+    expected = dict(inputs=receipt["inputs"], candidate=receipt["candidate"], outcome=native["report"]["outcome"],
+                    artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    if collected and assignment["result"] != expected:
+        raise FactoryError("Collected Antigravity result differs from the complete original report")
+    return args, receipt, native
+
+
+def collect_antigravity(path, assignment_id, rex, record, assignment):
+    """Collect the original Antigravity report; this never accepts a task."""
+    args, receipt, native = antigravity_evidence(assignment_id, record, assignment,
+        collected=assignment.get("native_collected") is True, current=False,
+        observe=lambda: status(rex, record, assignment))
+    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
+        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
+        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    record["assignments"][assignment_id]["native_collected"] = True
+    save(path, record)
+    return record
+
+
+NATIVE_HARNESSES = ("codex", "claude", "grok", "antigravity")
 
 
 def native_harness(command):
@@ -2251,11 +2384,11 @@ def native_harness(command):
 
 def evidence_reader(harness):
     """Each harness's strict original-evidence reader, resolved at call time."""
-    return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence)[harness]
+    return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence, antigravity=antigravity_evidence)[harness]
 
 
 def collector(harness):
-    return dict(codex=collect_codex, claude=collect_claude, grok=collect_grok)[harness]
+    return dict(codex=collect_codex, claude=collect_claude, grok=collect_grok, antigravity=collect_antigravity)[harness]
 
 
 def tidy_tasks(directory, task=None, binary=None, server=None):
@@ -2281,7 +2414,7 @@ def main(argv=None):
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
     parser.add_argument("--server", help="Explicit local unix:// Rex endpoint; pinned per task")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("start", "codex-start", "grok-start", "claude-start"):
+    for action in ("start", "codex-start", "grok-start", "claude-start", "antigravity-start"):
         start = sub.add_parser(action, help="Launch or reconnect to an explicit assignment")
         start.add_argument("--task", required=True)
         start.add_argument("--id", required=True, help="Stable assignment ID; new attempt needs a new ID")
@@ -2308,11 +2441,13 @@ def main(argv=None):
             start.add_argument("--gh", type=Path)
             start.add_argument("--release-scripts", type=Path)
         else:
-            start.add_argument("--claude" if action == "claude-start" else "--grok", required=True)
+            start.add_argument(dict(zip(("claude-start", "grok-start", "antigravity-start"),
+                                        ("--claude", "--grok", "--agy")))[action], required=True)
             start.add_argument("--model", required=True)
             start.add_argument("--effort", required=True)
             start.add_argument("--seconds", type=int, default=600)
-            start.add_argument("--turns", type=int, default=30)
+            if action != "antigravity-start":  # Antigravity has no turn bound.
+                start.add_argument("--turns", type=int, default=30)
             start.add_argument("--base", help="Full base commit ID; required for code-review")
             start.add_argument("--write", action="store_true", help="Implementation specialist with edit tools")
             start.add_argument("--commit-message", help="With --write, the factory commits a completed result")
@@ -2367,7 +2502,7 @@ def main(argv=None):
         if action in {"pause", "resume"}:
             command.add_argument("--request-id", help="Stable ID makes a repeated control request idempotent")
             command.add_argument("--expected-revision", type=int, help="Apply only to this control-history revision")
-    for action in ("status", "capture", "codex-collect", "grok-collect", "claude-collect"):
+    for action in ("status", "capture", "codex-collect", "grok-collect", "claude-collect", "antigravity-collect"):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
@@ -2392,6 +2527,8 @@ def main(argv=None):
                 or not Path(args.grok).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or not 1 <= args.turns <= 1000):
             raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
+        if args.action == "antigravity-start" and (not Path(args.agy).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
+            raise FactoryError("Supply an absolute native Antigravity path and bounded seconds before launch")
         if args.action == "tidy":
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
             print(json.dumps(report, indent=2))
@@ -2444,7 +2581,7 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
             if prepared is not None and load_task(path) != prepared:
                 raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance", "provision"}:
@@ -2477,7 +2614,7 @@ def main(argv=None):
                 record = abandon_launch(path, connect(record, args.rex, args.server), assignment_id=args.id, reason=args.reason)
                 print(json.dumps(task_view(record), indent=2))
                 return 0
-            if args.action in {"start", "codex-start", "grok-start", "claude-start"}:
+            if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start"}:
                 if args.action == "codex-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Codex assignment")
@@ -2499,6 +2636,13 @@ def main(argv=None):
                     argv = grok_command(path, task=args.task, assignment_id=args.id, grok=args.grok,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
                         seconds=args.seconds, turns=args.turns, base=args.base,
+                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
+                elif args.action == "antigravity-start":
+                    if load_task(path)["admission"] is None:
+                        raise FactoryError("Admit a task before starting a native Antigravity assignment")
+                    argv = antigravity_command(path, task=args.task, assignment_id=args.id, agy=args.agy,
+                        model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
+                        seconds=args.seconds, base=args.base,
                         write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -2522,10 +2666,8 @@ def main(argv=None):
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
                     save(path, record)
-            if args.action in {"codex-collect", "claude-collect", "grok-collect"}:
-                collect = (collect_codex if args.action == "codex-collect"
-                           else collect_claude if args.action == "claude-collect" else collect_grok)
-                record = collect(path, args.id, rex, record, assignment)
+            if args.action.endswith("-collect"):
+                record = collector(args.action.removesuffix("-collect"))(path, args.id, rex, record, assignment)
                 try:
                     tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
                 except (FactoryError, OSError) as exc:

@@ -67,8 +67,12 @@ def validate_plan(value):
             import native_claude
             if job["effort"] not in native_claude.EFFORTS or (job["write"] and job["commit_message"] is None):
                 raise factory.FactoryError("Claude jobs need a supported effort, and Claude writers need a commit message")
-        if job.get("harness") == "grok" and job["write"] and job["commit_message"] is None:
-            raise factory.FactoryError("Grok writers need a commit message")
+        if job.get("harness") == "antigravity":
+            import native_antigravity
+            if job["effort"] not in native_antigravity.EFFORTS:
+                raise factory.FactoryError("Antigravity jobs need a supported effort")
+        if job.get("harness") in ("grok", "antigravity") and job["write"] and job["commit_message"] is None:
+            raise factory.FactoryError("Grok and Antigravity writers need a commit message")
         after = job["after"]
         if (not isinstance(after, list) or any(not isinstance(item, str) or not re.fullmatch(SLUG, item) for item in after)
                 or len(set(after)) != len(after)
@@ -131,7 +135,8 @@ def capacity_reason(snapshot, binary, now, minimum, job):
 
 
 class Runner:
-    def __init__(self, directory, plan, *, codex, rex, server, claude=None, grok=None, probe=codex_capacity.snapshot,
+    def __init__(self, directory, plan, *, codex, rex, server, claude=None, grok=None, antigravity=None,
+                 probe=codex_capacity.snapshot,
                  clock=time.time, from_writer=None):
         self.plan = validate_plan(plan)
         self.supplied_plan, self.from_writer = self.plan, from_writer
@@ -146,12 +151,15 @@ class Runner:
         self.directory, self.binary = Path(directory).resolve(), Path(codex).resolve()
         self.claude = Path(claude).resolve() if claude else None
         self.grok = Path(grok).resolve() if grok else None
+        self.antigravity = Path(antigravity).resolve() if antigravity else None
         if not Path(codex).is_absolute() or not Path(rex).is_absolute() or not server.startswith("unix://"):
             raise factory.FactoryError("Supply absolute Codex/Rex paths and an explicit unix:// Rex endpoint")
         if any(job["harness"] == "claude" for job in self.plan["jobs"]) and (claude is None or not Path(claude).is_absolute()):
             raise factory.FactoryError("Supply the absolute --claude executable for the plan's Claude jobs")
         if any(job["harness"] == "grok" for job in self.plan["jobs"]) and (grok is None or not Path(grok).is_absolute()):
             raise factory.FactoryError("Supply the absolute --grok executable for the plan's Grok jobs")
+        if any(job["harness"] == "antigravity" for job in self.plan["jobs"]) and (antigravity is None or not Path(antigravity).is_absolute()):
+            raise factory.FactoryError("Supply the absolute --antigravity executable for the plan's Antigravity jobs")
         self.rex, self.server, self.probe, self.clock = str(rex), server, probe, clock
         self.capacity, self.capacity_error, self.probed_at = None, None, None
         policy = factory.decode_json((factory.ROOT / "config/coordination.json").read_text())
@@ -171,6 +179,10 @@ class Runner:
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
         if job["harness"] == "grok":
             return factory.grok_command(path, task=job["task"], assignment_id=job["id"], grok=str(self.grok),
+                model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
+                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
+        if job["harness"] == "antigravity":
+            return factory.antigravity_command(path, task=job["task"], assignment_id=job["id"], agy=str(self.antigravity),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
         return factory.codex_command(path, task=job["task"], assignment_id=job["id"], codex=str(self.binary),
@@ -450,6 +462,7 @@ def main(argv=None):
     parser.add_argument("--codex", required=True, help="Native Codex CLI; also sandboxes every writer's factory commit")
     parser.add_argument("--claude", help="Native Claude Code CLI; required when the plan has Claude jobs")
     parser.add_argument("--grok", help="Native Grok CLI; required when the plan has Grok jobs")
+    parser.add_argument("--antigravity", help="Native Antigravity CLI (agy); required when the plan has Antigravity jobs")
     parser.add_argument("--rex", required=True)
     parser.add_argument("--server", required=True)
     parser.add_argument("--seconds", type=int, default=600)
@@ -459,7 +472,7 @@ def main(argv=None):
         if not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS:
             raise factory.FactoryError("Use an orchestration budget between 1 and 86400 seconds")
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
-        runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, rex=args.rex, server=args.server,
+        runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, antigravity=args.antigravity, rex=args.rex, server=args.server,
                         from_writer=args.from_writer)
         result = run(runner, seconds=args.seconds, once=args.once)
         print(json.dumps(result, indent=2, allow_nan=False))

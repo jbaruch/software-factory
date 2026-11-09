@@ -64,6 +64,12 @@ def collected_native(assignment_id, record, assignment, *, current=True):
         raise factory.FactoryError("Cannot validate original native integration evidence: " + str(exc)) from None
 
 
+def native_context(harness, receipt):
+    """The independent native identity a receipt carries."""
+    key = dict(codex="thread_id", antigravity="conversation_id").get(harness, "native_session")
+    return receipt.get(key) if isinstance(receipt, dict) else None
+
+
 def contributor_context(key, record, assignment):
     # A failed writer remains a contributor; never require or invent a success.
     import claude_worker
@@ -71,6 +77,8 @@ def contributor_context(key, record, assignment):
     import grok_worker
     command = assignment["request"]["command"]
     harness = factory.native_harness(command)
+    if harness == "antigravity":
+        return antigravity_contributor(key, record, assignment)
     try:
         if harness in ("claude", "grok"):
             args = (claude_worker if harness == "claude" else grok_worker).parser().parse_args(command[4:])
@@ -94,6 +102,30 @@ def contributor_context(key, record, assignment):
         return native["thread_id"]
     _, receipt, _ = collected_native(key, record, assignment, current=False)
     return receipt["thread_id"]
+
+
+def antigravity_contributor(key, record, assignment):
+    """Antigravity names its conversation at init, so a writer that failed before init has none."""
+    import antigravity_worker
+    import native_antigravity
+    try:
+        args = antigravity_worker.parser().parse_args(assignment["request"]["command"][4:])
+        receipt = factory.decode_json(factory.read_record(args.receipt, private=True))
+    except (SystemExit, OSError, ValueError):
+        raise factory.FactoryError("Missing original contributor execution metadata") from None
+    if not isinstance(receipt, dict):
+        raise factory.FactoryError("Missing original contributor execution metadata")
+    if receipt.get("state") != "failed":
+        _, receipt, _ = collected_native(key, record, assignment, current=False)
+        return receipt["conversation_id"]
+    try:
+        first = factory.decode_json(antigravity_worker.read_events(args.events)[0]) if args.events.exists() else None
+    except (IndexError, ValueError, native_antigravity.ExecutionError):
+        first = None  # A damaged failed stream names no conversation either.
+    if isinstance(first, dict) and first.get("event") == "init" and isinstance(first.get("conversation_id"), str):
+        return first["conversation_id"]
+    # No conversation started, so no reviewer can share it; the assignment key stands in.
+    return "antigravity-unstarted:" + record["task"] + "/" + key
 
 
 def approvals(record, review, required):
@@ -121,7 +153,7 @@ def approvals(record, review, required):
                 or (key == review and (args.role != "release" or not hasattr(args, "codex")))
                 or (not hasattr(args, "codex") and args.role not in {"qa", "security", "code-review"})):
             raise factory.FactoryError("Selected relevant native judgments must be read-only approved reports, including release")
-        context = receipt.get("thread_id") if hasattr(args, "codex") else receipt.get("native_session")
+        context = native_context(factory.native_harness(assignment["request"]["command"]), receipt)
         if not isinstance(context, str) or not context or context in contributors or context in contexts:
             raise factory.FactoryError("Selected approvals need distinct original native contexts independent of contributors")
         contexts.add(context)
