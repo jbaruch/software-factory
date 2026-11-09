@@ -80,6 +80,13 @@ Codex jobs; the runner reads no quota metadata for the others, so it does not ga
 their jobs on capacity. Collection and `--from-writer` evidence follow
 each assignment's harness.
 
+Two more fields are optional. `turns` sets a Claude or Grok job's turn budget,
+from 1 to 1000; without it the job gets the worker's default of 30, so set it for
+long writers. Codex and Antigravity jobs refuse it. `base` is the full commit ID a
+Claude, Grok or Antigravity `code-review` job reviews from; those code reviews
+require it, writers refuse it and Codex jobs take none. Invalid values refuse
+before execution, like any other plan error.
+
 Set `write` to true and supply an explicit `commit_message` to authorize the
 factory-owned local commit after a successful writer report. This uses the
 [approved writer contract](native-providers.md#explicit-codex-assignments),
@@ -108,11 +115,11 @@ The plan must contain jobs for exactly one admitted task. Every job must be
 read-only `qa`, `code-review` or `test-automation`, use an ID distinct from the
 writer, and name that existing writer explicitly in `after`. Additional explicit
 dependencies retain their normal gates. The source must already have a collected
-`completed` native Codex result and an explicit factory commit. The runner
+`completed` native result, on any harness, and an explicit factory commit. The runner
 revalidates its original receipt/events, commit and repository/worktree binding,
 observes its successful terminal Rex process, and compares the saved result with
 that evidence. A manually recorded completion alone is insufficient. Collect the
-writer through the existing runner or `factory.py codex-collect` first.
+writer through the existing runner or its harness's `factory.py` collect command first.
 
 Under the instance execution lock and task lock, the runner selects the exact
 produced commit with the original requirements revision through the task owner.

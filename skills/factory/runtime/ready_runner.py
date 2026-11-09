@@ -22,6 +22,8 @@ JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
 HARNESSES = factory.NATIVE_HARNESSES  # A job's optional "harness"; Codex when omitted.
+# Optional per job: the harness, a turn budget (Claude/Grok) and a review base (not Codex).
+OPTIONAL_FIELDS = {"harness", "turns", "base"}
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
 # Process states that will never change again; `lost` is terminal without an exit status.
 TERMINAL = {"exited", "failed", "lost"}
@@ -48,9 +50,10 @@ def validate_plan(value):
                and isinstance(row.get("task"), str) and isinstance(row.get("id"), str)}
     seen, inputs = set(), {}
     for job in jobs:
-        if not isinstance(job, dict) or set(job) - {"harness"} != JOB_FIELDS or job.get("harness", "codex") not in HARNESSES:
-            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields and an optional harness: "
-                                       + ", ".join(HARNESSES))
+        if (not isinstance(job, dict) or set(job) - OPTIONAL_FIELDS != JOB_FIELDS
+                or job.get("harness", "codex") not in HARNESSES):
+            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields, optional turns "
+                                       "and base, and an optional harness: " + ", ".join(HARNESSES))
         if any(not isinstance(job[k], str) or not job[k].strip() for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"}):
             raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
         key = (job["task"], job["id"])
@@ -74,6 +77,17 @@ def validate_plan(value):
                 raise factory.FactoryError("Antigravity jobs need a supported effort")
         if job.get("harness") in ("grok", "antigravity") and job["write"] and job["commit_message"] is None:
             raise factory.FactoryError("Grok and Antigravity writers need a commit message")
+        if "turns" in job and (job.get("harness") not in ("claude", "grok")
+                               or type(job["turns"]) is not int or not 1 <= job["turns"] <= 1000):
+            raise factory.FactoryError("Only Claude and Grok jobs take turns, from 1 to 1000")
+        if job.get("harness", "codex") == "codex":
+            if "base" in job:
+                raise factory.FactoryError("Codex jobs take no base; review a range on Claude, Grok or Antigravity")
+        else:
+            from review_evidence import valid_base
+            if job["write"] and job.get("base") is not None:
+                raise factory.FactoryError("Writers implement from the selected candidate; base is for code review")
+            valid_base(job.get("base"), job["role"])
         after = job["after"]
         if (not isinstance(after, list) or any(not isinstance(item, str) or not re.fullmatch(SLUG, item) for item in after)
                 or len(set(after)) != len(after)
@@ -174,18 +188,23 @@ class Runner:
 
     def command(self, path, job):
         """The frozen worker command for a plan job on its harness."""
+        # Absent turns keep each builder's default, so older plans freeze the same commands.
+        optional = {key: job[key] for key in ("turns", "base") if key in job}
         if job["harness"] == "claude":
             return factory.claude_command(path, task=job["task"], assignment_id=job["id"], claude=str(self.claude),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
-                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
+                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
+                **optional)
         if job["harness"] == "grok":
             return factory.grok_command(path, task=job["task"], assignment_id=job["id"], grok=str(self.grok),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
-                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
+                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
+                **optional)
         if job["harness"] == "antigravity":
             return factory.antigravity_command(path, task=job["task"], assignment_id=job["id"], agy=str(self.antigravity),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
-                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
+                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
+                **optional)
         return factory.codex_command(path, task=job["task"], assignment_id=job["id"], codex=str(self.binary),
             model=job["model"], effort=job["effort"], cwd=job["cwd"], write=job["write"], seconds=job["seconds"],
             commit_message=job["commit_message"], role=job["role"])

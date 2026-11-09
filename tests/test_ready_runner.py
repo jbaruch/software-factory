@@ -910,6 +910,46 @@ class ReadyRunner(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "Grok and Antigravity writers need a commit message"):
             self.grok_controller(self.plan([self.grok_job("first", write=True)]))
 
+    def every_harness(self, plan):
+        return runner.Runner(self.directory, plan, codex=sys.executable, claude=sys.executable, grok=sys.executable,
+                             antigravity=sys.executable, rex=sys.executable, server="unix:///test.sock",
+                             probe=self.probe, clock=lambda: self.now)
+
+    def test_long_claude_writers_freeze_their_planned_turns(self):
+        # Observed (#47): a real Claude writer needed 100 turns; plans used to freeze the default 30.
+        writer = self.claude_job("implement", write=True, commit_message="feat(fixture): Deliver candidate", turns=200)
+        self.assertEqual(self.tick(self.claude_controller(self.plan([writer])))["metrics"]["launched"], 1)
+        command = factory.load_task(self.directory / "task.json")["assignments"]["implement"]["request"]["command"]
+        self.assertEqual(command[command.index("--turns") + 1], "200")
+        self.assertNotIn("--base", command)
+
+    def test_planned_code_reviews_freeze_their_base_and_omitted_turns_keep_the_default(self):
+        agy = dict(harness="antigravity", model="gemini-3.8-flash-high")
+        plan = self.plan([self.grok_job("review", role="code-review", base=self.candidate, turns=60),
+                          self.job("second-review", role="code-review", base=self.candidate, **agy),
+                          self.claude_job("qa", role="qa")], workers=3, reserve=0)
+        self.assertEqual(self.tick(self.every_harness(plan))["metrics"]["launched"], 3)
+        assignments = factory.load_task(self.directory / "task.json")["assignments"]
+        grok, second, claude = (assignments[key]["request"]["command"] for key in ("review", "second-review", "qa"))
+        self.assertEqual((grok[grok.index("--base") + 1], grok[grok.index("--turns") + 1]), (self.candidate, "60"))
+        self.assertEqual(second[second.index("--base") + 1], self.candidate)
+        self.assertNotIn("--turns", second)
+        self.assertEqual(claude[claude.index("--turns") + 1], "30")
+        self.assertNotIn("--base", claude)
+
+    def test_invalid_turns_or_base_refuse_before_any_external_call(self):
+        agy = dict(harness="antigravity", model="gemini-3.8-flash-high")
+        for job in (self.job("first", turns=200), self.job("first", turns=200, **agy),
+                    *(self.claude_job("first", role="qa", turns=value) for value in (0, 1001, True, "200", None)),
+                    self.job("first", role="code-review", base=self.candidate),
+                    self.claude_job("first", role="code-review"), self.grok_job("first", role="code-review", base="HEAD"),
+                    self.job("first", role="code-review", base=None, **agy),
+                    self.claude_job("first", write=True, commit_message="feat(fixture): Deliver candidate", base=self.candidate)):
+            with self.subTest(job=job), self.assertRaises(factory.FactoryError):
+                self.every_harness(self.plan([job]))
+        self.assertEqual(PlanRex.calls, [])
+        self.assertEqual(self.probes, 0)
+
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
         self.tick(controller)
