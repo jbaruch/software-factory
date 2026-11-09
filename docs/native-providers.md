@@ -270,7 +270,12 @@ python3 -B skills/factory/runtime/factory.py antigravity-collect --task example 
 --output-format stream-json --json-schema SCHEMA --model MODEL --effort EFFORT
 --dangerously-skip-permissions` and writes the frozen brief to stdin as one
 `{"event":"user","message":{"role":"user","content":[{"type":"text",...}]}}`
-line, so briefs never meet argument-length limits. The CLI names the conversation
+line, so briefs never meet argument-length limits. Some models refuse `--effort`:
+`agy` 1.5.3 rejects it for `claude-opus-4-6-thinking` ("--effort is not supported
+for model") while the Gemini models accept it, and `agy models` does not say which
+is which. Omit `--effort` from `antigravity-start` (or set `"effort": null` in a
+ready plan) and the worker runs the model without the flag; the receipt records a
+null requested effort. The factory does not guess this from model names. The CLI names the conversation
 at `init`; there is no session flag or turn bound. Gemini API and ADC environment
 overrides refuse. Before the model turn the worker records a fresh
 [usage observation](#antigravity-native-quota). The strict decoder above reads

@@ -54,7 +54,10 @@ def validate_plan(value):
                 or job.get("harness", "codex") not in HARNESSES):
             raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields, optional turns "
                                        "and base, and an optional harness: " + ", ".join(HARNESSES))
-        if any(not isinstance(job[k], str) or not job[k].strip() for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"}):
+        # An Antigravity job's null effort runs the model without --effort; some of its models refuse the flag.
+        optional = {"effort"} if job.get("harness") == "antigravity" and job.get("effort") is None else set()
+        if any(not isinstance(job[k], str) or not job[k].strip()
+               for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"} - optional):
             raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
         key = (job["task"], job["id"])
         if (not re.fullmatch(SLUG, job["task"]) or not re.fullmatch(SLUG, job["id"])
@@ -73,8 +76,8 @@ def validate_plan(value):
                 raise factory.FactoryError("Claude jobs need a supported effort, and Claude writers need a commit message")
         if job.get("harness") == "antigravity":
             import native_antigravity
-            if job["effort"] not in native_antigravity.EFFORTS:
-                raise factory.FactoryError("Antigravity jobs need a supported effort")
+            if job["effort"] is not None and job["effort"] not in native_antigravity.EFFORTS:
+                raise factory.FactoryError("Antigravity jobs need a supported effort, or null for a model that refuses one")
         if job.get("harness") in ("grok", "antigravity") and job["write"] and job["commit_message"] is None:
             raise factory.FactoryError("Grok and Antigravity writers need a commit message")
         if "turns" in job and (job.get("harness") not in ("claude", "grok")

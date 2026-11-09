@@ -876,7 +876,7 @@ class ReadyRunner(unittest.TestCase):
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = antigravity_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
         async def spawn(*command, **options):
-            return FakeProcess(stream(request["cwd"], outcome=outcome))
+            return FakeProcess(stream(request["cwd"], outcome=outcome, model=args.model))
         before = Path.cwd()
         try:
             os.chdir(self.repo)
@@ -903,6 +903,28 @@ class ReadyRunner(unittest.TestCase):
             self.controller(self.plan([self.job("first", **job)]))
         with self.assertRaisesRegex(factory.FactoryError, "supported effort"):
             self.controller(self.plan([self.job("first", **{**job, "effort": "turbo"})]))
+
+    def test_antigravity_jobs_without_effort_launch_and_collect_beside_gemini(self):
+        # Observed (#50): agy refuses --effort for claude-opus-4-6-thinking, so its plan job sets effort null.
+        opus = self.job("opus", harness="antigravity", model="claude-opus-4-6-thinking", effort=None)
+        gemini = self.job("gemini", harness="antigravity", model="gemini-3.8-flash-high", effort="high")
+        controller = runner.Runner(self.directory, self.plan([opus, gemini]),
+            codex=sys.executable, antigravity=sys.executable, rex=sys.executable, server="unix:///test.sock",
+            probe=self.probe, clock=lambda: self.now)
+        self.assertEqual(self.tick(controller)["metrics"]["launched"], 2)
+        assignments = factory.load_task(self.directory / "task.json")["assignments"]
+        self.assertNotIn("--effort", assignments["opus"]["request"]["command"])
+        command = assignments["gemini"]["request"]["command"]
+        self.assertEqual(command[command.index("--effort") + 1], "high")
+        self.finish_antigravity("task", "opus")
+        self.assertEqual(self.states(self.tick(controller))[("task", "opus")], "approved")
+        for job in (*(self.job("first", harness="antigravity", model="claude-opus-4-6-thinking", effort=effort)
+                      for effort in ("", "turbo")),
+                    self.claude_job("first", role="qa", effort=None), self.job("first", effort=None)):
+            with self.subTest(job=job), self.assertRaises(factory.FactoryError):
+                runner.Runner(self.directory, self.plan([job]), codex=sys.executable, claude=sys.executable,
+                              antigravity=sys.executable, rex=sys.executable, server="unix:///test.sock",
+                              probe=self.probe, clock=lambda: self.now)
 
     def test_grok_jobs_need_their_binary_and_writer_commit_message(self):
         with self.assertRaisesRegex(factory.FactoryError, "--grok executable"):

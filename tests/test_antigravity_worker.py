@@ -171,6 +171,26 @@ class AntigravityWorker(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaisesRegex(factory.FactoryError, message):
                 self.make_command("refused", **changes)
 
+    def test_models_that_refuse_effort_run_without_the_flag_and_collect(self):
+        # Observed (#50): agy refuses --effort for claude-opus-4-6-thinking; Gemini models accept it.
+        args = self.launch("opus", model="claude-opus-4-6-thinking", effort=None)
+        self.assertIsNone(args.effort)
+        receipt = self.execute(args, events=stream(self.repo, model="claude-opus-4-6-thinking"))
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertIsNone(receipt["requested_effort"])
+        command, _ = self.spawns[-1]
+        self.assertNotIn("--effort", command)
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-6-thinking")
+        result = self.collect("opus")["assignments"]["opus"]
+        self.assertEqual((result["result"]["outcome"], result["native_collected"]), ("approved", True))
+        self.assertNotIn("--effort", result["request"]["command"])
+        gemini = self.make_command("gemini")
+        self.assertEqual(gemini[gemini.index("--effort") + 1], "high")
+        import dashboard
+        record = factory.load_task(self.path)
+        self.assertEqual(dashboard.requested_native(record, "opus", record["assignments"]["opus"])["effort"],
+                         "None (model default)")
+
     def test_api_overrides_refuse_before_native_artifacts(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), self.assertRaisesRegex(factory.FactoryError, "Gemini API"):
             self.execute(self.args)

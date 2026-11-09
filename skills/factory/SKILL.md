@@ -34,7 +34,7 @@ Use this when the user asks to hand the current work to the factory. The factory
 4. Start a writer on that worktree with a model and effort that fit the role. The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOINT`, with the endpoint from `rex whoami --json`.
    - Claude: `claude-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --claude /absolute/claude --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`
    - Grok: `grok-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --grok /absolute/grok --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`
-   - Antigravity: `antigravity-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --agy /absolute/agy --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`
+   - Antigravity: `antigravity-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --agy /absolute/agy --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`. Omit `--effort` for a model that refuses it, such as `claude-opus-4-6-thinking`.
    - Codex: `codex-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --codex /absolute/codex --model MODEL --effort EFFORT --write --commit-message MESSAGE`
 5. Check it with `status --task TASK --id ID`, collect it with `claude-collect`, `grok-collect`, `antigravity-collect` or `codex-collect`, and close finished tabs with `tidy`.
 
