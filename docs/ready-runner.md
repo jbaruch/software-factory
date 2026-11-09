@@ -72,7 +72,9 @@ the actual selected commit and discovered eligible model ID:
 
 Each job may name its `harness`: `codex` (the default when omitted), `claude`,
 `grok` or `antigravity`. Model and effort belong to the job; Claude and
-Antigravity jobs take an effort from `low` to `max`, and Grok jobs take one of the
+Antigravity jobs take an effort from `low` to `max` (an Antigravity job may set
+`effort` to null for a model that refuses `--effort`, such as
+`claude-opus-4-6-thinking`), and Grok jobs take one of the
 model's discovered efforts. `--codex` is always required because it also
 sandboxes every writer's factory commit; `--claude`, `--grok` and `--antigravity`
 are required when the plan has jobs for them. The Codex quota gate applies only to

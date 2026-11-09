@@ -3,6 +3,7 @@
 ## Next
 
 - Ready-plan jobs take optional `turns` (Claude and Grok, 1 to 1000) and `base` (the review base for Claude, Grok and Antigravity code reviews). A plan can now run a long writer and a code review instead of freezing 30 turns and having no way to express a review range; invalid values refuse before execution (#47).
+- Antigravity jobs can run without an effort. `antigravity-start` without `--effort`, or a ready-plan job with `"effort": null`, runs `agy` without the flag, so Antigravity's Claude models, which refuse `--effort`, can start; Gemini jobs still pass it (#50).
 
 ## 0.24.1 — 2026-11-09
 

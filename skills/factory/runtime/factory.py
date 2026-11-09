@@ -2243,7 +2243,7 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
                         write=False, commit_message=None, sandbox=None):
     """Freeze one explicit Antigravity effect, reviewer or writer; the CLI assigns its conversation ID."""
     import native_antigravity
-    if (not isinstance(model, str) or not model.strip() or effort not in native_antigravity.EFFORTS
+    if (not isinstance(model, str) or not model.strip() or (effort is not None and effort not in native_antigravity.EFFORTS)
             or not Path(agy).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS):
         raise FactoryError("Supply an absolute native Antigravity executable, a discovered model, a supported effort and bounded seconds")
     writer = writer_arguments("Antigravity", role, write, commit_message, sandbox, base)
@@ -2275,7 +2275,8 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
             raise FactoryError("Saved Antigravity binding is damaged; restore the original command without relaunching") from None
     prefix = path.parent / (task + "." + assignment_id + ".antigravity")
     return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id,
-        "--agy", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds), "--role", role,
+        "--agy", str(binary), "--model", model, *(() if effort is None else ("--effort", effort)),
+        "--seconds", str(seconds), "--role", role,
         "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}", "--brief-sha256", "{brief_sha256}",
         "--candidate", "{candidate}", "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
         "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
@@ -2330,7 +2331,7 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
             or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
             or not args.agy.is_absolute() or receipt.get("binary") != str(args.agy)
             or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
-            or args.effort not in native_antigravity.EFFORTS
+            or (args.effort is not None and args.effort not in native_antigravity.EFFORTS)
             or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
             or not args.events.is_absolute() or receipt.get("events") != str(args.events)):
         raise FactoryError("Antigravity receipt differs from its frozen completed assignment; inspect the original artifacts")
@@ -2444,7 +2445,8 @@ def main(argv=None):
             start.add_argument(dict(zip(("claude-start", "grok-start", "antigravity-start"),
                                         ("--claude", "--grok", "--agy")))[action], required=True)
             start.add_argument("--model", required=True)
-            start.add_argument("--effort", required=True)
+            # Antigravity runs without an effort when it is omitted: some of its models refuse the flag.
+            start.add_argument("--effort", required=action != "antigravity-start")
             start.add_argument("--seconds", type=int, default=600)
             if action != "antigravity-start":  # Antigravity has no turn bound.
                 start.add_argument("--turns", type=int, default=30)

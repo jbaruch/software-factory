@@ -133,13 +133,14 @@ def requested_native(record, identity, assignment):
             or str(args.brief) != assignment["brief"] or args.brief_sha256 != request["instructions_sha256"]
             or args.candidate != inputs["candidate"] or args.requirements != inputs["requirements"]
             or (args.role is not None and args.role != request["role"])
-            or not args.model.strip() or not args.effort.strip()
+            or not args.model.strip()
+            or (args.effort is None and harness != "antigravity") or (args.effort is not None and not args.effort.strip())
             or not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS
             or any(not path.is_absolute() for path in (getattr(args, "agy" if harness == "antigravity" else harness), args.worktree_git_dir,
                                                        args.events, args.receipt))):
         return unknown
     return dict(adapter=harness + "_worker", harness=harness, route=harness + "-native",
-                model=args.model, effort=args.effort)
+                model=args.model, effort="None (model default)" if args.effort is None else args.effort)
 
 
 def saved_pane(record, assignment):

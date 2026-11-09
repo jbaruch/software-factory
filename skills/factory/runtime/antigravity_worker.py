@@ -36,10 +36,13 @@ def read_events(path):
 
 
 def command(binary, model, effort):
-    """Print mode reading one stream-json user message from stdin, so briefs avoid argv limits."""
+    """Print mode reading one stream-json user message from stdin, so briefs avoid argv limits.
+
+    No effort omits --effort: some models, such as Antigravity's Claude models, refuse the flag.
+    """
     return [str(binary), "--print=", "--input-format", "stream-json", "--output-format", "stream-json",
-            "--json-schema", json.dumps(outcome_schema()), "--model", model, "--effort", effort,
-            "--dangerously-skip-permissions"]
+            "--json-schema", json.dumps(outcome_schema()), "--model", model,
+            *(() if effort is None else ("--effort", effort)), "--dangerously-skip-permissions"]
 
 
 def message(text):
@@ -55,7 +58,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
     if any(name in os.environ for name in native_antigravity.API_ENVIRONMENT):
         raise factory.FactoryError("Unset Gemini API/ADC environment overrides before native subscription execution")
     if (type(args.seconds) is not int or not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS
-            or not args.model.strip() or args.effort not in native_antigravity.EFFORTS):
+            or not args.model.strip() or (args.effort is not None and args.effort not in native_antigravity.EFFORTS)):
         raise factory.FactoryError("Supply a discovered Antigravity model, a supported effort and a bounded allowance before execution")
     factory.check_commit_message(args.commit_message, write=args.write)
     if args.write and (args.commit_message is None or args.sandbox is None or not args.sandbox.is_absolute()):
@@ -179,8 +182,9 @@ def parser():
     command_line = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     for field in ("agy", "repo", "cwd", "brief", "events", "receipt", "worktree-git-dir"):
         command_line.add_argument("--" + field, type=Path, required=True)
-    for field in ("job", "candidate", "requirements", "brief-sha256", "model", "effort", "repo-identity", "role"):
+    for field in ("job", "candidate", "requirements", "brief-sha256", "model", "repo-identity", "role"):
         command_line.add_argument("--" + field, required=True)
+    command_line.add_argument("--effort", help="Omit for a model that refuses --effort")
     command_line.add_argument("--seconds", type=int, default=600)
     command_line.add_argument("--base")
     command_line.add_argument("--write", action="store_true", help="Implementation specialist with every native tool in its worktree")
