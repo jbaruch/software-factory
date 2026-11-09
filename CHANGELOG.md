@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.24.0 — Unpublished
+## 0.24.0 — 2026-11-09
+
+Includes the unpublished 0.23.0 changes below.
 
 - Antigravity can review and write. `antigravity-start`/`antigravity-collect` run `agy` with `--dangerously-skip-permissions`, the brief on stdin as one stream-json message, and the existing strict decoder; writers go through the shared factory commit. The ready runner (`harness: antigravity`, `--antigravity`), integration approvals and the dashboard know it.
 
