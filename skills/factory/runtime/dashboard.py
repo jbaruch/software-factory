@@ -27,6 +27,7 @@ import jev
 import coordination_evidence
 
 ASSETS = Path(__file__).resolve().parent / "web"
+RUNTIME_LAYOUT = ("skills", "factory", "runtime")  # Runtime location inside a source checkout.
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
 PANE_LIMIT = 64 * 1024
 
@@ -46,18 +47,23 @@ def application_worker(path):
         root = worker.parent
         if root == factory.ROOT:
             return True
+        # A source checkout keeps its runtime at skills/factory/runtime; Git registers
+        # each worktree by its top level, so compare that directory.
+        if root.parts[-3:] != RUNTIME_LAYOUT:
+            return False
+        top = root.parents[2]
         # Inventory comes from the trusted application, never the task's repository
         # label or the caller's path. No repository markers are created/read here.
         inventory = factory.git_run(factory.ROOT, "worktree", "list", "--porcelain", "-z")
         if inventory.returncode:
             return False
         registered = any(
-            fields[0] == "worktree " + str(root)
+            fields[0] == "worktree " + str(top)
             and not any(field == "bare" or field.startswith("prunable") for field in fields)
             for entry in inventory.stdout.split("\0\0") if entry
             for fields in [entry.split("\0")])
-        return (registered and factory.git_worktree(root) == str(root)
-                and factory.git_common_dir(root) == factory.git_common_dir(factory.ROOT))
+        return (registered and factory.git_worktree(top) == str(top)
+                and factory.git_common_dir(top) == factory.git_common_dir(factory.ROOT))
     except (factory.FactoryError, OSError, ValueError, RuntimeError):
         return False
 
