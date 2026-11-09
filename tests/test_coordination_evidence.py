@@ -22,7 +22,9 @@ import test_codex_worker as fixtures
 from test_rex_launcher import FakeRex
 
 
-class BoundedAnswers(unittest.TestCase):
+class AnswerFixture(unittest.TestCase):
+    """A bounded Jev question on an admitted task; the harness-specific classes add the tests."""
+
     def setUp(self):
         self.fixture = fixtures.NativeResults()
         self.fixture.setUp()
@@ -45,6 +47,8 @@ class BoundedAnswers(unittest.TestCase):
             models=[dict(model="gpt-6-astra", effort_ids=["ultra", "low", "high"])])
         self.capability_probe = AsyncMock(side_effect=lambda binary: self.capacity)
 
+
+class BoundedAnswers(AnswerFixture):
     def start(self, *, question="task-demand", role="standby-reasoner", choice="uncertain", assignment="reason", purpose="work",
               model=None, effort=None):
         state: dict = {"assignment": "Missing acceptance evidence"}
@@ -280,3 +284,118 @@ class BoundedAnswers(unittest.TestCase):
         item, = jev.pending_decisions(self.store, task_state_dir=self.tasks)["items"]
         self.assertEqual((item["owner"], item["reason"]), ("operator", "engine_unavailable"))
         self.assertEqual(item["attempts"][0]["assignment"], "reason")
+
+
+class ClaudeBoundedAnswers(AnswerFixture):
+    """The same bounded questions answered by Claude instead of Codex."""
+
+    def setUp(self):
+        import native_claude
+        super().setUp()
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(native_claude.OVERRIDE_PREFIXES)}
+        cleanup = patch.dict(os.environ, environment, clear=True)
+        cleanup.start()
+        self.addCleanup(cleanup.stop)
+        self.spawned: list = []
+
+    def start_claude(self, *, question="task-demand", role="standby-reasoner", choice="uncertain",
+                     model="claude-sonnet-5-5", effort="high"):
+        import claude_worker
+        state: dict = {"assignment": "Missing acceptance evidence"}
+        if role == "judge":
+            state["dispute"] = dict(question="Which fixture behavior should be selected?",
+                options={"adopt-fix": "Use the investigator's demonstrated correction", "keep-behavior": "Keep the original behavior"})
+            with patch.object(factory, "Rex", FakeRex):
+                factory.launch(self.path, task="resolve", assignment_id="investigate", role="investigator",
+                    goal="Gather the exact disputed evidence", cwd=str(self.fixture.repo), command=[sys.executable, "-c", "pass"],
+                    purpose="investigation", binary=sys.executable, server="unix:///fixture.sock")
+            record = factory.record_result(self.path, assignment_id="investigate", candidate=self.inputs["candidate"],
+                requirements=self.inputs["requirements"], outcome="completed", artifacts=["evidence/recorded-investigation.json"])
+            state["investigation"] = dict(task="resolve", assignment="investigate", result=record["assignments"]["investigate"]["result"])
+        spec = next(spec for spec in jev.read_catalog() if spec["id"] == question)
+        client = Mock()
+        client.request.return_value = dict(model="jev-1.14.0", usage=dict(input_tokens=12, output_tokens=3), answers={
+            question: dict(type="choice", choice=choice, confidence=1,
+                           probabilities={option: int(option == choice) for option in spec["options"]})})
+        self.decision = jev.evaluate_stored(self.store, state=state, specs=[spec], model="jev-1.14.0",
+            evidence_revision="source-1", client_factory=lambda: client, clock=lambda: 1000, timer=lambda: 10)
+        self.question, self.assignment_id, self.role = question, "reason", role
+        command = factory.claude_command(self.path, task="resolve", assignment_id="reason", claude=sys.executable,
+            model=model, effort=effort, cwd=str(self.fixture.repo), role=role,
+            decision_store=self.store, decision=self.decision["id"], question=question)
+        with patch.object(factory, "Rex", FakeRex):
+            self.record, self.assignment = factory.launch(self.path, task="resolve", assignment_id="reason", role=role,
+                goal="Answer the original bounded question", cwd=str(self.fixture.repo), command=command,
+                purpose="work", binary=sys.executable, server="unix:///fixture.sock")
+        actual = [call for call in FakeRex.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
+        argv = actual[actual.index("--") + 1:]
+        argv = argv[argv.index("--") + 1:]
+        self.claude_args = claude_worker.parser().parse_args(argv[4:])
+
+    def claude_answer(self, answer, *, outcome="completed"):
+        import claude_worker
+        import native_claude
+        args, model = self.claude_args, self.claude_args.model
+        report = dict(outcome=outcome, artifacts=[str(args.brief)], answer=answer)
+        events = [dict(type="system", subtype="init", cwd=str(args.cwd), session_id=args.native_session, model=model,
+                       tools=list(native_claude.READ_TOOLS), mcp_servers=[], permissionMode="dontAsk", slash_commands=[],
+                       apiKeySource="none", claude_code_version="2.1.319", additional_directories=[]),
+                  dict(type="assistant", session_id=args.native_session, parent_tool_use_id=None,
+                       message=dict(model=model, content=[dict(type="tool_use", id="output-1", name="StructuredOutput", input=report)])),
+                  dict(type="user", session_id=args.native_session, parent_tool_use_id=None,
+                       message=dict(content=[dict(type="tool_result", tool_use_id="output-1", content="Structured output provided successfully")])),
+                  dict(type="result", session_id=args.native_session, subtype="success", is_error=False, terminal_reason="completed",
+                       api_error_status=None, safety_stops=0, permission_denials=[], subagent_stats=dict(spawned=0), num_turns=1,
+                       result=json.dumps(report), structured_output=report, usage=dict(input_tokens=2, output_tokens=20),
+                       modelUsage={model: dict(provider="firstParty", canonicalModel=model, costBasis="list", costUSD=0.01,
+                                               inputTokens=2, outputTokens=20)})]
+        async def spawn(*command, **options):
+            self.spawned.append(command)
+            return fixtures.FakeProcess(events)
+        def probe(binary, cwd):
+            return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
+                cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,
+                auth=dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty"))
+        previous = Path.cwd()
+        os.chdir(self.fixture.repo)
+        try:
+            with redirect_stdout(StringIO()):
+                return asyncio.run(claude_worker.execute(args, spawn=spawn, probe=probe, clock=lambda: 1000, timer=lambda: 10))
+        finally:
+            os.chdir(previous)
+
+    def collect_claude(self):
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            factory.collect_claude(self.path, "reason", Mock(), self.record, self.assignment)
+
+    def test_claude_standby_reasoner_answer_closes_the_bound_question(self):
+        self.start_claude()
+        receipt = self.claude_answer(dict(decision=self.decision["id"], question=self.question, choice="routine", missing_input=None))
+        self.assertEqual((receipt["schema_version"], receipt["state"]), (3, "completed"), receipt["error"])
+        command = self.spawned[-1]
+        schema = json.loads(command[command.index("--json-schema") + 1])
+        self.assertIn("answer", schema["required"])
+        self.collect_claude()
+        view = jev.pending_decisions(self.store, task_state_dir=self.tasks)
+        self.assertEqual(view["items"], [])
+        self.assertEqual(view["resolutions"][0]["answer"]["choice"], "routine")
+
+    def test_claude_judge_rules_at_maximum_effort_after_investigation(self):
+        self.start_claude(question="investigation-resolution", role="judge", choice="unresolved",
+                          model="claude-opus-5-5", effort="max")
+        receipt = self.claude_answer(dict(decision=self.decision["id"], question=self.question, ruling="adopt-fix",
+                                          consequences=["Apply the selected fixture behavior"], missing_input=None))
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.collect_claude()
+        view = jev.pending_decisions(self.store, task_state_dir=self.tasks)
+        self.assertEqual(view["resolutions"][0]["answer"]["ruling"], "adopt-fix")
+
+    def test_claude_judge_needs_the_configured_model_at_maximum_effort(self):
+        for model, effort in (("claude-sonnet-5-5", "max"), ("claude-opus-5-5", "high")):
+            with self.subTest(model=model, effort=effort), self.assertRaisesRegex(factory.FactoryError, "configured Claude judge_model"):
+                self.start_claude(question="investigation-resolution", role="judge", choice="unresolved", model=model, effort=effort)
+
+    def test_claude_report_without_its_bounded_answer_refuses(self):
+        self.start_claude()
+        receipt = self.claude_answer(None)
+        self.assertEqual(receipt["state"], "failed")

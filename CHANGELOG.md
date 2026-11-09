@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.21.0 — Unpublished
+
+- The ready runner dispatches Claude as well as Codex. Plan jobs may name `harness: claude`; the runner builds Claude commands, collects Claude reports and accepts a Claude writer for `--from-writer`. The Codex quota gate applies only to Codex jobs, and `--claude` supplies the Claude binary.
+- Claude can answer bounded Jev questions as the standby reasoner or the judge, with version-3 receipts that close decision-inbox items. `judge_models` in `config/coordination.json` now names one judge per harness; a Claude judge runs the configured model at effort `max`.
+
 ## 0.20.0 — Unpublished
 
 - Claude writers get a `Bash` tool in Claude Code's sandbox, so they can run tests: writes stay in the checkout and temporary directories, network is refused, and commands cannot leave the sandbox or run in the background. Sandbox network refusals decode as inspection-only events.

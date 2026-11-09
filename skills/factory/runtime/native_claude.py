@@ -190,7 +190,8 @@ def write_command(model, effort, session, turns):
             "--verbose", "--include-hook-events"]
 
 
-def read_command(model, effort, session, turns):
+def read_command(model, effort, session, turns, coordination=None):
+    """A read-only specialist; a bounded coordination answer extends its report schema."""
     from codex_worker import outcome_schema
     return ["--safe-mode", "--restricted", "--print", "--tools", "Read",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
@@ -200,11 +201,11 @@ def read_command(model, effort, session, turns):
             "--max-turns", str(turns), "--no-session-persistence",
             "--system-prompt", "You are an independent read-only specialist. Follow the supplied assignment. "
             "Use only Read and StructuredOutput. Do not delegate, execute commands or change files.",
-            "--json-schema", json.dumps(outcome_schema()), "--output-format", "stream-json",
+            "--json-schema", json.dumps(outcome_schema(coordination)), "--output-format", "stream-json",
             "--verbose", "--include-hook-events"]
 
 
-def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
+def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, coordination=None):
     """Decode the observed native lifecycle without supplying process/provenance authority."""
     def refuse() -> NoReturn:
         raise ClaudeProbeError("Unsupported or conflicting Claude lifecycle; inspect the original stream and pane without retrying")
@@ -344,11 +345,19 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False):
             final = event
         else:
             refuse()
-    if (final is None or not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
+    if (final is None or not isinstance(report, dict)
+            or set(report) != ({"outcome", "artifacts", "answer"} if coordination else {"outcome", "artifacts"})
             or report.get("outcome") not in ("approved", "completed", "findings", "blocked")
             or not isinstance(report.get("artifacts"), list) or not report["artifacts"]
             or any(not isinstance(ref, str) or not ref.strip() for ref in report["artifacts"])):
         refuse()
+    if coordination is not None:
+        import coordination_evidence
+        import factory
+        try:
+            coordination_evidence.validate_answer(report["answer"], coordination, report["outcome"])
+        except factory.FactoryError:
+            refuse()
     usage, model_usage = final.get("usage"), final.get("modelUsage")
     if (not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens"))
             or not isinstance(model_usage, dict) or set(model_usage) != {model}

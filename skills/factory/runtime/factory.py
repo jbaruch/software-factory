@@ -1406,6 +1406,12 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                        expected_git_dir=native_args.worktree_git_dir)
         if native_args.write:
             check_role_write(role)
+        elif any(value is not None for value in (native_args.decision_store, native_args.decision, native_args.question)):
+            import coordination_evidence
+            if not native_args.decision_store or not coordination_evidence.binding(native_args.decision, native_args.question, role):
+                raise FactoryError("Bind a native coordination assignment to its role, original store and selected inputs")
+            instructions += coordination_evidence.render(native_args.decision_store, native_args.decision, native_args.question,
+                role, record["inputs"], task_record=record, native=native_args, harness="claude")
         else:
             instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
                 requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
@@ -1928,7 +1934,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Restore original private Claude receipt and brief before collection") from None
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != (2 if args.write else 1)
+            or receipt["schema_version"] != (2 if args.write else 3 if args.decision is not None else 1)
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
                                 or "commit" not in receipt))
@@ -1965,11 +1971,21 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         if str(uuid.UUID(args.native_session)) != args.native_session:
             raise ValueError("Invalid session")
         native_claude.validate_auth(receipt.get("discovery"), args.claude, Path(request["cwd"]))
-        if not args.write:
+        coordination = None
+        if args.decision is not None or args.question is not None or args.decision_store is not None:
+            import coordination_evidence
+            coordination = coordination_evidence.read(instructions, args.decision, args.question, args.role,
+                                                      receipt["inputs"], write=args.write)
+            if coordination is None:
+                raise ValueError("Restore the original bounded coordination binding before collection")
+            if args.role == "judge":
+                coordination_evidence.check_investigation(coordination["request"], record)
+                coordination_evidence.validate_claude_judge(coordination, args.model, args.effort)
+        elif not args.write:
             review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
         native = native_claude.parse_execution(claude_worker.read_events(args.events),
             session_id=args.native_session, cwd=request["cwd"], model=args.model, max_turns=args.turns,
-            writer=args.write)
+            writer=args.write, coordination=coordination)
     except (ValueError, native_claude.ClaudeProbeError) as exc:
         raise FactoryError(str(exc)) from None
     if any(receipt.get(k) != native[k] for k in ("report", "usage", "model_usage", "turns", "rate_limits")):
@@ -2016,7 +2032,7 @@ def require_grok_execution():
 
 
 def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None,
-                   write=False, commit_message=None, sandbox=None):
+                   write=False, commit_message=None, sandbox=None, decision_store=None, decision=None, question=None):
     """Freeze one explicit Claude effect, reviewer or writer, including its native session."""
     import native_claude
     if (not isinstance(model, str) or not model.strip() or effort not in native_claude.EFFORTS
@@ -2033,6 +2049,15 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
         tool = Path(sandbox).resolve()
     if base is not None and write:
         raise FactoryError("Writers implement from the selected candidate; --base is for code review")
+    coordination = []
+    if decision_store is not None or decision is not None or question is not None:
+        import coordination_evidence
+        if (not coordination_evidence.binding(decision, question, role, write=write)
+                or decision_store is None or not Path(decision_store).is_absolute()):
+            raise FactoryError("Supply the absolute original Jev decision store before a coordination assignment")
+        if role == "judge" and (model != coordination_evidence.judge_model("claude") or effort != "max"):
+            raise FactoryError("Select the configured Claude judge_model at maximum effort; arbitrary choices cannot adjudicate this case")
+        coordination = ["--decision-store", str(decision_store), "--decision", str(decision), "--question", str(question)]
     worker = [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
@@ -2064,7 +2089,7 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
             raise FactoryError("Supply the executable Codex CLI as the Claude writer's commit sandbox")
         writer = ["--write", "--commit-message", commit_message, "--sandbox", str(tool)]
     prefix = path.parent / (task + "." + assignment_id + ".claude")
-    return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
+    return worker + ([] if base is None else ["--base", base]) + writer + coordination + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
@@ -2242,6 +2267,9 @@ def main(argv=None):
                 start.add_argument("--write", action="store_true", help="Implementation specialist with edit tools")
                 start.add_argument("--commit-message", help="With --write, the factory commits a completed result")
                 start.add_argument("--sandbox", help="With --write, the absolute Codex CLI used as the commit's local sandbox")
+                start.add_argument("--decision-store", type=Path, help="Original Jev decision store for a bounded answer")
+                start.add_argument("--decision", help="Exact original Jev decision ID")
+                start.add_argument("--question", help="One unresolved question from that decision")
     delivery = sub.add_parser("integrate", help="Integrate selected exact-input native approvals; existing IDs reconcile read-only")
     delivery.add_argument("--task", required=True)
     delivery.add_argument("--id", required=True)
@@ -2412,7 +2440,8 @@ def main(argv=None):
                     argv = claude_command(path, task=args.task, assignment_id=args.id, claude=args.claude,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
                         seconds=args.seconds, turns=args.turns, base=args.base,
-                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
+                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox,
+                        decision_store=args.decision_store, decision=args.decision, question=args.question)
                 elif args.action == "grok-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")

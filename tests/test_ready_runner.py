@@ -338,13 +338,13 @@ class ReadyRunner(unittest.TestCase):
         self.tick(self.controller(self.plan([self.job("implement")])))
         self.finish("task", "implement", outcome="completed")
         self.tick(self.controller(self.plan([self.job("implement")])))
-        with self.assertRaisesRegex(factory.FactoryError, "native Codex writer"):
+        with self.assertRaisesRegex(factory.FactoryError, "collected, completed native writer"):
             self.handoff()
         path = self.directory / "task.json"
         record = factory.load_task(path)
         record["assignments"]["implement"]["request"]["command"] = [sys.executable, "--write"]
         factory.save(path, record)
-        with self.assertRaisesRegex(factory.FactoryError, "native Codex writer"):
+        with self.assertRaisesRegex(factory.FactoryError, "collected, completed native writer"):
             self.handoff()
 
     def test_from_writer_no_explicit_commit_refuses(self):
@@ -719,6 +719,75 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.states(result), {("task", "first"): "abandoned", ("task", "second"): "blocked"})
         self.assertEqual(result["active_workers"], 0)
         self.assertEqual(result["result"], "needs_action")
+
+    def claude_job(self, identity, **changes):
+        return self.job(identity, **{"harness": "claude", "model": "claude-sonnet-5-5", "effort": "high", **changes})
+
+    def claude_controller(self, plan, **options):
+        return runner.Runner(self.directory, plan, codex=sys.executable, claude=sys.executable, rex=sys.executable,
+                             server="unix:///test.sock", probe=self.probe, clock=lambda: self.now, **options)
+
+    def finish_claude(self, task, identity, outcome="approved"):
+        import claude_worker
+        import native_claude
+        record = factory.load_task(self.directory / (task + ".json"))
+        assignment = record["assignments"][identity]
+        request = assignment["request"]
+        replacements = {"{repository}": str(self.repo), "{cwd}": request["cwd"],
+            "{brief}": assignment["brief"], "{brief_sha256}": request["instructions_sha256"],
+            "{candidate}": request["inputs"]["candidate"], "{requirements}": request["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = claude_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
+        report = dict(outcome=outcome, artifacts=["fixture/evidence.txt"])
+        session, model = args.native_session, args.model
+        events = [dict(type="system", subtype="init", cwd=str(args.cwd), session_id=session, model=model,
+                       tools=list(native_claude.READ_TOOLS), mcp_servers=[], permissionMode="dontAsk", slash_commands=[],
+                       apiKeySource="none", claude_code_version="2.1.319", additional_directories=[]),
+                  dict(type="assistant", session_id=session, parent_tool_use_id=None,
+                       message=dict(model=model, content=[dict(type="tool_use", id="output-1", name="StructuredOutput", input=report)])),
+                  dict(type="user", session_id=session, parent_tool_use_id=None,
+                       message=dict(content=[dict(type="tool_result", tool_use_id="output-1", content="Structured output provided successfully")])),
+                  dict(type="result", session_id=session, subtype="success", is_error=False, terminal_reason="completed",
+                       api_error_status=None, safety_stops=0, permission_denials=[], subagent_stats=dict(spawned=0), num_turns=1,
+                       result=json.dumps(report), structured_output=report, usage=dict(input_tokens=2, output_tokens=20),
+                       modelUsage={model: dict(provider="firstParty", canonicalModel=model, costBasis="list", costUSD=0.01,
+                                               inputTokens=2, outputTokens=20)})]
+        async def spawn(*command, **options):
+            return FakeProcess(events)
+        def probe(binary, cwd):
+            return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
+                cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,
+                auth=dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty"))
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(native_claude.OVERRIDE_PREFIXES)}
+        before = Path.cwd()
+        try:
+            os.chdir(self.repo)
+            with patch.dict(os.environ, environment, clear=True), redirect_stdout(StringIO()):
+                receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=probe, clock=lambda: 1000.0, timer=lambda: 10.0))
+        finally:
+            os.chdir(before)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        PlanRex.processes[(record["session_id"], assignment["block_id"])] = "exited"
+
+    def test_claude_jobs_launch_collect_and_advance_without_codex_capacity(self):
+        controller = self.claude_controller(self.plan([self.claude_job("first", role="qa"),
+                                                       self.claude_job("second", role="qa", after=["first"])]))
+        first = self.tick(controller)
+        self.assertEqual(self.states(first), {("task", "first"): "running", ("task", "second"): "waiting"})
+        command = factory.load_task(self.directory / "task.json")["assignments"]["first"]["request"]["command"]
+        self.assertEqual(Path(command[3]).name, "claude_worker.py")
+        self.finish_claude("task", "first")
+        second = self.tick(controller)
+        self.assertEqual(self.states(second), {("task", "first"): "approved", ("task", "second"): "running"})
+        self.assertEqual(second["metrics"]["collected"], 1)
+        self.assertEqual(self.probes, 0)
+
+    def test_claude_jobs_need_their_binary_effort_and_writer_commit_message(self):
+        with self.assertRaisesRegex(factory.FactoryError, "--claude executable"):
+            self.controller(self.plan([self.claude_job("first", role="qa")]))
+        for changes in (dict(effort="turbo"), dict(write=True, role="backend"), dict(harness="grok")):
+            with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
+                self.claude_controller(self.plan([self.claude_job("first", **{"role": "qa", **changes})]))
 
     def test_findings_never_advance_a_dependency_or_repeat_the_worker(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))

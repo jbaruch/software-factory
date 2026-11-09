@@ -1,4 +1,4 @@
-"""Run an explicit Codex assignment plan using the existing factory task store."""
+"""Run an explicit native assignment plan (Codex or Claude) using the existing factory task store."""
 import argparse
 import asyncio
 import json
@@ -21,6 +21,7 @@ RESERVED_ROLES = {"qa", "code-review", "investigator", "judge", "standby-reasone
 JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
+HARNESSES = ("codex", "claude")  # A job's optional "harness"; Codex when omitted.
 SLUG = r"[a-z0-9][a-z0-9-]{0,63}"
 # Process states that will never change again; `lost` is terminal without an exit status.
 TERMINAL = {"exited", "failed", "lost"}
@@ -47,8 +48,8 @@ def validate_plan(value):
                and isinstance(row.get("task"), str) and isinstance(row.get("id"), str)}
     seen, inputs = set(), {}
     for job in jobs:
-        if not isinstance(job, dict) or set(job) != JOB_FIELDS:
-            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields")
+        if not isinstance(job, dict) or set(job) - {"harness"} != JOB_FIELDS or job.get("harness", "codex") not in HARNESSES:
+            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields and an optional codex or claude harness")
         if any(not isinstance(job[k], str) or not job[k].strip() for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"}):
             raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
         key = (job["task"], job["id"])
@@ -62,6 +63,10 @@ def validate_plan(value):
                 or (job["role"] == "investigator") != (job["purpose"] == "investigation")):
             raise factory.FactoryError("Repair job identity, role, candidate, absolute cwd, purpose, writer flag or execution allowance")
         factory.check_commit_message(job["commit_message"], write=job["write"])
+        if job.get("harness") == "claude":
+            import native_claude
+            if job["effort"] not in native_claude.EFFORTS or (job["write"] and job["commit_message"] is None):
+                raise factory.FactoryError("Claude jobs need a supported effort, and Claude writers need a commit message")
         after = job["after"]
         if (not isinstance(after, list) or any(not isinstance(item, str) or not re.fullmatch(SLUG, item) for item in after)
                 or len(set(after)) != len(after)
@@ -73,13 +78,21 @@ def validate_plan(value):
         inputs[job["task"]] = selected
         seen.add(key)
     return {**value, "limits": dict(limits),
-            "jobs": [{**job, "cwd": str(Path(job["cwd"]).resolve())} for job in jobs]}
+            "jobs": [{**job, "harness": job.get("harness", "codex"), "cwd": str(Path(job["cwd"]).resolve())} for job in jobs]}
+
+
+def worker_harness(request):
+    """The verified native worker behind a request, or None for any other command adapter."""
+    command = request["command"]
+    for harness in HARNESSES:
+        worker = str(factory.ROOT / (harness + "_worker.py"))
+        if command[:4] == [sys.executable, "-E", "-s", worker] or (harness == "codex" and command[:2] == [sys.executable, worker]):
+            return harness
+    return None
 
 
 def native_request(request):
-    command = request["command"]
-    return (command[:4] == [sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
-            or command[:2] == [sys.executable, str(factory.ROOT / "codex_worker.py")])
+    return worker_harness(request) is not None
 
 
 def writer(request):
@@ -121,7 +134,7 @@ def capacity_reason(snapshot, binary, now, minimum, job):
 
 
 class Runner:
-    def __init__(self, directory, plan, *, codex, rex, server, probe=codex_capacity.snapshot,
+    def __init__(self, directory, plan, *, codex, rex, server, claude=None, probe=codex_capacity.snapshot,
                  clock=time.time, from_writer=None):
         self.plan = validate_plan(plan)
         self.supplied_plan, self.from_writer = self.plan, from_writer
@@ -134,8 +147,11 @@ class Runner:
                            or job["id"] == from_writer or from_writer not in job["after"] for job in jobs)):
                 raise factory.FactoryError("--from-writer requires exactly one task with read-only independent verification jobs, distinct IDs and explicit writer dependencies")
         self.directory, self.binary = Path(directory).resolve(), Path(codex).resolve()
+        self.claude = Path(claude).resolve() if claude else None
         if not Path(codex).is_absolute() or not Path(rex).is_absolute() or not server.startswith("unix://"):
             raise factory.FactoryError("Supply absolute Codex/Rex paths and an explicit unix:// Rex endpoint")
+        if any(job["harness"] == "claude" for job in self.plan["jobs"]) and (claude is None or not Path(claude).is_absolute()):
+            raise factory.FactoryError("Supply the absolute --claude executable for the plan's Claude jobs")
         self.rex, self.server, self.probe, self.clock = str(rex), server, probe, clock
         self.capacity, self.capacity_error, self.probed_at = None, None, None
         policy = factory.decode_json((factory.ROOT / "config/coordination.json").read_text())
@@ -146,6 +162,16 @@ class Runner:
         self.launch_errors = {}
         self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0, tabs_closed=0)
         self.tidy_issues = []
+
+    def command(self, path, job):
+        """The frozen worker command for a plan job on its harness."""
+        if job["harness"] == "claude":
+            return factory.claude_command(path, task=job["task"], assignment_id=job["id"], claude=str(self.claude),
+                model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
+                write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None)
+        return factory.codex_command(path, task=job["task"], assignment_id=job["id"], codex=str(self.binary),
+            model=job["model"], effort=job["effort"], cwd=job["cwd"], write=job["write"], seconds=job["seconds"],
+            commit_message=job["commit_message"], role=job["role"])
 
     def select_writer_candidate(self):
         """Called under the execution lock; derive continuity from original evidence."""
@@ -161,12 +187,13 @@ class Runner:
             if (source["state"] != "launched" or not native_request(source["request"])
                     or not writer(source["request"]) or source["result"] is None
                     or source["result"]["outcome"] != "completed"):
-                raise factory.FactoryError("--from-writer needs a collected, completed native Codex writer")
+                raise factory.FactoryError("--from-writer needs a collected, completed native writer")
             if source["request"].get("inputs") != original:
                 raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
             factory.check_repository(record["admission"])
             rex = factory.connect(record, self.rex, self.server)
-            args, receipt, native = factory.codex_evidence(self.from_writer, record, source,
+            evidence = factory.claude_evidence if worker_harness(source["request"]) == "claude" else factory.codex_evidence
+            args, receipt, native = evidence(self.from_writer, record, source,
                 observe=lambda: factory.status(rex, record, source))
             if not args.write or args.commit_message is None or receipt.get("commit") is None:
                 raise factory.FactoryError("--from-writer needs an explicit validated factory commit")
@@ -226,7 +253,8 @@ class Runner:
                             if observed["state"] in {"exited", "lost"}:
                                 # A lost pane defers to the worker's own completed receipt.
                                 if native_request(assignment["request"]) and assignment["result"] is None:
-                                    record = factory.collect_codex(path, identity, rex, record, assignment)
+                                    collect = factory.collect_claude if worker_harness(assignment["request"]) == "claude" else factory.collect_codex
+                                    record = collect(path, identity, rex, record, assignment)
                                     self.metrics["collected"] += 1
                                     assignment = record["assignments"][identity]
                                 result = assignment["result"]
@@ -297,9 +325,7 @@ class Runner:
             if phase is not None:
                 request = record["assignments"][job["id"]]["request"]
                 try:
-                    expected = factory.codex_command(self.directory / (job["task"] + ".json"), task=job["task"],
-                        assignment_id=job["id"], codex=str(self.binary), model=job["model"], effort=job["effort"],
-                        cwd=job["cwd"], write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"], role=job["role"])
+                    expected = self.command(self.directory / (job["task"] + ".json"), job)
                     if (request.get("inputs") != dict(candidate=job["candidate"], requirements=job["requirements"])
                             or any(request[k] != job[k] for k in ("role", "goal", "cwd", "purpose"))
                             or request.get("dependencies", []) != sorted(job["after"]) or request["command"] != expected):
@@ -328,7 +354,7 @@ class Runner:
                 reason = "Active task limit is occupied"
             else:
                 request = dict(role=job["role"], purpose=job["purpose"], cwd=job["cwd"],
-                    command=[sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py")]
+                    command=[sys.executable, "-E", "-s", str(factory.ROOT / (job["harness"] + "_worker.py"))]
                             + (["--write"] if job["write"] else []))
                 if not reserved(request) and sum(not reserved(item) for _, item in active) >= limits["workers"] - limits["reserve_workers"]:
                     reason = "Ordinary worker slots are occupied; verification/recovery reserve remains available"
@@ -345,7 +371,7 @@ class Runner:
                             reason = "An active writer/reader owns this checkout; use an independent worktree"
                     except factory.FactoryError as exc:
                         reason = "Worktree occupancy is unavailable: " + str(exc)
-            if reason is None:
+            if reason is None and job["harness"] == "codex":
                 self.refresh_capacity()
                 reason = self.capacity_error or (capacity_reason(self.capacity, self.binary, self.clock(),
                          limits["minimum_remaining_percent"], job) if self.capacity is not None else "Capacity is unavailable")
@@ -357,9 +383,7 @@ class Runner:
                     current = factory.load_task(path)
                     if current["inputs"] != record["inputs"] or current["hold"] is not None:
                         raise factory.FactoryError("Task inputs/hold changed before launch; inspect current state before resuming")
-                    command = factory.codex_command(path, task=job["task"], assignment_id=job["id"],
-                        codex=str(self.binary), model=job["model"], effort=job["effort"], cwd=job["cwd"],
-                        write=job["write"], seconds=job["seconds"], commit_message=job["commit_message"], role=job["role"])
+                    command = self.command(path, job)
                     current, assignment = factory.launch(path, task=job["task"], assignment_id=job["id"],
                         role=job["role"], goal=job["goal"], cwd=job["cwd"], command=command,
                         binary=self.rex, server=self.server, purpose=job["purpose"], dependencies=job["after"])
@@ -419,7 +443,8 @@ def main(argv=None):
     parser.add_argument("--state-dir", type=Path, default=factory.default_state_dir())
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--from-writer", metavar="ASSIGNMENT_ID")
-    parser.add_argument("--codex", required=True)
+    parser.add_argument("--codex", required=True, help="Native Codex CLI; also sandboxes every writer's factory commit")
+    parser.add_argument("--claude", help="Native Claude Code CLI; required when the plan has Claude jobs")
     parser.add_argument("--rex", required=True)
     parser.add_argument("--server", required=True)
     parser.add_argument("--seconds", type=int, default=600)
@@ -429,7 +454,7 @@ def main(argv=None):
         if not 1 <= args.seconds <= factory.MAX_NATIVE_SECONDS:
             raise factory.FactoryError("Use an orchestration budget between 1 and 86400 seconds")
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
-        runner = Runner(args.state_dir, plan, codex=args.codex, rex=args.rex, server=args.server,
+        runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, rex=args.rex, server=args.server,
                         from_writer=args.from_writer)
         result = run(runner, seconds=args.seconds, once=args.once)
         print(json.dumps(result, indent=2, allow_nan=False))
