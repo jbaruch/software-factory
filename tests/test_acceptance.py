@@ -1,4 +1,5 @@
 """Replay externally stated expected behavior against the small reference decisions."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import json
 import unittest
 from pathlib import Path

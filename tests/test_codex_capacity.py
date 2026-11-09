@@ -1,4 +1,5 @@
 """Offline native capacity fixtures; no provider or Rex access."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
 import io

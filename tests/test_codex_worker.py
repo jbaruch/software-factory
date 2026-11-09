@@ -1,4 +1,5 @@
 """Native result/lifecycle tests use fake processes and Rex, never model calls."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 import copy

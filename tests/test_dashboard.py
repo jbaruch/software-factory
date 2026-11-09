@@ -1,4 +1,5 @@
 """View tests use fixed task records and fake observations; never live Rex or providers."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 import base64
 from concurrent.futures import ThreadPoolExecutor

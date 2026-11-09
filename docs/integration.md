@@ -31,7 +31,7 @@ Capture again under a new assignment ID when affected inputs change.
 Collect original results with `codex-collect`. Then invoke:
 
 ```sh
-python3 factory.py --state-dir '/absolute/private/state' integrate \
+python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/private/state' integrate \
   --task TASK --id INTEGRATION --pr 'https://github.com/OWNER/REPO/pull/NUMBER' \
   --review RELEASE_REVIEW --after REQUIRED_APPROVAL \
   --gh '/absolute/installed/gh' \

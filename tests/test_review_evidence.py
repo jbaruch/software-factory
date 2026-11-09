@@ -1,4 +1,5 @@
 """Revision evidence uses owned real Git fixtures, without providers or Rex."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 import json
 import os

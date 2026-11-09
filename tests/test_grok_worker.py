@@ -1,4 +1,5 @@
 """Grok execution/collection uses fake native processes and fake Rex only."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
 from contextlib import redirect_stderr, redirect_stdout

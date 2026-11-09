@@ -3,7 +3,7 @@
 Run the view from the application checkout with Python 3.11+:
 
 ```sh
-python3 dashboard.py --state-dir '/absolute/path/to/factory-state' \
+python3 -B skills/factory/runtime/dashboard.py --state-dir '/absolute/path/to/factory-state' \
   --decision-store '/absolute/path/to/private/decisions' --port 8090
 ```
 

@@ -362,10 +362,11 @@ def scanner_binary(args):
         return path
     binary = tool("gitleaks")
     try:
-        config = (factory.ROOT / ".pre-commit-config.yaml").read_text()
-        pin = re.search(r"(?m)^  - repo: https://github.com/gitleaks/gitleaks\n    rev: v([0-9]+\.[0-9]+\.[0-9]+)\s*$", config)
+        scanner = factory.decode_json((factory.ROOT / "config/scanner.json").read_text())
+        pinned = scanner.get("gitleaks") if isinstance(scanner, dict) else None
+        pin = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)", pinned) if isinstance(pinned, str) else None
         if pin is None:
-            raise factory.FactoryError("Restore the pinned Gitleaks entry in .pre-commit-config.yaml before automatic commits")
+            raise factory.FactoryError("Restore the pinned Gitleaks version in the runtime's config/scanner.json before automatic commits")
         version = subprocess.run([str(binary), "version"], stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=10, check=False, env=tool_environment())
         verified = not version.returncode and not version.stderr and version.stdout.strip() == pin[1]
@@ -377,7 +378,7 @@ def scanner_binary(args):
                 line.startswith(module) for line in metadata.stdout.splitlines())
         if not verified:
             raise factory.FactoryError("Scanner identity/version does not match the Gitleaks pin; install the pinned native release before starting a writer")
-    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
         raise factory.FactoryError("Cannot verify the pinned scanner; restore its native installation and manifest before starting a writer") from None
     return binary
 

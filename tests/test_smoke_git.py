@@ -1,4 +1,5 @@
 """Offline smoke orchestration with fake sandbox/signing transports and owned Git fixtures."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 from contextlib import ExitStack, contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from io import StringIO
 import json

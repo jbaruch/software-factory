@@ -15,6 +15,8 @@ import secrets
 import stat
 import subprocess
 import sys
+
+sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import tempfile
 import time
 import uuid
@@ -944,8 +946,9 @@ def port_number(value):
 
 
 def main(argv=None):
+    factory.relocate("dashboard.py", sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-dir", type=Path, default=factory.ROOT / ".factory-state")
+    parser.add_argument("--state-dir", type=Path, default=factory.default_state_dir())
     parser.add_argument("--decision-store", type=Path, help="Existing private Jev store; omitted means unknown/not configured")
     parser.add_argument("--port", type=port_number, default=8090)
     args = parser.parse_args(argv)

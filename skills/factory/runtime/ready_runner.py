@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 import re
 import sys
+
+sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import time
 
 import codex_capacity
@@ -40,7 +42,7 @@ def validate_plan(value):
         raise factory.FactoryError("Set positive worker/task limits, a smaller verification reserve and headroom strictly between 0 and 100")
     if not isinstance(jobs, list) or len(jobs) > 1000:
         raise factory.FactoryError("Supply at most 1000 explicit assignment jobs")
-    roles = {item["id"] for item in factory.decode_json((factory.ROOT / "skills/factory/references/roles.json").read_text())["roles"]}
+    roles = {item["id"] for item in factory.decode_json(factory.ROLES_PATH.read_text())["roles"]}
     planned = {(row["task"], row["id"]) for row in jobs if isinstance(row, dict)
                and isinstance(row.get("task"), str) and isinstance(row.get("id"), str)}
     seen, inputs = set(), {}
@@ -412,8 +414,9 @@ def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) 
 
 
 def main(argv=None):
+    factory.relocate("ready_runner.py", sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-dir", type=Path, default=factory.ROOT / ".factory-state")
+    parser.add_argument("--state-dir", type=Path, default=factory.default_state_dir())
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--from-writer", metavar="ASSIGNMENT_ID")
     parser.add_argument("--codex", required=True)

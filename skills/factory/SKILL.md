@@ -21,7 +21,24 @@ Read current artifacts by reference, route findings directly to their responsibl
 
 Finish here.
 
-## Step 2 — Inspect current state
+## Step 2 — Hand off work
+
+Use this when the user asks to hand the current work to the factory. The factory's intake is its task record; do not write a separate handover document.
+
+1. Commit the work to hand off in this repository and note the commit ID.
+2. Run the factory as `python3 -B skills/factory/runtime/factory.py`. It installs or upgrades the per-user runtime on first use and keeps task state in `~/.local/state/software-factory`.
+3. Record the task, its inputs and a writer worktree:
+   - `admit --task TASK --goal GOAL --repo /absolute/repo --acceptance REFERENCE`
+   - `inputs --task TASK --candidate COMMIT --requirements REQUIREMENTS-ID`
+   - `provision --task TASK --id writer --path /absolute/new/worktree`
+4. Start a writer on that worktree with a model and effort that fit the role. The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOINT`, with the endpoint from `rex whoami --json`.
+   - Claude: `claude-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --claude /absolute/claude --model MODEL --effort EFFORT --write --commit-message MESSAGE --sandbox /absolute/codex`
+   - Codex: `codex-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --codex /absolute/codex --model MODEL --effort EFFORT --write --commit-message MESSAGE`
+5. Check it with `status --task TASK --id ID`, collect it with `claude-collect` or `codex-collect`, and close finished tabs with `tidy`.
+
+Report the task ID and its current state. A collected result is not task acceptance. Finish here.
+
+## Step 3 — Inspect current state
 
 Read stored task, assignment and exception facts and relevant original evidence. Use current process observations for liveness. Distinguish completed processes, specialist findings, task acceptance and release readiness. Preserve unknown or stale evidence as unknown or stale; reconcile uncertain effects before proposing another attempt.
 

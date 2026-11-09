@@ -1,4 +1,5 @@
 """Fixed observed native shapes; no provider or live Rex calls."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
 from contextlib import nullcontext, redirect_stdout, redirect_stderr

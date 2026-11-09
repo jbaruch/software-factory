@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.0 — Unpublished
+
+- `acr install github:jbaruch/software-factory` and `acr realize` now install the factory itself: the application moved into the `factory` skill as `skills/factory/runtime/`, with its configuration, dashboard assets and scanner pin.
+- A project's installed copy installs itself as the one per-user runtime in `~/.local/share/software-factory/skill` and runs from there, so tasks keep stable worker paths across projects. The runtime is upgraded in place to the newest version any project brings and never downgraded; a source checkout runs in place.
+- Task state defaults to the per-user `~/.local/state/software-factory` instead of a directory beside the application.
+- The factory skill gains a hand-off step that drives the bundled CLI: admit, select inputs, provision a writer worktree, start a Claude or Codex writer, collect and tidy.
+- Installed copies never write bytecode, and `scripts/check_design.py` keeps the runtime `VERSION` and Gitleaks pin equal to the repository's.
+
 ## 0.18.1 — Unpublished
 
 - Accept relative Glob/Grep paths from Claude writers, resolved against the checkout, instead of failing the attempt after its edits; refuse Glob patterns and Grep file filters that escape the checkout.

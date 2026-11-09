@@ -17,8 +17,9 @@ verification limits and the remaining work toward live delivery.
 - [Integration](docs/integration.md): original native release judgments, canonical readiness, conditional merge and read-only recovery.
 - [Task state](docs/task-state.md): admission, attempt limits, holds and the state schema.
 - `skills/factory/references/roles.json`: the specialist catalog, focused prompts and decision authority.
-- `config/providers.json`: the five requested subscription routes, with unknown capabilities and quota sharing preserved explicitly.
-- `config/coordination.json`: bounded Jev judgments and execution policies.
+- `skills/factory/runtime/`: the factory application, shipped inside the `factory` skill so ACR installs it.
+- `skills/factory/runtime/config/providers.json`: the five requested subscription routes, with unknown capabilities and quota sharing preserved explicitly.
+- `skills/factory/runtime/config/coordination.json`: bounded Jev judgments and execution policies.
 - `evals/scenarios.json`: replayable, credential-free acceptance scenarios.
 
 From this directory, with Python 3.11+:

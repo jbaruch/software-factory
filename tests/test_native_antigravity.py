@@ -1,4 +1,5 @@
 """Recorded native usage rows and fake transports; no provider or Rex calls."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 from contextlib import redirect_stderr
 from io import StringIO
 import os

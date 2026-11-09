@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import sys
+
+sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import time
 import urllib.error
 import urllib.request

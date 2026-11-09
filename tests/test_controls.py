@@ -1,4 +1,5 @@
 """Operator actions use fixed records and loopback HTTP, never Rex/providers."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import base64
 import copy
 from http.client import HTTPConnection

@@ -1,4 +1,5 @@
 """Owner provisioning conformance with real temporary Git repositories, never providers/Rex."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO

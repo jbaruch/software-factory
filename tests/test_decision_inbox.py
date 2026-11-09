@@ -1,4 +1,5 @@
 """Fixed offline inbox/control regressions; no private runtime state or live effects."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout

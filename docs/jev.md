@@ -13,8 +13,8 @@ The integration follows the official [System One API](https://docs.typesafe.ai/a
 ## Compile and discover
 
 ```sh
-python3 jev.py compile --question task-demand --question correction-disposition
-python3 jev.py models
+python3 -B skills/factory/runtime/jev.py compile --question task-demand --question correction-disposition
+python3 -B skills/factory/runtime/jev.py models
 ```
 
 Compilation is offline and credential-free. Live commands read `TYPESAFE_API_KEY`
@@ -30,7 +30,7 @@ native subscriptions used for specialist execution.
 ## Shadow evaluation
 
 ```sh
-python3 jev.py evaluate --state /path/to/relevant-state.json \
+python3 -B skills/factory/runtime/jev.py evaluate --state /path/to/relevant-state.json \
   --model '<discovered-model-name>' --evidence-revision '<source-revision>' \
   --question task-demand --question correction-disposition
 ```
@@ -61,11 +61,11 @@ actual model/version, relevant evidence, question/version and candidate set.
 ## Retained decisions and uncertainty inbox
 
 ```sh
-python3 jev.py evaluate --state /path/to/relevant-state.json \
+python3 -B skills/factory/runtime/jev.py evaluate --state /path/to/relevant-state.json \
   --model '<discovered-model-name-or-alias>' --model-version '<expected-jev-version>' \
   --evidence-revision '<source-revision>' \
   --question task-demand --store /path/to/private/decisions
-python3 jev.py pending --store /path/to/private/decisions
+python3 -B skills/factory/runtime/jev.py pending --store /path/to/private/decisions
 ```
 
 The store reuses a completed evaluation only for identical endpoint, requested
@@ -166,7 +166,7 @@ consequences and a concrete missing input. It does not re-answer the classifier'
 resolved/unresolved labels. Original artifact references supply its evidence basis.
 
 ```sh
-python3 jev.py pending --store /path/to/private/decisions --task-state-dir /path/to/tasks
+python3 -B skills/factory/runtime/jev.py pending --store /path/to/private/decisions --task-state-dir /path/to/tasks
 ```
 
 This optional view uses schema 2 with `items` and `resolutions`. Already collected

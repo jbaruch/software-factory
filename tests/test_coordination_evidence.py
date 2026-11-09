@@ -1,4 +1,5 @@
 """Bounded answers use fixed classifier replies, fake native events and fake Rex."""
+import runtime_path  # noqa: F401  Must precede runtime imports.
 import hashlib
 import asyncio
 from contextlib import redirect_stdout

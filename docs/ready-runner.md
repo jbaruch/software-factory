@@ -14,7 +14,7 @@ outside the supplied plan. Other instances and native CLI use outside this
 factory are not part of its work limits.
 
 ```sh
-python3 ready_runner.py --state-dir '/absolute/path/to/state' \
+python3 -B skills/factory/runtime/ready_runner.py --state-dir '/absolute/path/to/state' \
   --plan '/absolute/path/to/plan.json' \
   --codex '/absolute/path/to/codex' \
   --rex '/absolute/path/to/rex' --server 'unix:///explicit/socket' \
