@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- Ready-plan jobs take optional `turns` (Claude and Grok, 1 to 1000) and `base` (the review base for Claude, Grok and Antigravity code reviews). A plan can now run a long writer and a code review instead of freezing 30 turns and having no way to express a review range; invalid values refuse before execution (#47).
+
 ## 0.24.1 — 2026-11-09
 
 - The Claude decoder accepts `system/api_retry` and the task events Claude Code emits for long or backgrounded Bash calls (`tool_progress`, `task_started`, `task_updated`, `task_notification`, `background_tasks_changed`). A completed 100-turn writer failed collection on a transient API retry and would have failed again on its long Bash calls (#45).
