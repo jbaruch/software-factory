@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.22.0 — Unpublished
+## 0.22.0 — 2026-11-09
+
+Includes the unpublished 0.20.0 and 0.21.0 changes below.
 
 - Every native agent runs without approval prompts or a harness sandbox: Codex with `--dangerously-bypass-approvals-and-sandbox`, Claude and Grok with `--permission-mode bypassPermissions`. The boundary is structural: a worktree per writer, a factory-owned commit with a secret scan, and no push or merge authority for agents. This replaces Codex's read-only/workspace-write sandbox, Claude's `--restricted`/`acceptEdits`/`dontAsk` modes and its shell sandbox.
 - Grok inspection runs again. The execution hold is gone, project trust is no longer required, and imported plugins, hooks, MCP and LSP servers are recorded rather than refused. The native `strict` sandbox blocked CLI startup on 1.0.77.
