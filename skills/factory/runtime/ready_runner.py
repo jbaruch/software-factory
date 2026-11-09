@@ -49,7 +49,8 @@ def validate_plan(value):
     seen, inputs = set(), {}
     for job in jobs:
         if not isinstance(job, dict) or set(job) - {"harness"} != JOB_FIELDS or job.get("harness", "codex") not in HARNESSES:
-            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields and an optional codex, claude or grok harness")
+            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields and an optional harness: "
+                                       + ", ".join(HARNESSES))
         if any(not isinstance(job[k], str) or not job[k].strip() for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"}):
             raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
         key = (job["task"], job["id"])
