@@ -1,5 +1,27 @@
 # Native provider observations
 
+## Execution policy
+
+Every native agent runs unattended, without approval prompts or a harness
+sandbox: Codex with `--dangerously-bypass-approvals-and-sandbox`, Claude Code and
+Grok with `--permission-mode bypassPermissions`. A factory nobody sits in front
+of cannot wait on permission dialogs, and a sandbox that refuses ordinary build,
+test and network commands turns every assignment into an approval queue. The
+boundary is structural instead:
+
+- each writer edits only its own provisioned worktree, and each reviewer reads a
+  clean one at the selected candidate;
+- agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
+  secrets, runs hooks and signs, and integration stays with the runtime;
+- only a structured report counts as a result. Text, tool telemetry and
+  permission labels never supply completion, acceptance or authority.
+
+Claude and Grok reviewers are given read tools only. That is their tool
+interface, not a fence. Native user configuration that a CLI imports, such as
+plugins, hooks, MCP and LSP servers, is the operator's environment. It is recorded,
+not refused. Receipts and streams recorded under the earlier confined modes still
+decode and collect.
+
 `native_codex.py` reads metadata from the installed Codex CLI through a private
 stdio app-server child. It preserves native sign-in and configuration. It does
 not read auth files, start a thread or model turn, edit settings, log out, spend
@@ -226,18 +248,13 @@ This additive parser changes no CLI, usage snapshot, task or receipt format and
 migrates no stored data. Rollback is removal of the decoder/version change by the
 integration owner; no irreversible data effects occur. Keep historical failures
 unchanged. The canonical [inventory](implementation.md) records qualification
-limits; execution remains held pending the separate security/lifecycle work.
+limits. This decoder has no worker yet.
 
 ## Grok authenticated metadata
 
-The ACP metadata command is currently held before any native child starts. The
-CLI reloads mutable executable configuration after inspection, so the check below
-does not establish a safe execution boundary. Use another eligible route.
-The following describes retained protocol coverage, not current route readiness.
-
-The metadata command applies the same native configuration/trust and executable-
-customization checks as the [inspection worker](#explicit-grok-inspection-assignments)
-before starting its ACP agent. Unsupported profiles remain held without a model turn.
+The metadata command applies the same native configuration checks as the
+[inspection worker](#explicit-grok-inspection-assignments) before starting its
+ACP agent in `bypassPermissions` mode with only the `read_file` tool.
 
 ```sh
 python3 -B skills/factory/runtime/native_grok.py --grok '/absolute/path/to/grok' --cwd '/absolute/project/path'
@@ -286,16 +303,9 @@ is used by the explicit worker and collector below.
 
 ## Explicit Grok inspection assignments
 
-New assignments, direct worker execution and new result collection are currently
-held. Existing assignment reconnect and raw artifact inspection remain available.
-The native built-in sandbox can fail open, `read_file` does not enforce checkout
-confinement, and custom profiles only add to inherited filesystem grants. Native
-configuration inspection also leaves a gap before mutable hooks/plugins/MCP/LSP
-configuration is reloaded. Tool denies and file hashes do not close those gaps.
-No environment switch or command-line option bypasses the hold. Restore execution
-only with a compatible boundary and separate live conformance evidence.
-
-The retained command interface uses an admitted task, selected
+Grok inspection runs under the [execution policy](#execution-policy). The native
+`strict` sandbox blocked the CLI's own startup on 1.0.77, so assignments run in
+`bypassPermissions` mode with only the `read_file` tool. The command interface uses an admitted task, selected
 candidate/requirements and discovered model/effort, as with
 [native launcher commands](native-rex.md):
 
@@ -325,11 +335,8 @@ Reconnecting an existing effect preserves its original brief and range. Historic
 code-review assignments without a base remain inspection-only; they cannot gain
 review evidence retroactively. Historical non-review briefs stay unchanged.
 
-The retained protocol implementation requests only the built-in `read_file` tool, with explicit write, edit,
-shell, MCP, web, workflow and subagent denies and the native `strict` sandbox.
-Source reads are explicitly allowed; model file reads of the default and selected
-Grok profile directories are denied. It disables native subagents, web search and automatic
-updates, preserves native subscription configuration and excludes host credential
+The worker requests only the built-in `read_file` tool in `bypassPermissions`
+mode. It disables native subagents, web search and automatic updates, preserves native subscription configuration and excludes host credential
 environment variables. API-key overrides, including empty ones, refuse. Metadata
 preflight requires cached OIDC sign-in, a reported subscription, no access gate,
 and the requested model/effort in the actual catalog. Before a model turn,
@@ -341,11 +348,11 @@ environment overrides also refuse. All inherited `GROK_*` variables except
 `GROK_HOME` and the runtime-controlled worktree-GC setting refuse, including
 empty issuer/client/proxy overrides. `GROK_HOME` reaches both native children;
 the recorded configuration includes its resolved root and layer paths/hashes,
-without configuration contents or credentials. Native discovery must report
-the assigned project trusted and no executable hooks, enabled plugins, MCP or
-LSP servers. Inspection precedes the metadata agent and model child, but does not
-freeze the configuration either child consumes. The execution hold prevents
-these checks from being treated as sufficient confinement. It changes no global configuration.
+without configuration contents or credentials. Imported hooks, plugins, MCP and
+LSP servers are accepted and recorded as `no_executable_customizations`; malformed
+discovery reports refuse. Project trust is not required. Inspection precedes the
+metadata agent and model child, but does not freeze the configuration either child
+consumes. It changes no global configuration.
 Unknown quota stays unknown;
 these explicit commands do not add automatic Grok scheduling to the ready runner.
 
@@ -404,10 +411,9 @@ python3 -B skills/factory/runtime/factory.py codex-collect --task example --id q
 ```
 
 Admission and input selection use the [native launcher commands](native-rex.md).
-The default worker sandbox is read-only. Inspection commands must work without
-creating temporary files; use direct reads such as `sed`/`rg` or `python -c`
-instead of shell heredocs. An explicit `--write` selects
-`workspace-write`; writers need their own worktree. `--seconds` declares the
+Every worker runs with `--dangerously-bypass-approvals-and-sandbox` under the
+[execution policy](#execution-policy). An explicit `--write` makes the assignment a
+writer; writers need their own worktree. `--seconds` declares the
 execution allowance, initially 600 seconds and bounded to 1–86400 seconds.
 Invalid allowances refuse before task reads, locks or attempts. Expiry interrupts only the owned
 native child and records failure. An uncertain attempt never retries itself.
@@ -448,7 +454,7 @@ describes why environment filtering is not credential confinement. See the
 native qualification.
 
 Writer CLI installations must remain outside the assigned checkout and Git
-metadata; the resolved executable is reused for later sandbox commands. Writer
+metadata; the resolved executable is reused for the factory commit sandbox. Writer
 mode requires a native CLI binary, a Python runtime outside writer-controlled
 paths, and no checkout/Git metadata entries in PATH. Script-form CLI wrappers
 refuse; select their installed native binary directly.
@@ -460,7 +466,7 @@ Read-only verification roles refuse writer execution; historical read-only
 assignments retain their original reconnect and collection behavior.
 
 For a factory-owned writer commit, supply `--write --commit-message` with the
-intended commit message. The specialist edits/tests within its workspace sandbox
+intended commit message. The specialist edits and tests in its own worktree
 and leaves Git staging/commit to the runtime. `factory_commit.py` owns that step
 independently of which agent edited the worktree. It confines Git, hooks and
 signing with the native Codex CLI's local `sandbox` command, which makes no model
@@ -535,7 +541,7 @@ and does not qualify a native assignment.
 with fake native transports and disposable Git repositories. The live command
 remains a separate explicit check.
 
-Native model commands retain their declared sandbox. Writers may
+Native model commands follow the [execution policy](#execution-policy). Writers may
 start from an admitted subdirectory; source checks still use the worktree root.
 No changes produce no empty commit. Commit errors or lost responses preserve the
 intent and worktree for inspection; they never retry the native job or commit.
@@ -664,16 +670,11 @@ scheduling route, API fallback or release-judgment path.
 `--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
 assignment an implementation specialist for a role whose catalog entry permits
 writing. Claude then runs with `Read`, `Edit`, `Write`, `Glob`, `Grep` and `Bash`
-in `acceptEdits` mode. `--restricted` confines those tools to the assigned checkout
-and refuses writes to Git and settings files without a person, so the agent cannot
-stage or commit. Its `Bash` tool runs in Claude Code's sandbox: writes stay in the
-checkout and temporary directories, network connections are refused, commands
-cannot ask to run unsandboxed or in the background, Claude Code refuses to run the
-shell if the sandbox cannot start, and well-known credential stores such as
-`~/.ssh`, `~/.claude`, cloud CLI and package-registry credentials are unreadable. A writer that still changes
-Git HEAD fails the factory commit's HEAD check. Recorded Glob/Grep paths may be relative and
-resolve against the checkout; search paths and Glob patterns that escape it refuse
-collection. After a completed report, `factory_commit.py`
+in `bypassPermissions` mode with no permission prompts, under the
+[execution policy](#execution-policy). A writer that changes Git HEAD fails the
+factory commit's HEAD check. The decoder checks tool-call shapes, not paths:
+reads, searches and edits outside the checkout decode, as a shell command could
+reach them anyway, and the factory commit takes only the worktree. After a completed report, `factory_commit.py`
 stages, scans, runs hooks, signs and commits the work exactly as it does for any
 other writer, using the Codex CLI only as its local sandbox. Writer briefs carry
 the task goal instead of review evidence, and `--base` is refused.
@@ -688,11 +689,13 @@ version-3 receipt carries it. Collected answers close their decision-inbox item.
 `native_claude.probe` before inference. Execution accepts Claude Code 2.1.319 or newer
 with claude.ai/firstParty sign-in only. Newer releases run until the strict decoder
 meets a shape it does not recognize, which refuses visibly rather than guessing. API/provider/auth environment overrides refuse even when
-empty. The private frozen brief goes to stdin with EOF. Safe-mode/restricted,
-Read-only tools plus internal StructuredOutput, empty strict MCP configuration,
-denied MCP tools, disabled slash commands/Chrome, dontAsk/no permission host and
-no session persistence are per-invocation controls. They do not establish general
-confinement or subscription eligibility.
+empty. The private frozen brief goes to stdin with EOF. Safe mode, read tools
+plus internal StructuredOutput for reviewers, empty strict MCP configuration,
+disabled slash commands/Chrome, `bypassPermissions` and no session persistence
+are per-invocation controls. They do not establish subscription eligibility.
+Claude Code 2.1.319 emits `system`/`ui_invalidate` rendering notices in bypass
+mode, sometimes before `init`; the decoder accepts them as inspection-only
+telemetry.
 
 A writer's receipt is version 2: version 1's fields plus `writer: true`, the
 `sandbox` path and nullable `commit` evidence with the same shape and checks as a

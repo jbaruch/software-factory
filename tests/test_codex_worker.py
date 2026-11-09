@@ -148,7 +148,8 @@ class NativeResults(unittest.TestCase):
                                     data=json.dumps(events()[0]) + "\n"))
         self.assertEqual(self.args.events.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
-        self.assertIn("read-only", self.spawns[0])
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
+        self.assertNotIn("--sandbox", self.spawns[0])
         self.assertEqual(self.spawns[0][4:8], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
         self.assertEqual(self.spawns[0][-1], "-")
@@ -407,7 +408,7 @@ class NativeResults(unittest.TestCase):
         receipt = self.execute()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["commit"]["state"], "created")
-        self.assertIn("workspace-write", self.spawns[0])
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
         self.assertEqual(dict(os.environ), before)
 
     def test_duplicate_web_search_telemetry_ids_are_not_used_as_evidence(self):
@@ -1151,7 +1152,7 @@ class NativeResults(unittest.TestCase):
         self.assertIn("writer-edited source", "".join(output))
         self.assertEqual(receipt["commit"]["state"], "created")
         self.assertNotEqual(receipt["candidate"], self.candidate)
-        self.assertIn("workspace-write", self.spawns[0])
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
         self.assertFalse((self.repo / "__pycache__").exists())
 
     def test_active_transitive_filter_refuses_before_any_helper_execution(self):

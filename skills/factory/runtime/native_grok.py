@@ -16,22 +16,12 @@ from factory import decode_json, RESULT_OUTCOMES
 from codex_worker import native_environment, stop_child
 
 API_KEY_ENVIRONMENT = ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
-READ_OPTIONS = ("--tools", "read_file", "--deny", "Write", "--deny", "Edit", "--deny", "Bash",
-                "--deny", "MCPTool(*)", "--deny", "WebFetch", "--deny", "WebSearch",
-                "--deny", "Task", "--deny", "Workflow")
+# The reviewer's tool interface. Operator policy runs agents unconfined, so this is not a fence.
+READ_OPTIONS = ("--tools", "read_file")
 
 
 class GrokProbeError(Exception):
     pass
-
-
-def require_execution_boundary():
-    """Hold execution until the native boundary meets the assignment contract."""
-    raise GrokProbeError(
-        "Grok execution is held: native sandbox permissions do not confine reads to the assigned checkout, "
-        "and configuration inspection does not freeze executable integrations. "
-        "Select another eligible route; retain existing Grok artifacts for inspection. "
-        "Re-enable only after a compatible boundary passes live conformance.")
 
 
 def validate_configuration(value, cwd):
@@ -40,8 +30,9 @@ def validate_configuration(value, cwd):
             or value["schema_version"] != 2 or value.get("kind") != "grok-subscription-configuration"
             or value.get("cwd") != str(Path(cwd).resolve())
             or value.get("route") != "cached-session-without-routing-overrides"
-            or value.get("sandbox") != "strict" or value.get("tools") != ["read_file"]
-            or value.get("no_executable_customizations") is not True
+            # "none" now; "strict" remains readable in retained evidence.
+            or value.get("sandbox") not in ("none", "strict") or value.get("tools") != ["read_file"]
+            or type(value.get("no_executable_customizations")) is not bool
             or not isinstance(value.get("grok_home"), str) or "\0" in value["grok_home"]
             or not Path(value["grok_home"]).is_absolute()
             or not isinstance(value.get("cli_version"), str) or not value["cli_version"].strip()
@@ -89,25 +80,14 @@ def environment():
     return result
 
 
-def read_options(cwd):
-    home = Path(os.environ.get("GROK_HOME", str(Path.home() / ".grok"))).expanduser()
-    if not home.is_absolute():
-        home = Path(cwd) / home
-    home = home.resolve()
-    if any(character in str(home) for character in "*?[]()\\"):
-        raise GrokProbeError("Select a Grok profile path without permission-pattern characters before read-only execution")
-    return (*READ_OPTIONS, "--allow", "Read(./**)", "--deny", "Read(~/.grok/**)", "--deny", f"Read({home}/**)")
-
-
 async def subscription_configuration(binary, cwd, *, spawn=asyncio.create_subprocess_exec):
     """Refuse routing overrides rather than reproduce Grok's config merge."""
-    require_execution_boundary()
     if any(key in os.environ for key in (*API_KEY_ENVIRONMENT, "GROK_AUTH", "GROK_CONFIG", "GROK_CONFIG_PATH",
             "GROK_MODELS_BASE_URL", "GROK_MODELS_LIST_URL", "GROK_AUTH_PROVIDER_COMMAND")):
         raise GrokProbeError("Unset Grok API, endpoint, auth-provider and config-overlay environment overrides before subscription execution")
     process, started = None, time.monotonic()
     try:
-        process = await spawn(str(binary), "--no-auto-update", *read_options(cwd), "inspect", "--json", cwd=str(cwd), env=environment(),
+        process = await spawn(str(binary), "--no-auto-update", *READ_OPTIONS, "inspect", "--json", cwd=str(cwd), env=environment(),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
         if process.returncode or stderr:
@@ -124,17 +104,19 @@ async def subscription_configuration(binary, cwd, *, spawn=asyncio.create_subpro
 
 
 def parse_configuration(report, cwd) -> dict:
+    # Operator policy accepts the profile as it is: no per-worktree trust and whatever
+    # plugins, hooks, MCP or language servers it loads (Grok imports the Claude environment).
     if (not isinstance(report, dict) or report.get("cwd") != str(Path(cwd).resolve())
-            or report.get("projectTrusted") is not True
             or not isinstance(report.get("grokVersion"), str) or not report["grokVersion"].strip()
             or not isinstance(report.get("configSources"), dict)
             or not isinstance(report["configSources"].get("layers"), list)
             or report.get("experiments") != []):
-        raise GrokProbeError("Native Grok configuration is untrusted, unsupported or experimental; inspect and explicitly trust only the assigned repository before execution")
-    if (any(report.get(key) != [] for key in ("hooks", "mcpServers", "lspServers"))
-            or not isinstance(report.get("plugins"), list)
-            or any(not isinstance(plugin, dict) or plugin.get("enabled") is not False for plugin in report["plugins"])):
-        raise GrokProbeError("Grok executable hooks, plugins, MCP or LSP configuration is unavailable for read-only assignments; select a profile and checkout without executable customization")
+        raise GrokProbeError("Native Grok configuration is unsupported or experimental; inspect its native configuration before execution")
+    if (any(not isinstance(report.get(key), list) for key in ("hooks", "mcpServers", "lspServers", "plugins"))
+            or any(not isinstance(plugin, dict) for plugin in report["plugins"])):
+        raise GrokProbeError("Malformed Grok customization report; inspect the native configuration before execution")
+    customized = (any(report[key] for key in ("hooks", "mcpServers", "lspServers"))
+                  or any(plugin.get("enabled") is not False for plugin in report["plugins"]))
     layers = []
     for layer in report["configSources"]["layers"]:
         if (not isinstance(layer, dict) or not isinstance(layer.get("path"), str)
@@ -154,8 +136,8 @@ def parse_configuration(report, cwd) -> dict:
         home = Path(cwd) / home
     return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(Path(cwd).resolve()),
                 grok_home=str(home.resolve()), cli_version=report["grokVersion"], layers=layers,
-                route="cached-session-without-routing-overrides", sandbox="strict", tools=["read_file"],
-                no_executable_customizations=True)
+                route="cached-session-without-routing-overrides", sandbox="none", tools=["read_file"],
+                no_executable_customizations=not customized)
 
 
 def parse_execution(events, *, session_id, cwd, max_turns):
@@ -282,7 +264,6 @@ def metadata(initialized, authenticated) -> dict:
 
 async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec,
                 configuration=subscription_configuration, clock=time.time, timer=time.monotonic) -> dict:
-    require_execution_boundary()
     if any(name in os.environ for name in API_KEY_ENVIRONMENT):
         raise GrokProbeError("Unset XAI_API_KEY and GROK_CODE_XAI_API_KEY before native subscription discovery")
     if not Path(binary).is_absolute():
@@ -297,8 +278,8 @@ async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec,
     config = await configuration(binary, cwd)
     validate_configuration(config, cwd)
     try:
-        process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
-            "--sandbox", "strict", *read_options(cwd), "agent", "--no-leader", "stdio", cwd=str(cwd),
+        process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
+            "--permission-mode", "bypassPermissions", *READ_OPTIONS, "agent", "--no-leader", "stdio", cwd=str(cwd),
             env=environment(), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     except OSError:

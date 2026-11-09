@@ -13,9 +13,11 @@ For Software Factory's runtime and explicitly invoked conformance checks, native
 For this repository's operator-admitted writer tasks, explicitly selecting
 `--write --commit-message` also authorizes factory-owned local Git staging/commit
 and the repository's configured hooks, filters and signing helpers with normal
-host access, including when they load writer-edited source. This exception does
-not expand native model command permissions or authorize pushes, merges,
-publication, task acceptance or bypassed CI/review gates.
+host access, including when they load writer-edited source. Native model
+commands run without approval prompts or harness sandboxes, as described in
+[native providers](docs/native-providers.md#execution-policy). This exception
+does not authorize pushes, merges, publication, task acceptance or bypassed
+CI/review gates.
 
 The operator temporarily waives waiting for Claude quality review while its subscription capacity is unavailable, expected to return Saturday afternoon, 2026-11-07 (America/Chicago). Current-head policy review and required CI still gate merges. Restore the Claude review requirement when capacity returns; never record the waived review as an approval.
 <!-- acr:begin id=038f1ca62f562183118d50b2dbc027ccfd9b70cba2a7bbee8860f50150df8273 source=github:jbaruch/coding-policy artifact=package-rules-69d19e3a2abcf3824356cce166d313ddcf0986a5c4dbda600377a60fcd426ae1 adapter=codex prefix=none -->

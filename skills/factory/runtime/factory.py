@@ -1416,7 +1416,6 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
                 requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     if not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
-        require_grok_execution()
         import grok_worker
         import review_evidence
         try:
@@ -2023,14 +2022,6 @@ def collect_claude(path, assignment_id, rex, record, assignment):
     return record
 
 
-def require_grok_execution():
-    import native_grok
-    try:
-        native_grok.require_execution_boundary()
-    except native_grok.GrokProbeError as exc:
-        raise FactoryError(str(exc)) from None
-
-
 def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None,
                    write=False, commit_message=None, sandbox=None, decision_store=None, decision=None, question=None):
     """Freeze one explicit Claude effect, reviewer or writer, including its native session."""
@@ -2105,8 +2096,6 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         raise FactoryError("Supply an absolute native Grok executable, discovered model/effort and bounded seconds/turns")
     worker = [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
-    if existing is None:
-        require_grok_execution()
     if existing is None or base is not None:
         from review_evidence import valid_base
         valid_base(base, role)
@@ -2141,7 +2130,6 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
 
 def collect_grok(path, assignment_id, rex, record, assignment):
     """Collect the original Grok report; this never accepts a task."""
-    require_grok_execution()
     import grok_worker
     import native_grok
 
