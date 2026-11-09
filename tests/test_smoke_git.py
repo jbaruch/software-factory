@@ -57,9 +57,9 @@ class SmokeGit(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}))
             stack.enter_context(patch.object(smoke.shutil, "which", side_effect=which))
             stack.enter_context(patch.object(smoke.subprocess, "run", side_effect=run))
-            stack.enter_context(patch.object(smoke.codex_worker, "isolated_git", side_effect=lambda *a, **k: nullcontext()))
-            stack.enter_context(patch.object(smoke.codex_worker, "private_signer", side_effect=lambda *a: nullcontext("fixture-agent")))
-            stack.enter_context(patch.object(smoke.codex_worker, "commit_changes", side_effect=commit))
+            stack.enter_context(patch.object(smoke.factory_commit, "isolated_git", side_effect=lambda *a, **k: nullcontext()))
+            stack.enter_context(patch.object(smoke.factory_commit, "private_signer", side_effect=lambda *a: nullcontext("fixture-agent")))
+            stack.enter_context(patch.object(smoke.factory_commit, "commit_changes", side_effect=commit))
             yield calls
 
     def test_fixture_orchestration_reports_checks_and_removes_owned_repositories(self):
