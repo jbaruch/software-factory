@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.0 — Unpublished
+
+- Every native agent runs without approval prompts or a harness sandbox: Codex with `--dangerously-bypass-approvals-and-sandbox`, Claude and Grok with `--permission-mode bypassPermissions`. The boundary is structural: a worktree per writer, a factory-owned commit with a secret scan, and no push or merge authority for agents. This replaces Codex's read-only/workspace-write sandbox, Claude's `--restricted`/`acceptEdits`/`dontAsk` modes and its shell sandbox.
+- Grok inspection runs again. The execution hold is gone, project trust is no longer required, and imported plugins, hooks, MCP and LSP servers are recorded rather than refused. The native `strict` sandbox blocked CLI startup on 1.0.77.
+- The Claude decoder accepts the `system`/`ui_invalidate` notices that Claude Code 2.1.319 emits in bypass mode, including before `init`.
+
 ## 0.21.0 — Unpublished
 
 - The ready runner dispatches Claude as well as Codex. Plan jobs may name `harness: claude`; the runner builds Claude commands, collects Claude reports and accepts a Claude writer for `--from-writer`. The Codex quota gate applies only to Codex jobs, and `--claude` supplies the Claude binary.

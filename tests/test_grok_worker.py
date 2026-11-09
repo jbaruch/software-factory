@@ -25,10 +25,6 @@ from test_rex_launcher import FakeRex
 
 class GrokWorker(unittest.TestCase):
     def setUp(self):
-        # These fake-process tests retain protocol coverage, not route eligibility.
-        self.boundary = patch.object(native_grok, "require_execution_boundary")
-        self.boundary.start()
-        self.addCleanup(self.boundary.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
@@ -140,40 +136,9 @@ class GrokWorker(unittest.TestCase):
                          factory.load_task(self.path)["assignments"]["inspect"]["result"]["outcome"])
         self.assertIn("Collected result saved, but its tab was not tidied; run tidy: Rex command failed", error.getvalue())
 
-    def test_production_hold_prevents_worker_probe_and_model_launch(self):
-        self.boundary.stop()
-        with self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
-            self.execute()
-        self.assertEqual(self.probes, [])
-        self.assertEqual(self.spawns, [])
-        self.assertFalse(self.args.events.exists())
-        self.assertFalse(self.args.receipt.exists())
-
-    def test_production_hold_refuses_new_effect_without_consuming_allowance(self):
+    def test_existing_effect_reconnects_without_relaunch(self):
         before = self.path.read_bytes()
         calls = copy.deepcopy(FakeRex.calls)
-        self.boundary.stop()
-        with self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
-            self.make_command(assignment_id="held")
-        with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
-            factory.launch(self.path, task="task", assignment_id="held", role="qa",
-                goal="Inspect the fixture", cwd=str(self.repo), command=self.command, purpose="work",
-                binary=sys.executable, server="unix:///test.sock")
-        self.assertEqual(self.path.read_bytes(), before)
-        self.assertEqual(FakeRex.calls, calls)
-
-    def test_production_hold_retains_historical_receipt_without_new_result(self):
-        self.assertEqual(self.execute()["state"], "completed")
-        before = [path.read_bytes() for path in (self.path, self.args.receipt, self.args.events)]
-        self.boundary.stop()
-        with self.assertRaisesRegex(factory.FactoryError, "Grok execution is held"):
-            self.collect()
-        self.assertEqual([path.read_bytes() for path in (self.path, self.args.receipt, self.args.events)], before)
-
-    def test_production_hold_allows_existing_effect_reconnect_without_relaunch(self):
-        before = self.path.read_bytes()
-        calls = copy.deepcopy(FakeRex.calls)
-        self.boundary.stop()
         self.assertEqual(self.make_command(), self.command)
         with patch.object(factory, "Rex", FakeRex):
             _, assignment = factory.launch(self.path, task="task", assignment_id="inspect", role="qa",
@@ -195,10 +160,9 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(grok_worker.read_events(self.args.events), self.events)
         command, options = self.spawns[0]
         self.assertIn("--no-subagents", command)
-        self.assertEqual(command[command.index("--sandbox") + 1], "strict")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+        self.assertNotIn("--sandbox", command)
         self.assertEqual(command[command.index("--tools") + 1], "read_file")
-        self.assertIn("MCPTool(*)", command)
-        self.assertIn("Bash", command)
         self.assertEqual(command[command.index("--prompt-file") + 1], str(self.args.brief))
         self.assertNotIn("--single", command)
         self.assertNotIn("GH_TOKEN", options["env"])

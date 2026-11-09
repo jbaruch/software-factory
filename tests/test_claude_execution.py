@@ -462,15 +462,36 @@ class WriterDecoder(unittest.TestCase):
                 self.assertEqual(native_claude.supported_version(version + " (Claude Code)", suffix=" (Claude Code)"), accepted)
         self.assertFalse(native_claude.supported_version("2.1.400", suffix=" (Claude Code)"))
 
-    def test_writer_command_names_the_shell_and_its_sandbox(self):
-        command = native_claude.write_command(MODEL, "high", SESSION, 10)
-        self.assertIn("Bash", command[command.index("--tools") + 1:command.index("--settings")])
-        settings = json.loads(command[command.index("--settings") + 1])
-        sandbox = settings["sandbox"]
-        self.assertEqual({key: sandbox[key] for key in ("enabled", "autoAllowBashIfSandboxed", "allowUnsandboxedCommands", "failIfUnavailable")},
-                         dict(enabled=True, autoAllowBashIfSandboxed=True, allowUnsandboxedCommands=False, failIfUnavailable=True))
-        self.assertTrue({"~/.ssh", "~/.claude", "~/.codex", "~/.aws", "~/.config/gh"} <= set(sandbox["filesystem"]["denyRead"]))
-        self.assertNotIn("--settings", native_claude.read_command(MODEL, "low", SESSION, 3))
+    def test_agents_run_in_bypass_mode_without_a_harness_fence(self):
+        for command in (native_claude.write_command(MODEL, "high", SESSION, 10), native_claude.read_command(MODEL, "low", SESSION, 3)):
+            self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+            self.assertNotIn("--restricted", command)
+            self.assertNotIn("--settings", command)
+        writer = native_claude.write_command(MODEL, "high", SESSION, 10)
+        self.assertIn("Bash", writer[writer.index("--tools") + 1:writer.index("--strict-mcp-config")])
+
+    def test_bypass_mode_rendering_notifications_decode_anywhere(self):
+        # Observed live: bypassPermissions runs emit system/ui_invalidate before init.
+        notice = dict(type="system", subtype="ui_invalidate", event="ui.render", session_id=SESSION,
+                      uuid="00000000-0000-4000-8000-000000000099")
+        data = writer_events("/fixture")
+        data[0]["permissionMode"] = "bypassPermissions"
+        self.assertEqual(self.parse([dict(notice), *data[:2], dict(notice), *data[2:]])["report"]["outcome"], "completed")
+        for damaged in ({**notice, "event": None}, {**notice, "session_id": "other"}):
+            with self.subTest(damaged=damaged), self.assertRaises(native_claude.ClaudeProbeError):
+                self.parse([damaged, *data])
+
+    def test_streams_from_confined_and_bypass_modes_both_decode(self):
+        for writer, legacy in ((True, "acceptEdits"), (False, "dontAsk")):
+            for mode in (legacy, "bypassPermissions"):
+                data = writer_events("/fixture") if writer else events("/fixture")
+                data[0]["permissionMode"] = mode
+                with self.subTest(writer=writer, mode=mode):
+                    self.assertIn(self.parse(data, writer=writer)["report"]["outcome"], {"completed", "approved"})
+        data = writer_events("/fixture")
+        data[0]["permissionMode"] = "dontAsk"
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
 
     def test_refused_attempts_outside_the_checkout_do_not_fail_the_writer(self):
         # Observed live: a mistyped path the harness refused, then the corrected edit.
@@ -605,7 +626,7 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(factory.git_commit(".", "HEAD"), receipt["candidate"])
         self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
         command = self.spawns[-1][0]
-        self.assertEqual(command[command.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
         self.assertEqual(command[command.index("--tools") + 1:command.index("--tools") + 6], ("Read", "Edit", "Write", "Glob", "Grep"))
         self.assertEqual((command[command.index("--model") + 1], command[command.index("--effort") + 1]), ("claude-opus-5-5", "high"))
         record = factory.load_task(self.path)
@@ -684,8 +705,10 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(self.execute()["state"],"completed")
         self.assertEqual(self.prompt, self.args.brief.read_text())
         command=self.spawns[0][0]
-        for flag in ["--safe-mode","--restricted","--strict-mcp-config","--no-session-persistence"]:
+        for flag in ["--safe-mode","--strict-mcp-config","--no-session-persistence"]:
             self.assertIn(flag,command)
+        self.assertNotIn("--restricted",command)
+        self.assertEqual(command[command.index("--permission-mode")+1],"bypassPermissions")
         result=self.collect()
         self.assertTrue(result["assignments"]["inspect"]["native_collected"])
         self.assertEqual(self.collect(),result)
