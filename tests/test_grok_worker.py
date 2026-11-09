@@ -558,7 +558,7 @@ class GrokApprovals(unittest.TestCase):
 
     def run_grok(self, identity, role, session, *, write=False):
         f = self.fixture
-        writer = dict(write=True, commit_message="Add fixture notes", sandbox=sys.executable) if write else {}
+        writer: dict[str, Any] = dict(write=True, commit_message="Add fixture notes", sandbox=sys.executable) if write else {}
         with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(session)):
             command = factory.grok_command(f.path, task="deliver", assignment_id=identity, grok=sys.executable,
                 model="fixture-model", effort="high", cwd=str(f.repo), role=role, **writer)
