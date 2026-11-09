@@ -212,7 +212,7 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
     expected_tools = WRITE_TOOLS if writer else READ_TOOLS
     callable_tools = set(expected_tools)
     report, final, pending, tools, rates = None, None, {}, {}, []
-    initialized, denied, tasks = False, {}, set()
+    initialized, denied, tasks, started = False, {}, set(), set()
     for event in events:
         if (not isinstance(event, dict) or final is not None or event.get("session_id") != session_id):
             refuse()
@@ -319,8 +319,9 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
             # Claude Code tracks long or backgrounded Bash calls as tasks. Their output still reaches
             # the agent as tool results, so task lifecycle events carry no report or usage authority.
             if (not bash_call(event.get("tool_use_id")) or event.get("task_type") != "local_bash"
-                    or not text(event.get("task_id")) or event["task_id"] in tasks):
+                    or not text(event.get("task_id")) or event["task_id"] in started):
                 refuse()
+            started.add(event["task_id"])
             tasks.add(event["task_id"])
         elif kind == "system" and event.get("subtype") == "task_updated":
             if not known_task(event.get("task_id")) or not isinstance(event.get("patch"), dict):
@@ -329,9 +330,12 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
             if not known_task(event.get("task_id")) or not text(event.get("status")):
                 refuse()
         elif kind == "system" and event.get("subtype") == "background_tasks_changed":
+            # A run_in_background Bash task is announced here one event before its task_started.
             if (not isinstance(event.get("tasks"), list)
-                    or any(not isinstance(task, dict) or not known_task(task.get("task_id")) for task in event["tasks"])):
+                    or any(not isinstance(task, dict) or not text(task.get("task_id"))
+                           or task.get("task_type", "local_bash") != "local_bash" for task in event["tasks"])):
                 refuse()
+            tasks.update(task["task_id"] for task in event["tasks"])
         elif (kind == "system" and event.get("subtype") == "permission_denied"
                 and event.get("tool_name") == "SandboxNetworkAccess"):
             # A writer's sandbox refused a network connection. It is not a tool call and
