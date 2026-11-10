@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- A completed Antigravity run keeps a private copy of each report file it wrote in agy's brain directory, beside its receipt (`TASK.ID.antigravity.artifacts/`). A Gemini QA reader returned only a path into that directory, which agy does not retain, so an approval's evidence could vanish (#74).
+
 ## 0.29.1 — 2026-11-10
 
 - The Antigravity decoder accepts the bare `error_message` steps agy 1.5.3 records when the agent carries on past an error. A Gemini QA reader that completed its run failed collection on one, the same family as #51.

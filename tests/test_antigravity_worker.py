@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -287,6 +287,26 @@ class AntigravityWorker(unittest.TestCase):
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         with self.assertRaisesRegex(factory.FactoryError, "receipt failed"):
             factory.reset_writer(self.path, assignment_id="implement")
+
+    def test_brain_directory_reports_are_retained_beside_the_receipt(self):
+        # Observed (#74): Gemini returned only a path into agy's private brain directory.
+        home = self.root / "home"
+        brain = home / ".gemini" / "antigravity-cli" / "brain" / CONVERSATION
+        report_file = brain / "qa-verification-report.md"
+        events = stream(self.repo)
+        report = dict(outcome="approved", artifacts=[str(report_file), "README.md:1 verified"])
+        cast(dict, events[-1]["result"]).update(structured_output=report, response=json.dumps(report))
+        def write_report(cwd):
+            brain.mkdir(parents=True)
+            report_file.write_text("# QA\nAll six points verified.\n")
+        with patch.dict(os.environ, HOME=str(home)):
+            receipt = self.execute(self.args, events=events, act=write_report)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
+        self.assertEqual((kept / "qa-verification-report.md").read_text(), "# QA\nAll six points verified.\n")
+        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["qa-verification-report.md"])
+        self.assertEqual((kept / "qa-verification-report.md").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(receipt["report"], report)
 
     def test_api_overrides_refuse_before_native_artifacts(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), self.assertRaisesRegex(factory.FactoryError, "Gemini API"):
