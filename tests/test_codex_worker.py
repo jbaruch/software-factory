@@ -658,6 +658,58 @@ class NativeResults(unittest.TestCase):
                         factory_commit.scan_staged(self.args, dict(repository_identity=self.identity,
                             commit=dict(staged_tree=tree)), git_scope=scope)
 
+    def scan_fixture(self, sentinel, *, existing):
+        """A parent commit holding existing content, then a staged writer change."""
+        self.args._gitleaks = Path(sys.executable)
+        self.args.commit_message = "Fixture commit"
+        (self.repo / "notes.txt").write_text(existing)
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                         "-c", "commit.gpgsign=false", "commit", "-qm", "Parent").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        @contextmanager
+        def scope(*args, **kwargs):
+            with factory.git_execution(lambda: [], {**factory.git_environment(), "TMPDIR": str(self.root)}):
+                yield
+        run = subprocess.run
+        def scanner(command, **options):
+            if command[0] != str(self.args._gitleaks):
+                return run(command, **options)
+            text = options["stdin"].read().decode()
+            if sentinel not in text:
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+            line = text[:text.index(sentinel)].count("\n") + 1
+            report = Path(command[command.index("--report-path") + 1])
+            report.write_text(json.dumps([dict(RuleID="fixture-token", StartLine=line, Match="REDACTED")]))
+            return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
+        return scope, scanner
+
+    def test_secret_scan_covers_only_the_writers_additions(self):
+        # Observed (#63): both canary repos' unchanged trees held test fixtures and doc
+        # examples that match default rules, so every factory commit there was refused.
+        sentinel = "ghp_" + "f" * 36
+        scope, scanner = self.scan_fixture(sentinel, existing=f"fixture token {sentinel}\n")
+        (self.repo / "feature.py").write_text("answer = 42\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        tree = factory.git_run(".", "write-tree").stdout.strip()
+        with patch.object(factory_commit.subprocess, "run", side_effect=scanner):
+            factory_commit.scan_staged(self.args, dict(repository_identity=self.identity, commit=dict(staged_tree=tree)),
+                                       git_scope=scope)
+
+    def test_secret_scan_names_the_rule_and_path_of_an_added_secret(self):
+        sentinel = "ghp_" + "e" * 36
+        scope, scanner = self.scan_fixture(sentinel, existing="first line\nsecond line\n")
+        (self.repo / "notes.txt").write_text(f"first line\nadded {sentinel}\nsecond line\n")
+        self.assertEqual(factory.git_run(".", "add", "--all").returncode, 0)
+        tree = factory.git_run(".", "write-tree").stdout.strip()
+        with patch.object(factory_commit.subprocess, "run", side_effect=scanner), \
+                self.assertRaises(factory_commit.Refusal) as refused:
+            factory_commit.scan_staged(self.args, dict(repository_identity=self.identity, commit=dict(staged_tree=tree)),
+                                       git_scope=scope)
+        self.assertIn("fixture-token in notes.txt", str(refused.exception))
+        self.assertNotIn(sentinel, str(refused.exception))
+        self.assertNotIn("sandbox", str(refused.exception))
+
     def test_native_environment_dump_cannot_commit_host_credentials(self):
         self.writer()
         selected = self.root / "native-configuration"

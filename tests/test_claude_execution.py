@@ -548,6 +548,9 @@ class WriterDecoder(unittest.TestCase):
             self.assertNotIn("--settings", command)
         writer = native_claude.write_command(MODEL, "high", SESSION, 10)
         self.assertIn("Bash", writer[writer.index("--tools") + 1:writer.index("--strict-mcp-config")])
+        import factory_commit
+        self.assertIn(factory_commit.WRITER_CONTRACT, writer[writer.index("--system-prompt") + 1])
+        self.assertIn("ignores gitleaks:allow", factory_commit.WRITER_CONTRACT)
 
     def test_bypass_mode_rendering_notifications_decode_anywhere(self):
         # Observed live: bypassPermissions runs emit system/ui_invalidate before init.

@@ -26,7 +26,17 @@ import factory
 
 # What every writer is told, whichever harness carries it.
 WRITER_CONTRACT = ("Factory commit mode: edit and test only; do not stage or commit Git changes. "
-                   "The factory commits after a completed report. Keep temporary outputs outside this checkout.")
+                   "The factory commits after a completed report. Keep temporary outputs outside this checkout. "
+                   "Before committing, the factory scans the lines you add with Gitleaks default rules and ignores "
+                   "gitleaks:allow comments, so a match fails your work: keep test fixtures and examples from "
+                   "looking like credentials.")
+
+
+SANDBOX_HINT = "; inspect native Git sandbox support and offline hook/signing access before another attempt; no host fallback was used"
+
+
+class Refusal(factory.FactoryError):
+    """A factory decision about the writer's own work, not a Git sandbox failure."""
 
 
 def tool_environment():
@@ -267,8 +277,12 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
         try:
             with factory.git_execution(command_prefix, environment):
                 yield
+        except Refusal:
+            raise
         except factory.FactoryError as exc:
-            raise factory.FactoryError(str(exc) + "; inspect native Git sandbox support and offline hook/signing access before another attempt; no host fallback was used") from None
+            if SANDBOX_HINT in str(exc):
+                raise  # An inner scope already explained it.
+            raise factory.FactoryError(str(exc) + SANDBOX_HINT) from None
 
 
 def trusted_git_runtime(args):
@@ -388,8 +402,29 @@ def scanner_binary(args):
     return binary
 
 
+def added_lines(patch):
+    """The lines a unified diff adds, each with the path it belongs to (labels are best effort)."""
+    path, in_hunk = None, False
+    for line in patch.split(b"\n"):
+        if line.startswith(b"diff --git "):
+            path, in_hunk = None, False
+        elif not in_hunk and line.startswith(b"+++ "):
+            label = line[4:].decode("utf-8", "replace").strip('"')
+            path = label[2:] if label.startswith("b/") else label
+        elif line.startswith(b"@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith(b"+"):
+            yield path, line[1:]
+
+
 def scan_staged(args, receipt, *, git_scope=isolated_git):
-    """Scan staged data and resolved commit metadata without a signer."""
+    """Scan what the writer adds, and the commit metadata, without a signer.
+
+    Only the writer's additions are its responsibility: a repository whose existing tree
+    holds test fixtures or documentation examples that match default rules must still
+    accept commits. The writer cannot exempt its additions: allow comments and ignore
+    files are disabled.
+    """
     if getattr(args, "_gitleaks", None) is None:
         args._gitleaks = scanner_binary(args)
     # Resolve identities against the same original config/environment used by
@@ -407,33 +442,58 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
         environment["PATH"] = os.defpath
         config = Path(environment["TMPDIR"]) / "scanner.toml"
         config.write_text("[extend]\nuseDefault = true\n")
-        objects = factory.git_run(".", "ls-tree", "-r", "--format=%(objectname)", receipt["commit"]["staged_tree"])
-        if objects.returncode or not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)
-                                         for oid in objects.stdout.splitlines()):
-            raise factory.FactoryError("Cannot enumerate the staged tree for secret scanning; inspect the retained index before another attempt")
-        paths = factory.git_run(".", "ls-tree", "-r", "--name-only", "-z", receipt["commit"]["staged_tree"])
+        staged, parent = receipt["commit"]["staged_tree"], args.candidate
+        paths = factory.git_run(".", "diff", "--name-only", "-z", "--no-renames", parent, staged)
         if paths.returncode or paths.stdout and not paths.stdout.endswith("\0"):
-            raise factory.FactoryError("Cannot read staged filenames for secret scanning; inspect the retained tree before another attempt")
+            raise factory.FactoryError("Cannot read changed filenames for secret scanning; inspect the retained tree before another attempt")
+        report = Path(environment["TMPDIR"]) / "scan-report.json"
         try:
-            # Avoid the scanner's Git-diff parser: some versions report success
-            # after Git stderr errors without scanning its additions.
-            with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as blobs:
-                blobs.write((identity_text + "\n" + args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode())
-                blobs.flush()
-                copied = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects",
-                    "cat-file", "--batch"], input=objects.stdout.encode(), stdout=blobs,
-                    stderr=subprocess.PIPE, env=environment, timeout=30, check=False)
-                if copied.returncode:
-                    raise factory.FactoryError("Cannot read staged blobs for secret scanning; inspect the retained tree before another attempt")
-                blobs.seek(0)
+            # Build the additions ourselves rather than use the scanner's Git-diff parser:
+            # some versions report success after Git stderr errors without scanning them.
+            patch = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects", "diff", "--no-ext-diff",
+                "--no-textconv", "--text", "--unified=0", "--no-renames", "--no-color", parent, staged],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, timeout=60, check=False)
+            if patch.returncode:
+                raise factory.FactoryError("Cannot read the writer's changes for secret scanning; inspect the retained tree before another attempt")
+            header = (identity_text + "\n" + args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode()
+            sources, chunks = [], [header]
+            line_number = header.count(b"\n") + 1
+            for path, line in added_lines(patch.stdout):
+                sources.append((line_number, path))
+                chunks.append(line + b"\n")
+                line_number += 1
+            with tempfile.TemporaryFile(dir=environment["TMPDIR"]) as stream:
+                stream.write(b"".join(chunks))
+                stream.flush()
+                stream.seek(0)
                 result = subprocess.run([*prefix(), str(args._gitleaks), "stdin",
                     "--config", str(config), "--gitleaks-ignore-path", os.devnull, "--ignore-gitleaks-allow",
-                    "--redact=100", "--no-banner", "--log-level", "error", "--timeout", "30"],
-                    stdin=blobs, env=environment, capture_output=True, timeout=35, check=False)
+                    "--redact=100", "--no-banner", "--log-level", "error", "--timeout", "30",
+                    "--report-format", "json", "--report-path", str(report)],
+                    stdin=stream, env=environment, capture_output=True, timeout=35, check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise factory.FactoryError("Secret scanner unavailable; inspect the retained staged tree and restore offline Gitleaks before another attempt") from None
         if result.returncode or result.stderr:
-            raise factory.FactoryError("Secret scan refused the staged tree; inspect it with redacted Gitleaks output before another attempt. No commit was retried")
+            raise Refusal("Secret scan refused the writer's additions" + scan_findings(report, sources)
+                          + "; inspect them before another attempt. No commit was retried")
+
+
+def scan_findings(report, sources):
+    """Redacted rule and path for each finding, when the scanner wrote its report."""
+    try:
+        findings = json.loads(report.read_text())
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(findings, list) or not findings:
+        return ""
+    def where(line):
+        if not isinstance(line, int):
+            return "commit metadata"
+        found = [path for start, path in sources if start <= line]
+        return found[-1] if found and found[-1] else "commit metadata"
+    labels = sorted({f'{item.get("RuleID", "unknown rule")} in {where(item.get("StartLine"))}'
+                     for item in findings if isinstance(item, dict)})
+    return ": " + ", ".join(labels[:20]) + (f" and {len(labels) - 20} more" if len(labels) > 20 else "")
 
 
 def check_git_operation(args):

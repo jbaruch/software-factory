@@ -167,6 +167,7 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 def write_command(model, effort, session, turns):
     """An implementation specialist with edit tools and a shell, in bypassPermissions mode."""
     from codex_worker import outcome_schema
+    import factory_commit
     # Operator policy: agents run unconfined and never prompt. A writer that commits on
     # its own still fails the factory commit's HEAD check.
     return ["--safe-mode", "--print", "--tools", "Read", "Edit", "Write", "Glob", "Grep", "Bash",
@@ -176,8 +177,8 @@ def write_command(model, effort, session, turns):
             "--model", model, "--effort", effort, "--session-id", session,
             "--max-turns", str(turns), "--no-session-persistence",
             "--system-prompt", "You are the assigned implementation specialist. Follow the supplied assignment. "
-            "Edit and test only inside this checkout. Do not delegate, stage, commit or change Git state; the "
-            "factory commits your finished work after a completed report.",
+            "Edit and test only inside this checkout, do not delegate, and do not change Git state. "
+            + factory_commit.WRITER_CONTRACT,
             "--json-schema", json.dumps(outcome_schema()), "--output-format", "stream-json",
             "--verbose", "--include-hook-events"]
 
