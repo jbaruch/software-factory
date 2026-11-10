@@ -122,9 +122,10 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
         if kind == "step_update":
             index, state, category = payload.get("step_index"), payload.get("state"), payload.get("step_type")
             # A tool step can end in ERROR (the agent saw the failure and carried on), and agy
-            # 1.5.3 records empty system_message steps. Neither carries a report or authority.
+            # 1.5.3 records empty system_message and error_message steps. None carries a report
+            # or authority; the result event alone supplies the report.
             if (type(index) is not int or index < 0 or state not in ("ACTIVE", "DONE", "ERROR")
-                    or category not in ("user_input", "agent_response", "tool", "finish", "system_message")
+                    or category not in ("user_input", "agent_response", "tool", "finish", "system_message", "error_message")
                     or state == "ERROR" and not tool_error(payload)):
                 refuse(f"has malformed step_update at line {line_number}")
             if index == step_index:
