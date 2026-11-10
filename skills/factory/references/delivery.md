@@ -3,7 +3,7 @@
 Delivery starts after independent verifiers approve the task's current candidate. `SKILL_DIR` is the `factory` skill's directory, as in the skill. The factory never pushes; specialists have no push or merge authority. The full contract is in [docs/integration.md](https://github.com/jbaruch/software-factory/blob/main/docs/integration.md).
 
 1. Push the writer's branch (`factory/TASK/WRITER_ID`) and open the PR through the project's installed release skill. PR preparation, issue declarations and feedback correction stay with that skill.
-2. Run the release judgment: a read-only `release` assignment over the complete PR feedback, on the strongest model available on any harness, at that model's maximum effort. Launch refuses a lower effort: Claude and Antigravity `max`, Grok and Codex the top effort of their model catalogs. For example, on Claude:
+2. Run the release judgment: a read-only `release` assignment over the complete PR feedback, on the strongest model available on any harness, at that model's maximum effort. Claude and Antigravity need `max`, Grok and Codex the top effort of their model catalogs. Launch refuses a lower effort, except on Grok, whose worker fails at start instead. For example, on Claude:
 
    ```sh
    python3 -B "$SKILL_DIR/runtime/factory.py" claude-start --task TASK --id release --role release --purpose work \
