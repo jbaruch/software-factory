@@ -862,7 +862,7 @@ def validate_provisioning(record):
         raise FactoryError("Invalid task provisioning request; restore the original record")
 
 
-def provisioning_git(repository, *args, output=None):
+def provisioning_git(repository, *args, output=None, timeout=30):
     """Metadata/index operations and raw blobs only; never checkout callbacks."""
     environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
     try:
@@ -870,7 +870,7 @@ def provisioning_git(repository, *args, output=None):
             "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
             env=environment, stdout=subprocess.PIPE if output is None else output,
-            stderr=subprocess.PIPE, timeout=30, check=False)
+            stderr=subprocess.PIPE, timeout=timeout, check=False)
         diagnostic = result.stderr.decode("utf-8")
         output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
@@ -1026,8 +1026,9 @@ def reader_checkout(repository, candidate, destination, *, identity):
                        expected_git_dir=git_dir(destination))
         yield destination
     finally:
-        # Two --force flags remove a locked worktree with every untracked and ignored file.
-        provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination))
+        # Two --force flags remove a locked worktree with every untracked and ignored file;
+        # a reader's node_modules can take minutes on slow storage.
+        provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination), timeout=600)
 
 
 def reset_writer(path, *, assignment_id):
@@ -1071,14 +1072,19 @@ def reset_writer(path, *, assignment_id):
             staged = subprocess.run([*base, *arguments], env=environment, capture_output=True, timeout=120, check=False)
             if staged.returncode:
                 raise FactoryError("Cannot capture the failed writer's edits: " + staged.stderr.decode("utf-8", "replace").strip())
-        descriptor = os.open(patch, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
+        # Written privately and renamed only once complete, so a failed diff never blocks a retry.
+        partial = Path(temporary) / "reset.patch"
+        with open(partial, "xb") as stream:
             diff = subprocess.run([*base, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", candidate],
                                   env=environment, stdout=stream, stderr=subprocess.PIPE, timeout=120, check=False)
             stream.flush()
             os.fsync(stream.fileno())
         if diff.returncode:
             raise FactoryError("Cannot write the failed writer's patch: " + diff.stderr.decode("utf-8", "replace").strip())
+        os.chmod(partial, 0o600)
+        if os.path.lexists(patch):
+            raise FactoryError("This writer was already reset; inspect its saved patch")
+        shutil.move(partial, patch)
     for arguments in (("reset", "--hard", "--quiet", candidate), ("clean", "-ffdxq")):
         restored = subprocess.run([*base, *arguments], env=git_environment(), capture_output=True, timeout=120, check=False)
         if restored.returncode:
