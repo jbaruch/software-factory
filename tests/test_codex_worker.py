@@ -492,6 +492,22 @@ class NativeResults(unittest.TestCase):
                 factory_commit.check_commit_receipt({**receipt, "commit": {**receipt["commit"], "discarded": damaged}},
                                                     self.args, str(self.repo))
 
+    def test_writer_empty_directories_are_discarded_so_the_commit_collects(self):
+        # Observed (#68): nanoclaw's vitest left empty directories that Git cannot track,
+        # so the writer committed and then failed the post-commit cleanliness check.
+        self.writer()
+        original_spawn = self.spawn
+        async def with_empty_directories(*command, **options):
+            (self.repo / "groups" / "fresh").mkdir(parents=True)
+            (self.repo / "groups" / "other").mkdir()
+            return await original_spawn(*command, **options)
+        self.spawn = with_empty_directories
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(sorted(receipt["commit"]["discarded"]), ["groups/", "groups/fresh/", "groups/other/"])
+        self.assertFalse((self.repo / "groups").exists())
+        factory_commit.check_commit_receipt(receipt, self.args, str(self.repo))
+
     def test_readers_work_in_a_disposable_checkout_that_leaves_the_shared_one_clean(self):
         # #53: unconfined readers that install or test must not dirty a checkout others share.
         original_spawn = self.spawn

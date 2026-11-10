@@ -264,6 +264,23 @@ class AntigravityWorker(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "already reset"):
             factory.reset_writer(self.path, assignment_id="implement")
 
+    def test_reset_keeps_a_failed_writers_own_factory_commit(self):
+        # Observed (#68): writer-4 committed through the factory, then failed afterwards;
+        # reset refused because HEAD had moved to that commit.
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        committed = receipt["candidate"]
+        args.receipt.write_text(json.dumps({**receipt, "state": "failed", "error": "post-commit check failed"}))
+        (self.repo / "groups" / "fresh").mkdir(parents=True)
+        (self.repo / "leftover.txt").write_text("leftover\n")
+        result = factory.reset_writer(self.path, assignment_id="implement")
+        self.assertEqual(result["candidate"], committed)
+        self.assertIn("select it with factory.py inputs", result["next"])
+        self.assertIn("+leftover", Path(result["patch"]).read_text())
+        factory.check_checkout(str(self.base), str(self.repo), committed)
+        self.assertEqual(self.git("-C", str(self.repo), "show", "HEAD:NOTES.md", directory=self.repo).stdout, "Notes\n")
+
     def test_reset_refuses_a_writer_whose_receipt_did_not_fail(self):
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
         receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)

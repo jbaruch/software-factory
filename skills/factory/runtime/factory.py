@@ -1048,7 +1048,8 @@ def reset_writer(path, *, assignment_id):
         raise FactoryError("Only a native writer's checkout can be reset; readers never change theirs")
     receipt = Path(command[command.index("--receipt") + 1])
     try:
-        state = decode_json(read_record(receipt, private=True)).get("state")
+        saved = decode_json(read_record(receipt, private=True))
+        state, commit = saved.get("state"), saved.get("commit")
     except (OSError, ValueError, UnicodeError, AttributeError):
         raise FactoryError("Cannot read the writer's original receipt; restore it before resetting") from None
     if state != "failed":
@@ -1056,9 +1057,13 @@ def reset_writer(path, *, assignment_id):
     # No other assignment can be using this checkout: launches refuse a dirty one.
     cwd, candidate = assignment["request"]["cwd"], assignment["request"]["inputs"]["candidate"]
     check_repository(record["admission"])
-    directory = git_dir(cwd)
-    if repository_identity(cwd) != record["admission"]["repository_identity"] or git_commit(cwd, "HEAD") != candidate:
-        raise FactoryError("Writer checkout moved off its input candidate; inspect it by hand rather than resetting")
+    directory, head = git_dir(cwd), git_commit(cwd, "HEAD")
+    committed = (commit.get("candidate") if isinstance(commit, dict) and commit.get("state") == "created"
+                 and commit.get("parent") == candidate else None)
+    if repository_identity(cwd) != record["admission"]["repository_identity"] or head != candidate and head != committed:
+        raise FactoryError("Writer checkout moved off its input candidate and its own factory commit; inspect it by hand")
+    # A writer that failed after its factory commit keeps that commit; only leftovers are reset.
+    candidate = head
     patch = receipt.with_name(receipt.name.removesuffix(".json") + ".reset.patch")
     if os.path.lexists(patch):
         raise FactoryError("This writer was already reset; inspect its saved patch")
@@ -1092,9 +1097,14 @@ def reset_writer(path, *, assignment_id):
                                + restored.stderr.decode("utf-8", "replace").strip())
     check_checkout(record["admission"]["repository"], cwd, candidate,
                    expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
-    return dict(task=record["task"], assignment=assignment_id, checkout=cwd, candidate=candidate, patch=str(patch),
-                next="Plan a new writer ID on this checkout and current inputs; its goal applies the patch first, "
+    if candidate == committed:
+        following = ("The writer's factory commit is kept; select it with factory.py inputs and verify it with a plain "
+                     "plan (no --from-writer); the patch holds only leftovers")
+    else:
+        following = ("Plan a new writer ID on this checkout and current inputs; its goal applies the patch first, "
                      "then re-runs the gate; after stays empty")
+    return dict(task=record["task"], assignment=assignment_id, checkout=cwd, candidate=candidate, patch=str(patch),
+                next=following)
 
 
 def provision_worktree(path, *, worktree_id, destination):
@@ -1303,6 +1313,9 @@ def brief(role_id, goal):
             + "\n".join("- " + item for item in role["instructions"])
             + "\n\nAuthority: " + role["decision_authority"]
             + "\nReturn: " + role["result"]
+            # Read-only specialists cannot write files, so the report is their only collected output.
+            + "\nYour structured report is the only output the factory collects: put each finding, or each verified"
+            + " point behind an approval, in its artifacts as a self-contained string with path:line."
             + "\nUse original evidence; do not create a separate handover or status ledger.\n"
             + "Existing repository policy and user authorization remain binding.\n")
 
