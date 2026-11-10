@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.29.0 — 2026-11-10
 
 - An exhausted correction allowance escalates through the factory's roles instead of stopping at the operator: `architecture` diagnoses why the task isn't converging (overengineering first) and re-plans within the goal, the investigator gathers facts, a disagreement or exhausted investigation goes to the judge, and only the judge escalates to the operator. The default correction limit is 4 (#66).
 - Every assignment brief says the structured report is the only output the factory collects, so each finding goes in its artifacts with path:line. A Claude QA reader, which can only read, returned `findings` with all of them in its final text and none in the report (#69).
