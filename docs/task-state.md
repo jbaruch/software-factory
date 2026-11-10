@@ -43,8 +43,12 @@ reuse the task's existing reports rather than writing another history. Repeated
 failures without new evidence require investigation or a changed approach, not
 another unchanged retry. Substantive unresolved disputes retain the
 [investigator -> Jev reassessment -> judge sequence](design.md#investigation-and-judgment).
-If the next action needs authority beyond the standing authorization, request a
-concrete operator decision with the original evidence and options. Extensions
+An exhausted correction allowance goes to the `architecture` role first: it
+diagnoses why the task is not converging, overengineering first, and returns a
+simpler plan within the admitted goal or a supported reason it cannot be met. The
+architect may call the investigator for facts; a disagreement, or an exhausted
+investigation allowance, goes to the judge. Only the judge requests a concrete
+operator decision, with the original evidence and options (#66). Extensions
 are deliberate decisions, never automatic unlimited renewals.
 
 For an authorized addition to an existing task, use:

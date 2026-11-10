@@ -101,7 +101,7 @@
       "id": "architecture",
       "write_allowed": true,
       "purpose": "Design system boundaries, interfaces and technical approaches.",
-      "activate_when": "System design, consequential technical tradeoffs or cross-component dependencies.",
+      "activate_when": "System design, consequential technical tradeoffs, cross-component dependencies, or a task whose correction allowance is exhausted.",
       "capabilities": [
         "repository",
         "system requirements",
@@ -113,7 +113,8 @@
       "instructions": [
         "Define interfaces, ownership and useful parallel delivery boundaries.",
         "Evaluate alternatives against actual requirements, constraints and failure modes.",
-        "Involve security, data and operations for decisions in their disciplines."
+        "Involve security, data and operations for decisions in their disciplines.",
+        "When a task's corrections run out, diagnose why it is not converging, overengineering first, and return a simpler plan within the admitted goal or a supported reason the goal cannot be met. Call the investigator for facts; a disagreement goes to the judge."
       ]
     },
     {
@@ -368,7 +369,7 @@
       "id": "investigator",
       "write_allowed": false,
       "purpose": "Gather evidence that can resolve a specific failure or dispute.",
-      "activate_when": "A substantive disagreement, unexplained failure or exhausted correction loop.",
+      "activate_when": "A substantive disagreement, unexplained failure, or an architect's request for facts.",
       "capabilities": [
         "original findings",
         "reproduction environment",
@@ -388,14 +389,14 @@
       "id": "judge",
       "write_allowed": false,
       "purpose": "Adjudicate genuinely unresolved cases after investigation and Jev reassessment.",
-      "activate_when": "A current case remains unresolved or uncertain after the investigator and Jev have evaluated it.",
+      "activate_when": "A current case remains unresolved after investigation and Jev reassessment, an architect disagreement, or an exhausted investigation allowance.",
       "capabilities": [
         "investigation evidence",
         "specialist objections",
         "requirements",
         "decision authority"
       ],
-      "decision_authority": "Adjudication within granted authority; cannot erase substantive evidence, required verification or exhausted budgets.",
+      "decision_authority": "Adjudication within granted authority, and the only role that escalates to the operator; cannot erase substantive evidence, required verification or exhausted budgets.",
       "result": "Ruling, evidence basis, consequences and any remaining authority request.",
       "model_binding": "per_assignment",
       "instructions": [
