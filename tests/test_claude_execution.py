@@ -486,11 +486,31 @@ class WriterDecoder(unittest.TestCase):
     def test_long_shell_task_lifecycles_decode(self):
         self.assertEqual(self.parse(self.shell_task())["report"]["outcome"], "completed")
 
+    def test_background_shell_tasks_are_announced_before_they_start(self):
+        # Observed (canary writer-2): run_in_background lists the task in background_tasks_changed
+        # one event before its task_started, then the Bash result reports the background ID.
+        data = self.shell(command="npx vitest run", run_in_background=True)
+        task = dict(task_id="b49xlktt3", run_id="0mw9pgmp2-5786118d", session_id=SESSION)
+        announced = [dict(type="system", subtype="background_tasks_changed", session_id=SESSION,
+                          tasks=[dict(task_id="b49xlktt3", run_id="0mw9pgmp2-5786118d", task_type="local_bash",
+                                      description="npx vitest run")]),
+                     dict(type="system", subtype="task_started", tool_use_id="shell-1", description="npx vitest run",
+                          is_backgrounded=True, task_type="local_bash", **task)]
+        finished = [dict(type="system", subtype="task_updated", patch=dict(status="completed", end_time=1794255705591), **task),
+                    dict(type="system", subtype="task_notification", tool_use_id="shell-1", status="completed",
+                         output_file="", summary="npx vitest run", **task),
+                    dict(type="system", subtype="background_tasks_changed", tasks=[], session_id=SESSION)]
+        stream = [*data[:2], *announced, data[2], *finished, *data[3:]]
+        self.assertEqual(self.parse(stream)["report"]["outcome"], "completed")
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse([*stream[:4], dict(stream[3]), *stream[4:]])  # started twice
+
     def test_shell_task_events_must_name_a_known_bash_call_or_task(self):
         for index, change in ((2, dict(tool_use_id="other-1")), (2, dict(task_type="local_agent")), (2, dict(task_id="")),
                               (3, dict(parent_tool_use_id="other-1")), (3, dict(tool_name="Write")),
                               (3, dict(parent_tool_use_id=["shell-1"])), (3, dict(elapsed_time_seconds="30")),
-                              (4, dict(tasks=[dict(task_id="unknown")])), (4, dict(tasks=None)),
+                              (4, dict(tasks=[dict(task_id="other", task_type="local_agent")])),
+                              (4, dict(tasks=[dict(task_id="")])), (4, dict(tasks=None)),
                               (5, dict(task_id="unknown")), (5, dict(patch=None)), (8, dict(status="")),
                               (8, dict(task_id=["bf5wd7jy7"]))):
             data = self.shell_task()

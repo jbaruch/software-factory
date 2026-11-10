@@ -2,6 +2,7 @@
 
 ## Next
 
+- The Claude decoder accepts a `run_in_background` Bash task that `background_tasks_changed` announces one event before its `task_started`. The 0.24.1 fix required `task_started` first, so a completed 52-turn writer that ran its tests in the background failed collection.
 - The Antigravity decoder accepts a tool step that ends in `ERROR` with a `tool_info.error` record (the agent saw the failure and carried on) and the empty `system_message` steps agy 1.5.3 records. A Gemini QA run that retried a relative-path read and finished `approved` failed collection on the error and would have failed again on the system step (#51).
 
 ## 0.26.0 — 2026-11-09
