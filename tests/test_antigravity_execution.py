@@ -118,7 +118,7 @@ class AntigravityExecution(unittest.TestCase):
             with self.subTest(lines=lines):
                 self.rejects(lines, diagnostic)
 
-    def recovered(self, **error_changes):
+    def recovered(self, step_type="system_message", error=None):
         """Observed 1.5.3 (#51): a read_file step errors, the agent carries on, and an empty
         system_message step follows; later steps shift by one."""
         def shifted(line, by):
@@ -127,14 +127,17 @@ class AntigravityExecution(unittest.TestCase):
             return json.dumps(event) + "\n"
         errored = json.loads(LINES[4])
         errored["step_update"].update(state="ERROR", tool_info=dict(name="read_file", parameters=dict(Path="README.md"),
-            error={**dict(type="TOOL_ERROR", message="README.md must be an absolute path"), **error_changes}))
+            error={**dict(type="TOOL_ERROR", message="README.md must be an absolute path"), **(error or {})}))
+        # Observed (canary qa-1 on writer-4): agy also records a bare error_message step and carries on.
         notice = dict(event="step_update", step_update=dict(conversation_id="fixture-conversation", step_index=3,
-                                                            state="DONE", step_type="system_message", duration_seconds=0.0002))
+                                                            state="DONE", step_type=step_type, duration_seconds=0.0002))
         return (LINES[:4] + [json.dumps(errored) + "\n", json.dumps(notice) + "\n"]
                 + [shifted(line, 1) for line in LINES[5:8]] + LINES[8:])
 
     def test_recovered_tool_errors_and_system_messages_complete(self):
-        self.assertEqual(self.parse(self.recovered())["report"]["outcome"], "approved")
+        for step_type in ("system_message", "error_message"):
+            with self.subTest(step_type=step_type):
+                self.assertEqual(self.parse(self.recovered(step_type))["report"]["outcome"], "approved")
 
     def test_errors_outside_tools_or_without_an_error_record_refuse(self):
         lines = self.recovered()
@@ -148,7 +151,7 @@ class AntigravityExecution(unittest.TestCase):
                 self.rejects(altered, "malformed step_update|out-of-order")
         for changes in (dict(message=""), dict(type=None)):
             with self.subTest(error=changes):
-                self.rejects(self.recovered(**changes), "malformed step_update")
+                self.rejects(self.recovered(error=changes), "malformed step_update")
         closed_twice = lines[:5] + [lines[4].replace('"ERROR"', '"DONE"')] + lines[5:]
         self.rejects(closed_twice, "duplicate or out-of-order")
 
