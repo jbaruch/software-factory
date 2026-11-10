@@ -302,7 +302,10 @@ task goal plus the shared writer contract, and `factory_commit.py` stages, scans
 signs and commits a completed report. Receipts are version 3 for reviewers
 (`checkout`: the disposable worktree they ran in, which collection decodes against)
 and version 2 for writers (`writer`, `sandbox`, nullable `commit`); version-1
-reviewer receipts, which reviewed in place, still collect. Events are
+reviewer receipts, which reviewed in place, still collect. A completed run copies each artifact
+that is a file in agy's per-conversation brain directory into a private
+`TASK.ID.antigravity.artifacts/` beside its receipt, because agy does not keep
+that directory; the receipt and report stay unchanged. Events are
 version-1 `antigravity-event-line` envelopes holding each original line.
 Integration counts collected `qa`, `security` and `code-review` approvals under
 their conversation ID and treats writers as contributors; a writer that failed

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -44,6 +45,28 @@ def command(binary, model, effort):
     return [str(binary), "--print=", "--input-format", "stream-json", "--output-format", "stream-json",
             "--json-schema", json.dumps(outcome_schema()), "--model", model,
             *(() if effort is None else ("--effort", effort)), "--dangerously-skip-permissions"]
+
+
+def retain_artifacts(artifacts, conversation, receipt):
+    """Copy report files from agy's private brain directory beside the receipt.
+
+    Gemini tends to return a path to a report it wrote in agy's per-conversation brain
+    directory instead of self-contained evidence; agy does not keep that directory for us.
+    """
+    base = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+    brain = base / conversation
+    if brain.parent != base or not brain.is_dir() or brain.is_symlink():
+        return
+    brain, kept = brain.resolve(strict=True), receipt.with_name(receipt.name.removesuffix(".json") + ".artifacts")
+    for artifact in artifacts:
+        path = Path(artifact)
+        if not path.is_absolute() or path.is_symlink() or not path.is_file() or not path.resolve(strict=True).is_relative_to(brain):
+            continue  # An ordinary reference, not a brain-directory report file.
+        target = kept / path.resolve(strict=True).relative_to(brain)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        kept.chmod(0o700)
+        shutil.copyfile(path, target)
+        target.chmod(0o600)
 
 
 def message(text):
@@ -162,6 +185,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
                                                     expected_schema=outcome_schema())
         receipt.update(report=native["report"], conversation_id=native["conversation_id"], usage=native["usage"],
                        duration_seconds=native["duration_seconds"], turns=native["turns"])
+        retain_artifacts(native["report"]["artifacts"], native["conversation_id"], args.receipt)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
