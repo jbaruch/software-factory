@@ -1144,9 +1144,10 @@ def release_worktree(path):
     head = git_commit(str(destination), "HEAD")
     check_checkout(record["admission"]["repository"], str(destination), head,
                    expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
-    repository = record["admission"]["repository"]
-    provisioning_git(repository, "worktree", "unlock", str(destination))
-    provisioning_git(repository, "worktree", "remove", str(destination), timeout=600)
+    # Removing the still-locked worktree in one step keeps the ownership marker until it is gone,
+    # so a failed removal can be retried; it was verified clean above.
+    provisioning_git(record["admission"]["repository"], "worktree", "remove", "--force", "--force",
+                     str(destination), timeout=600)
     return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=head)
 
 
@@ -1172,10 +1173,13 @@ def rebase_worktree(path, *, onto):
         raise FactoryError("The new base shares no history with this worktree; choose a commit on the same line")
     start = common.stdout.strip()
     if start == target:
+        if head == target and record["inputs"]["candidate"] != target:
+            # Resume a rebase that moved the worktree but did not finish selecting it.
+            set_inputs(path, candidate=target, requirements=record["inputs"]["requirements"])
+            return dict(task=record["task"], worktree=destination, previous=None, candidate=target, patch=None,
+                        next="Resumed: the worktree was already on this base; plan the writer that applies the saved patch")
         raise FactoryError("The worktree already contains that base; nothing to refresh")
     patch = path.parent / f'{record["task"]}.{item["id"]}.rebase-{head[:12]}.patch'
-    if os.path.lexists(patch):
-        raise FactoryError("This worktree state was already rebased; inspect its saved patch")
     base = [git_binary(), "--no-replace-objects", "-C", destination, "--work-tree=" + destination,
             "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false"]
     with tempfile.TemporaryDirectory(prefix="factory-rebase-") as temporary:
@@ -1187,8 +1191,13 @@ def rebase_worktree(path, *, onto):
             os.fsync(stream.fileno())
         if diff.returncode:
             raise FactoryError("Cannot save the task's change as a patch: " + diff.stderr.decode("utf-8", "replace").strip())
-        os.chmod(partial, 0o600)
-        shutil.move(partial, patch)
+        if os.path.lexists(patch):
+            # A retry after a failed move reuses the identical saved patch.
+            if patch.read_bytes() != partial.read_bytes():
+                raise FactoryError("A different saved patch already exists for this worktree state; inspect it")
+        else:
+            os.chmod(partial, 0o600)
+            shutil.move(partial, patch)
     for arguments in (("reset", "--hard", "--quiet", target), ("clean", "-ffdxq")):
         moved = subprocess.run([*base, *arguments], env=git_environment(), capture_output=True, timeout=120, check=False)
         if moved.returncode:

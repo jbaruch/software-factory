@@ -116,6 +116,11 @@ class WorktreeProvisioning(unittest.TestCase):
         self.assertEqual(factory.load_task(self.path)["inputs"]["candidate"], moved)
         factory.check_checkout(str(self.repo), str(self.destination), moved)
         worktree_git("apply", "--3way", "--check", str(patch))
+        # A rebase that moved the worktree but failed before selecting it resumes on retry.
+        factory.set_inputs(self.path, candidate=changed, requirements="requirements-v1")
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+            resumed = factory.rebase_worktree(self.path, onto=moved)
+        self.assertEqual((resumed["candidate"], factory.load_task(self.path)["inputs"]["candidate"]), (moved, moved))
         with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
                 self.assertRaisesRegex(factory.FactoryError, "already contains"):
             factory.rebase_worktree(self.path, onto=moved)
