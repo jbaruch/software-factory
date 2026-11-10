@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- The delivery reference says who deletes the writer branch: `release-worktree` removes only the factory-locked worktree, and the release skill's prune removes the merged branch afterwards. The canary found coding-policy's stop hook flagging the branch that `release-worktree` had kept.
+
 ## 0.30.0 — 2026-11-10
 
 - `factory.py rebase-worktree --task TASK --onto COMMIT` refreshes a candidate whose base moved: it saves the change as a patch, moves the provisioned worktree onto the new base and selects it, and a writer replays the patch and resolves the conflicts. A canary branch conflicted with main's CHANGELOG and no step could refresh it, because writers cannot make merge commits.
