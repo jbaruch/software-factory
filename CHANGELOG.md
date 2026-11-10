@@ -2,6 +2,9 @@
 
 ## Next
 
+- The skill says what happens when the correction allowance runs out and names `extend-allowance`, which needs the operator's approval.
+- The factory commit's secret scan covers what the writer adds (its added lines, changed paths, identities and commit message), not the whole tree. Both canary repositories hold test fixtures and documentation examples that match default Gitleaks rules, so every factory commit there was refused (#63). A refusal now names each finding's rule and path, redacted, and no longer blames the Git sandbox, twice.
+- The writer contract tells every writer that its added lines are scanned with default rules and that `gitleaks:allow` is ignored. Claude writers now get the shared contract instead of their own copy.
 - `factory.py reset` prints the next step, and the ready-plan reference says how to rerun a failed writer: a new ID on the same checkout, a goal that applies the patch first, an empty `after`, and one plan for several tasks because a second runner refuses while the first holds the execution lock.
 
 ## 0.27.0 — 2026-11-09
