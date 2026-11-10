@@ -1629,11 +1629,18 @@ class TaskAdmission(unittest.TestCase):
             record = self.admit(corrections=1, investigations=None)
         self.assertEqual(record["admission"]["limits"], dict(correction=1, investigation=3))
 
+    def test_default_correction_limit_is_four(self):
+        # Owner decision (#66): two corrections were too few before the architect weighs in.
+        arguments = dict(task="task", goal="Verify the example", repository=str(self.repo),
+                         acceptance=["docs/example.md#acceptance"])
+        record = factory.admit(self.path, **arguments)
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"], dict(limit=4, used=0, remaining=4))
+
     def test_allowance_survives_new_worker_id_and_controller_restart(self):
         self.admit()
         self.start(purpose="correction")
         FakeRex.calls.clear()
-        with self.assertRaisesRegex(factory.FactoryError, "exhausted; route to investigator"):
+        with self.assertRaisesRegex(factory.FactoryError, "exhausted; route to architecture"):
             self.start(assignment_id="security", role="security", purpose="correction")
         view = factory.task_view(factory.load_task(self.path))
         self.assertEqual(view["allowances"]["correction"], dict(limit=1, used=1, remaining=0))
@@ -1680,7 +1687,7 @@ class TaskAdmission(unittest.TestCase):
                 self.start(**changes)
         self.assertEqual(FakeRex.calls, [])
         self.start(role="investigator", purpose="investigation")
-        with self.assertRaisesRegex(factory.FactoryError, "exhausted; route to operator"):
+        with self.assertRaisesRegex(factory.FactoryError, "exhausted; route to judge"):
             self.start(assignment_id="another-investigator", role="investigator", purpose="investigation")
 
     def test_legacy_record_migrates_without_relaunch_or_inferred_allowances(self):
@@ -2000,7 +2007,7 @@ class TaskAdmission(unittest.TestCase):
         result, output, errors = self.cli("admit", "--task", "task", "--goal", "Inspect",
                                           "--repo", str(self.repo), "--acceptance", "criteria.md")
         self.assertEqual((result, errors), (0, ""))
-        self.assertEqual(json.loads(output)["allowances"]["correction"]["limit"], 2)
+        self.assertEqual(json.loads(output)["allowances"]["correction"]["limit"], 4)
         result, output, errors = self.cli("pause", "--task", "task", "--reason", "Operator hold")
         self.assertEqual((result, errors), (0, ""))
         self.assertEqual(json.loads(output)["hold"], "Operator hold")

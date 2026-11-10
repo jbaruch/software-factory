@@ -4,7 +4,7 @@
   "adapter_status": "shadow_http",
   "note": "Factory judgment specs compiled to TypeSafe HTTP by jev.py. Candidate options expand to supplied IDs plus no_match/uncertain. No consequential routing thresholds are calibrated or approved.",
   "policies": {
-    "max_corrections": 2,
+    "max_corrections": 4,
     "max_investigations": 1,
     "max_operational_retries": 2,
     "global_task_wip": 4,

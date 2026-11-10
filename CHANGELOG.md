@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- An exhausted correction allowance escalates through the factory's roles instead of stopping at the operator: `architecture` diagnoses why the task isn't converging (overengineering first) and re-plans within the goal, the investigator gathers facts, a disagreement or exhausted investigation goes to the judge, and only the judge escalates to the operator. The default correction limit is 4 (#66).
+
 ## 0.28.0 — 2026-11-09
 
 - The skill says what happens when the correction allowance runs out and names `extend-allowance`, which needs the operator's approval.

@@ -1603,7 +1603,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("Dependency needs a successful result on current inputs: " + dependency)
     allowances = task_view(record)["allowances"]
     if allowances is not None and purpose in allowances and allowances[purpose]["remaining"] <= 0:
-        owner = "investigator" if purpose == "correction" else "operator"
+        # Exhaustion escalates through the factory's roles; only the judge escalates to the operator.
+        owner = "architecture" if purpose == "correction" else "judge"
         raise FactoryError(f"Task {purpose} allowance exhausted; route to {owner}")
     if record["admission"] is not None:
         check_repository(record["admission"])
