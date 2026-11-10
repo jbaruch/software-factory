@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.29.2 — 2026-11-10
 
 - A completed Antigravity run keeps a private copy of each report file it wrote in agy's brain directory, beside its receipt (`TASK.ID.antigravity.artifacts/`). A Gemini QA reader returned only a path into that directory, which agy does not retain, so an approval's evidence could vanish (#74).
 
