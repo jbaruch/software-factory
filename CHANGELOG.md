@@ -1,5 +1,10 @@
 # Changelog
 
+## Next
+
+- `factory.py rebase-worktree --task TASK --onto COMMIT` refreshes a candidate whose base moved: it saves the change as a patch, moves the provisioned worktree onto the new base and selects it, and a writer replays the patch and resolves the conflicts. A canary branch conflicted with main's CHANGELOG and no step could refresh it, because writers cannot make merge commits.
+- `factory.py release-worktree --task TASK` removes a task's provisioned worktree after delivery, keeping the branch. The factory locks the worktree, so the release skill's cleanup could not remove it after the first factory-delivered PR merged (#78).
+
 ## 0.29.2 — 2026-11-10
 
 - A completed Antigravity run keeps a private copy of each report file it wrote in agy's brain directory, beside its receipt (`TASK.ID.antigravity.artifacts/`). A Gemini QA reader returned only a path into that directory, which agy does not retain, so an approval's evidence could vanish (#74).

@@ -333,6 +333,16 @@ Changed name, path, candidate or requirements revision cannot rebind the saved
 request. `show` and the existing operator view expose the saved provisioning
 state and generated `inputs_current`; they do not observe live checkout health.
 
+`rebase-worktree --task TASK --onto COMMIT` refreshes a candidate whose base moved:
+it saves the change since the worktree diverged from COMMIT as a private patch,
+moves the worktree onto COMMIT and selects it as the task's candidate; a writer then
+replays the patch and resolves any conflicts.
+
+`release-worktree --task TASK` removes the provisioned worktree once the task's
+work is done: it verifies the ownership marker, refuses a dirty checkout or an
+assignment there that may still run, unlocks and removes the worktree, and keeps
+the branch. Collected writers keep their provenance after the checkout is gone.
+
 Provisioning does not launch a writer, select new task inputs, hand off a produced
 candidate, accept a task or grant merge/release authority. Select the provisioned
 path explicitly in the existing assignment command.

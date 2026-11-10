@@ -75,6 +75,75 @@ class WorktreeProvisioning(unittest.TestCase):
         factory.set_inputs(self.path, candidate=candidate, requirements="requirements-v1")
         return candidate
 
+    def test_release_removes_the_provisioned_worktree_and_keeps_the_branch(self):
+        # Observed (#78): after delivery the release skill could not remove the locked worktree.
+        self.provision()
+        result, output, errors = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual((result, errors), (0, ""))
+        released = json.loads(output)
+        self.assertEqual((released["worktree"], released["branch"]), (str(self.destination), "factory/fixture/backend"))
+        self.assertFalse(self.destination.exists())
+        self.assertNotIn(str(self.destination), self.git("worktree", "list", "--porcelain"))
+        self.assertEqual(self.git("rev-parse", "factory/fixture/backend"), released["head"])
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+                self.assertRaises(factory.FactoryError):
+            factory.release_worktree(self.path)
+
+    def test_rebase_moves_the_worktree_onto_a_new_base_and_keeps_the_change_as_a_patch(self):
+        # Owner decision: refresh a candidate whose base moved by replaying its change (patch rebase).
+        self.provision()
+        def worktree_git(*args):
+            return subprocess.check_output([factory.git_binary(), "-C", str(self.destination), "-c", "user.name=Fixture",
+                "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                "-c", "core.hooksPath=" + os.devnull, *args], env=factory.git_environment(), text=True).strip()
+        (self.destination / "change.txt").write_text("the task's change\n")
+        worktree_git("add", "change.txt")
+        worktree_git("commit", "--quiet", "-m", "Task change")
+        changed = worktree_git("rev-parse", "HEAD")
+        (self.repo / "main.txt").write_text("main moved on\n")
+        self.git("add", "main.txt")
+        self.git("commit", "--quiet", "-m", "Main moves")
+        moved = self.git("rev-parse", "HEAD")
+        result, output, errors = self.cli("rebase-worktree", "--task", "fixture", "--onto", moved)
+        self.assertEqual((result, errors), (0, ""))
+        rebased = json.loads(output)
+        self.assertEqual((rebased["previous"], rebased["candidate"]), (changed, moved))
+        patch = Path(rebased["patch"])
+        self.assertIn("+the task's change", patch.read_text())
+        self.assertNotIn("main moved on", patch.read_text())
+        self.assertEqual(patch.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(worktree_git("rev-parse", "HEAD"), moved)
+        self.assertEqual(factory.load_task(self.path)["inputs"]["candidate"], moved)
+        factory.check_checkout(str(self.repo), str(self.destination), moved)
+        worktree_git("apply", "--3way", "--check", str(patch))
+        # A rebase that moved the worktree but failed before selecting it resumes on retry.
+        factory.set_inputs(self.path, candidate=changed, requirements="requirements-v1")
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+            resumed = factory.rebase_worktree(self.path, onto=moved)
+        self.assertEqual((resumed["candidate"], factory.load_task(self.path)["inputs"]["candidate"]), (moved, moved))
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+                self.assertRaisesRegex(factory.FactoryError, "already contains"):
+            factory.rebase_worktree(self.path, onto=moved)
+
+    def test_release_refuses_a_dirty_worktree_or_a_running_assignment(self):
+        self.provision()
+        (self.destination / "unfinished.txt").write_text("work in progress\n")
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+                self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            factory.release_worktree(self.path)
+        (self.destination / "unfinished.txt").unlink()
+        receipt = self.state / "fixture.reader.claude.json"
+        receipt.write_text(json.dumps(dict(state="starting")))
+        receipt.chmod(0o600)
+        record = factory.load_task(self.path)
+        running = copy.deepcopy(record)
+        running["assignments"]["reader"] = dict(state="launched", request=dict(
+            cwd=str(self.destination), command=[sys.executable, "worker.py", "--receipt", str(receipt)]))
+        with patch.object(factory, "load_task", return_value=running), factory.execution_lock(self.state), \
+                factory.task_lock(self.state, "fixture"), self.assertRaisesRegex(factory.FactoryError, "still running"):
+            factory.release_worktree(self.path)
+        self.assertTrue(self.destination.exists())
+
     def test_control_character_filenames_preserve_tree_index_and_disk_names(self):
         names = ["name\rsegment", "name\nsegment", "name\r\nsegment"]
         candidate = self.filename_candidate(names)
