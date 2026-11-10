@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.28.0 — 2026-11-09
 
 - The skill says what happens when the correction allowance runs out and names `extend-allowance`, which needs the operator's approval.
 - The factory commit's secret scan covers what the writer adds (its added lines, changed paths, identities and commit message), not the whole tree. Both canary repositories hold test fixtures and documentation examples that match default Gitleaks rules, so every factory commit there was refused (#63). A refusal now names each finding's rule and path, redacted, and no longer blames the Git sandbox, twice.
