@@ -14,6 +14,7 @@ sys.dont_write_bytecode = True
 import factory
 import factory_commit
 import native_grok
+import release_evidence
 import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, outcome_schema, stop_child
 
@@ -66,6 +67,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or not factory.valid_repository_identity(identity) or not args.worktree_git_dir.is_absolute()):
         raise factory.FactoryError("Grok assignment binding changed; inspect its original brief, role and repository pin")
     factory.role_spec(args.role)
+    release_evidence.check_brief(args, instructions)
     if args.write:
         factory.check_role_write(args.role)
     else:
@@ -97,6 +99,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             or authentication["gate"] is not None or model is None
             or args.effort not in {item["value"] for item in model.get("_meta", {}).get("reasoningEfforts", [])}):
         raise factory.FactoryError("Grok subscription eligibility or model/effort is unavailable; refresh native metadata and select an eligible route before another attempt")
+    if args.role == "release":
+        release_evidence.require_max_effort(args.effort, [item["value"] for item in model["_meta"]["reasoningEfforts"]])
     # Version 2 reviews; version 3 writes.
     receipt = dict(schema_version=3 if args.write else 2, kind="grok-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
@@ -190,6 +194,7 @@ def parser():
     command.add_argument("--write", action="store_true", help="Implementation specialist with every built-in tool in its worktree")
     command.add_argument("--commit-message", help="With --write, the factory commits a completed result using this message")
     command.add_argument("--sandbox", type=Path, help="With --write, the Codex CLI used as the factory commit's local sandbox")
+    factory.add_judgment_arguments(command)
     return command
 
 

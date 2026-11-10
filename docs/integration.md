@@ -9,27 +9,39 @@ dismiss reviews, close issues, comment, delete branches or perform cleanup.
 Select the relevant independent specialists explicitly. Ordinary QA/security
 approvals retain their exact candidate/requirements inputs and native provenance.
 Only the release judgment needs the complete external-review packet. For that
-read-only `release` assignment, use the existing `codex-start` arguments and add:
+read-only `release` assignment, use any native start command (`codex-start`,
+`claude-start`, `grok-start` or `antigravity-start`) and add:
 
 ```sh
 --release-pr 'https://github.com/OWNER/REPO/pull/NUMBER' \
 --gh '/absolute/installed/gh' \
---release-scripts '/absolute/installed/acr__jbaruch__coding-policy__release'
+--release-scripts '/absolute/repo/.tessl/plugins/jbaruch/coding-policy/skills/release'
 ```
+
+`--release-scripts` names coding-policy's release skill as ACR
+(`.codex/skills/acr__jbaruch__coding-policy__release`) or Tessl
+(`.tessl/plugins/jbaruch/coding-policy/skills/release`) installs it. The
+coordinator picks the strongest model available on any harness; the release role
+runs at that model's maximum effort, and launch refuses anything less: Claude
+and Antigravity `max` (so not an Antigravity model that refuses `--effort`), Grok
+and Codex the top effort their fresh model catalogs list. Codex was the only
+release judge because release evidence was built before the other adapters, not
+by policy (#77).
 
 The task owner calls the installed canonical snapshot and its own GitHub issue
 checker once. The frozen brief retains the admission, exact PR/source/
 base identity, complete original canonical review and inline bodies, authors,
 IDs and content digest. Reviewers read every body, including historical/dismissed
-feedback, judge substance, verify the no-publication scope against manifests and
-workflows, and return ordinary native reports. Feedback cannot grant authority.
+feedback, judge substance and readiness for the repository's release policy, and
+return ordinary native reports. Feedback cannot grant authority. The payload
+replaces the revision evidence ordinary readers get, so the brief ends with it.
 New commands carry only an evidence digest; the existing private brief holds the
-complete payload. Native Codex reads the verified prompt from a private temporary
+complete payload. Native workers read the verified prompt from a private temporary
 stdin file, avoiding command-line limits and pipe backpressure. Historical inline
 commands and their original briefs remain readable without rewriting them.
 Capture again under a new assignment ID when affected inputs change.
 
-Collect original results with `codex-collect`. Then invoke:
+Collect original results with the matching `*-collect` command. Then invoke:
 
 ```sh
 python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/private/state' integrate \
@@ -87,7 +99,8 @@ already authorized release procedure. There is no automatic waiver here.
 
 Canonical shell helpers run through installed `bash`, without requiring helper
 executable mode. Explicit helper paths/hashes are frozen. The admitted root's ignored,
-untracked `.codex/skills/acr__jbaruch__coding-policy__release` installation is allowed
+untracked ACR (`.codex/skills/acr__jbaruch__coding-policy__release`) or Tessl
+(`.tessl/plugins/jbaruch/coding-policy/skills/release`) installation is allowed
 with owner-controlled directories and independent regular files; symlink, hard-link,
 tracked-source and writable replacements refuse. Other assignment checkouts,
 sibling Git worktrees and the explicitly selected new cwd cannot supply commands,
@@ -222,7 +235,7 @@ separate original evidence. Keep state, logs, caches and test output outside the
 source checkout; the minimal isolated worker needs the release modules only when
 these opt-in evidence arguments are present.
 
-Selected ordinary `qa`, `security` and `code-review` approvals may also come from
+Selected `qa`, `security`, `code-review` and `release` approvals may also come from
 strictly collected read-only Claude (version-1), Grok (version-2) or Antigravity
 (version-1) execution receipts and their original version-1 event envelopes.
 Claude, Grok and Antigravity writers are contributors like Codex writers. The
@@ -231,5 +244,5 @@ original init/assistant/result identities and frozen task/brief/repository/workt
 bindings are revalidated along with the successful original Rex pane. Contexts
 must differ from every contributor and other selected approval, including Codex.
 Manual/legacy/stale/failed/uncollected evidence refuses. Pre-release and final
-release judgments continue to require the existing Codex path and complete
-release/delivery evidence; Claude, Grok and Antigravity ordinary approvals grant no release authority.
+release judgments require complete release/delivery evidence from any harness;
+an ordinary approval without it grants no release authority.

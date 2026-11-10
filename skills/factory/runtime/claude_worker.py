@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 import factory
 import factory_commit
 import native_claude
+import release_evidence
 import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, stop_child
 
@@ -81,6 +82,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                                                   dict(candidate=args.candidate, requirements=args.requirements))
         if args.role == "judge":
             coordination_evidence.validate_claude_judge(coordination, args.model, args.effort)
+    release_evidence.check_brief(args, instructions)
+    if args.role == "release":
+        release_evidence.require_max_effort(args.effort, native_claude.EFFORTS)
     if args.write:
         factory.check_role_write(args.role)
     elif coordination is None:
@@ -207,6 +211,7 @@ def parser():
     command.add_argument("--decision-store", type=Path, help="Original Jev decision store; frozen before the native launch")
     command.add_argument("--decision", help="Exact original Jev decision ID")
     command.add_argument("--question", help="One unresolved question from that decision")
+    factory.add_judgment_arguments(command)
     return command
 
 

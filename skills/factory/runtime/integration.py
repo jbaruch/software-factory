@@ -150,8 +150,8 @@ def approvals(record, review, required):
         args, receipt, native = collected_native(key, record, assignment)
         if (args.write or args.role != assignment["request"]["role"]
                 or native["report"]["outcome"] != "approved"
-                or (key == review and (args.role != "release" or not hasattr(args, "codex")))
-                or (not hasattr(args, "codex") and args.role not in {"qa", "security", "code-review"})):
+                or (key == review and args.role != "release")
+                or (not hasattr(args, "codex") and args.role not in {"qa", "security", "code-review", "release"})):
             raise factory.FactoryError("Selected relevant native judgments must be read-only approved reports, including release")
         context = native_context(factory.native_harness(assignment["request"]["command"]), receipt)
         if not isinstance(context, str) or not context or context in contributors or context in contexts:
@@ -170,13 +170,13 @@ def command_binding(record, transport, *, cwd=None):
     if hasattr(transport, "checkouts"):
         transport.checkouts = tuple(checkouts)
     binding = transport.binding()
-    managed = Path(record["admission"]["repository"]) / ".codex" / "skills" / "acr__jbaruch__coding-policy__release"
+    managed = evidence.managed_installs(record["admission"]["repository"])
     for filename in binding:
         path = Path(filename)
         if not path.is_absolute():
             continue  # Offline transports use symbolic command identities.
-        if path.parent == managed:
-            continue  # GitHub.binding validates this protected installed directory.
+        if path.parent in managed:
+            continue  # GitHub.binding validates these protected installed directories.
         if any(path.resolve().is_relative_to(Path(root).resolve()) for root in checkouts):
             raise factory.FactoryError("Installed release commands cannot come from an assignment checkout")
     return binding
@@ -564,8 +564,9 @@ def accepted(record, integration_id, acceptance_id, transport):
     if assignment is None:
         raise factory.FactoryError("Unknown selected final native acceptance judgment")
     args, receipt, native = collected_native(acceptance_id, record, assignment)
-    if not hasattr(args, "codex") or args.role != "release" or args.write or native["report"]["outcome"] != "approved":
+    if args.role != "release" or args.write or native["report"]["outcome"] != "approved":
         raise factory.FactoryError("Final acceptance requires an approved current native release judgment")
+    judge = native_context(factory.native_harness(assignment["request"]["command"]), receipt)
     assessed = evidence.from_delivery_assignment(record, assignment)
     if assessed["assignment"] != original["assignment"]:
         raise factory.FactoryError("Final acceptance assessed different delivered evidence")
@@ -577,7 +578,7 @@ def accepted(record, integration_id, acceptance_id, transport):
         raise factory.FactoryError("Original selected native approvals changed before final acceptance")
     for key, item in record["assignments"].items():
         if "--write" in item["request"]["command"]:
-            if receipt["thread_id"] == contributor_context(key, record, item):
+            if judge == contributor_context(key, record, item):
                 raise factory.FactoryError("A contributor cannot judge final acceptance")
     current = postmerge(intent, transport)
     confirmed = assessed.get("observation", assessed["receipt"]["delivery"])

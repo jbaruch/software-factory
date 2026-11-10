@@ -19,6 +19,8 @@ import dashboard
 import factory
 import integration
 import native_claude
+import release_evidence
+import review_evidence
 from test_codex_worker import FakeProcess
 from test_rex_launcher import FakeRex
 
@@ -1079,13 +1081,66 @@ class ClaudeApprovals(unittest.TestCase):
         record=copy.deepcopy(self.record);record["inputs"]["requirements"]="changed"
         with self.assertRaises(factory.FactoryError):integration.approvals(record,"release",["claude-qa"])
 
-    def test_claude_cannot_replace_final_codex_release(self):
+    def test_final_acceptance_takes_a_release_judgment_from_any_harness_but_not_a_qa_report(self):
         from argparse import Namespace
-        with patch.object(integration.evidence, "delivery", return_value={}), patch.object(integration, "collected_native",
-                return_value=(Namespace(role="release", write=False, claude=Path(sys.executable)), {},
-                              dict(report=dict(outcome="approved")))):
-            with self.assertRaisesRegex(factory.FactoryError, "native release"):
+        def judged(role):
+            return patch.object(integration, "collected_native", return_value=(
+                Namespace(role=role, write=False, claude=Path(sys.executable)), {}, dict(report=dict(outcome="approved"))))
+        with patch.object(integration.evidence, "delivery", return_value={}):
+            with judged("qa"), self.assertRaisesRegex(factory.FactoryError, "native release"):
                 integration.accepted(self.record, "delivery", "claude-qa", self.fixture.transport)
+            # A Claude release judgment passes the harness gate and stops only at its missing delivery payload.
+            with judged("release"), self.assertRaisesRegex(factory.FactoryError, "frozen delivery"):
+                integration.accepted(self.record, "delivery", "claude-qa", self.fixture.transport)
+
+    RELEASE_SESSION = "00000000-0000-0000-0000-000000000004"
+
+    def run_claude_release(self):
+        f = self.fixture
+        with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(self.RELEASE_SESSION)):
+            command = factory.claude_command(f.path, task="deliver", assignment_id="claude-release", claude=sys.executable,
+                model=MODEL, effort="max", cwd=str(f.repo), role="release", release_evidence=f.frozen)
+        record, assignment = factory.launch(f.path, task="deliver", assignment_id="claude-release", role="release",
+            goal="Judge the PR for release", cwd=str(f.repo), command=command, purpose="work",
+            binary=sys.executable, server="unix:///fixture.sock", frozen_release=f.frozen)
+        replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
+            "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
+            "{requirements}": record["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = claude_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
+        async def spawn(*command, **options):
+            return FakeProcess(events(str(f.repo), self.RELEASE_SESSION))
+        def probe(binary, cwd):
+            return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
+                cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,
+                auth=dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty"))
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=probe, clock=lambda: 1000, timer=lambda: 10))
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            return factory.collect_claude(f.path, "claude-release", None, record, assignment), args
+
+    def test_claude_gives_the_release_judgment_at_maximum_effort(self):
+        record, _ = self.run_claude_release()
+        selected = integration.approvals(record, "claude-release", ["qa", "claude-qa"])
+        self.assertEqual(selected["claude-release"]["context"], self.RELEASE_SESSION)
+        self.assertEqual(selected["claude-release"]["evidence"], self.fixture.frozen)
+        brief = Path(record["assignments"]["claude-release"]["brief"]).read_text()
+        self.assertTrue(brief.endswith(release_evidence.render(self.fixture.frozen)))
+        self.assertNotIn(review_evidence.MARKER, brief)
+
+    def test_release_judgment_below_maximum_effort_refuses(self):
+        f = self.fixture
+        with self.assertRaisesRegex(factory.FactoryError, "maximum effort: select max, not high"):
+            factory.claude_command(f.path, task="deliver", assignment_id="lazy-release", claude=sys.executable,
+                model=MODEL, effort="high", cwd=str(f.repo), role="release", release_evidence=f.frozen)
+        # The worker re-checks a command that skipped the builder.
+        _, args = self.run_claude_release()
+        args.receipt.unlink()
+        args.events.unlink()
+        args.effort = "high"
+        with self.assertRaisesRegex(factory.FactoryError, "maximum effort"):
+            asyncio.run(claude_worker.execute(args, spawn=None, probe=None))
 
     def test_claude_cannot_replace_release_judgment(self):
         with self.assertRaises(factory.FactoryError):integration.approvals(self.record,"claude-qa",["qa"])

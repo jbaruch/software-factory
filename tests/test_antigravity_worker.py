@@ -345,14 +345,14 @@ class AntigravityApprovals(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             self.record = factory.collect_antigravity(self.fixture.path, "agy-qa", None, record, assignment)
 
-    def run_agy(self, identity, role, conversation, *, write=False, exit_code=0):
+    def run_agy(self, identity, role, conversation, *, write=False, exit_code=0, effort: str | None = "high", frozen=None):
         f = self.fixture
         writer: dict[str, Any] = dict(write=True, commit_message="Add fixture notes", sandbox=sys.executable) if write else {}
         command = factory.antigravity_command(f.path, task="deliver", assignment_id=identity, agy=sys.executable,
-            model="gemini-3.8-flash-high", effort="high", cwd=str(f.repo), role=role, **writer)
+            model="gemini-3.8-flash-high", effort=effort, cwd=str(f.repo), role=role, release_evidence=frozen, **writer)
         record, assignment = factory.launch(f.path, task="deliver", assignment_id=identity, role=role,
             goal="Fixture " + role, cwd=str(f.repo), command=command, purpose="work",
-            binary=sys.executable, server="unix:///fixture.sock")
+            binary=sys.executable, server="unix:///fixture.sock", frozen_release=frozen)
         replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
             "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
             "{requirements}": record["inputs"]["requirements"],
@@ -383,9 +383,23 @@ class AntigravityApprovals(unittest.TestCase):
         self.assertEqual(integration.contributor_context("agy-failed", record, assignment),
                          "antigravity-unstarted:deliver/agy-failed")
 
-    def test_antigravity_cannot_be_the_release_judgment(self):
+    def test_an_antigravity_qa_report_cannot_be_the_release_judgment(self):
         with self.assertRaises(factory.FactoryError):
             integration.approvals(self.record, "agy-qa", ["qa"])
+
+    def test_antigravity_gives_the_release_judgment_only_at_max_effort(self):
+        conversation = "33333333-3333-4333-8333-333333333333"
+        record, assignment, receipt = self.run_agy("agy-release", "release", conversation, effort="max", frozen=self.fixture.frozen)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            record = factory.collect_antigravity(self.fixture.path, "agy-release", None, record, assignment)
+            selected = integration.approvals(record, "agy-release", ["qa", "agy-qa"])
+        self.assertEqual(selected["agy-release"]["evidence"], self.fixture.frozen)
+        with self.assertRaisesRegex(factory.FactoryError, "maximum effort: select max, not high"):
+            self.run_agy("lazy-release", "release", "unused", effort="high", frozen=self.fixture.frozen)
+        # Omitting --effort runs at the CLI's default, so it is refused too.
+        with self.assertRaisesRegex(factory.FactoryError, "maximum effort: select max, not None"):
+            self.run_agy("default-release", "release", "unused", effort=None, frozen=self.fixture.frozen)
 
 
 if __name__ == "__main__":
