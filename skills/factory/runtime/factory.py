@@ -1107,6 +1107,101 @@ def reset_writer(path, *, assignment_id):
                 next=following)
 
 
+def owned_quiet_worktree(record):
+    """The task's provisioned worktree, verified owned, with nothing that may still run there."""
+    item = record["provisioning"]
+    if record["admission"] is None or item is None or item["state"] != "provisioned":
+        raise FactoryError("Task has no provisioned worktree")
+    directory = provisioning_owned(record, item)
+    for identity, assignment in record["assignments"].items():
+        command = assignment["request"]["command"]
+        try:
+            here = git_dir(assignment["request"]["cwd"]) == directory
+        except FactoryError:
+            here = False  # A checkout that no longer exists cannot be this worktree.
+        if not here:
+            continue
+        if assignment["state"] == "launching" or "--receipt" not in command:
+            raise FactoryError(f"Cannot confirm assignment {identity} stopped; reconcile it before releasing the worktree")
+        try:
+            state = decode_json(read_record(command[command.index("--receipt") + 1], private=True)).get("state")
+        except (OSError, ValueError, UnicodeError, AttributeError):
+            raise FactoryError(f"Cannot read assignment {identity}'s receipt; restore it before releasing the worktree") from None
+        if state == "starting":
+            raise FactoryError(f"Assignment {identity} is still running in this worktree; let it finish first")
+    return item, directory
+
+
+def release_worktree(path):
+    """Remove a task's provisioned worktree once its work is done; the branch stays.
+
+    The worktree is locked while the factory owns it, so ordinary cleanup cannot remove
+    it. Caller holds the owner's execution and task locks.
+    """
+    record = load_task(path)
+    item, directory = owned_quiet_worktree(record)
+    destination = Path(item["request"]["path"])
+    head = git_commit(str(destination), "HEAD")
+    check_checkout(record["admission"]["repository"], str(destination), head,
+                   expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+    repository = record["admission"]["repository"]
+    provisioning_git(repository, "worktree", "unlock", str(destination))
+    provisioning_git(repository, "worktree", "remove", str(destination), timeout=600)
+    return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=head)
+
+
+def rebase_worktree(path, *, onto):
+    """Move a task's provisioned worktree onto a new base, keeping its change as a patch.
+
+    Writers cannot make merge commits, so a candidate whose base moved is refreshed by
+    replaying: the change since it diverged from ONTO becomes a patch, the worktree moves to ONTO
+    and becomes the task's selected candidate, and a writer applies the patch and
+    resolves any conflicts. Caller holds the owner's execution and task locks.
+    """
+    record = load_task(path)
+    item, directory = owned_quiet_worktree(record)
+    destination, repository = item["request"]["path"], record["admission"]["repository"]
+    head = git_commit(destination, "HEAD")
+    check_checkout(repository, destination, head, expected_identity=record["admission"]["repository_identity"],
+                   expected_git_dir=directory)
+    target = pinned_commit(repository, onto, record["admission"]["repository_identity"])
+    # The change is everything since this worktree diverged from the new base, however many
+    # times it was refreshed before.
+    common = git_run(destination, "merge-base", head, target)
+    if common.returncode or not common.stdout.strip():
+        raise FactoryError("The new base shares no history with this worktree; choose a commit on the same line")
+    start = common.stdout.strip()
+    if start == target:
+        raise FactoryError("The worktree already contains that base; nothing to refresh")
+    patch = path.parent / f'{record["task"]}.{item["id"]}.rebase-{head[:12]}.patch'
+    if os.path.lexists(patch):
+        raise FactoryError("This worktree state was already rebased; inspect its saved patch")
+    base = [git_binary(), "--no-replace-objects", "-C", destination, "--work-tree=" + destination,
+            "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false"]
+    with tempfile.TemporaryDirectory(prefix="factory-rebase-") as temporary:
+        partial = Path(temporary) / "rebase.patch"
+        with open(partial, "xb") as stream:
+            diff = subprocess.run([*base, "diff", "--binary", "--no-ext-diff", "--no-textconv", start, head],
+                                  env=git_environment(), stdout=stream, stderr=subprocess.PIPE, timeout=120, check=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if diff.returncode:
+            raise FactoryError("Cannot save the task's change as a patch: " + diff.stderr.decode("utf-8", "replace").strip())
+        os.chmod(partial, 0o600)
+        shutil.move(partial, patch)
+    for arguments in (("reset", "--hard", "--quiet", target), ("clean", "-ffdxq")):
+        moved = subprocess.run([*base, *arguments], env=git_environment(), capture_output=True, timeout=120, check=False)
+        if moved.returncode:
+            raise FactoryError("Saved the patch, but moving the worktree failed; inspect it before another launch: "
+                               + moved.stderr.decode("utf-8", "replace").strip())
+    check_checkout(repository, destination, target, expected_identity=record["admission"]["repository_identity"],
+                   expected_git_dir=directory)
+    set_inputs(path, candidate=target, requirements=record["inputs"]["requirements"])
+    return dict(task=record["task"], worktree=destination, previous=head, candidate=target, patch=str(patch),
+                next="Plan a writer (purpose work) on this worktree and the new inputs; its goal applies the patch "
+                     "with git apply --3way, resolves any conflicts and re-runs the gate; then verify the produced commit")
+
+
 def provision_worktree(path, *, worktree_id, destination):
     """Caller holds the owner's execution/task locks, as for explicit launches."""
     record = load_task(path)
@@ -2610,6 +2705,11 @@ def main(argv=None):
     inputs.add_argument("--task", required=True)
     inputs.add_argument("--candidate", required=True)
     inputs.add_argument("--requirements", required=True)
+    release = sub.add_parser("release-worktree", help="Remove the task's provisioned worktree after its work is done; the branch stays")
+    release.add_argument("--task", required=True)
+    rebase = sub.add_parser("rebase-worktree", help="Move the task's provisioned worktree onto a new base, keeping its change as a patch")
+    rebase.add_argument("--task", required=True)
+    rebase.add_argument("--onto", required=True, help="The new base commit, such as the current main")
     reset = sub.add_parser("reset", help="Save a failed writer's leftover edits as a patch and restore its checkout")
     reset.add_argument("--task", required=True)
     reset.add_argument("--id", required=True, help="The failed writer assignment")
@@ -2711,7 +2811,13 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset", "release-worktree", "rebase-worktree"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+            if args.action == "rebase-worktree":
+                print(json.dumps(rebase_worktree(path, onto=args.onto), indent=2))
+                return 0
+            if args.action == "release-worktree":
+                print(json.dumps(release_worktree(path), indent=2))
+                return 0
             if args.action == "reset":
                 print(json.dumps(reset_writer(path, assignment_id=args.id), indent=2))
                 return 0

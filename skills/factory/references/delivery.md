@@ -21,6 +21,10 @@ Delivery starts after independent verifiers approve the task's current candidate
      --gh /absolute/gh --release-scripts /absolute/repo/.codex/skills/acr__jbaruch__coding-policy__release
    ```
 
+If the branch conflicts with a moved base before step 1 or during review, run `python3 -B "$SKILL_DIR/runtime/factory.py" rebase-worktree --task TASK --onto BASE-COMMIT`, then a writer (`purpose: work`) whose goal applies the printed patch with `git apply --3way`, resolves the conflicts and re-runs the gate, and verify the produced commit with `--from-writer`. Writers cannot make merge commits, so the factory refreshes by replaying.
+
+4. After the merge, remove the task's provisioned worktree with `python3 -B "$SKILL_DIR/runtime/factory.py" release-worktree --task TASK`. It refuses while the worktree is dirty or an assignment there may still run, and keeps the branch.
+
 ## Prerequisites
 
 `integrate` holds with an operator prerequisite, and never changes repository settings, unless all of these hold:
