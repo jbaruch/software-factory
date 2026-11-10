@@ -551,9 +551,15 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     # A provisioned worktree starts with no ignored files, so these are the writer's disposable
     # outputs (test caches, bytecode, installs). The factory discards them and records the paths.
     discarded = ignored()
+    if discarded and (git("clean", "-ffdXq", environment=environment).returncode or ignored()):
+        raise factory.FactoryError("Cannot discard the writer's ignored outputs; inspect them before another attempt")
+    # Git cannot track empty directories (test suites leave them), so they are disposable too.
+    for current, _, _ in os.walk(root, topdown=False):
+        directory = Path(current)
+        if directory != root and ".git" not in directory.relative_to(root).parts and not any(directory.iterdir()):
+            directory.rmdir()
+            discarded.append(directory.relative_to(root).as_posix() + "/")
     if discarded:
-        if git("clean", "-ffdXq", environment=environment).returncode or ignored():
-            raise factory.FactoryError("Cannot discard the writer's ignored outputs; inspect them before another attempt")
         receipt["commit"]["discarded"] = discarded
         factory.save(args.receipt, receipt)
     staged = git("add", "--all", "--", ".", environment=environment)
@@ -694,6 +700,9 @@ def commit_completed(args, receipt, identity, *, git_scope=isolated_git, scan=sc
         if committing:
             commit_changes(args, receipt, git_scope=git_scope, scan=scan)
         candidate = factory.git_commit(".", "HEAD")
-        factory.check_checkout(".", ".", candidate, expected_identity=identity,
-                               expected_git_dir=args.worktree_git_dir)
+        try:
+            factory.check_checkout(".", ".", candidate, expected_identity=identity,
+                                   expected_git_dir=args.worktree_git_dir)
+        except factory.FactoryError as exc:
+            raise Refusal("The checkout is not clean after the run (" + str(exc) + ")") from None
     return candidate

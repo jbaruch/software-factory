@@ -15,12 +15,16 @@ boundary is structural instead:
   tool, so they work in a disposable worktree of the candidate beside their
   receipt (`TASK.ID.HARNESS.checkout`), removed after the run with every ignored
   file; tests and installs they run never dirty the shared checkout;
-- a writer's ignored outputs (test caches, bytecode, installs) are discarded
-  before the factory commit and listed in the receipt's `commit.discarded`;
+- a writer's ignored outputs (test caches, bytecode, installs) and the empty
+  directories Git cannot track are discarded before the factory commit and listed
+  in the receipt's `commit.discarded`;
 - a writer that fails after editing leaves its worktree dirty, so
   `factory.py reset --task TASK --id ID` saves the leftover edits as
   `TASK.ID.HARNESS.reset.patch` beside the receipt and restores the candidate.
-  The failed receipt stays failed; a new writer can cite the patch;
+  The failed receipt stays failed; a new writer can cite the patch. A writer
+  that failed after its own factory commit keeps that commit: reset clears only
+  leftovers, and the coordinator selects the commit with `inputs` and verifies it
+  with a plain plan;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
   secrets, runs hooks and signs, and integration stays with the runtime;
 - only a structured report counts as a result. Text, tool telemetry and
