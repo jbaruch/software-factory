@@ -51,6 +51,14 @@ python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/private/stat
   --release-scripts '/absolute/installed/acr__jbaruch__coding-policy__release'
 ```
 
+A repository without `integrate`'s prerequisites (a `checks.yml` `verify` job and
+strict classic protection) delivers through its own release skill instead: after the skill merges, `factory.py delivered --task TASK --pr URL --review
+RELEASE_REVIEW --after REQUIRED_APPROVAL --gh ... --release-scripts ...` re-checks
+the same approvals, requires the PR merged at the exact head the release judgment
+froze, with the merge commit in the target branch's history, and records
+`TASK.RELEASE_REVIEW.delivered.json` once. Any merge method is accepted; the factory
+makes no merge call on this path and leaves publication to the skill.
+
 Repeat `--after` for selected required approval IDs; selection is authorized input,
 not parsed from acceptance prose. Every selected judgment must be `approved`,
 current, read-only and collected from original native events/receipts. Only the

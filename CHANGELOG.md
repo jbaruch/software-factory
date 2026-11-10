@@ -2,6 +2,7 @@
 
 ## Next
 
+- `factory.py delivered` is the delivery step for repositories without `integrate`'s prerequisites (a `checks.yml` `verify` job and strict classic protection): the repository's release skill merges, then `delivered` re-checks the approvals, confirms the PR merged at exactly the head the release judgment approved, and records `TASK.RELEASE_ID.delivered.json`. Neither nanoclaw repository meets those prerequisites, so every canary delivery so far was merged by hand under an operator override (#77).
 - Any harness can give the release judgment: Codex, Claude, Grok or Antigravity, on the strongest model available, at that model's maximum effort. `claude-start`, `grok-start` and `antigravity-start` take `--release-pr` and `--delivery` like `codex-start`, and launch refuses a release judgment below maximum effort. Codex was the only judge because release evidence was built before the other adapters, not by policy, so every delivery stopped whenever Codex ran out of quota (#77).
 - Release helpers come from coding-policy's release skill as ACR or Tessl installs it (`.codex/skills/acr__jbaruch__coding-policy__release` or `.tessl/plugins/jbaruch/coding-policy/skills/release`). Both nanoclaw repositories install it through Tessl, so no release judgment could capture their PR feedback.
 - The release judgment's brief no longer tells the judge the repository can't publish. That limit belongs to `integrate`, and the brief blocked repositories that publish through their release skill.
