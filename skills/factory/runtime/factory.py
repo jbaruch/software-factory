@@ -1092,7 +1092,9 @@ def reset_writer(path, *, assignment_id):
                                + restored.stderr.decode("utf-8", "replace").strip())
     check_checkout(record["admission"]["repository"], cwd, candidate,
                    expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
-    return dict(task=record["task"], assignment=assignment_id, checkout=cwd, candidate=candidate, patch=str(patch))
+    return dict(task=record["task"], assignment=assignment_id, checkout=cwd, candidate=candidate, patch=str(patch),
+                next="Plan a new writer ID on this checkout and current inputs; its goal applies the patch first, "
+                     "then re-runs the gate; after stays empty")
 
 
 def provision_worktree(path, *, worktree_id, destination):

@@ -59,3 +59,7 @@ After a writer is collected, run a verification plan with `--from-writer WRITER_
 - Restart with the same plan and writer ID; selection is reused, never repeated.
 
 Later phases, such as a security review or a correction, plan against the produced commit, which is then the task's selected candidate.
+
+## Rerunning a failed writer
+
+After `factory.py reset --task TASK --id WRITER_ID`, plan a new writer under a new ID on the same checkout and the task's current inputs, with the same role and `purpose`. Its goal starts with `git apply <patch>` (the path `reset` printed), then re-runs the gate and checks the result against the original goal. Keep `after` empty. Several tasks' jobs go in one plan, because a second runner refuses while the first holds the execution lock.
