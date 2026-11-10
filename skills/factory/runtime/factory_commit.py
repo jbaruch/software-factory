@@ -483,9 +483,19 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
         if info.st_nlink > 1:
             # Materialize finished output without changing its other hard links.
             factory.independent_source(source)
-    status = git("status", "--porcelain=v1", "--untracked-files=all", "--ignored", environment=environment)
-    if status.returncode or any(line.startswith("!!") for line in status.stdout.splitlines()):
-        raise factory.FactoryError("Writer left ignored outputs or unreadable Git status; inspect and remove only its disposable outputs before authorizing a correction")
+    def ignored():
+        status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored", environment=environment)
+        if status.returncode:
+            raise factory.FactoryError("Cannot read writer Git status; restore Git access before staging changes")
+        return [entry[3:] for entry in status.stdout.split("\0") if entry.startswith("!! ")]
+    # A provisioned worktree starts with no ignored files, so these are the writer's disposable
+    # outputs (test caches, bytecode, installs). The factory discards them and records the paths.
+    discarded = ignored()
+    if discarded:
+        if git("clean", "-ffdXq", environment=environment).returncode or ignored():
+            raise factory.FactoryError("Cannot discard the writer's ignored outputs; inspect them before another attempt")
+        receipt["commit"]["discarded"] = discarded
+        factory.save(args.receipt, receipt)
     staged = git("add", "--all", "--", ".", environment=environment)
     if staged.returncode:
         raise factory.FactoryError("Cannot stage writer changes; inspect the retained commit intent, index and worktree before correcting it")
@@ -578,7 +588,9 @@ def check_commit_receipt(receipt, args, repository, *, historical=False):
     if commit is None:
         return
     if (not expected or not args.write or not isinstance(commit, dict)
-            or set(commit) != {"state", "parent", "message", "staged_tree", "candidate"}
+            or set(commit) - {"discarded"} != {"state", "parent", "message", "staged_tree", "candidate"}
+            or "discarded" in commit and (not isinstance(commit["discarded"], list) or not commit["discarded"]
+                                          or any(not isinstance(name, str) or not name for name in commit["discarded"]))
             or commit.get("state") not in {"created", "unchanged"}
             or commit.get("parent") != receipt["inputs"]["candidate"]
             or commit.get("candidate") != receipt["candidate"]

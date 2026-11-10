@@ -866,7 +866,7 @@ class ReadyRunner(unittest.TestCase):
 
     def finish_antigravity(self, task, identity, outcome="approved"):
         import antigravity_worker
-        from test_antigravity_worker import stream, usage_probe
+        from test_antigravity_worker import echo_cwd, stream, usage_probe
         record = factory.load_task(self.directory / (task + ".json"))
         assignment = record["assignments"][identity]
         request = assignment["request"]
@@ -876,7 +876,7 @@ class ReadyRunner(unittest.TestCase):
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = antigravity_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
         async def spawn(*command, **options):
-            return FakeProcess(stream(request["cwd"], outcome=outcome, model=args.model))
+            return FakeProcess(echo_cwd(stream(request["cwd"], outcome=outcome, model=args.model), options))
         before = Path.cwd()
         try:
             os.chdir(self.repo)

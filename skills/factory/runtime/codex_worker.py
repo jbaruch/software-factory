@@ -1,6 +1,7 @@
 """One explicit native Codex assignment; retain its original events and compact result."""
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -251,8 +252,13 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     directory = None
     cleanup_errors = []
     events = []
+    # Readers run unconfined, so they work in a disposable checkout of the candidate.
+    checkouts, workdir = contextlib.ExitStack(), "."
     try:
         try:
+            if not args.write:
+                workdir = str(checkouts.enter_context(factory.reader_checkout(
+                    str(args.repo), args.candidate, factory.reader_checkout_path(args.receipt), identity=identity)))
             with os.fdopen(fd, "w") as stream:
                 if args.commit_message is not None:
                     instructions += "\n" + factory_commit.WRITER_CONTRACT + "\n"
@@ -282,8 +288,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           "-c", "features.shell_snapshot=false",
                                           "-c", "shell_environment_policy.experimental_use_profile=false",
                                           "-c", "shell_environment_policy.set.ZDOTDIR=" + shell_path,
-                                          "--cd", ".", "-",
-                                          env=environment,
+                                          "--cd", workdir, "-",
+                                          cwd=workdir, env=environment,
                                           limit=NATIVE_LINE_LIMIT,
                                           stdin=prompt, stdout=asyncio.subprocess.PIPE)
                 except OSError:
@@ -350,6 +356,16 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     except (factory.FactoryError, ValueError, KeyError, TypeError) as exc:
         receipt.update(state="failed", error=str(exc))
     finally:
+        # The reader checkout goes last, once the native child is confirmed stopped.
+        if process is not None and process.returncode is None:
+            if not args.write:
+                cleanup_errors.append("Native termination is unconfirmed; retain the reader checkout until owned-child reconciliation confirms exit")
+        else:
+            try:
+                checkouts.close()
+            except factory.FactoryError as exc:
+                cleanup_errors.append("Cannot remove the reader checkout " + str(factory.reader_checkout_path(args.receipt))
+                                      + "; remove it with git worktree remove --force --force after reconciling: " + str(exc))
         if cleanup_errors:
             receipt.update(state="failed", error="; ".join(filter(None, [receipt["error"], *cleanup_errors])))
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)

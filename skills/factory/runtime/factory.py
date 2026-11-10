@@ -862,7 +862,7 @@ def validate_provisioning(record):
         raise FactoryError("Invalid task provisioning request; restore the original record")
 
 
-def provisioning_git(repository, *args, output=None):
+def provisioning_git(repository, *args, output=None, timeout=30):
     """Metadata/index operations and raw blobs only; never checkout callbacks."""
     environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
     try:
@@ -870,7 +870,7 @@ def provisioning_git(repository, *args, output=None):
             "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
             env=environment, stdout=subprocess.PIPE if output is None else output,
-            stderr=subprocess.PIPE, timeout=30, check=False)
+            stderr=subprocess.PIPE, timeout=timeout, check=False)
         diagnostic = result.stderr.decode("utf-8")
         output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
@@ -982,6 +982,119 @@ def provisioning_file(root, name):
         os.close(directory)
 
 
+def write_candidate(repository, destination, candidate, entries):
+    """Fill a --no-checkout worktree from raw blobs; no hooks or smudge filters run."""
+    provisioning_git(destination, "read-tree", candidate)
+    for name, mode, oid in entries:
+        with provisioning_file(destination, name) as stream:
+            provisioning_git(repository, "cat-file", "blob", oid, output=stream)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
+            os.fsync(stream.fileno())
+
+
+def reader_checkout_path(receipt):
+    """Where a full-tool reader's disposable checkout lives: beside its receipt, by name."""
+    receipt = Path(receipt)
+    return receipt.parent / (receipt.name.removesuffix(".json") + ".checkout")
+
+
+@contextmanager
+def reader_checkout(repository, candidate, destination, *, identity):
+    """A disposable detached worktree at the candidate for a reader that has every tool.
+
+    Codex and Antigravity readers run unconfined, so tests and installs they run
+    would dirty a checkout other readers share and that collection requires clean.
+    They work here instead; the factory removes the whole tree afterwards, ignored
+    files included, and the assignment's own checkout never changes.
+    """
+    destination = Path(destination)
+    if os.path.lexists(destination):
+        raise FactoryError("Reader checkout path already exists; inspect it rather than reusing or deleting it")
+    for parent in destination.parents:
+        if os.path.lexists(parent / ".git") or (parent / "HEAD").exists() and (parent / "objects").is_dir():
+            raise FactoryError("Keep reader checkouts outside existing checkouts and Git directories")
+    entries = provisioning_source(repository, candidate, destination.parent)
+    provisioning_git(repository, "worktree", "add", "--detach", "--no-checkout", "--lock",
+                     "--reason", "factory-reader-" + uuid.uuid4().hex, str(destination), candidate)
+    try:
+        try:
+            write_candidate(repository, destination, candidate, entries)
+        except OSError:
+            raise FactoryError("Reader checkout writes failed; restore filesystem access/space before another attempt") from None
+        check_checkout(repository, str(destination), candidate, expected_identity=identity,
+                       expected_git_dir=git_dir(destination))
+        yield destination
+    finally:
+        # Two --force flags remove a locked worktree with every untracked and ignored file;
+        # a reader's node_modules can take minutes on slow storage.
+        provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination), timeout=600)
+
+
+def reset_writer(path, *, assignment_id):
+    """Recover a failed writer's checkout: keep its leftover edits as a patch, then restore the candidate.
+
+    The failed receipt stays failed. A writer that failed after editing (a decoder refusal, a
+    timeout, a refused commit) leaves the task's provisioned worktree dirty, and every later
+    assignment refuses a dirty checkout. The patch keeps the work for a new writer to cite.
+    Caller holds the owner's execution and task locks.
+    """
+    record = load_task(path)
+    assignment = record["assignments"].get(assignment_id)
+    if record["admission"] is None or assignment is None:
+        raise FactoryError("Reset needs an admitted task and an existing writer assignment")
+    command = assignment["request"]["command"]
+    if native_harness(command) is None or "--write" not in command or "--receipt" not in command:
+        raise FactoryError("Only a native writer's checkout can be reset; readers never change theirs")
+    receipt = Path(command[command.index("--receipt") + 1])
+    try:
+        state = decode_json(read_record(receipt, private=True)).get("state")
+    except (OSError, ValueError, UnicodeError, AttributeError):
+        raise FactoryError("Cannot read the writer's original receipt; restore it before resetting") from None
+    if state != "failed":
+        raise FactoryError("Reset only a writer whose original receipt failed; collect or inspect any other attempt")
+    # No other assignment can be using this checkout: launches refuse a dirty one.
+    cwd, candidate = assignment["request"]["cwd"], assignment["request"]["inputs"]["candidate"]
+    check_repository(record["admission"])
+    directory = git_dir(cwd)
+    if repository_identity(cwd) != record["admission"]["repository_identity"] or git_commit(cwd, "HEAD") != candidate:
+        raise FactoryError("Writer checkout moved off its input candidate; inspect it by hand rather than resetting")
+    patch = receipt.with_name(receipt.name.removesuffix(".json") + ".reset.patch")
+    if os.path.lexists(patch):
+        raise FactoryError("This writer was already reset; inspect its saved patch")
+    worktree = git_worktree(cwd)
+    base = [git_binary(), "--no-replace-objects", "-C", worktree, "--work-tree=" + worktree,
+            "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false"]
+    with tempfile.TemporaryDirectory(prefix="factory-reset-") as temporary:
+        # A private index stages untracked files too; .gitignore keeps disposable outputs out.
+        environment = {**git_environment(), "GIT_INDEX_FILE": str(Path(temporary) / "index")}
+        for arguments in (("read-tree", candidate), ("add", "--all", "--", ".")):
+            staged = subprocess.run([*base, *arguments], env=environment, capture_output=True, timeout=120, check=False)
+            if staged.returncode:
+                raise FactoryError("Cannot capture the failed writer's edits: " + staged.stderr.decode("utf-8", "replace").strip())
+        # Written privately and renamed only once complete, so a failed diff never blocks a retry.
+        partial = Path(temporary) / "reset.patch"
+        with open(partial, "xb") as stream:
+            diff = subprocess.run([*base, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", candidate],
+                                  env=environment, stdout=stream, stderr=subprocess.PIPE, timeout=120, check=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if diff.returncode:
+            raise FactoryError("Cannot write the failed writer's patch: " + diff.stderr.decode("utf-8", "replace").strip())
+        os.chmod(partial, 0o600)
+        if os.path.lexists(patch):
+            raise FactoryError("This writer was already reset; inspect its saved patch")
+        shutil.move(partial, patch)
+    for arguments in (("reset", "--hard", "--quiet", candidate), ("clean", "-ffdxq")):
+        restored = subprocess.run([*base, *arguments], env=git_environment(), capture_output=True, timeout=120, check=False)
+        if restored.returncode:
+            raise FactoryError("Saved the patch, but restoring the checkout failed; inspect it before another launch: "
+                               + restored.stderr.decode("utf-8", "replace").strip())
+    check_checkout(record["admission"]["repository"], cwd, candidate,
+                   expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+    return dict(task=record["task"], assignment=assignment_id, checkout=cwd, candidate=candidate, patch=str(patch))
+
+
 def provision_worktree(path, *, worktree_id, destination):
     """Caller holds the owner's execution/task locks, as for explicit launches."""
     record = load_task(path)
@@ -1054,15 +1167,8 @@ def provision_worktree(path, *, worktree_id, destination):
         provisioning_git(repository, "worktree", "add", "--no-checkout", "--lock", "--reason", marker,
                          "-b", request["branch"], str(destination), request["inputs"]["candidate"])
         directory = provisioning_owned(record, existing)
-        # --no-checkout avoids hooks and smudge filters; read-tree writes only this index.
-        provisioning_git(destination, "read-tree", request["inputs"]["candidate"])
         try:
-            for name, mode, oid in entries:
-                with provisioning_file(destination, name) as stream:
-                    provisioning_git(repository, "cat-file", "blob", oid, output=stream)
-                    stream.flush()
-                    os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
-                    os.fsync(stream.fileno())
+            write_candidate(repository, destination, request["inputs"]["candidate"], entries)
             check_checkout(repository, str(destination), request["inputs"]["candidate"],
                            expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
         except OSError:
@@ -2310,7 +2416,10 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
         raise FactoryError("Cannot read the original Antigravity receipt; inspect or restore it without relaunching") from None
     keys = ("report", "conversation_id", "usage", "duration_seconds", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != (2 if args.write else 1) or receipt.get("kind") != "antigravity-execution"
+            or receipt["schema_version"] not in ((2,) if args.write else (1, 3)) or receipt.get("kind") != "antigravity-execution"
+            # Version 3 readers ran in the disposable checkout named beside their receipt.
+            or (receipt["schema_version"] == 3) != ("checkout" in receipt)
+            or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
                                 or "commit" not in receipt))
@@ -2338,7 +2447,7 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
     try:
         native_antigravity.validate_usage(receipt.get("discovery"), args.agy)
         native = native_antigravity.parse_execution(antigravity_worker.read_events(args.events),
-            expected_model=args.model, expected_cwd=request["cwd"], expected_schema=outcome_schema())
+            expected_model=args.model, expected_cwd=receipt.get("checkout", request["cwd"]), expected_schema=outcome_schema())
     except (native_antigravity.UsageError, native_antigravity.ExecutionError) as exc:
         raise FactoryError(str(exc)) from None
     if json.dumps({key: receipt[key] for key in keys}, sort_keys=True) != json.dumps(
@@ -2485,6 +2594,9 @@ def main(argv=None):
     inputs.add_argument("--task", required=True)
     inputs.add_argument("--candidate", required=True)
     inputs.add_argument("--requirements", required=True)
+    reset = sub.add_parser("reset", help="Save a failed writer's leftover edits as a patch and restore its checkout")
+    reset.add_argument("--task", required=True)
+    reset.add_argument("--id", required=True, help="The failed writer assignment")
     provision = sub.add_parser("provision", help="Provision or reconcile one explicitly named writer worktree")
     provision.add_argument("--task", required=True)
     provision.add_argument("--id", required=True, help="Stable worktree name; branch is factory/TASK/ID")
@@ -2583,7 +2695,10 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+            if args.action == "reset":
+                print(json.dumps(reset_writer(path, assignment_id=args.id), indent=2))
+                return 0
             if prepared is not None and load_task(path) != prepared:
                 raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance", "provision"}:
