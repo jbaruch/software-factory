@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.29.1 — 2026-11-10
 
 - The Antigravity decoder accepts the bare `error_message` steps agy 1.5.3 records when the agent carries on past an error. A Gemini QA reader that completed its run failed collection on one, the same family as #51.
 
