@@ -49,7 +49,7 @@ def validate_judge_capacity(capacity, binary, model, effort, configured_model, n
         if reason:
             raise factory.FactoryError(reason)
         selected = [item for item in capacity["models"] if item["model"] == model]
-        rank = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+        rank = factory.EFFORT_RANK
         efforts = selected[0]["effort_ids"] if len(selected) == 1 else None
         if (not isinstance(efforts, list) or not efforts or any(not isinstance(item, str) or item not in rank for item in efforts)
                 or len(set(efforts)) != len(efforts)):

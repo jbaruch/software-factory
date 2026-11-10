@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 import factory
 import factory_commit
 import native_antigravity
+import release_evidence
 import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, native_environment, outcome_schema, stop_child
 
@@ -100,6 +101,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
             or not factory.valid_repository_identity(identity) or not args.worktree_git_dir.is_absolute()):
         raise factory.FactoryError("Antigravity assignment binding changed; inspect its original brief, role and repository pin")
     factory.role_spec(args.role)
+    release_evidence.check_brief(args, instructions)
+    if args.role == "release":  # Omitting --effort would run at the CLI's default, not the model's maximum.
+        release_evidence.require_max_effort(args.effort, native_antigravity.EFFORTS)
     if args.write:
         factory.check_role_write(args.role)
     else:
@@ -228,6 +232,7 @@ def parser():
     command_line.add_argument("--write", action="store_true", help="Implementation specialist with every native tool in its worktree")
     command_line.add_argument("--commit-message", help="With --write, the factory commits a completed result using this message")
     command_line.add_argument("--sandbox", type=Path, help="With --write, the Codex CLI used as the factory commit's local sandbox")
+    factory.add_judgment_arguments(command_line)
     return command_line
 
 

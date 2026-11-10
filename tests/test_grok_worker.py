@@ -519,7 +519,7 @@ class GrokWorker(unittest.TestCase):
 
 
 
-def fake_grok_discovery(repo, root):
+def fake_grok_discovery(repo, root, efforts=("high",)):
     async def configuration(binary, cwd):
         return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(repo),
                     grok_home=str(root / "grok-profile"), cli_version="fixture", layers=[],
@@ -531,7 +531,7 @@ def fake_grok_discovery(repo, root):
                     readiness="unverified", quota_observation=None, agent_version="fixture", capabilities={},
                     current_model="fixture-model",
                     authentication=dict(method="cached_token", auth_mode="Oidc", subscription_tier="Fixture", gate=None, backend_billed=False),
-                    models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value="high")]))])
+                    models=[dict(modelId="fixture-model", _meta=dict(reasoningEfforts=[dict(value=item) for item in efforts]))])
     return probe, configuration
 
 
@@ -553,15 +553,15 @@ class GrokApprovals(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             self.record = factory.collect_grok(self.fixture.path, "grok-qa", None, record, assignment)
 
-    def run_grok(self, identity, role, session, *, write=False):
+    def run_grok(self, identity, role, session, *, write=False, effort="high", efforts=("high",), frozen=None):
         f = self.fixture
         writer: dict[str, Any] = dict(write=True, commit_message="Add fixture notes", sandbox=sys.executable) if write else {}
         with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(session)):
             command = factory.grok_command(f.path, task="deliver", assignment_id=identity, grok=sys.executable,
-                model="fixture-model", effort="high", cwd=str(f.repo), role=role, **writer)
+                model="fixture-model", effort=effort, cwd=str(f.repo), role=role, release_evidence=frozen, **writer)
         record, assignment = factory.launch(f.path, task="deliver", assignment_id=identity, role=role,
             goal="Fixture " + role, cwd=str(f.repo), command=command, purpose="work",
-            binary=sys.executable, server="unix:///fixture.sock")
+            binary=sys.executable, server="unix:///fixture.sock", frozen_release=frozen)
         replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
             "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
             "{requirements}": record["inputs"]["requirements"],
@@ -572,7 +572,7 @@ class GrokApprovals(unittest.TestCase):
                        structuredOutput=dict(outcome="completed" if write else "approved", artifacts=["fixture"]))]
         async def spawn(*command, **options):
             return FakeProcess(events)
-        probe, configuration = fake_grok_discovery(f.repo, f.root)
+        probe, configuration = fake_grok_discovery(f.repo, f.root, efforts)
         with redirect_stdout(StringIO()):
             receipt = asyncio.run(grok_worker.execute(args, spawn=spawn, probe=probe, configuration=configuration,
                 clock=lambda: 1000, timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
@@ -604,9 +604,24 @@ class GrokApprovals(unittest.TestCase):
         with self.assertRaises(factory.FactoryError):
             integration.approvals(record, "release", ["grok-qa"])
 
-    def test_grok_cannot_be_the_release_judgment(self):
+    def test_a_grok_qa_report_cannot_be_the_release_judgment(self):
         with self.assertRaises(factory.FactoryError):
             integration.approvals(self.record, "grok-qa", ["qa"])
+
+    def test_grok_gives_the_release_judgment_at_its_models_maximum_effort(self):
+        session = "00000000-0000-0000-0000-00000000000c"
+        record, assignment, receipt = self.run_grok("grok-release", "release", session, frozen=self.fixture.frozen)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            record = factory.collect_grok(self.fixture.path, "grok-release", None, record, assignment)
+            selected = integration.approvals(record, "grok-release", ["qa", "grok-qa"])
+        self.assertEqual(selected["grok-release"]["context"], session)
+        self.assertEqual(selected["grok-release"]["evidence"], self.fixture.frozen)
+
+    def test_grok_release_judgment_below_its_models_maximum_effort_refuses(self):
+        with self.assertRaisesRegex(factory.FactoryError, "maximum effort: select high, not low"):
+            self.run_grok("lazy-release", "release", "00000000-0000-0000-0000-00000000000d",
+                          effort="low", efforts=("low", "high"), frozen=self.fixture.frozen)
 
 
 if __name__ == "__main__":

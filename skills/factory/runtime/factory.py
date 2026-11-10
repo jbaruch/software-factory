@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 ROLES_PATH = ROOT.parent / "references" / "roles.json"
 GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
 MAX_NATIVE_SECONDS = 86400
+EFFORT_RANK = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")  # Native effort IDs, weakest first.
 RESULT_OUTCOMES = {"completed", "approved", "findings", "blocked"}
 # Process states that never change again; only these assignment tabs are tidied.
 TERMINAL_STATES = ("exited", "failed", "lost")
@@ -1637,7 +1638,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                 raise FactoryError("Bind a native coordination assignment to its role, original store and selected inputs")
             instructions += coordination_evidence.render(native_args.decision_store, native_args.decision, native_args.question,
                 role, record["inputs"], task_record=record, native=native_args, harness="claude")
-        else:
+        elif not judged(command):
             instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
                 requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
     if not existing and native_harness(command) in ("grok", "antigravity"):
@@ -1656,18 +1657,14 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                        expected_git_dir=native_args.worktree_git_dir)
         if native_args.write:
             check_role_write(role)
-        else:
+        elif not judged(command):
             instructions += review_evidence.render(cwd, candidate=record["inputs"]["candidate"],
                 requirements=record["inputs"]["requirements"], base=native_args.base, role=role)
+    if not existing and role == "release" and native_harness(command) == "codex":
+        codex_release_effort(native_arguments(command, "Damaged native release command"))
     if not existing and any(flag in command for flag in ("--delivery-evidence", "--delivery-evidence-digest")):
-        import codex_worker
         import release_evidence
-        if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
-            raise FactoryError("Delivered evidence requires the verified native adapter")
-        try:
-            native_args = codex_worker.parser().parse_args(command[4:])
-        except SystemExit:
-            raise FactoryError("Damaged final native release command") from None
+        native_args = native_arguments(command, "Final release judgment needs an undamaged verified native worker command")
         if native_args.write or native_args.role != "release" or role != "release" or any(flag in command for flag in ("--release-evidence", "--release-evidence-digest")):
             raise FactoryError("Final acceptance evidence needs a distinct read-only release assignment")
         frozen = decode_json(native_args.delivery_evidence) if native_args.delivery_evidence is not None else frozen_delivery
@@ -1676,14 +1673,8 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         release_evidence.validate_delivery(frozen, record)
         instructions += release_evidence.render_delivery(frozen)
     if not existing and any(flag in command for flag in ("--release-evidence", "--release-evidence-digest")):
-        import codex_worker
         import release_evidence
-        if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
-            raise FactoryError("Release evidence requires the verified native Codex adapter")
-        try:
-            native_args = codex_worker.parser().parse_args(command[4:])
-        except SystemExit:
-            raise FactoryError("Damaged native release-review command") from None
+        native_args = native_arguments(command, "Release evidence needs an undamaged verified native worker command")
         if native_args.write or native_args.role != role:
             raise FactoryError("Frozen release evidence requires a matching read-only specialist")
         frozen = decode_json(native_args.release_evidence) if native_args.release_evidence is not None else frozen_release
@@ -2254,7 +2245,8 @@ def collect_claude(path, assignment_id, rex, record, assignment):
 
 
 def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None,
-                   write=False, commit_message=None, sandbox=None, decision_store=None, decision=None, question=None):
+                   write=False, commit_message=None, sandbox=None, decision_store=None, decision=None, question=None,
+                   release_evidence=None, delivery_evidence=None):
     """Freeze one explicit Claude effect, reviewer or writer, including its native session."""
     import native_claude
     if (not isinstance(model, str) or not model.strip() or effort not in native_claude.EFFORTS
@@ -2262,7 +2254,11 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
             or type(turns) is not int or not 1 <= turns <= 1000):
         raise FactoryError("Supply an absolute native Claude executable, a discovered model, a supported effort and bounded seconds/turns")
+    if role == "release":
+        import release_evidence as evidence
+        evidence.require_max_effort(effort, native_claude.EFFORTS)
     writer = writer_arguments("Claude", role, write, commit_message, sandbox, base)
+    judgment = evidence_arguments(release_evidence, delivery_evidence)
     coordination = []
     if decision_store is not None or decision is not None or question is not None:
         import coordination_evidence
@@ -2300,12 +2296,34 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
     if writer and existing is None:
         check_commit_tool("Claude", writer[-1])
     prefix = path.parent / (task + "." + assignment_id + ".claude")
-    return worker + ([] if base is None else ["--base", base]) + writer + coordination + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
+    return worker + ([] if base is None else ["--base", base]) + writer + coordination + judgment + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
         "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
         "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
+
+
+def evidence_arguments(release=None, delivery=None):
+    """A reader's frozen release or delivery payload: the command carries its digest, the brief holds it."""
+    import release_evidence as evidence
+    if release is not None and delivery is not None:
+        raise FactoryError("Select pre-merge release review or final delivery judgment")
+    if release is not None:
+        return ["--release-evidence-digest", evidence.digest(release)]
+    return [] if delivery is None else ["--delivery-evidence-digest", evidence.digest(delivery)]
+
+
+def add_judgment_arguments(command):
+    """Every native worker parser accepts one frozen release or delivery payload; release modules load only when one is present."""
+    for kind in ("delivery", "release"):
+        evidence = command.add_mutually_exclusive_group()
+        evidence.add_argument("--" + kind + "-evidence", help="Historical inline frozen evidence")
+        evidence.add_argument("--" + kind + "-evidence-digest", help="Digest of original evidence in the saved brief")
+
+
+def carries_judgment(args):
+    return any(getattr(args, kind + suffix) is not None for kind in ("delivery", "release") for suffix in ("_evidence", "_evidence_digest"))
 
 
 def writer_arguments(provider, role, write, commit_message, sandbox, base):
@@ -2327,13 +2345,14 @@ def check_commit_tool(provider, tool):
 
 
 def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None,
-                 write=False, commit_message=None, sandbox=None):
+                 write=False, commit_message=None, sandbox=None, release_evidence=None, delivery_evidence=None):
     """Freeze one explicit Grok effect, reviewer or writer, including its native session."""
     if (not model.strip() or not effort.strip() or not Path(grok).is_absolute()
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
             or type(turns) is not int or not 1 <= turns <= 1000):
         raise FactoryError("Supply an absolute native Grok executable, discovered model/effort and bounded seconds/turns")
     writer = writer_arguments("Grok", role, write, commit_message, sandbox, base)
+    judgment = evidence_arguments(release_evidence, delivery_evidence)
     worker = [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
@@ -2362,7 +2381,7 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
     if writer and existing is None:
         check_commit_tool("Grok", writer[-1])
     prefix = path.parent / (task + "." + assignment_id + ".grok")
-    return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
+    return worker + ([] if base is None else ["--base", base]) + writer + judgment + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
@@ -2466,13 +2485,17 @@ def collect_grok(path, assignment_id, rex, record, assignment):
 
 
 def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, role, seconds=600, base=None,
-                        write=False, commit_message=None, sandbox=None):
+                        write=False, commit_message=None, sandbox=None, release_evidence=None, delivery_evidence=None):
     """Freeze one explicit Antigravity effect, reviewer or writer; the CLI assigns its conversation ID."""
     import native_antigravity
     if (not isinstance(model, str) or not model.strip() or (effort is not None and effort not in native_antigravity.EFFORTS)
             or not Path(agy).is_absolute() or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS):
         raise FactoryError("Supply an absolute native Antigravity executable, a discovered model, a supported effort and bounded seconds")
+    if role == "release":  # Omitting --effort would run at the CLI's default, not the model's maximum.
+        import release_evidence as evidence
+        evidence.require_max_effort(effort, native_antigravity.EFFORTS)
     writer = writer_arguments("Antigravity", role, write, commit_message, sandbox, base)
+    judgment = evidence_arguments(release_evidence, delivery_evidence)
     worker = [sys.executable, "-E", "-s", str(ROOT / "antigravity_worker.py")]
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
@@ -2500,7 +2523,7 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
         except (ValueError, IndexError):
             raise FactoryError("Saved Antigravity binding is damaged; restore the original command without relaunching") from None
     prefix = path.parent / (task + "." + assignment_id + ".antigravity")
-    return worker + ([] if base is None else ["--base", base]) + writer + ["--job", task + "/" + assignment_id,
+    return worker + ([] if base is None else ["--base", base]) + writer + judgment + ["--job", task + "/" + assignment_id,
         "--agy", str(binary), "--model", model, *(() if effort is None else ("--effort", effort)),
         "--seconds", str(seconds), "--role", role,
         "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}", "--brief-sha256", "{brief_sha256}",
@@ -2612,6 +2635,40 @@ def native_harness(command):
     return None
 
 
+JUDGMENT_FLAGS = ("--release-evidence", "--release-evidence-digest", "--delivery-evidence", "--delivery-evidence-digest")
+
+
+def judged(command):
+    """A reader whose brief ends with a frozen release or delivery payload instead of revision evidence."""
+    return any(flag in command for flag in JUDGMENT_FLAGS)
+
+
+def native_arguments(command, problem):
+    """A verified native worker command, parsed by that worker's own parser."""
+    import importlib
+    harness = native_harness(command)
+    if harness is None or command[1:3] != ["-E", "-s"]:
+        raise FactoryError(problem)
+    try:
+        return importlib.import_module(harness + "_worker").parser().parse_args(command[4:])
+    except SystemExit:
+        raise FactoryError(problem) from None
+
+
+def codex_release_effort(native_args):
+    """Codex lists each model's efforts only in its fresh catalog, so the release judgment's check reads it."""
+    import asyncio
+    import codex_capacity
+    import native_codex
+    import release_evidence
+    try:
+        capacity = asyncio.run(codex_capacity.snapshot(Path(native_args.codex)))
+    except (codex_capacity.CapacityError, native_codex.CodexProbeError, OSError, TimeoutError) as exc:
+        raise FactoryError("Codex's model catalog is unavailable to check the release judgment's effort: " + str(exc)) from None
+    models = [item for item in capacity["models"] if item.get("model") == native_args.model]
+    release_evidence.require_max_effort(native_args.effort, models[0].get("effort_ids") if len(models) == 1 else None)
+
+
 def evidence_reader(harness):
     """Each harness's strict original-evidence reader, resolved at call time."""
     return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence, antigravity=antigravity_evidence)[harness]
@@ -2656,7 +2713,12 @@ def main(argv=None):
         start.add_argument("--after", action="append", default=[], help="Earlier assignment requiring a current successful result")
         if action == "start":
             start.add_argument("command", nargs=argparse.REMAINDER)
-        elif action == "codex-start":
+        else:
+            start.add_argument("--delivery", help="Freeze an original confirmed integration for final release judgment")
+            start.add_argument("--release-pr", help="Freeze complete canonical feedback for a native read-only judgment")
+            start.add_argument("--gh", type=Path)
+            start.add_argument("--release-scripts", type=Path, help="The release skill's ACR or Tessl installation")
+        if action == "codex-start":
             start.add_argument("--codex", required=True)
             start.add_argument("--model", required=True)
             start.add_argument("--effort", required=True)
@@ -2666,11 +2728,7 @@ def main(argv=None):
             start.add_argument("--decision-store", type=Path)
             start.add_argument("--decision")
             start.add_argument("--question")
-            start.add_argument("--delivery", help="Freeze an original confirmed integration for final release judgment")
-            start.add_argument("--release-pr", help="Freeze complete canonical feedback for a native read-only judgment")
-            start.add_argument("--gh", type=Path)
-            start.add_argument("--release-scripts", type=Path)
-        else:
+        elif action != "start":
             start.add_argument(dict(zip(("claude-start", "grok-start", "antigravity-start"),
                                         ("--claude", "--grok", "--agy")))[action], required=True)
             start.add_argument("--model", required=True)
@@ -2792,7 +2850,8 @@ def main(argv=None):
             return 0 if receipt["state"] in {"launched", "delivered"} else 1
         prepared = None
         frozen_release = frozen_delivery = None
-        if args.action == "codex-start" and (args.release_pr is not None or args.delivery is not None):
+        if args.action in {"codex-start", "claude-start", "grok-start", "antigravity-start"} and (
+                args.release_pr is not None or args.delivery is not None):
             import release_evidence
             if args.release_pr is not None and args.delivery is not None:
                 raise FactoryError("Select pre-merge release review or final delivery judgment")
@@ -2877,21 +2936,24 @@ def main(argv=None):
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
                         seconds=args.seconds, turns=args.turns, base=args.base,
                         write=args.write, commit_message=args.commit_message, sandbox=args.sandbox,
-                        decision_store=args.decision_store, decision=args.decision, question=args.question)
+                        decision_store=args.decision_store, decision=args.decision, question=args.question,
+                        release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 elif args.action == "grok-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")
                     argv = grok_command(path, task=args.task, assignment_id=args.id, grok=args.grok,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
                         seconds=args.seconds, turns=args.turns, base=args.base,
-                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
+                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox,
+                        release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 elif args.action == "antigravity-start":
                     if load_task(path)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Antigravity assignment")
                     argv = antigravity_command(path, task=args.task, assignment_id=args.id, agy=args.agy,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
                         seconds=args.seconds, base=args.base,
-                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox)
+                        write=args.write, commit_message=args.commit_message, sandbox=args.sandbox,
+                        release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 else:
                     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
                 record, assignment = launch(path, task=args.task, assignment_id=args.id,

@@ -13,6 +13,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import codex_capacity
 import codex_worker
 import factory
 import integration
@@ -180,8 +181,16 @@ class Integration(unittest.TestCase):
         rex_patch = patch.object(factory, "Rex", EvidenceRex)
         rex_patch.start()
         self.addCleanup(rex_patch.stop)
+        catalog = patch.object(codex_capacity, "snapshot", self.codex_catalog)
+        catalog.start()
+        self.addCleanup(catalog.stop)
         self.review("qa", "qa", frozen=False)
         self.review("release", "release")
+
+    @staticmethod
+    async def codex_catalog(binary):
+        """The release judgment's effort check reads Codex's catalog; the fixture model tops out at high."""
+        return dict(models=[dict(model="fixture-model", effort_ids=["low", "medium", "high"])])
 
     def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None, legacy=False, cwd=None, collect=True):
         cwd = self.repo if cwd is None else cwd
@@ -277,6 +286,22 @@ class Integration(unittest.TestCase):
         original = self.review("legacy-release", "release", legacy=True)
         self.assertIn("--release-evidence", original["request"]["command"])
         self.assertEqual(release_evidence.from_assignment(self.record, original), self.frozen)
+
+    def test_codex_release_judgment_runs_at_its_models_maximum_effort_from_the_fresh_catalog(self):
+        with self.assertRaisesRegex(factory.FactoryError, "maximum effort: select high, not medium"):
+            command = factory.codex_command(self.path, task="deliver", assignment_id="lazy-release", codex=sys.executable,
+                model="fixture-model", effort="medium", cwd=str(self.repo), role="release", release_evidence=self.frozen)
+            with patch.object(factory, "Rex", FakeRex):
+                factory.launch(self.path, task="deliver", assignment_id="lazy-release", role="release",
+                    goal="Judge the original complete evidence", cwd=str(self.repo), command=command, purpose="work",
+                    binary=sys.executable, server="unix:///fixture.sock", frozen_release=self.frozen)
+        self.assertNotIn("lazy-release", factory.load_task(self.path)["assignments"])
+        ranks = [(["low", "high", "xhigh"], "xhigh"), (["max", "ultra", "high"], "ultra"), (["none"], "none")]
+        for efforts, top in ranks:
+            release_evidence.require_max_effort(top, efforts)
+        for efforts in ([], ["turbo"], None):
+            with self.assertRaisesRegex(factory.FactoryError, "effort ordering"):
+                release_evidence.require_max_effort("high", efforts)
 
     def test_real_pane_lifecycle_and_ordinary_schema_nine_readers(self):
         started = self.launch_integration()
@@ -1490,14 +1515,20 @@ class CommandAuthority(unittest.TestCase):
             self.assertEqual(transport.binding(), before)
 
     def test_managed_ignored_helpers_are_allowed_but_source_and_replacements_refuse(self):
+        # nanoclaw installs coding-policy through Tessl, the factory's own repository through ACR.
+        for install in release_evidence.RELEASE_INSTALLS:
+            with self.subTest(install=str(install)):
+                self.check_managed_install(install)
+
+    def check_managed_install(self, install):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
             repo = root / "repo"
             subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
             factory.git_run(str(repo), "config", "core.excludesFile", "/dev/null")
-            scripts = repo / ".codex" / "skills" / "acr__jbaruch__coding-policy__release"
+            scripts = repo / install
             scripts.mkdir(parents=True)
-            (repo / ".git" / "info" / "exclude").write_text(".codex/\n")
+            (repo / ".git" / "info" / "exclude").write_text(install.parts[0] + "/\n")
             gh = root / "gh"
             gh.write_text("fixture binary")
             gh.chmod(0o700)
@@ -1511,15 +1542,34 @@ class CommandAuthority(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "owner-controlled"):
                 transport.binding()
             target.chmod(0o600)
+            top = repo / install.parts[0]  # The outermost managed directory, six levels up for Tessl.
+            top.chmod(0o777)
+            with self.assertRaisesRegex(factory.FactoryError, "owner-controlled"):
+                transport.binding()
+            top.chmod(0o755)
             target.unlink()
             target.symlink_to(scripts / "poll-pr-reviews.sh")
             with self.assertRaises(factory.FactoryError):
                 transport.binding()
             target.unlink()
             target.write_text("installed helper")
-            factory.git_run(str(repo), "add", "-f", ".codex")
-            with self.assertRaisesRegex(factory.FactoryError, "protected .codex"):
+            factory.git_run(str(repo), "add", "-f", install.parts[0])
+            with self.assertRaisesRegex(factory.FactoryError, "ignored, untracked"):
                 transport.binding()
+
+    def test_release_skill_directory_must_be_an_acr_or_tessl_installation(self):
+        for name in ("/opt/acr__jbaruch__coding-policy__release", "/home/u/.tessl/plugins/jbaruch/coding-policy/skills/release"):
+            self.assertTrue(release_evidence.release_install(Path(name)), name)
+        with tempfile.TemporaryDirectory() as folder:
+            gh, repo = Path(folder).resolve() / "gh", Path(folder).resolve() / "repo"
+            gh.write_text("fixture binary")
+            gh.chmod(0o700)
+            repo.mkdir()
+            for name in ("/opt/release", "/home/u/.tessl/plugins/someone/coding-policy/skills/release",
+                         "/opt/acr__jbaruch__coding-policy__release/nested"):
+                self.assertFalse(release_evidence.release_install(Path(name)), name)
+                with self.assertRaisesRegex(factory.FactoryError, "ACR or Tessl"):
+                    release_evidence.GitHub(gh, Path(name), repo)
 
     def test_unvalidated_paths_and_urls_refuse(self):
         for url in ("https://evil.example/x/y/pull/1", "https://github.com/x/y/pull/1;echo", "https://github.com/x/y/pull/0"):
