@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.27.0 — 2026-11-09
 
 - Codex and Antigravity readers, which run with every tool, work in a disposable worktree of the candidate that the factory removes after the run. A Gemini QA reader that ran `npm ci` and `pytest` in a checkout it shared with a Grok review left caches that made the review uncollectable (#53). Antigravity reviewer receipts are version 3 and name the disposable checkout.
 - The factory commit discards a writer's ignored outputs, such as test caches and bytecode, and lists them in `commit.discarded`, instead of refusing finished work.
