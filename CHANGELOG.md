@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- `factory.py reset` prints the next step, and the ready-plan reference says how to rerun a failed writer: a new ID on the same checkout, a goal that applies the patch first, an empty `after`, and one plan for several tasks because a second runner refuses while the first holds the execution lock.
+
 ## 0.27.0 — 2026-11-09
 
 - Codex and Antigravity readers, which run with every tool, work in a disposable worktree of the candidate that the factory removes after the run. A Gemini QA reader that ran `npm ci` and `pytest` in a checkout it shared with a Grok review left caches that made the review uncollectable (#53). Antigravity reviewer receipts are version 3 and name the disposable checkout.

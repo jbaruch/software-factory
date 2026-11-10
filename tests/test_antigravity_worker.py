@@ -255,6 +255,7 @@ class AntigravityWorker(unittest.TestCase):
         result = factory.reset_writer(self.path, assignment_id="implement")
         patch = Path(result["patch"])
         self.assertEqual((result["checkout"], result["candidate"]), (str(self.repo), self.candidate))
+        self.assertIn("new writer ID", result["next"])
         self.assertEqual(patch.stat().st_mode & 0o777, 0o600)
         self.assertIn("+Notes", patch.read_text())
         self.assertIn("+untracked work", patch.read_text())
