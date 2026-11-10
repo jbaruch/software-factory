@@ -151,7 +151,10 @@ class NativeResults(unittest.TestCase):
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
         self.assertNotIn("--sandbox", self.spawns[0])
         self.assertEqual(self.spawns[0][4:8], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
-        self.assertEqual(self.spawns[0][self.spawns[0].index("--cd") + 1], ".")
+        # Readers work in a disposable checkout of the candidate, removed after the run (#53).
+        checkout = self.spawns[0][self.spawns[0].index("--cd") + 1]
+        self.assertTrue(checkout.endswith(".checkout"), checkout)
+        self.assertFalse(Path(checkout).exists())
         self.assertEqual(self.spawns[0][-1], "-")
         self.assertEqual(self.prompt_inputs[0], self.brief.read_bytes())
         before = self.args.receipt.read_bytes()
@@ -462,6 +465,50 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
         self.assertEqual(self.scans, [receipt["commit"]["staged_tree"]])
         self.assertFalse(self.shell_directories[0].exists())
+
+    def test_writer_ignored_outputs_are_discarded_and_recorded(self):
+        # Observed (canary correction-1): the writer ran pytest, which left an ignored
+        # __pycache__/, and the factory refused to commit finished work.
+        (self.repo / ".gitignore").write_text("cache/\n")
+        self.assertEqual(factory.git_run(".", "add", ".gitignore").returncode, 0)
+        self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                         "-c", "commit.gpgsign=false", "commit", "-qm", "Ignore caches").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.writer()
+        original_spawn = self.spawn
+        async def with_cache(*command, **options):
+            (self.repo / "cache").mkdir()
+            (self.repo / "cache" / "feature.cpython-311.pyc").write_bytes(b"generated")
+            return await original_spawn(*command, **options)
+        self.spawn = with_cache
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((receipt["commit"]["state"], receipt["commit"]["discarded"]), ("created", ["cache/feature.cpython-311.pyc"]))
+        self.assertFalse((self.repo / "cache").exists())
+        self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
+        factory_commit.check_commit_receipt(receipt, self.args, str(self.repo))
+        for damaged in ([], [""], "cache/"):
+            with self.subTest(discarded=damaged), self.assertRaisesRegex(factory.FactoryError, "commit evidence differs"):
+                factory_commit.check_commit_receipt({**receipt, "commit": {**receipt["commit"], "discarded": damaged}},
+                                                    self.args, str(self.repo))
+
+    def test_readers_work_in_a_disposable_checkout_that_leaves_the_shared_one_clean(self):
+        # #53: unconfined readers that install or test must not dirty a checkout others share.
+        original_spawn = self.spawn
+        seen = []
+        async def install(*command, **options):
+            cwd = Path(options["cwd"])
+            seen.append(cwd)
+            (cwd / "node_modules").mkdir()
+            (cwd / "node_modules" / "left-pad.js").write_text("module.exports = 0\n")
+            return await original_spawn(*command, **options)
+        self.spawn = install
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(seen, [factory.reader_checkout_path(self.args.receipt)])
+        self.assertFalse(seen[0].exists())
+        factory.check_checkout(".", ".", self.candidate)
+        self.assertNotIn(".checkout", factory.git_run(".", "worktree", "list", "--porcelain").stdout)
 
     def test_secret_scan_cannot_be_skipped_when_hooks_are_disabled(self):
         self.writer()

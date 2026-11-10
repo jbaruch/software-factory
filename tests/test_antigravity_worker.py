@@ -46,6 +46,14 @@ def stream(cwd, *, model="gemini-3.8-flash-high", outcome="approved", conversati
                     json_schema=outcome_schema(), usage=dict(input_tokens=9, output_tokens=4)))])
 
 
+def echo_cwd(events, options):
+    """agy reports the directory it runs in; readers now run in a disposable checkout."""
+    events = json.loads(json.dumps(events))
+    if events and "init" in events[0] and options.get("cwd", ".") != ".":
+        events[0]["init"]["cwd"] = options["cwd"]
+    return events
+
+
 def usage_probe(binary, cwd):
     return dict(schema_version=1, kind="antigravity-native-usage", binary=str(Path(binary).resolve()), cwd=str(cwd),
                 cli_version="1.5.3", observed_at=1000, probe_seconds=0.2,
@@ -108,14 +116,16 @@ class AntigravityWorker(unittest.TestCase):
         argv = argv[argv.index("--") + 1:]
         return antigravity_worker.parser().parse_args(argv[4:])
 
-    def execute(self, args, *, events=None, edit=False, exit_code=0):
+    def execute(self, args, *, events=None, edit=False, exit_code=0, act=None):
         async def spawn(*command, **options):
             options["prompt"] = options["stdin"].read().decode()
             options["stdin"].seek(0)
             self.spawns.append((command, options))
             if edit:
                 (self.repo / "NOTES.md").write_text("Notes\n")
-            return FakeProcess(events if events is not None else stream(self.repo), exit_code=exit_code)
+            if act is not None:
+                act(Path(options["cwd"]))
+            return FakeProcess(echo_cwd(events if events is not None else stream(self.repo), options), exit_code=exit_code)
         with redirect_stdout(StringIO()):
             return asyncio.run(antigravity_worker.execute(args, spawn=spawn, probe=usage_probe, clock=lambda: 1000,
                 timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
@@ -129,8 +139,11 @@ class AntigravityWorker(unittest.TestCase):
         receipt = self.execute(self.args)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual((receipt["schema_version"], receipt["conversation_id"], receipt["candidate"]),
-                         (1, CONVERSATION, self.candidate))
+                         (3, CONVERSATION, self.candidate))
         command, options = self.spawns[0]
+        checkout = factory.reader_checkout_path(self.args.receipt)
+        self.assertEqual((options["cwd"], receipt["checkout"]), (str(checkout), str(checkout)))
+        self.assertFalse(checkout.exists(), "the disposable reader checkout outlived its run")
         self.assertIn("--dangerously-skip-permissions", command)
         self.assertEqual(command[command.index("--input-format") + 1], "stream-json")
         self.assertEqual((command[command.index("--model") + 1], command[command.index("--effort") + 1]),
@@ -141,7 +154,8 @@ class AntigravityWorker(unittest.TestCase):
         self.assertNotIn("Factory commit mode", message["message"]["content"][0]["text"])
         result = self.collect("inspect")["assignments"]["inspect"]
         self.assertEqual((result["result"]["outcome"], result["native_collected"]), ("approved", True))
-        self.assertEqual(antigravity_worker.read_events(self.args.events), [json.dumps(e) + "\n" for e in stream(self.repo)])
+        self.assertEqual(antigravity_worker.read_events(self.args.events),
+                         [json.dumps(e) + "\n" for e in echo_cwd(stream(self.repo), dict(cwd=str(checkout)))])
 
     def test_writer_edits_are_committed_by_the_factory_and_collected(self):
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
@@ -190,6 +204,71 @@ class AntigravityWorker(unittest.TestCase):
         record = factory.load_task(self.path)
         self.assertEqual(dashboard.requested_native(record, "opus", record["assignments"]["opus"])["effort"],
                          "None (model default)")
+
+    def test_readers_work_in_disposable_checkouts_so_a_shared_checkout_stays_collectable(self):
+        # Observed (#53): an unconfined Gemini QA reader ran npm ci and pytest in a checkout it
+        # shared with a Grok review, and the leftovers made the review uncollectable.
+        def install_and_test(cwd):
+            self.assertNotEqual(cwd, self.repo)
+            (cwd / "node_modules" / "left-pad").mkdir(parents=True)
+            (cwd / "node_modules" / "left-pad" / "index.js").write_text("module.exports = 0\n")
+            (cwd / ".pytest_cache").mkdir()
+            (cwd / "README.md").unlink()
+        first = self.execute(self.args, act=install_and_test)
+        self.assertEqual(first["state"], "completed", first["error"])
+        factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+        self.assertEqual((self.repo / "README.md").read_text(), "Owned fixture\n")
+        second_args = self.launch("second", role="code-review", base=self.candidate)
+        second = self.execute(second_args)
+        self.assertEqual(second["state"], "completed", second["error"])
+        for identity, args in (("inspect", self.args), ("second", second_args)):
+            with self.subTest(identity=identity):
+                result = self.collect(identity)["assignments"][identity]
+                self.assertEqual((result["result"]["outcome"], result["native_collected"]), ("approved", True))
+                self.assertFalse(factory.reader_checkout_path(args.receipt).exists())
+        worktrees = self.git("worktree", "list", "--porcelain").stdout
+        self.assertNotIn(".checkout", worktrees)
+
+    def test_reader_receipts_bind_their_disposable_checkout(self):
+        self.assertEqual(self.execute(self.args)["state"], "completed")
+        receipt = json.loads(self.args.receipt.read_text())
+        for damaged in ({**receipt, "checkout": str(self.repo)}, {k: v for k, v in receipt.items() if k != "checkout"},
+                        {**receipt, "schema_version": 1}):
+            self.args.receipt.write_text(json.dumps(damaged))
+            with self.subTest(damaged={k: damaged.get(k) for k in ("schema_version", "checkout")}), \
+                    self.assertRaisesRegex(factory.FactoryError, "differs from its frozen"):
+                self.collect("inspect")
+
+    def test_reset_keeps_a_failed_writers_edits_as_a_patch_and_restores_the_checkout(self):
+        # A failed writer that edited its checkout left the task's worktree dirty, and every
+        # later assignment refused it; reset keeps the work for a new writer to cite.
+        self.assertEqual(self.execute(self.args)["state"], "completed")
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        failed = self.execute(args, edit=True, exit_code=3)
+        self.assertEqual(failed["state"], "failed")
+        (self.repo / "scratch.txt").write_text("untracked work\n")
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+        for identity, message in (("inspect", "Only a native writer"), ("missing", "existing writer")):
+            with self.subTest(identity=identity), self.assertRaisesRegex(factory.FactoryError, message):
+                factory.reset_writer(self.path, assignment_id=identity)
+        result = factory.reset_writer(self.path, assignment_id="implement")
+        patch = Path(result["patch"])
+        self.assertEqual((result["checkout"], result["candidate"]), (str(self.repo), self.candidate))
+        self.assertEqual(patch.stat().st_mode & 0o777, 0o600)
+        self.assertIn("+Notes", patch.read_text())
+        self.assertIn("+untracked work", patch.read_text())
+        factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+        self.assertEqual(self.git("-C", str(self.repo), "apply", "--check", str(patch), directory=self.repo).returncode, 0)
+        with self.assertRaisesRegex(factory.FactoryError, "already reset"):
+            factory.reset_writer(self.path, assignment_id="implement")
+
+    def test_reset_refuses_a_writer_whose_receipt_did_not_fail(self):
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with self.assertRaisesRegex(factory.FactoryError, "receipt failed"):
+            factory.reset_writer(self.path, assignment_id="implement")
 
     def test_api_overrides_refuse_before_native_artifacts(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), self.assertRaisesRegex(factory.FactoryError, "Gemini API"):
@@ -243,7 +322,7 @@ class AntigravityApprovals(unittest.TestCase):
         args = antigravity_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
         events = stream(f.repo, outcome="completed" if write else "approved", conversation=conversation)
         async def spawn(*command, **options):
-            return FakeProcess([] if exit_code else events, exit_code=exit_code)
+            return FakeProcess([] if exit_code else echo_cwd(events, options), exit_code=exit_code)
         with redirect_stdout(StringIO()):
             receipt = asyncio.run(antigravity_worker.execute(args, spawn=spawn, probe=usage_probe, clock=lambda: 1000,
                 timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))

@@ -1,6 +1,7 @@
 """One explicit native Antigravity assignment, reviewer or writer, with retained original events."""
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -100,8 +101,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         native_antigravity.validate_usage(observation, binary)
     except native_antigravity.UsageError as exc:
         raise factory.FactoryError(str(exc)) from None
-    # Version 1 reviews; version 2 writes.
-    receipt = dict(schema_version=2 if args.write else 1, kind="antigravity-execution", state="starting", job=args.job,
+    # Version 2 writes; version 3 reviews in a disposable checkout (version 1 reviewed in place).
+    receipt = dict(schema_version=2 if args.write else 3, kind="antigravity-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort, discovery=observation,
@@ -111,6 +112,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
     if args.write:
         # Version 2 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
+    else:
+        # agy cannot restrict its tools, so a reader works in a throwaway checkout of the candidate.
+        receipt.update(checkout=str(factory.reader_checkout_path(args.receipt)))
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         factory.save(args.receipt, receipt, exclusive=True)
@@ -118,14 +122,18 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         os.close(fd)
         raise
     started, process, lines = timer(), None, []
+    checkouts, workdir = contextlib.ExitStack(), Path(".")
     try:
+        if not args.write:
+            workdir = checkouts.enter_context(factory.reader_checkout(
+                args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
             prompt_text = instructions + ("\n" + factory_commit.WRITER_CONTRACT + "\n" if args.write else "")
             # A private file provides EOF without argv limits or pipe backpressure.
             with tempfile.TemporaryFile() as prompt:
                 prompt.write(message(prompt_text).encode("utf-8"))
                 prompt.seek(0)
-                process = await spawn(*command(binary, args.model, args.effort), cwd=".", env=native_environment(),
+                process = await spawn(*command(binary, args.model, args.effort), cwd=str(workdir), env=native_environment(),
                                       limit=NATIVE_LINE_LIMIT, stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
                 while True:
@@ -149,7 +157,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Antigravity exited unsuccessfully; inspect its retained events and original Rex pane")
-        native = native_antigravity.parse_execution(lines, expected_model=args.model, expected_cwd=str(args.cwd),
+        native = native_antigravity.parse_execution(lines, expected_model=args.model,
+                                                    expected_cwd=str(args.cwd) if args.write else receipt["checkout"],
                                                     expected_schema=outcome_schema())
         receipt.update(report=native["report"], conversation_id=native["conversation_id"], usage=native["usage"],
                        duration_seconds=native["duration_seconds"], turns=native["turns"])
@@ -173,6 +182,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         if process is not None:
             await stop_child(process)
             receipt["exit_code"] = process.returncode
+        try:
+            checkouts.close()  # Only after the native process has stopped.
+        except factory.FactoryError as exc:
+            receipt.update(state="failed", error="Cannot remove the reader checkout " + receipt["checkout"]
+                           + "; remove it with git worktree remove --force --force before another attempt: " + str(exc))
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)
         factory.save(args.receipt, receipt)
     return receipt

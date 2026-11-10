@@ -11,7 +11,16 @@ test and network commands turns every assignment into an approval queue. The
 boundary is structural instead:
 
 - each writer edits only its own provisioned worktree, and each reviewer reads a
-  clean one at the selected candidate;
+  clean one at the selected candidate. Codex and Antigravity reviewers get every
+  tool, so they work in a disposable worktree of the candidate beside their
+  receipt (`TASK.ID.HARNESS.checkout`), removed after the run with every ignored
+  file; tests and installs they run never dirty the shared checkout;
+- a writer's ignored outputs (test caches, bytecode, installs) are discarded
+  before the factory commit and listed in the receipt's `commit.discarded`;
+- a writer that fails after editing leaves its worktree dirty, so
+  `factory.py reset --task TASK --id ID` saves the leftover edits as
+  `TASK.ID.HARNESS.reset.patch` beside the receipt and restores the candidate.
+  The failed receipt stays failed; a new writer can cite the patch;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
   secrets, runs hooks and signs, and integration stays with the runtime;
 - only a structured report counts as a result. Text, tool telemetry and
@@ -286,8 +295,10 @@ Code review requires `--base`, whose evidence is embedded in the frozen brief.
 `--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
 assignment an implementation specialist for a writing role: the brief carries the
 task goal plus the shared writer contract, and `factory_commit.py` stages, scans,
-signs and commits a completed report. Receipts are version 1 for reviewers and
-version 2 for writers (`writer`, `sandbox`, nullable `commit`). Events are
+signs and commits a completed report. Receipts are version 3 for reviewers
+(`checkout`: the disposable worktree they ran in, which collection decodes against)
+and version 2 for writers (`writer`, `sandbox`, nullable `commit`); version-1
+reviewer receipts, which reviewed in place, still collect. Events are
 version-1 `antigravity-event-line` envelopes holding each original line.
 Integration counts collected `qa`, `security` and `code-review` approvals under
 their conversation ID and treats writers as contributors; a writer that failed
