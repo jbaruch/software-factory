@@ -2376,6 +2376,38 @@ def carries_judgment(args):
     return any(getattr(args, kind + suffix) is not None for kind in ("delivery", "release") for suffix in ("_evidence", "_evidence_digest"))
 
 
+def called_tool(harness, event):
+    """Whether one native event calls a tool: the events a pane shows as `→` lines."""
+    if harness == "antigravity" and isinstance(event, str):
+        try:
+            event = json.loads(event)
+        except ValueError:
+            return False  # Collection refuses a malformed line on its own.
+    if not isinstance(event, dict):
+        return False
+    if harness == "claude":
+        # StructuredOutput carries the report itself, so it is not evidence of reading anything.
+        content = pane_object(event.get("message")).get("content") if event.get("type") == "assistant" else None
+        return isinstance(content, list) and any(isinstance(block, dict) and block.get("type") == "tool_use"
+                                                 and block.get("name") != "StructuredOutput" for block in content)
+    if harness == "grok":
+        return event.get("type") == "tool_call"
+    if harness == "antigravity":
+        # The `finish` tool step delivers the report itself, like Claude's StructuredOutput.
+        step = pane_object(event.get("step_update"))
+        return step.get("step_type") == "tool" and "finish" not in (step.get("tool_name"), pane_object(step.get("tool_info")).get("name"))
+    return event.get("type") == "item.started" and pane_object(event.get("item")).get("type") == "command_execution"
+
+
+def check_reader_evidence(harness, events, args, coordination=None):
+    """A read-only verifier's verdict rests on something it read; a judgment's evidence is its frozen brief."""
+    if (not args.write and coordination is None and not carries_judgment(args)
+            and not any(called_tool(harness, event) for event in events)):
+        # Two Grok qa runs thought for one turn and returned approved, then blocked, with an "UNTESTED" placeholder.
+        raise FactoryError("Returned a verdict without a single tool call, so nothing was read or checked; "
+                           "inspect the brief and launch a new attempt")
+
+
 def writer_arguments(provider, role, write, commit_message, sandbox, base):
     """The frozen writer flags for a Claude or Grok effect; empty for reviewers."""
     check_commit_message(commit_message, write=write)

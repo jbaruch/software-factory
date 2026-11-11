@@ -173,6 +173,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         native = native_claude.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), model=args.model,
                                                max_turns=args.turns, writer=args.write, coordination=coordination)
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
+        factory.check_reader_evidence("claude", events, args, coordination)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),

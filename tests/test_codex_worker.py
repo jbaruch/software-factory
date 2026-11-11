@@ -27,6 +27,10 @@ from test_rex_launcher import FakeRex
 def events(outcome="approved"):
     return [dict(type="thread.started", thread_id="thread-fixture"),
             dict(type="turn.started"),
+            dict(type="item.started", item=dict(id="command-1", type="command_execution", command="cat evidence/qa.txt",
+                                                status="in_progress")),
+            dict(type="item.completed", item=dict(id="command-1", type="command_execution", command="cat evidence/qa.txt",
+                                                  exit_code=0, status="completed")),
             dict(type="item.completed", item=dict(type="agent_message", text="Checking the candidate")),
             dict(type="item.completed", item=dict(type="agent_message", text=json.dumps(
                 dict(outcome=outcome, artifacts=["evidence/qa.txt"])))),

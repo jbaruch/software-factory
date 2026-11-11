@@ -104,6 +104,10 @@ class ReadyRunner(unittest.TestCase):
         argv = [replacements.get(part, part) for part in request["command"]]
         args = codex_worker.parser().parse_args(argv[4:])
         events = [dict(type="thread.started", thread_id="fixture-thread"), dict(type="turn.started"),
+            dict(type="item.started", item=dict(id="command-1", type="command_execution", command="cat fixture/evidence.txt",
+                                                status="in_progress")),
+            dict(type="item.completed", item=dict(id="command-1", type="command_execution", command="cat fixture/evidence.txt",
+                                                  exit_code=0, status="completed")),
             dict(type="item.completed", item=dict(type="agent_message", text=json.dumps(
                 dict(outcome=outcome, artifacts=["fixture/evidence.txt"])))),
             dict(type="turn.completed", usage=dict(input_tokens=10, output_tokens=5))]
@@ -787,6 +791,12 @@ class ReadyRunner(unittest.TestCase):
                        tools=list(native_claude.READ_TOOLS), mcp_servers=[], permissionMode="dontAsk", slash_commands=[],
                        apiKeySource="none", claude_code_version="2.1.319", additional_directories=[]),
                   dict(type="assistant", session_id=session, parent_tool_use_id=None,
+                       message=dict(model=model, content=[dict(type="tool_use", id="read-1", name="Read",
+                                                               input=dict(file_path=str(Path(args.cwd) / "README.md")))])),
+                  dict(type="user", session_id=session, parent_tool_use_id=None,
+                       message=dict(content=[dict(type="tool_result", tool_use_id="read-1", content="Fixture readme")]),
+                       tool_use_result=dict(type="text", file=dict(filePath=str(Path(args.cwd) / "README.md"), content="Fixture readme"))),
+                  dict(type="assistant", session_id=session, parent_tool_use_id=None,
                        message=dict(model=model, content=[dict(type="tool_use", id="output-1", name="StructuredOutput", input=report)])),
                   dict(type="user", session_id=session, parent_tool_use_id=None,
                        message=dict(content=[dict(type="tool_result", tool_use_id="output-1", content="Structured output provided successfully")])),
@@ -850,7 +860,9 @@ class ReadyRunner(unittest.TestCase):
             "{candidate}": request["inputs"]["candidate"], "{requirements}": request["inputs"]["requirements"],
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = grok_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
-        events = [dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="fixture-request",
+        events = [dict(type="tool_call", toolCallId="read-1", toolName="read_file", title="read_file",
+                       rawInput=dict(target_file="README.md")),
+                  dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="fixture-request",
                        cwd=request["cwd"], num_turns=1, structuredOutput=dict(outcome=outcome, artifacts=["fixture/evidence.txt"]),
                        usage=dict(input_tokens=1, output_tokens=2), modelUsage=None)]
         async def spawn(*command, **options):
