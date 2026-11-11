@@ -729,3 +729,35 @@ class WorktreeProvisioning(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitTimeouts(unittest.TestCase):
+    """A writer commit failed with "Cannot run Git" while the Codex sandbox took up to 6.3 s just to start."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.repo = Path(directory.name).resolve() / "repo"
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
+
+    def timeout_of(self, *, sandboxed):
+        seen = []
+        real = subprocess.run
+        def run(command, **options):
+            if "diff" in command:
+                seen.append(options["timeout"])
+                raise subprocess.TimeoutExpired(command, options["timeout"])
+            return real(command, **options)
+        with patch.object(factory.subprocess, "run", side_effect=run):
+            scope = factory.git_execution(lambda: [], dict(os.environ)) if sandboxed else factory.nullcontext()
+            with scope, self.assertRaises(factory.FactoryError) as error:
+                factory.git_run(str(self.repo), "-c", "core.fsmonitor=false", "diff", "--name-only")
+        return seen, str(error.exception)
+
+    def test_git_gets_sixty_seconds_and_a_timeout_says_so(self):
+        for sandboxed in (True, False):
+            with self.subTest(sandboxed=sandboxed):
+                seen, message = self.timeout_of(sandboxed=sandboxed)
+                self.assertEqual(seen, [60])
+                self.assertIn("did not finish within 60 seconds (git diff)", message)
+                self.assertNotIn("Cannot run Git", message)
