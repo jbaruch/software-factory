@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.31.0 — 2026-11-10
 
 - `factory.py delivered` is the delivery step for repositories without `integrate`'s prerequisites (a `checks.yml` `verify` job and strict classic protection): the repository's release skill merges, then `delivered` re-checks the approvals, confirms the PR merged at exactly the head the release judgment approved, and records `TASK.RELEASE_ID.delivered.json`. Neither nanoclaw repository meets those prerequisites, so every canary delivery so far was merged by hand under an operator override (#77).
 - Any harness can give the release judgment: Codex, Claude, Grok or Antigravity, on the strongest model available, at that model's maximum effort. `claude-start`, `grok-start` and `antigravity-start` take `--release-pr` and `--delivery` like `codex-start`, and a release judgment below maximum effort is refused at launch (Grok: when its worker starts). Codex was the only judge because release evidence was built before the other adapters, not by policy, so every delivery stopped whenever Codex ran out of quota (#77).
