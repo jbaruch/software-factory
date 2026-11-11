@@ -727,10 +727,6 @@ class WorktreeProvisioning(unittest.TestCase):
                     self.assertFalse(self.destination.exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GitTimeouts(unittest.TestCase):
     """A writer commit failed with "Cannot run Git" while the Codex sandbox took up to 6.3 s just to start."""
 
@@ -761,3 +757,7 @@ class GitTimeouts(unittest.TestCase):
                 self.assertEqual(seen, [60])
                 self.assertIn("did not finish within 60 seconds (git diff)", message)
                 self.assertNotIn("Cannot run Git", message)
+
+
+if __name__ == "__main__":
+    unittest.main()
