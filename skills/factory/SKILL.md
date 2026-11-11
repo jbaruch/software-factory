@@ -15,6 +15,8 @@ For specialty selection or an assigned role, consult only the relevant entries i
 
 You coordinate; specialists do the work. Do not edit, commit, rebase, review or merge by hand where a step below exists.
 
+Keep every line busy. When an assignment settles, write its next phase's plan at once: verification after a writer, a correction or a dispute after findings, delivery after approvals. When a worker frees and admitted work remains, launch it; when the admitted work runs out, triage and admit the next authorized items. Writing the next plan is your job, so idle capacity while authorized work remains is your failure, not a wait state.
+
 1. Establish the authorized goal and its acceptance references. Commit any work being handed over and note the commit ID; the task record is the handover, so write no separate document.
 2. Admit the task and select its inputs:
    - `factory.py admit --task TASK --goal GOAL --repo /absolute/repo --acceptance REFERENCE`
