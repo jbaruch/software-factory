@@ -47,6 +47,26 @@ class Pane(unittest.TestCase):
             item=dict(type="command_execution", command="ls", exit_code=0))))
         self.assertEqual(factory.pane_line("codex", dict(type="turn.completed")), "= completed")
 
+    def test_control_characters_never_reach_the_terminal(self):
+        # An escape sequence in tool output a prompt-injected agent read must not clear or retitle the pane.
+        for harness, event in (("codex", dict(type="item.completed", item=dict(type="agent_message", text="ok\x1b[2J\x1b]0;owned\x07"))),
+                               ("antigravity", "raw \x1b[2J line"),
+                               ("claude", dict(type="user", message=dict(content=[dict(type="tool_result", is_error=True, content="\x1b[31mred")])))):
+            line = factory.pane_line(harness, event)
+            self.assertTrue(line.isprintable(), (harness, line))
+            self.assertNotIn("\x1b", line)
+
+    def test_unexpected_shapes_display_instead_of_failing_the_run(self):
+        for harness, event in (("claude", dict(type="assistant", message="text")), ("claude", dict(type="result", structured_output="x")),
+                               ("grok", dict(type="end", structuredOutput=dict(artifacts="many"))),
+                               ("antigravity", json.dumps(dict(event="step_update", step_update="weird"))),
+                               ("antigravity", json.dumps(dict(event="init", init=["x"]))),
+                               ("codex", dict(type="item.completed", item="oops")), ("codex", dict(type=7))):
+            with self.subTest(harness=harness, event=event):
+                factory.pane_line(harness, event)  # Must not raise.
+        self.assertEqual(factory.pane_line("grok", dict(type="end", stopReason="end_turn", num_turns=1,
+            structuredOutput=dict(outcome="approved", artifacts="many"))), "= end_turn: approved (0 artifacts), 1 turns")
+
     def test_long_text_is_cut_to_one_line(self):
         line = factory.pane_line("codex", dict(type="item.completed", item=dict(type="agent_message", text="x" * 500)))
         self.assertEqual(len(line), 2 + factory.PANE_WIDTH)

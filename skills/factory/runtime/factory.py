@@ -2708,8 +2708,21 @@ PANE_KEYS = ("file_path", "path", "target_file", "command", "commandline", "patt
 
 
 def pane_text(value):
-    text = " ".join(str(value).split())
+    # Agent text and tool output may quote untrusted content; an escape sequence must not rewrite the pane.
+    text = "".join(character if character.isprintable() else "?" for character in " ".join(str(value).split()))
     return text if len(text) <= PANE_WIDTH else text[:PANE_WIDTH - 1] + "…"
+
+
+def pane_object(value):
+    """A nested event field as a dict, so an unexpected shape displays as missing instead of failing the run."""
+    return value if isinstance(value, dict) else {}
+
+
+def pane_outcome(report, turns, status):
+    report = pane_object(report)
+    artifacts = report.get("artifacts")
+    count = len(artifacts) if isinstance(artifacts, list) else 0
+    return pane_text(f"= {status}: {report.get('outcome')} ({count} artifacts), {turns} turns")
 
 
 def pane_argument(arguments):
@@ -2738,9 +2751,9 @@ def pane_line(harness, event):
     if harness == "claude":
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
-            lines.append("start " + str(event.get("model")))
+            lines.append(pane_text("start " + str(event.get("model"))))
         elif kind in ("assistant", "user"):
-            content = (event.get("message") or {}).get("content")
+            content = pane_object(event.get("message")).get("content")
             for block in content if isinstance(content, list) else ():
                 if not isinstance(block, dict):
                     continue
@@ -2751,9 +2764,7 @@ def pane_line(harness, event):
                 elif block.get("type") == "tool_result" and block.get("is_error"):
                     lines.append("✗ " + pane_text(block.get("content")))
         elif kind == "result":
-            report = event.get("structured_output") or {}
-            lines.append(pane_text(f"= {event.get('subtype')}: {report.get('outcome')} "
-                                   f"({len(report.get('artifacts') or [])} artifacts), {event.get('num_turns')} turns"))
+            lines.append(pane_outcome(event.get("structured_output"), event.get("num_turns"), event.get("subtype")))
     elif harness == "grok":
         kind = event.get("type")
         if kind == "tool_call":
@@ -2761,24 +2772,20 @@ def pane_line(harness, event):
         elif kind == "tool_call_update" and event.get("status") == "failed":
             lines.append("✗ " + pane_text(event.get("content")))
         elif kind == "end":
-            report = event.get("structuredOutput") or {}
-            lines.append(pane_text(f"= {event.get('stopReason')}: {report.get('outcome')} "
-                                   f"({len(report.get('artifacts') or [])} artifacts), {event.get('num_turns')} turns"))
+            lines.append(pane_outcome(event.get("structuredOutput"), event.get("num_turns"), event.get("stopReason")))
     elif harness == "antigravity":
         if event.get("event") == "init":
-            lines.append("start " + str((event.get("init") or {}).get("model")))
-        step = event.get("step_update") or {}
+            lines.append(pane_text("start " + str(pane_object(event.get("init")).get("model"))))
+        step = pane_object(event.get("step_update"))
         if step.get("step_type") == "tool" and step.get("state") == "ACTIVE":
-            lines.append(pane_text(f"→ {step.get('tool_name')} {pane_argument((step.get('tool_info') or {}).get('parameters'))}"))
+            lines.append(pane_text(f"→ {step.get('tool_name')} {pane_argument(pane_object(step.get('tool_info')).get('parameters'))}"))
         elif step.get("state") == "ERROR" or step.get("step_type") == "error_message":
             lines.append("✗ " + pane_text(step.get("error") or step.get("tool_name") or step.get("step_type")))
-        result = event.get("result") or {}
+        result = pane_object(event.get("result"))
         if result:
-            report = result.get("structured_output") or {}
-            lines.append(pane_text(f"= {result.get('status')}: {report.get('outcome')} "
-                                   f"({len(report.get('artifacts') or [])} artifacts), {result.get('num_turns')} turns"))
+            lines.append(pane_outcome(result.get("structured_output"), result.get("num_turns"), result.get("status")))
     elif harness == "codex":
-        kind, item = event.get("type"), event.get("item") or {}
+        kind, item = event.get("type"), pane_object(event.get("item"))
         if kind == "item.started" and item.get("type") == "command_execution":
             lines.append(pane_text("→ $ " + str(item.get("command"))))
         elif kind == "item.completed" and item.get("type") == "command_execution" and item.get("exit_code") not in (0, None):
@@ -2792,7 +2799,7 @@ def pane_line(harness, event):
         elif kind == "item.completed" and item.get("type") == "error":
             lines.append("✗ " + pane_text(item.get("message")))
         elif kind in ("turn.completed", "turn.failed"):
-            lines.append("= " + kind.removeprefix("turn."))
+            lines.append("= " + str(kind).removeprefix("turn."))
     return "\n".join(lines) or None
 
 
