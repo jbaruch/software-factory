@@ -162,7 +162,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                         events.append(factory.decode_json(text))
                     except (ValueError, UnicodeError):
                         raise factory.FactoryError("Malformed Claude event; inspect the retained original stream before collection") from None
-                    print(text, end="", flush=True)
+                    shown = factory.pane_line("claude", events[-1])
+                    if shown is not None:
+                        print(shown, flush=True)
                 return await process.wait()
             receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
             os.fsync(stream.fileno())

@@ -161,7 +161,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                         events.append(factory.decode_json(text))
                     except (ValueError, UnicodeError):
                         raise factory.FactoryError("Malformed Grok event; inspect the retained original stream before collection") from None
-                    print(text, end="", flush=True)
+                    shown = factory.pane_line("grok", events[-1])
+                    if shown is not None:
+                        print(shown, flush=True)
                 return await process.wait()
             receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
             os.fsync(stream.fileno())

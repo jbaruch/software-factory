@@ -60,8 +60,9 @@ def retain_artifacts(artifacts, conversation, receipt):
         return
     brain, kept = brain.resolve(strict=True), receipt.with_name(receipt.name.removesuffix(".json") + ".artifacts")
     for artifact in artifacts:
-        path = Path(artifact)
-        if not path.is_absolute() or path.is_symlink() or not path.is_file() or not path.resolve(strict=True).is_relative_to(brain):
+        # A Sonnet review wrote its report into the brain directory and named it by a bare file name.
+        path = Path(artifact) if Path(artifact).is_absolute() else brain / artifact
+        if path.is_symlink() or not path.is_file() or not path.resolve(strict=True).is_relative_to(brain):
             continue  # An ordinary reference, not a brain-directory report file.
         target = kept / path.resolve(strict=True).relative_to(brain)
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -178,7 +179,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
                     except UnicodeError:
                         raise factory.FactoryError("Malformed Antigravity event; inspect the retained original stream before collection") from None
                     lines.append(text)
-                    print(text, end="", flush=True)
+                    shown = factory.pane_line("antigravity", text)
+                    if shown is not None:
+                        print(shown, flush=True)
                 return await process.wait()
             receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
             os.fsync(stream.fileno())

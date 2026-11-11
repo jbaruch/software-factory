@@ -296,7 +296,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                             event = factory.decode_json(text, object_pairs_hook=native_object)
                         except (UnicodeDecodeError, ValueError):
                             raise factory.FactoryError("Malformed native event; inspect the retained stream and update the adapter before another attempt") from None
-                        print(text, end="", flush=True)
+                        shown = factory.pane_line("codex", event)
+                        if shown is not None:
+                            print(shown, flush=True)
                         if not isinstance(event, dict):
                             raise factory.FactoryError("Native output is not an event object; inspect the retained stream")
                         events.append(event)
