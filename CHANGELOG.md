@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.33.1 — 2026-11-11
 
 - A ready-plan refusal names the job it is about (`Job TASK/ID: …`), for every per-job check, and a commit subject over 72 characters is refused with its length. The canary had to find the two over-long subjects in a seven-job plan by hand.
 
