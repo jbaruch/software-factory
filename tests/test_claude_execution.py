@@ -302,7 +302,7 @@ class Decoder(unittest.TestCase):
     def test_conflicts_and_unsupported_lifecycles(self):
         for index, key, value in [(0,"tools",["Read","Bash","StructuredOutput"]), (0,"mcp_servers",[{}]),
                 (0,"model","alias"), (0,"cwd","/other"), (1,"session_id","other"),
-                (4,"is_error",True), (4,"num_turns",4), (4,"result",'{"outcome":"blocked"}'),
+                (4,"is_error",True), (4,"num_turns",0), (4,"result",'{"outcome":"blocked"}'),
                 (4,"structured_output",None), (4,"usage",None), (4,"modelUsage",{}), (4,"subtype","error_max_turns")]:
             with self.subTest(index=index,key=key):
                 data=events("/fixture");data[index][key]=value
@@ -311,6 +311,13 @@ class Decoder(unittest.TestCase):
                      [events("/fixture")[0], events("/fixture")[0]],
                      events("/fixture")+[dict(type="error",session_id=SESSION)]]:
             with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
+
+    def test_a_completed_run_may_report_more_turns_than_its_budget(self):
+        # Observed (#89): a Fable release judgment under --max-turns 30 made 72 parallel Reads, completed
+        # normally and reported num_turns 74. Claude Code's own error_max_turns still refuses.
+        data = events("/fixture")
+        data[4]["num_turns"] = 74
+        self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
 
     def test_tool_escape_and_assistant_model_refuse(self):
         for name in ["Bash", "Agent", "mcp__tool"]:
