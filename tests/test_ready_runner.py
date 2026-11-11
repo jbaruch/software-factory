@@ -1095,6 +1095,18 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(PlanRex.calls, [])
         self.assertEqual(self.probes, 0)
 
+    def test_job_field_refusal_names_what_is_missing_or_unexpected(self):
+        # The canary dropped commit_message from read-only jobs and got no hint which field was wrong.
+        value = self.plan([self.job()])
+        del value["jobs"][0]["commit_message"]
+        value["jobs"][0]["model_name"] = "typo"
+        with self.assertRaisesRegex(factory.FactoryError, "missing commit_message; unexpected model_name.*commit_message to null"):
+            self.controller(value)
+        value = self.plan([self.job()])
+        value["jobs"][0]["harness"] = "gemini"
+        with self.assertRaisesRegex(factory.FactoryError, "harness must be one of"):
+            self.controller(value)
+
     def test_execution_lock_excludes_another_runner_and_manual_cli_launch(self):
         controller = self.controller(self.plan([self.job()]))
         original = (self.directory / "task.json").read_bytes()

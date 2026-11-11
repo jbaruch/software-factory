@@ -50,10 +50,15 @@ def validate_plan(value):
                and isinstance(row.get("task"), str) and isinstance(row.get("id"), str)}
     seen, inputs = set(), {}
     for job in jobs:
-        if (not isinstance(job, dict) or set(job) - OPTIONAL_FIELDS != JOB_FIELDS
-                or job.get("harness", "codex") not in HARNESSES):
-            raise factory.FactoryError("Each job must supply exactly the documented ready-plan assignment fields, optional turns "
-                                       "and base, and an optional harness: " + ", ".join(HARNESSES))
+        if not isinstance(job, dict):
+            raise factory.FactoryError("Each job must be an object of the documented ready-plan assignment fields")
+        missing, unexpected = sorted(JOB_FIELDS - set(job)), sorted(set(job) - JOB_FIELDS - OPTIONAL_FIELDS)
+        if missing or unexpected or job.get("harness", "codex") not in HARNESSES:
+            raise factory.FactoryError(f"Job {job.get('task')}/{job.get('id')}: " + "; ".join(filter(None, (
+                missing and "missing " + ", ".join(missing),
+                unexpected and "unexpected " + ", ".join(unexpected),
+                job.get("harness", "codex") not in HARNESSES and "harness must be one of " + ", ".join(HARNESSES))))
+                + ". Read-only jobs still set commit_message to null.")
         # An Antigravity job's null effort runs the model without --effort; some of its models refuse the flag.
         optional = {"effort"} if job.get("harness") == "antigravity" and job.get("effort") is None else set()
         if any(not isinstance(job[k], str) or not job[k].strip()
