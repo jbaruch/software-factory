@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.32.0 — 2026-11-11
 
 - Grok readers work in a disposable checkout of the candidate, like Codex and Antigravity readers. Grok loads the operator's MCP servers whatever `--tools` says, and Playwright's wrote `.playwright-mcp/` into a writer worktree that a Grok QA reader shared, which blocked every later assignment there (#85). Reader receipts are version 4 and name the checkout; version 2 receipts still collect.
 - `factory.py reset` restores a checkout that a failed reader left dirty, as it does for a failed writer. The canary's worktree had no factory way back (#85).
