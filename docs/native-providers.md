@@ -34,6 +34,11 @@ boundary is structural instead:
   secrets, runs hooks and signs, and integration stays with the runtime;
 - only a structured report counts as a result. Text, tool telemetry and
   permission labels never supply completion, acceptance or authority.
+- a read-only verifier's verdict needs at least one tool call behind it. A
+  reader that returns any outcome without calling a tool (Claude's
+  `StructuredOutput` carries the report and doesn't count) is recorded `failed`.
+  A release judgment is exempt: its evidence is the frozen payload in its brief.
+  Two Grok qa runs approved, then blocked, after one turn of thought and no reads.
 
 Claude and Grok reviewers are given read tools only. That is their tool
 interface, not a fence. Native user configuration that a CLI imports, such as

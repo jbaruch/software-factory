@@ -1,5 +1,6 @@
 """Readable assignment panes: one line per event worth watching, from each harness's real event shapes."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
+import argparse
 import json
 import unittest
 
@@ -75,3 +76,33 @@ class Pane(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReaderEvidence(unittest.TestCase):
+    """A verifier's verdict needs a tool call behind it: two Grok qa runs answered after one turn of thought."""
+
+    def args(self, *, write=False, release=None):
+        return argparse.Namespace(write=write, release_evidence=release, release_evidence_digest=None,
+                                  delivery_evidence=None, delivery_evidence_digest=None)
+
+    def test_each_harness_needs_a_tool_call(self):
+        report = dict(type="tool_use", name="StructuredOutput", input=dict(outcome="approved", artifacts=[]))
+        read = dict(type="tool_use", name="Read", input=dict(file_path="/repo/a.md"))
+        cases = dict(
+            claude=([dict(type="assistant", message=dict(content=[read])), dict(type="assistant", message=dict(content=[report]))],
+                    [dict(type="assistant", message=dict(content=[report]))]),
+            grok=([dict(type="tool_call", toolName="read_file"), dict(type="end")], [dict(type="thought"), dict(type="end")]),
+            antigravity=([json.dumps(dict(event="step_update", step_update=dict(step_type="tool", state="ACTIVE")))],
+                         [json.dumps(dict(event="step_update", step_update=dict(step_type="agent_response", state="DONE")))]),
+            codex=([dict(type="item.started", item=dict(type="command_execution", command="cat a.md"))],
+                   [dict(type="item.completed", item=dict(type="agent_message", text="{}"))]))
+        for harness, (evidence, none) in cases.items():
+            with self.subTest(harness=harness):
+                factory.check_reader_evidence(harness, evidence, self.args())
+                with self.assertRaisesRegex(factory.FactoryError, "without a single tool call"):
+                    factory.check_reader_evidence(harness, none, self.args())
+
+    def test_writers_judgments_and_coordination_are_exempt(self):
+        factory.check_reader_evidence("grok", [], self.args(write=True))
+        factory.check_reader_evidence("grok", [], self.args(release="{}"))
+        factory.check_reader_evidence("claude", [], self.args(), coordination=dict(question="fixture"))

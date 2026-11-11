@@ -61,6 +61,17 @@ def events(cwd, session=SESSION):
                  modelUsage={MODEL: dict(provider="firstParty", canonicalModel=MODEL, costBasis="list", costUSD=0.01, inputTokens=2, outputTokens=20)})]
 
 
+def read_events(cwd, session=SESSION):
+    """A reader that read a file before its result; a verdict without any read is refused."""
+    stream, path = events(cwd, session), str(Path(cwd) / "README.md")
+    return stream[:1] + [
+        dict(type="assistant", session_id=session, parent_tool_use_id=None,
+             message=dict(model=MODEL, content=[dict(type="tool_use", id="read-1", name="Read", input=dict(file_path=path))])),
+        dict(type="user", session_id=session, parent_tool_use_id=None,
+             message=dict(content=[dict(type="tool_result", tool_use_id="read-1", content="Fixture readme")]),
+             tool_use_result=dict(type="text", file=dict(filePath=path, content="Fixture readme")))] + stream[1:]
+
+
 def writer_events(cwd, session=SESSION, *, path=None, model=MODEL):
     """Observed 2.1.319 writer shapes: edit tools in the checkout, then a report."""
     path = path or str(Path(cwd) / "NOTES.md")
@@ -670,7 +681,7 @@ class ClaudeWorker(unittest.TestCase):
         previous = Path.cwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, previous)
-        self.events = events(str(self.repo), self.args.native_session)
+        self.events = read_events(str(self.repo), self.args.native_session)
         self.process = FakeProcess(self.events)
         self.spawns = []
         self.probes = []
@@ -882,7 +893,7 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(self.args.events.read_bytes(), retained)
 
     def test_cumulative_stream_exact_limit_and_collection_refusal(self):
-        self.events[1:1] = [self.events[3]] * 100
+        self.events[1:1] = [next(event for event in self.events if event["type"] == "rate_limit_event")] * 100
         self.process = FakeProcess(self.events)
         raw = envelope_bytes([json.dumps(event) + "\n" for event in self.events])
         with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw)):
@@ -897,7 +908,7 @@ class ClaudeWorker(unittest.TestCase):
             self.assertTrue(self.collect()["assignments"]["inspect"]["native_collected"])
 
     def test_cumulative_stream_over_limit_stops_before_write(self):
-        self.events[1:1] = [self.events[3]] * 100
+        self.events[1:1] = [next(event for event in self.events if event["type"] == "rate_limit_event")] * 100
         self.process = FakeProcess(self.events)
         raw = envelope_bytes([json.dumps(event) + "\n" for event in self.events])
         prefix = envelope_bytes([json.dumps(event) + "\n" for event in self.events[:-1]])
@@ -1078,7 +1089,7 @@ class ClaudeApprovals(unittest.TestCase):
             "{brief_sha256}":assignment["request"]["instructions_sha256"],"{candidate}":record["inputs"]["candidate"],
             "{requirements}":record["inputs"]["requirements"],"{repository_identity}":json.dumps(record["admission"]["repository_identity"],sort_keys=True)}
         self.args=claude_worker.parser().parse_args([replacements.get(part,part) for part in command[4:]])
-        async def spawn(*command,**options):return FakeProcess(events(str(f.repo)))
+        async def spawn(*command,**options):return FakeProcess(read_events(str(f.repo)))
         def probe(binary,cwd):
             return dict(schema_version=1,kind="claude-native-auth",harness="claude",binary=str(binary),cwd=str(cwd),
                 cli_version="2.1.319 (Claude Code)",started_at=1000,observed_at=1000,probe_seconds=0,

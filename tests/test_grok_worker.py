@@ -64,7 +64,9 @@ class GrokWorker(unittest.TestCase):
         previous = Path.cwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, previous)
-        self.events = [dict(type="text", data='{"outcome":"blocked","artifacts":[]}'),
+        self.events = [dict(type="tool_call", toolCallId="read-1", toolName="read_file", title="read_file",
+                            rawInput=dict(target_file="README.md")),
+            dict(type="text", data='{"outcome":"blocked","artifacts":[]}'),
             dict(type="end", stopReason="end_turn", sessionId=self.args.native_session,
                  requestId="fixture-request", cwd=str(self.repo), num_turns=1,
                  structuredOutput=dict(outcome="approved", artifacts=["README.md"]),
@@ -643,7 +645,9 @@ class GrokApprovals(unittest.TestCase):
             "{requirements}": record["inputs"]["requirements"],
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = grok_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
-        events = [dict(type="end", stopReason="end_turn", sessionId=session, requestId="fixture-request",
+        events = [dict(type="tool_call", toolCallId="read-1", toolName="read_file", title="read_file",
+                       rawInput=dict(target_file="README.md")),
+                  dict(type="end", stopReason="end_turn", sessionId=session, requestId="fixture-request",
                        cwd=str(f.repo), num_turns=1, usage=None, modelUsage=None,
                        structuredOutput=dict(outcome="completed" if write else "approved", artifacts=["fixture"]))]
         async def spawn(*command, **options):

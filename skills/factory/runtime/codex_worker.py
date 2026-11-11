@@ -326,6 +326,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             if receipt["exit_code"] != 0:
                 raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
             receipt.update(parse_events(events, coordination))
+            factory.check_reader_evidence("codex", events, args, coordination)
             if not args.write:
                 factory.retain_checkout_reports(receipt["report"]["artifacts"], workdir, args.receipt)
         finally:
