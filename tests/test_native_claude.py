@@ -125,6 +125,13 @@ class NativeClaude(unittest.TestCase):
                 run.assert_not_called()
                 self.assertNotIn("fixture-private", str(error.exception))
 
+    def test_assignment_environment_disables_background_tasks(self):
+        # A writer's background shell outlived its result; Claude woke again and the run ended with two results.
+        self.assertEqual(native.environment()["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
+        with patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}):
+            with self.assertRaisesRegex(native.ClaudeProbeError, "Unset"):
+                native.environment()
+
     def test_explicit_config_directory_preserved_without_reading_contents(self):
         with tempfile.TemporaryDirectory() as directory:
             run = transport()
