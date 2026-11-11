@@ -165,10 +165,8 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
                 if not isinstance(payload["response"], str):
                     refuse("result response is not JSON text")
                 try:
-                    # After a prose answer and agy's re-prompt, the response is the prose then the report line.
-                    lines = payload["response"].strip().splitlines()
-                    response = decode_json(lines[-1] if user_turns == 2 else payload["response"])
-                except (ValueError, IndexError):
+                    response = trailing_object(payload["response"])
+                except ValueError:
                     refuse("result response is malformed JSON")
                 if response != report:
                     refuse("result response disagrees with structured_output")
@@ -178,6 +176,22 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
     return dict(report=final["structured_output"], conversation_id=conversation_id,
                 init_model=expected_model, cwd=expected_cwd, turns=final["num_turns"],
                 usage=final.get("usage"), duration_seconds=final.get("duration_seconds"))
+
+
+def trailing_object(text):
+    """The JSON object a response ends with. agy puts any prose the model wrote before it,
+    after a newline when it re-prompted for the report and glued on when it did not (#86)."""
+    text, decoder = text.rstrip(), json.JSONDecoder()
+    start = text.rfind("{")
+    while start >= 0:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except ValueError:
+            value, end = None, -1
+        if end == len(text) and isinstance(value, dict):
+            return value
+        start = text.rfind("{", 0, start)
+    raise ValueError("Response does not end with a JSON object")
 
 
 def parse_usage(output):

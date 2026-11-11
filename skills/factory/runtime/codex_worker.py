@@ -310,6 +310,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             if receipt["exit_code"] != 0:
                 raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
             receipt.update(parse_events(events, coordination))
+            if not args.write:
+                factory.retain_checkout_reports(receipt["report"]["artifacts"], workdir, args.receipt)
         finally:
             # Retire native resources before any factory-owned Git callbacks.
             # mkdtemp has no finalizer: an unconfirmed child keeps its directory.

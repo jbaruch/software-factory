@@ -1032,6 +1032,32 @@ def reader_checkout(repository, candidate, destination, *, identity):
         provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination), timeout=600)
 
 
+def retain_checkout_reports(artifacts, checkout, receipt):
+    """Copy report files a reader wrote in its disposable checkout beside its receipt before the checkout goes.
+
+    Readers asked to keep findings in their artifacts still write a report file and name it; an
+    Antigravity review approved with only `review-retire-service-pins.md`, which went with its
+    checkout. Files of the candidate itself are cited evidence and stay where they are.
+    """
+    checkout = Path(checkout).resolve(strict=True)
+    kept = receipt.with_name(receipt.name.removesuffix(".json") + ".artifacts")
+    for artifact in artifacts:
+        path = Path(artifact) if Path(artifact).is_absolute() else checkout / artifact
+        try:
+            if path.is_symlink() or not path.is_file() or not path.resolve(strict=True).is_relative_to(checkout):
+                continue  # Not a file the reader left in its checkout.
+        except (OSError, ValueError):
+            continue
+        relative = path.resolve(strict=True).relative_to(checkout)
+        if git_run(str(checkout), "ls-files", "--error-unmatch", "--", str(relative)).returncode == 0:
+            continue  # Part of the candidate: cited evidence, not a report.
+        target = kept / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        kept.chmod(0o700)
+        shutil.copyfile(path, target)
+        target.chmod(0o600)
+
+
 def reset_writer(path, *, assignment_id):
     """Recover a failed writer's checkout: keep its leftover edits as a patch, then restore the candidate.
 
@@ -1424,6 +1450,7 @@ def brief(role_id, goal):
             # Read-only specialists cannot write files, so the report is their only collected output.
             + "\nYour structured report is the only output the factory collects: put each finding, or each verified"
             + " point behind an approval, in its artifacts as a self-contained string with path:line."
+            + " Don't put a report in a file instead: a reader's checkout is deleted after the run."
             + "\nUse original evidence; do not create a separate handover or status ledger.\n"
             + "Existing repository policy and user authorization remain binding.\n")
 

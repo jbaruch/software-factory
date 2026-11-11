@@ -170,6 +170,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         native = native_grok.parse_execution(events, session_id=args.native_session,
                                              cwd=str(args.cwd) if args.write else receipt["checkout"], max_turns=args.turns)
         receipt.update({key: native[key] for key in ("report", "request_id", "usage", "model_usage", "turns")})
+        if not args.write:
+            factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),

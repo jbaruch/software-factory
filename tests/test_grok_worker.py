@@ -328,6 +328,18 @@ class GrokWorker(unittest.TestCase):
         self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
         self.assertEqual(self.collect()["assignments"]["inspect"]["result"]["outcome"], "approved")
 
+    def test_a_report_file_left_in_the_reader_checkout_is_retained(self):
+        self.events[-1]["structuredOutput"] = dict(outcome="approved", artifacts=["qa-report.md", "README.md"])
+        self.process = FakeProcess(self.events)
+        spawn = self.spawn
+        async def write_report(*command, **options):
+            (Path(options["cwd"]) / "qa-report.md").write_text("# QA\nVerified.\n")
+            return await spawn(*command, **options)
+        self.spawn = write_report
+        self.assertEqual(self.execute()["state"], "completed")
+        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
+        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["qa-report.md"])
+
     def test_reset_restores_a_checkout_a_failed_reader_left_dirty(self):
         # The canary's worktree was dirtied by a reader that ran in place before readers got checkouts.
         self.process = FakeProcess(self.events, exit_code=1)
