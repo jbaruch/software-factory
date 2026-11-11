@@ -319,6 +319,25 @@ class Decoder(unittest.TestCase):
         data[4]["num_turns"] = 74
         self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
 
+    def test_claude_codes_synthetic_resume_nudge_decodes(self):
+        # Observed: the API cut a review off mid-stream; Claude Code retried and injected this nudge, and the
+        # run finished with its one result, which the worker refused as a conflicting lifecycle.
+        nudge = dict(type="user", session_id=SESSION, parent_tool_use_id=None, isSynthetic=True,
+                     message=dict(role="user", content=[dict(type="text", text="Your response above was cut off mid-stream. "
+                                                             "Resume directly from where it stops \u2014 no apology, no recap.")]))
+        retry = dict(type="system", subtype="api_retry", session_id=SESSION, attempt=1, max_retries=1, retry_delay_ms=541)
+        data = events("/fixture")
+        data[1:1] = [nudge, retry]
+        self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
+        for change in (dict(isSynthetic=False), dict(parent_tool_use_id="output-1"),
+                       dict(message=dict(role="user", content=[dict(type="tool_result", tool_use_id="output-1", content="x")])),
+                       dict(message=dict(role="user", content=[]))):
+            with self.subTest(change=change):
+                data = events("/fixture")
+                data[1:1] = [{**nudge, **change}]
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    self.parse(data)
+
     def test_tool_escape_and_assistant_model_refuse(self):
         for name in ["Bash", "Agent", "mcp__tool"]:
             data=events("/fixture");data[1]["message"]["content"][0]["name"]=name

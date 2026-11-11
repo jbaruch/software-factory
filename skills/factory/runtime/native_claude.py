@@ -270,6 +270,15 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
                         if report is not None:
                             refuse()
                         report = block.get("input")
+        elif kind == "user" and event.get("isSynthetic") is True:
+            # Claude Code's own nudge, such as resuming a response the API cut off mid-stream. Text only,
+            # so it answers no tool call; the final result stays authoritative.
+            message = event.get("message")
+            if (not isinstance(message, dict) or event.get("parent_tool_use_id") is not None
+                    or not isinstance(message.get("content"), list) or not message["content"]
+                    or any(not isinstance(block, dict) or block.get("type") != "text" or not text(block.get("text"))
+                           for block in message["content"])):
+                refuse()
         elif kind == "user":
             message = event.get("message")
             if not isinstance(message, dict) or not isinstance(message.get("content"), list) or event.get("parent_tool_use_id") is not None:
