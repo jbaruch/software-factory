@@ -2702,6 +2702,100 @@ def codex_release_effort(native_args):
     release_evidence.require_max_effort(native_args.effort, models[0].get("effort_ids") if len(models) == 1 else None)
 
 
+PANE_WIDTH = 160
+# Lower-cased argument names native tools use, most telling first (Grok read_file uses target_file, agy CommandLine).
+PANE_KEYS = ("file_path", "path", "target_file", "command", "commandline", "pattern", "url", "query", "tool_name", "name", "action")
+
+
+def pane_text(value):
+    text = " ".join(str(value).split())
+    return text if len(text) <= PANE_WIDTH else text[:PANE_WIDTH - 1] + "…"
+
+
+def pane_argument(arguments):
+    """The argument that says what a tool call is doing, such as the path it reads or the command it runs."""
+    if not isinstance(arguments, dict):
+        return ""
+    lowered = {str(key).lower(): value for key, value in arguments.items()}
+    return next((str(lowered[key]) for key in PANE_KEYS if key in lowered), "")
+
+
+def pane_line(harness, event):
+    """One readable line for an event worth watching in an assignment's Rex pane, or None to skip it.
+
+    Display only: the retained .jsonl stream keeps every original event for collection.
+    Streamed text fragments and bookkeeping events are skipped; tool calls, failures,
+    agent text and the final outcome are shown.
+    """
+    if harness == "antigravity":
+        try:
+            event = json.loads(event)
+        except ValueError:
+            return pane_text(event)  # Collection refuses it later; show it as it came.
+    if not isinstance(event, dict):
+        return pane_text(event)
+    lines = []
+    if harness == "claude":
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            lines.append("start " + str(event.get("model")))
+        elif kind in ("assistant", "user"):
+            content = (event.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else ():
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and block.get("text"):
+                    lines.append("▸ " + pane_text(block["text"]))
+                elif block.get("type") == "tool_use":
+                    lines.append(pane_text(f"→ {block.get('name')} {pane_argument(block.get('input'))}"))
+                elif block.get("type") == "tool_result" and block.get("is_error"):
+                    lines.append("✗ " + pane_text(block.get("content")))
+        elif kind == "result":
+            report = event.get("structured_output") or {}
+            lines.append(pane_text(f"= {event.get('subtype')}: {report.get('outcome')} "
+                                   f"({len(report.get('artifacts') or [])} artifacts), {event.get('num_turns')} turns"))
+    elif harness == "grok":
+        kind = event.get("type")
+        if kind == "tool_call":
+            lines.append(pane_text(f"→ {event.get('toolName') or event.get('title')} {pane_argument(event.get('rawInput'))}"))
+        elif kind == "tool_call_update" and event.get("status") == "failed":
+            lines.append("✗ " + pane_text(event.get("content")))
+        elif kind == "end":
+            report = event.get("structuredOutput") or {}
+            lines.append(pane_text(f"= {event.get('stopReason')}: {report.get('outcome')} "
+                                   f"({len(report.get('artifacts') or [])} artifacts), {event.get('num_turns')} turns"))
+    elif harness == "antigravity":
+        if event.get("event") == "init":
+            lines.append("start " + str((event.get("init") or {}).get("model")))
+        step = event.get("step_update") or {}
+        if step.get("step_type") == "tool" and step.get("state") == "ACTIVE":
+            lines.append(pane_text(f"→ {step.get('tool_name')} {pane_argument((step.get('tool_info') or {}).get('parameters'))}"))
+        elif step.get("state") == "ERROR" or step.get("step_type") == "error_message":
+            lines.append("✗ " + pane_text(step.get("error") or step.get("tool_name") or step.get("step_type")))
+        result = event.get("result") or {}
+        if result:
+            report = result.get("structured_output") or {}
+            lines.append(pane_text(f"= {result.get('status')}: {report.get('outcome')} "
+                                   f"({len(report.get('artifacts') or [])} artifacts), {result.get('num_turns')} turns"))
+    elif harness == "codex":
+        kind, item = event.get("type"), event.get("item") or {}
+        if kind == "item.started" and item.get("type") == "command_execution":
+            lines.append(pane_text("→ $ " + str(item.get("command"))))
+        elif kind == "item.completed" and item.get("type") == "command_execution" and item.get("exit_code") not in (0, None):
+            lines.append(pane_text(f"✗ exit {item.get('exit_code')}: {item.get('command')}"))
+        elif kind == "item.completed" and item.get("type") == "agent_message":
+            lines.append("▸ " + pane_text(item.get("text")))
+        elif kind == "item.completed" and item.get("type") == "file_change":
+            changes = item.get("changes")
+            paths = [str(change.get("path")) for change in changes if isinstance(change, dict)] if isinstance(changes, list) else []
+            lines.append(pane_text("→ edit " + " ".join(paths)))
+        elif kind == "item.completed" and item.get("type") == "error":
+            lines.append("✗ " + pane_text(item.get("message")))
+        elif kind in ("turn.completed", "turn.failed"):
+            lines.append("= " + kind.removeprefix("turn."))
+    return "\n".join(lines) or None
+
+
 def evidence_reader(harness):
     """Each harness's strict original-evidence reader, resolved at call time."""
     return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence, antigravity=antigravity_evidence)[harness]

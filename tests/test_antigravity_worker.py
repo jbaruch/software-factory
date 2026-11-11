@@ -323,6 +323,23 @@ class AntigravityWorker(unittest.TestCase):
         self.assertEqual((kept / "review-retire-service-pins.md").read_text(), "# Review\nApproved.\n")
         self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
 
+    def test_a_bare_report_name_in_the_brain_directory_is_retained(self):
+        # Observed: a Sonnet review wrote review-retire-service-pins.md into agy's brain directory
+        # and named it without a directory.
+        home = self.root / "home"
+        brain = home / ".gemini" / "antigravity-cli" / "brain" / CONVERSATION
+        events = stream(self.repo)
+        report = dict(outcome="approved", artifacts=["review-retire-service-pins.md"])
+        cast(dict, events[-1]["result"]).update(structured_output=report, response=json.dumps(report))
+        def write_report(cwd):
+            brain.mkdir(parents=True)
+            (brain / "review-retire-service-pins.md").write_text("# Review\nApproved.\n")
+        with patch.dict(os.environ, HOME=str(home)):
+            receipt = self.execute(self.args, events=events, act=write_report)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
+        self.assertEqual((kept / "review-retire-service-pins.md").read_text(), "# Review\nApproved.\n")
+
     def test_api_overrides_refuse_before_native_artifacts(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), self.assertRaisesRegex(factory.FactoryError, "Gemini API"):
             self.execute(self.args)
