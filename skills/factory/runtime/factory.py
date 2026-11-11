@@ -1940,9 +1940,11 @@ def close_idle_session(path, rex, record):
 
 
 def check_commit_message(message, *, write):
-    if message is not None and (not write or not isinstance(message, str) or not message.strip()
-            or not message.splitlines()[0].strip() or len(message.splitlines()[0]) > 72 or "\0" in message):
-        raise FactoryError("Use --commit-message only with --write and supply a nonempty commit subject of at most 72 characters")
+    subject = message.splitlines()[0] if isinstance(message, str) and message.strip() else ""
+    if message is not None and (not write or not subject.strip() or len(subject) > 72 or "\0" in message):
+        length = f" (this subject has {len(subject)})" if len(subject) > 72 else ""
+        raise FactoryError("Use --commit-message only with --write and supply a nonempty commit subject of at most 72 characters"
+                           + length)
 
 
 def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None,

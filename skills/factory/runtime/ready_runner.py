@@ -52,62 +52,70 @@ def validate_plan(value):
     for job in jobs:
         if not isinstance(job, dict):
             raise factory.FactoryError("Each job must be an object of the documented ready-plan assignment fields")
-        missing, unexpected = sorted(JOB_FIELDS - set(job)), sorted(set(job) - JOB_FIELDS - OPTIONAL_FIELDS)
-        problems = ([f"missing {', '.join(missing)}"] if missing else []) + (
-            [f"unexpected {', '.join(unexpected)}"] if unexpected else []) + (
-            [] if job.get("harness", "codex") in HARNESSES else ["harness must be one of " + ", ".join(HARNESSES)])
-        if problems:
-            raise factory.FactoryError(f"Job {job.get('task')}/{job.get('id')}: " + "; ".join(problems)
-                                       + ". Read-only jobs still set commit_message to null.")
-        # An Antigravity job's null effort runs the model without --effort; some of its models refuse the flag.
-        optional = {"effort"} if job.get("harness") == "antigravity" and job.get("effort") is None else set()
-        if any(not isinstance(job[k], str) or not job[k].strip()
-               for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"} - optional):
-            raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
-        key = (job["task"], job["id"])
-        if (not re.fullmatch(SLUG, job["task"]) or not re.fullmatch(SLUG, job["id"])
-                or key in seen or job["role"] not in roles
-                or not Path(job["cwd"]).is_absolute()
-                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", job["candidate"])
-                or type(job["seconds"]) is not int or not 1 <= job["seconds"] <= factory.MAX_NATIVE_SECONDS
-                or type(job["write"]) is not bool
-                or job["purpose"] not in {"work", "correction", "investigation"}
-                or (job["role"] == "investigator") != (job["purpose"] == "investigation")):
-            raise factory.FactoryError("Repair job identity, role, candidate, absolute cwd, purpose, writer flag or execution allowance")
-        factory.check_commit_message(job["commit_message"], write=job["write"])
-        if job.get("harness") == "claude":
-            import native_claude
-            if job["effort"] not in native_claude.EFFORTS or (job["write"] and job["commit_message"] is None):
-                raise factory.FactoryError("Claude jobs need a supported effort, and Claude writers need a commit message")
-        if job.get("harness") == "antigravity":
-            import native_antigravity
-            if job["effort"] is not None and job["effort"] not in native_antigravity.EFFORTS:
-                raise factory.FactoryError("Antigravity jobs need a supported effort, or null for a model that refuses one")
-        if job.get("harness") in ("grok", "antigravity") and job["write"] and job["commit_message"] is None:
-            raise factory.FactoryError("Grok and Antigravity writers need a commit message")
-        if "turns" in job and (job.get("harness") not in ("claude", "grok")
-                               or type(job["turns"]) is not int or not 1 <= job["turns"] <= 1000):
-            raise factory.FactoryError("Only Claude and Grok jobs take turns, from 1 to 1000")
-        if job.get("harness", "codex") == "codex":
-            if "base" in job:
-                raise factory.FactoryError("Codex jobs take no base; review a range on Claude, Grok or Antigravity")
-        else:
-            from review_evidence import valid_base
-            if job["write"] and job.get("base") is not None:
-                raise factory.FactoryError("Writers implement from the selected candidate; base is for code review")
-            valid_base(job.get("base"), job["role"])
-        after = job["after"]
-        if (not isinstance(after, list) or any(not isinstance(item, str) or not re.fullmatch(SLUG, item) for item in after)
-                or len(set(after)) != len(after)
-                or any((job["task"], item) in planned and (job["task"], item) not in seen for item in after)):
-            raise factory.FactoryError("Dependencies must name distinct earlier plan jobs or existing assignments in the same task")
-        selected = dict(candidate=job["candidate"], requirements=job["requirements"])
-        if job["task"] in inputs and inputs[job["task"]] != selected:
-            raise factory.FactoryError("One plan must use one candidate/requirements pair per task; select a new phase explicitly after implementation")
-        inputs[job["task"]] = selected
-        seen.add(key)
+        try:
+            check_job(job, roles=roles, planned=planned, seen=seen, inputs=inputs)
+        except factory.FactoryError as exc:
+            # In a many-job plan the operator needs to know which job to repair.
+            raise factory.FactoryError(f"Job {job.get('task')}/{job.get('id')}: {exc}") from None
     return {**value, "limits": dict(limits),
             "jobs": [{**job, "harness": job.get("harness", "codex"), "cwd": str(Path(job["cwd"]).resolve())} for job in jobs]}
+
+
+def check_job(job, *, roles, planned, seen, inputs):
+    """Validate one plan job against the earlier jobs; records it in seen and inputs."""
+    missing, unexpected = sorted(JOB_FIELDS - set(job)), sorted(set(job) - JOB_FIELDS - OPTIONAL_FIELDS)
+    problems = ([f"missing {', '.join(missing)}"] if missing else []) + (
+        [f"unexpected {', '.join(unexpected)}"] if unexpected else []) + (
+        [] if job.get("harness", "codex") in HARNESSES else ["harness must be one of " + ", ".join(HARNESSES)])
+    if problems:
+        raise factory.FactoryError("; ".join(problems) + ". Read-only jobs still set commit_message to null.")
+    # An Antigravity job's null effort runs the model without --effort; some of its models refuse the flag.
+    optional = {"effort"} if job.get("harness") == "antigravity" and job.get("effort") is None else set()
+    if any(not isinstance(job[k], str) or not job[k].strip()
+           for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"} - optional):
+        raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
+    key = (job["task"], job["id"])
+    if (not re.fullmatch(SLUG, job["task"]) or not re.fullmatch(SLUG, job["id"])
+            or key in seen or job["role"] not in roles
+            or not Path(job["cwd"]).is_absolute()
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", job["candidate"])
+            or type(job["seconds"]) is not int or not 1 <= job["seconds"] <= factory.MAX_NATIVE_SECONDS
+            or type(job["write"]) is not bool
+            or job["purpose"] not in {"work", "correction", "investigation"}
+            or (job["role"] == "investigator") != (job["purpose"] == "investigation")):
+        raise factory.FactoryError("Repair job identity, role, candidate, absolute cwd, purpose, writer flag or execution allowance")
+    factory.check_commit_message(job["commit_message"], write=job["write"])
+    if job.get("harness") == "claude":
+        import native_claude
+        if job["effort"] not in native_claude.EFFORTS or (job["write"] and job["commit_message"] is None):
+            raise factory.FactoryError("Claude jobs need a supported effort, and Claude writers need a commit message")
+    if job.get("harness") == "antigravity":
+        import native_antigravity
+        if job["effort"] is not None and job["effort"] not in native_antigravity.EFFORTS:
+            raise factory.FactoryError("Antigravity jobs need a supported effort, or null for a model that refuses one")
+    if job.get("harness") in ("grok", "antigravity") and job["write"] and job["commit_message"] is None:
+        raise factory.FactoryError("Grok and Antigravity writers need a commit message")
+    if "turns" in job and (job.get("harness") not in ("claude", "grok")
+                           or type(job["turns"]) is not int or not 1 <= job["turns"] <= 1000):
+        raise factory.FactoryError("Only Claude and Grok jobs take turns, from 1 to 1000")
+    if job.get("harness", "codex") == "codex":
+        if "base" in job:
+            raise factory.FactoryError("Codex jobs take no base; review a range on Claude, Grok or Antigravity")
+    else:
+        from review_evidence import valid_base
+        if job["write"] and job.get("base") is not None:
+            raise factory.FactoryError("Writers implement from the selected candidate; base is for code review")
+        valid_base(job.get("base"), job["role"])
+    after = job["after"]
+    if (not isinstance(after, list) or any(not isinstance(item, str) or not re.fullmatch(SLUG, item) for item in after)
+            or len(set(after)) != len(after)
+            or any((job["task"], item) in planned and (job["task"], item) not in seen for item in after)):
+        raise factory.FactoryError("Dependencies must name distinct earlier plan jobs or existing assignments in the same task")
+    selected = dict(candidate=job["candidate"], requirements=job["requirements"])
+    if job["task"] in inputs and inputs[job["task"]] != selected:
+        raise factory.FactoryError("One plan must use one candidate/requirements pair per task; select a new phase explicitly after implementation")
+    inputs[job["task"]] = selected
+    seen.add(key)
 
 
 def worker_harness(request):

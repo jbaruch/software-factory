@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- A ready-plan refusal names the job it is about (`Job TASK/ID: …`), for every per-job check, and a commit subject over 72 characters is refused with its length. The canary had to find the two over-long subjects in a seven-job plan by hand.
+
 ## 0.33.0 — 2026-11-11
 
 - Each assignment's Rex pane shows one readable line per event worth watching: tool calls with their path or command, failures, agent text and the final outcome. It used to echo every raw native event, so a pane was thousands of JSON lines nobody could follow. The retained `.jsonl` stream is unchanged.
