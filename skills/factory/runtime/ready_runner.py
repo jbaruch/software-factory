@@ -1,6 +1,7 @@
 """Run an explicit native assignment plan (Codex or Claude) using the existing factory task store."""
 import argparse
 import asyncio
+import contextlib
 import json
 import math
 from pathlib import Path
@@ -18,6 +19,8 @@ POLL_SECONDS = 5
 CAPACITY_MAX_AGE = 60
 PROBE_TIMEOUT = 30
 RESERVED_ROLES = {"qa", "code-review", "investigator", "judge", "standby-reasoner"}
+# Read-only roles a writer handoff may launch; integration accepts their approvals.
+VERIFIER_ROLES = {"qa", "security", "code-review", "test-automation"}
 JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
@@ -173,12 +176,12 @@ class Runner:
         self.supplied_plan, self.from_writer = self.plan, from_writer
         if from_writer is not None:
             jobs = self.plan["jobs"]
-            if (not isinstance(from_writer, str) or not re.fullmatch(SLUG, from_writer)
-                    or len({job["task"] for job in jobs}) != 1
-                    or any(job["role"] not in {"qa", "code-review", "test-automation"}
+            if (not isinstance(from_writer, str) or not re.fullmatch(SLUG, from_writer) or not jobs
+                    or any(job["role"] not in VERIFIER_ROLES
                            or job["write"] or job["commit_message"] is not None
                            or job["id"] == from_writer or from_writer not in job["after"] for job in jobs)):
-                raise factory.FactoryError("--from-writer requires exactly one task with read-only independent verification jobs, distinct IDs and explicit writer dependencies")
+                raise factory.FactoryError("--from-writer requires read-only verification jobs (" + ", ".join(sorted(VERIFIER_ROLES))
+                                           + "), IDs distinct from the writer and an explicit dependency on it in every job")
         self.directory, self.binary = Path(directory).resolve(), Path(codex).resolve()
         self.claude = Path(claude).resolve() if claude else None
         self.grok = Path(grok).resolve() if grok else None
@@ -226,49 +229,60 @@ class Runner:
             commit_message=job["commit_message"], role=job["role"])
 
     def select_writer_candidate(self):
-        """Called under the execution lock; derive continuity from original evidence."""
+        """Called under the execution lock; derive each task's continuity from original evidence.
+
+        Every task is checked before any task's inputs move, so one refused task leaves them all unchanged.
+        """
         if self.from_writer is None:
             return
         jobs = self.supplied_plan["jobs"]
-        original = dict(candidate=jobs[0]["candidate"], requirements=jobs[0]["requirements"])
-        with factory.task_lock(self.directory, jobs[0]["task"]) as path:
-            record = factory.load_task(path)
-            source = record["assignments"].get(self.from_writer)
-            if record["admission"] is None or source is None:
-                raise factory.FactoryError("--from-writer needs an admitted task and an existing writer assignment")
-            harness = worker_harness(source["request"])
-            if (source["state"] != "launched" or harness is None
-                    or not writer(source["request"]) or source["result"] is None
-                    or source["result"]["outcome"] != "completed"):
-                raise factory.FactoryError("--from-writer needs a collected, completed native writer")
-            if source["request"].get("inputs") != original:
-                raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
-            factory.check_repository(record["admission"])
-            rex = factory.connect(record, self.rex, self.server)
-            args, receipt, native = factory.evidence_reader(harness)(self.from_writer, record, source,
-                observe=lambda: factory.status(rex, record, source))
-            if not args.write or args.commit_message is None or receipt.get("commit") is None:
-                raise factory.FactoryError("--from-writer needs an explicit validated factory commit")
-            expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],
-                artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
-            if source["result"] != expected:
-                raise factory.FactoryError("Collected writer result differs from its original native evidence")
-            target = dict(candidate=receipt["candidate"], requirements=original["requirements"])
-            if record["inputs"] not in (original, target):
-                raise factory.FactoryError("Selected task inputs changed; refuse stale or third-party candidate/requirements")
-            if record["inputs"] != target:
-                if record["hold"] is not None:
-                    raise factory.FactoryError("Task is paused: " + record["hold"])
-                for identity, assignment in record["assignments"].items():
-                    if identity == self.from_writer or assignment["state"] == "abandoned":
-                        continue
-                    # Even a saved result is no substitute for observing its process.
-                    if assignment["state"] == "launching":
-                        factory.reconcile(rex, record, assignment)
-                    if factory.status(rex, record, assignment)["state"] not in TERMINAL:
-                        raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
-                factory.set_inputs(path, **target)
-            self.plan = {**self.supplied_plan, "jobs": [{**job, **target} for job in jobs]}
+        originals = {job["task"]: dict(candidate=job["candidate"], requirements=job["requirements"]) for job in jobs}
+        with contextlib.ExitStack() as locks:
+            selected = {task: self.writer_target(locks.enter_context(factory.task_lock(self.directory, task)), original)
+                        for task, original in sorted(originals.items())}
+            for path, current, target in selected.values():
+                if current != target:
+                    factory.set_inputs(path, **target)
+        self.plan = {**self.supplied_plan, "jobs": [{**job, **selected[job["task"]][2]} for job in jobs]}
+
+    def writer_target(self, path, original):
+        """Check one task's writer evidence; returns its path, current inputs and the writer's target pair."""
+        record = factory.load_task(path)
+        source = record["assignments"].get(self.from_writer)
+        if record["admission"] is None or source is None:
+            raise factory.FactoryError("--from-writer needs an admitted task and an existing writer assignment")
+        harness = worker_harness(source["request"])
+        if (source["state"] != "launched" or harness is None
+                or not writer(source["request"]) or source["result"] is None
+                or source["result"]["outcome"] != "completed"):
+            raise factory.FactoryError("--from-writer needs a collected, completed native writer")
+        if source["request"].get("inputs") != original:
+            raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
+        factory.check_repository(record["admission"])
+        rex = factory.connect(record, self.rex, self.server)
+        args, receipt, native = factory.evidence_reader(harness)(self.from_writer, record, source,
+            observe=lambda: factory.status(rex, record, source))
+        if not args.write or args.commit_message is None or receipt.get("commit") is None:
+            raise factory.FactoryError("--from-writer needs an explicit validated factory commit")
+        expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],
+            artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+        if source["result"] != expected:
+            raise factory.FactoryError("Collected writer result differs from its original native evidence")
+        target = dict(candidate=receipt["candidate"], requirements=original["requirements"])
+        if record["inputs"] not in (original, target):
+            raise factory.FactoryError("Selected task inputs changed; refuse stale or third-party candidate/requirements")
+        if record["inputs"] != target:
+            if record["hold"] is not None:
+                raise factory.FactoryError("Task is paused: " + record["hold"])
+            for identity, assignment in record["assignments"].items():
+                if identity == self.from_writer or assignment["state"] == "abandoned":
+                    continue
+                # Even a saved result is no substitute for observing its process.
+                if assignment["state"] == "launching":
+                    factory.reconcile(rex, record, assignment)
+                if factory.status(rex, record, assignment)["state"] not in TERMINAL:
+                    raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
+        return path, record["inputs"], target
 
     def observe(self):
         records, phases, active, issues = {}, {}, [], []

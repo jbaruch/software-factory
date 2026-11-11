@@ -2,6 +2,8 @@
 
 ## Next
 
+- One `--from-writer` verification plan can cover several tasks whose writers share the ID, and it may include `security` readers. The canary ran seven lines as a round-robin of single-task runners, because only one runner holds the execution lock and a handoff plan covered one task; security needed a further plan after selection. Every task's writer is checked before any task's inputs move.
+- Writers are told not to use `git stash`: every worktree of a repository shares one stash, so a concurrent writer could pop another's changes. A wave-1 writer stashed its change to prove its tests failed on the old code.
 - A ready-plan refusal names the job it is about (`Job TASK/ID: …`), for every per-job check, and a commit subject over 72 characters is refused with its length. The canary had to find the two over-long subjects in a seven-job plan by hand.
 
 ## 0.33.0 — 2026-11-11

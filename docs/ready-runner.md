@@ -51,9 +51,11 @@ candidate/requirements at the writer's **original frozen input pair**; no manual
 copy of the output SHA is needed. Ready-plan schema 1 and the task schema stay
 unchanged.
 
-The plan must contain jobs for exactly one admitted task. Every job must be
-read-only `qa`, `code-review` or `test-automation`, use an ID distinct from the
-writer, and name that existing writer explicitly in `after`. Additional explicit
+The plan may contain jobs for several admitted tasks; in each, the writer is the
+assignment with that ID. Every job must be read-only `qa`, `security`,
+`code-review` or `test-automation`, use an ID distinct from the writer, and name
+that existing writer explicitly in `after`. Every task's writer is checked before
+any task's inputs move, so one refused task leaves all of them unchanged. Additional explicit
 dependencies retain their normal gates. The source must already have a collected
 `completed` native result, on any harness, and an explicit factory commit. The runner
 revalidates its original receipt/events, commit and repository/worktree binding,

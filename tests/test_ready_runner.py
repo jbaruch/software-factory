@@ -115,7 +115,7 @@ class ReadyRunner(unittest.TestCase):
             return FakeProcess(events)
         before = Path.cwd()
         try:
-            os.chdir(self.repo)
+            os.chdir(request["cwd"])
             with redirect_stdout(StringIO()):
                 receipt = asyncio.run(codex_worker.execute(args, spawn=spawn,
                     clock=lambda: 1000.0, timer=lambda: 10.0, git_scope=lambda *args, **kwargs: nullcontext(), scan=lambda *args, **kwargs: None))
@@ -182,6 +182,49 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.handoff(plan)["result"], "complete")
         for path, content in originals.items():
             self.assertEqual(path.read_bytes(), content)
+
+    def second_writer(self, task):
+        """A completed writer for another task, in its own worktree of the fixture repository."""
+        checkout = self.root / (task + "-worktree")
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach", str(checkout), self.candidate],
+                       check=True)
+        self.admit(task)
+        job = self.job("implement", task=task, cwd=str(checkout), write=True, commit_message="feat(fixture): Deliver " + task)
+        controller = self.controller(self.plan([job]))
+        self.assertEqual(self.tick(controller)["metrics"]["launched"], 1)
+        with patch.dict(os.environ, GIT_AUTHOR_DATE="2000-01-03T00:00:00Z",
+                        GIT_COMMITTER_DATE="2000-01-03T00:00:00Z"):
+            self.finish(task, "implement", outcome="completed",
+                        edit=lambda: (checkout / "delivery.txt").write_text("Another fixture delivery\n"))
+        self.tick(controller)
+        return checkout
+
+    def test_from_writer_verifies_several_tasks_and_security_in_one_plan(self):
+        # With seven lines, one verification plan per task meant a round-robin of single-task runners.
+        self.completed_writer()
+        checkout = self.second_writer("other")
+        plan = self.plan([self.job("qa", after=["implement"]),
+                          self.job("security", role="security", after=["implement"]),
+                          self.job("qa", task="other", cwd=str(checkout), after=["implement"])], workers=3, reserve=0)
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 3)
+        for task, identities in (("task", ("qa", "security")), ("other", ("qa",))):
+            record = factory.load_task(self.directory / (task + ".json"))
+            target = record["assignments"]["implement"]["result"]["candidate"]
+            self.assertNotEqual(target, self.candidate)
+            self.assertEqual(record["inputs"], dict(candidate=target, requirements="requirements-1"))
+            for identity in identities:
+                request = record["assignments"][identity]["request"]
+                self.assertEqual(request["inputs"], record["inputs"])
+                self.assertNotIn("--write", request["command"])
+
+    def test_from_writer_refused_task_moves_no_task_inputs(self):
+        # "task" sorts before "zeta", so a selection that moved inputs task by task would have moved it already.
+        before = self.completed_writer()
+        self.admit("zeta")
+        plan = self.plan([self.job("qa", after=["implement"]), self.job("qa", task="zeta", after=["implement"])])
+        with self.assertRaisesRegex(factory.FactoryError, "existing writer assignment"):
+            self.handoff(plan)
+        self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"], before["inputs"])
 
     def test_from_writer_restart_observes_running_jobs_without_duplicate_or_reset(self):
         self.completed_writer()
