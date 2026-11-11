@@ -27,6 +27,8 @@ import factory
 # What every writer is told, whichever harness carries it.
 WRITER_CONTRACT = ("Factory commit mode: edit and test only; do not stage or commit Git changes. "
                    "The factory commits after a completed report. Keep temporary outputs outside this checkout. "
+                   "Do not use git stash: every worktree of this repository shares one stash, so another writer "
+                   "could pop your changes; to see old code, read it with git show HEAD:<path>. "
                    "Before committing, the factory scans the lines you add with Gitleaks default rules and ignores "
                    "gitleaks:allow comments, so a match fails your work: keep test fixtures and examples from "
                    "looking like credentials.")
