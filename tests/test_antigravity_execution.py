@@ -155,6 +155,43 @@ class AntigravityExecution(unittest.TestCase):
         closed_twice = lines[:5] + [lines[4].replace('"ERROR"', '"DONE"')] + lines[5:]
         self.rejects(closed_twice, "duplicate or out-of-order")
 
+    def test_a_response_streamed_as_repeated_active_updates_decodes(self):
+        # Observed (#86): agy streams one agent_response step as several ACTIVE text_delta updates.
+        def update(state, text=None, **extra):
+            step = dict(conversation_id="fixture-conversation", step_index=3, state=state, step_type="agent_response", **extra)
+            if text is not None:
+                step["text_delta"] = text
+            return json.dumps(dict(event="step_update", step_update=step)) + "\n"
+        streamed = LINES[:5] + [update("ACTIVE", "Now"), update("ACTIVE", " let me check"), update("ACTIVE", " for")] + LINES[5:]
+        self.assertEqual(self.parse(streamed)["report"]["outcome"], "approved")
+        # Only a response streams: a tool step still opens once, and nothing reopens after DONE.
+        tool = json.loads(LINES[3])["step_update"]
+        twice = LINES[:4] + [json.dumps(dict(event="step_update", step_update=tool)) + "\n"] + LINES[4:]
+        self.rejects(twice, "duplicate or out-of-order")
+        self.rejects(LINES[:6] + [update("ACTIVE", "late")] + LINES[6:], "out-of-order")
+
+    def test_agys_reprompt_after_a_prose_answer_decodes_with_two_turns(self):
+        # Observed (#86): the model answered in prose, agy added one empty user turn asking
+        # for the structured report, and the result response is the prose then the report.
+        def step(index, state, kind, **extra):
+            return json.dumps(dict(event="step_update", step_update=dict(
+                conversation_id="fixture-conversation", step_index=index, state=state, step_type=kind, **extra))) + "\n"
+        result = json.loads(LINES[-1])
+        report = result["result"]["structured_output"]
+        result["result"].update(num_turns=2, response="Prose findings table\n" + json.dumps(report) + "\n")
+        lines = (LINES[:3] + [step(2, "DONE", "user_input"), step(3, "DONE", "agent_response", text_delta=json.dumps(report)),
+                 step(4, "DONE", "finish"), json.dumps(result) + "\n"])
+        self.assertEqual(self.parse(lines)["report"], report)
+        self.assertEqual(self.parse(lines)["turns"], 2)
+        # A re-prompt that carries text, a third turn, or a turn count that disagrees refuses.
+        with_text = lines[:3] + [step(2, "DONE", "user_input", text_delta="do more")] + lines[4:]
+        self.rejects(with_text, "user_input")
+        third = lines[:5] + [step(4, "DONE", "user_input"), step(5, "DONE", "finish")] + lines[6:]
+        self.rejects(third, "user_input|out-of-order")
+        miscounted = copy.deepcopy(result)
+        miscounted["result"]["num_turns"] = 1
+        self.rejects(lines[:-1] + [json.dumps(miscounted) + "\n"], "one completed supplied user turn")
+
     def test_every_identity_bearing_event_must_agree(self):
         for index in range(len(LINES)):
             for envelope in (True, False):

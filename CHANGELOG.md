@@ -2,6 +2,9 @@
 
 ## Next
 
+- Grok readers work in a disposable checkout of the candidate, like Codex and Antigravity readers. Grok loads the operator's MCP servers whatever `--tools` says, and Playwright's wrote `.playwright-mcp/` into a writer worktree that a Grok QA reader shared, which blocked every later assignment there (#85). Reader receipts are version 4 and name the checkout; version 2 receipts still collect.
+- `factory.py reset` restores a checkout that a failed reader left dirty, as it does for a failed writer. The canary's worktree had no factory way back (#85).
+- The Antigravity decoder accepts a response streamed as repeated ACTIVE updates of one step, and agy's own empty turn that asks again for the structured report after a prose answer (two turns; the result response is the prose and then the report line). A Claude Sonnet review on agy failed collection on both (#86).
 - A ready-plan job with a wrong field set names what is missing or unexpected, and reminds that read-only jobs set `commit_message` to null. The canary dropped `commit_message` from read-only jobs and the refusal didn't say which field was wrong. SKILL Step 7 says a verification plan covers one task, as the ready-plan reference already did.
 
 ## 0.31.0 — 2026-11-10

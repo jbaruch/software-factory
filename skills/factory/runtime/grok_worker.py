@@ -1,6 +1,7 @@
 """One explicit native Grok assignment, reviewer or writer, with retained original events."""
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -101,8 +102,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         raise factory.FactoryError("Grok subscription eligibility or model/effort is unavailable; refresh native metadata and select an eligible route before another attempt")
     if args.role == "release":
         release_evidence.require_max_effort(args.effort, [item["value"] for item in model["_meta"]["reasoningEfforts"]])
-    # Version 2 reviews; version 3 writes.
-    receipt = dict(schema_version=3 if args.write else 2, kind="grok-execution", state="starting", job=args.job,
+    # Version 3 writes; version 4 reviews in a disposable checkout (version 2 reviewed in place).
+    receipt = dict(schema_version=3 if args.write else 4, kind="grok-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -114,6 +115,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
     if args.write:
         # Version 3 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
+    else:
+        # Grok loads the operator's MCP servers whatever --tools says, and one wrote into a shared
+        # writer worktree (#85), so a reader works in a throwaway checkout of the candidate.
+        receipt.update(checkout=str(factory.reader_checkout_path(args.receipt)))
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         factory.save(args.receipt, receipt, exclusive=True)
@@ -121,7 +126,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         os.close(fd)
         raise
     started, process, events = timer(), None, []
+    checkouts, workdir = contextlib.ExitStack(), Path(".")
     try:
+        if not args.write:
+            workdir = checkouts.enter_context(factory.reader_checkout(
+                args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
             environment = native_grok.environment()
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
@@ -131,7 +140,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                 "--max-turns", str(args.turns),
                 "--model", args.model, "--reasoning-effort", args.effort, "--session-id", args.native_session,
                 "--output-format", "streaming-json", "--json-schema", json.dumps(outcome_schema()),
-                "--prompt-file", str(args.brief), cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
+                "--prompt-file", str(args.brief), cwd=str(workdir), env=environment, limit=NATIVE_LINE_LIMIT,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
             async def consume():
                 while True:
@@ -155,7 +164,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Grok exited unsuccessfully; inspect its retained events and original Rex pane")
-        native = native_grok.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), max_turns=args.turns)
+        native = native_grok.parse_execution(events, session_id=args.native_session,
+                                             cwd=str(args.cwd) if args.write else receipt["checkout"], max_turns=args.turns)
         receipt.update({key: native[key] for key in ("report", "request_id", "usage", "model_usage", "turns")})
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
@@ -177,6 +187,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         if process is not None:
             await stop_child(process)
             receipt["exit_code"] = process.returncode
+        try:
+            checkouts.close()  # Only after the native process has stopped.
+        except factory.FactoryError as exc:
+            receipt.update(state="failed", error="Cannot remove the reader checkout " + receipt["checkout"]
+                           + "; remove it with git worktree remove --force --force before another attempt: " + str(exc))
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)
         factory.save(args.receipt, receipt)
     return receipt

@@ -53,12 +53,12 @@ def validate_plan(value):
         if not isinstance(job, dict):
             raise factory.FactoryError("Each job must be an object of the documented ready-plan assignment fields")
         missing, unexpected = sorted(JOB_FIELDS - set(job)), sorted(set(job) - JOB_FIELDS - OPTIONAL_FIELDS)
-        if missing or unexpected or job.get("harness", "codex") not in HARNESSES:
-            raise factory.FactoryError(f"Job {job.get('task')}/{job.get('id')}: " + "; ".join(filter(None, (
-                missing and "missing " + ", ".join(missing),
-                unexpected and "unexpected " + ", ".join(unexpected),
-                job.get("harness", "codex") not in HARNESSES and "harness must be one of " + ", ".join(HARNESSES))))
-                + ". Read-only jobs still set commit_message to null.")
+        problems = ([f"missing {', '.join(missing)}"] if missing else []) + (
+            [f"unexpected {', '.join(unexpected)}"] if unexpected else []) + (
+            [] if job.get("harness", "codex") in HARNESSES else ["harness must be one of " + ", ".join(HARNESSES)])
+        if problems:
+            raise factory.FactoryError(f"Job {job.get('task')}/{job.get('id')}: " + "; ".join(problems)
+                                       + ". Read-only jobs still set commit_message to null.")
         # An Antigravity job's null effort runs the model without --effort; some of its models refuse the flag.
         optional = {"effort"} if job.get("harness") == "antigravity" and job.get("effort") is None else set()
         if any(not isinstance(job[k], str) or not job[k].strip()

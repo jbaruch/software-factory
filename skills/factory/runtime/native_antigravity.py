@@ -129,13 +129,19 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
                     or state == "ERROR" and not tool_error(payload)):
                 refuse(f"has malformed step_update at line {line_number}")
             if index == step_index:
-                if (step_state != "ACTIVE" or state not in CLOSED_STEPS
+                # agy streams a response as repeated ACTIVE updates of one step, each with a text_delta.
+                streaming = state == "ACTIVE" and category == step_type == "agent_response"
+                if (step_state != "ACTIVE" or state not in CLOSED_STEPS and not streaming
                         or category != step_type and (step_type, category) != ("tool", "finish")):
                     refuse(f"has duplicate or out-of-order step_update at line {line_number}")
             elif index != step_index + 1 or step_index >= 0 and step_state not in CLOSED_STEPS or step_type == "finish":
                 refuse(f"has out-of-order step_update at line {line_number}")
             if category == "user_input":
-                if index != 0 or state != "DONE" or user_turns:
+                # The factory supplies one turn. agy adds one empty turn of its own when the model
+                # answered in prose, asking again for the structured report (#86).
+                reprompt = (user_turns == 1 and step_type == "agent_response" and step_state == "DONE"
+                            and not any(key in payload for key in ("text_delta", "content", "message")))
+                if state != "DONE" or not (index == 0 and not user_turns or reprompt):
                     refuse("requires exactly one first DONE user_input step")
                 user_turns += 1
             elif not user_turns:
@@ -143,7 +149,7 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
             step_index, step_state, step_type = index, state, category
         else:
             if (payload.get("status") != "SUCCESS" or type(payload.get("num_turns")) is not int
-                    or payload["num_turns"] != 1 or user_turns != 1
+                    or not user_turns or payload["num_turns"] != user_turns
                     or step_state != "DONE" or step_type != "finish"):
                 refuse("result requires SUCCESS, one completed supplied user turn and DONE finish")
             if (payload.get("json_schema") != schema
@@ -159,8 +165,10 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
                 if not isinstance(payload["response"], str):
                     refuse("result response is not JSON text")
                 try:
-                    response = decode_json(payload["response"])
-                except ValueError:
+                    # After a prose answer and agy's re-prompt, the response is the prose then the report line.
+                    lines = payload["response"].strip().splitlines()
+                    response = decode_json(lines[-1] if user_turns == 2 else payload["response"])
+                except (ValueError, IndexError):
                     refuse("result response is malformed JSON")
                 if response != report:
                     refuse("result response disagrees with structured_output")

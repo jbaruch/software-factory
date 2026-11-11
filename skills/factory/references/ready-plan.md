@@ -42,7 +42,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 - `base` is optional: the full commit ID a Claude, Grok or Antigravity `code-review` job reviews from. Those code reviews require it, writers refuse it and Codex jobs take none.
 - `write: true` with an explicit `commit_message` authorizes the factory-owned local commit after a successful writer report, under the [writer contract](https://github.com/jbaruch/software-factory/blob/main/docs/native-providers.md#explicit-codex-assignments). Read-only jobs use `commit_message: null`. Changing the message changes the immutable assignment request.
 - `seconds` is the job's wall-clock budget, at most 86400: roughly 3600–5400 for writers, 1800–2400 for readers.
-- `cwd`: readers may share a checkout, including the writer's once it is collected. Codex and Antigravity readers work in a disposable copy of it, so their tests never dirty it.
+- `cwd`: readers may share a checkout, including the writer's once it is collected. Codex, Antigravity and Grok readers work in a disposable copy of it, so their tests and MCP output never dirty it.
 - `purpose` is `work`, `correction` or `investigation`; `investigation` goes with the `investigator` role and only with it.
 - Jobs have distinct `(task, id)` pairs. `after` names earlier jobs in this plan or existing assignments in the same task. A dependency needs a successful current report and an observed successful process exit; findings, failures, stale reports and changed requests do not advance it.
 
