@@ -155,7 +155,8 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
         command = self.spawns[-1][0]
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
-        self.assertNotIn("--tools", command)  # Writers get every built-in tool.
+        self.assertNotIn("--tools", command)  # Writers get every built-in tool, but no MCP server.
+        self.assertEqual(command[command.index("--deny") + 1], "mcp__*")
         self.assertIn("do not stage or commit", command[command.index("--rules") + 1])
         collected = self.collect_writer()
         result = collected["assignments"]["implement"]["result"]
@@ -241,6 +242,8 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
         self.assertNotIn("--sandbox", command)
         self.assertEqual(command[command.index("--tools") + 1], "read_file")
+        # Observed live (grok 1.0.77): use_tool reached MCP servers under --tools read_file; this rule refused it.
+        self.assertEqual(command[command.index("--deny") + 1], "mcp__*")
         self.assertEqual(command[command.index("--prompt-file") + 1], str(self.args.brief))
         self.assertNotIn("--single", command)
         self.assertNotIn("GH_TOKEN", options["env"])

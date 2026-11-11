@@ -106,6 +106,7 @@ async def subscription_configuration(binary, cwd, *, spawn=asyncio.create_subpro
 def parse_configuration(report, cwd) -> dict:
     # Operator policy accepts the profile as it is: no per-worktree trust and whatever
     # plugins, hooks, MCP or language servers it loads (Grok imports the Claude environment).
+    # Assignments deny every MCP call with --deny mcp__*; the servers still start (#85).
     if (not isinstance(report, dict) or report.get("cwd") != str(Path(cwd).resolve())
             or not isinstance(report.get("grokVersion"), str) or not report["grokVersion"].strip()
             or not isinstance(report.get("configSources"), dict)

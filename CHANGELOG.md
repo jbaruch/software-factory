@@ -2,6 +2,7 @@
 
 ## Next
 
+- Every Grok assignment runs with `--deny mcp__*`. Grok reaches the operator's MCP servers through its `use_tool` meta-tool even under `--tools read_file`, so a read-only Grok reader could call homekit, browser or nanoclaw tools; a live probe on grok 1.0.77 confirmed the rule refuses those calls. The canary saw homekit tools listed in a Grok QA stream.
 - `integrate` and `delivered` accept a `test-automation` approval from Claude, Grok or Antigravity, as verification plans already allowed, and a refused approval names its ID, role and outcome. The canary's `delivered --after tests` was refused with no hint which approval was wrong.
 - Collection accepts a completed Claude run that reports more turns than its `--max-turns` budget. A Fable release judgment under the default 30 made 72 parallel Reads, finished normally and reported 74 turns, and the decoder refused it as an unsupported lifecycle. Claude Code enforces its own budget and reports `error_max_turns` when it hits it, which still refuses (#89).
 
