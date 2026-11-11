@@ -422,6 +422,25 @@ class GrokWorker(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
 
+    def test_pane_interrupt_records_a_failed_attempt_and_stops_the_child(self):
+        # factory.py cancel sends Ctrl-C to the pane; asyncio.run turns that SIGINT into cancelling execute.
+        class Hanging(FakeProcess):
+            async def readline(self):
+                await asyncio.Event().wait()
+        self.process = Hanging([])
+        async def interrupted():
+            run = asyncio.ensure_future(grok_worker.execute(self.args, spawn=self.spawn, probe=self.probe,
+                configuration=self.configuration, clock=lambda: 1000, timer=lambda: 10))
+            await asyncio.sleep(0.05)
+            run.cancel()
+            return await run
+        with redirect_stdout(StringIO()):
+            receipt = asyncio.run(interrupted())
+        self.assertEqual(receipt["state"], "failed")
+        self.assertTrue(receipt["error"].startswith("Cancelled by an interrupt in its pane"))
+        self.assertTrue(self.process.signals)
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+
     def test_changed_source_refuses_completion(self):
         original = self.spawn
         async def edit(*command, **options):

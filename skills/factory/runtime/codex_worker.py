@@ -138,6 +138,20 @@ def read_events(path):
     return events
 
 
+# factory.py cancel sends Ctrl-C to the pane. asyncio.run turns that SIGINT into cancelling the worker's
+# execution, and the terminal delivers the same SIGINT to the native child.
+CANCELLED = "Cancelled by an interrupt in its pane (factory.py cancel or Ctrl-C); inspect the retained attempt without retrying"
+
+
+def cancelled():
+    """Record a pane interrupt as the attempt's failure, then let cleanup await normally."""
+    task = asyncio.current_task()
+    if task is None:
+        raise RuntimeError("cancelled() runs only inside the worker's execution task")
+    task.uncancel()
+    return CANCELLED
+
+
 async def stop_child(process):
     if process.returncode is not None:
         return
@@ -340,6 +354,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         receipt.update(candidate=candidate, state="completed")
     except TimeoutError:
         receipt.update(state="failed", error="Native execution allowance expired; inspect the existing attempt")
+    except asyncio.CancelledError:
+        receipt.update(state="failed", error=cancelled())
     except OSError:
         receipt.update(state="failed", error="Native process/event-stream I/O failed; inspect the retained stream, storage and Rex pane, restore access/space and reconcile this attempt before another launch")
     except (factory.FactoryError, ValueError, KeyError, TypeError) as exc:

@@ -17,7 +17,7 @@ import factory_commit
 import native_grok
 import release_evidence
 import review_evidence
-from codex_worker import NATIVE_LINE_LIMIT, outcome_schema, stop_child
+from codex_worker import NATIVE_LINE_LIMIT, cancelled, outcome_schema, stop_child
 
 
 def read_events(path):
@@ -186,6 +186,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         receipt.update(state="completed", candidate=candidate)
     except TimeoutError:
         receipt.update(state="failed", error="Grok execution allowance expired; inspect the original attempt without retrying")
+    except asyncio.CancelledError:
+        receipt.update(state="failed", error=cancelled())
     except OSError:
         receipt.update(state="failed", error="Grok process/event I/O failed; restore local access/storage and inspect the retained attempt")
     except (factory.FactoryError, native_grok.GrokProbeError, ValueError) as exc:

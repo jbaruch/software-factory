@@ -1589,6 +1589,24 @@ def abandon_launch(path, rex, *, assignment_id, reason) -> dict:
     return record
 
 
+def cancel_assignment(rex, record, *, assignment_id) -> dict:
+    """Interrupt a running native assignment; its worker records the attempt failed.
+
+    Ctrl-C reaches the worker and its native child together. The worker saves its receipt as
+    failed and stops the child, so status, capture and reset work as for any failed attempt.
+    """
+    assignment = record["assignments"].get(assignment_id)
+    if assignment is None or assignment["state"] != "launched":
+        raise FactoryError("Only a launched assignment can be cancelled; abandon a pending launch instead")
+    if native_harness(assignment["request"]["command"]) is None:
+        raise FactoryError("Only a native factory worker records a cancel; inspect other commands in their pane")
+    observed = status(rex, record, assignment)
+    if observed["state"] != "running":
+        raise FactoryError(f"Assignment is {observed['state']}, not running; collect or inspect it instead")
+    rex.call("send-key", "-s", record["session_id"], "-b", assignment["block_id"], "ctrl+c", raw=True)
+    return observed
+
+
 def reconcile(rex, record, assignment):
     """Read back a uniquely labeled pending launch; never relaunch an unknown one."""
     session_id = record.get("session_id")
@@ -2946,6 +2964,9 @@ def main(argv=None):
         command = sub.add_parser(action)
         command.add_argument("--task", required=True)
         command.add_argument("--id", required=True)
+    cancel = sub.add_parser("cancel", help="Interrupt a running native assignment; its worker records it failed")
+    cancel.add_argument("--task", required=True)
+    cancel.add_argument("--id", required=True)
     abandon = sub.add_parser("abandon", help="Record that a pending launch never created its pane")
     abandon.add_argument("--task", required=True)
     abandon.add_argument("--id", required=True)
@@ -3068,6 +3089,14 @@ def main(argv=None):
                     record = hold_task(path, args.reason if args.action == "pause" else None,
                                        request_id=args.request_id, expected_revision=args.expected_revision)
                 print(json.dumps(task_view(record), indent=2))
+                return 0
+            if args.action == "cancel":
+                record = load_task(path)
+                if record["rex"] is None:
+                    raise FactoryError("Only a launched assignment can be cancelled; abandon a pending launch instead")
+                observed = cancel_assignment(connect(record, args.rex, args.server), record, assignment_id=args.id)
+                print(json.dumps(dict(cancelled=args.id, interrupted=observed,
+                                      next="Wait for the pane to exit; inspect the failed attempt with status or capture, reset a writer's checkout, and launch the replacement under a new ID"), indent=2))
                 return 0
             if args.action == "abandon":
                 record = load_task(path)

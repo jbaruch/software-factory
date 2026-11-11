@@ -71,6 +71,9 @@ class FakeRex:
         if args[0] == "kill":
             self.sessions.remove(self.session(args[1]))
             return ""
+        if args[0] == "send-key":
+            self.require_block(self.session(args[args.index("-s") + 1]), args[args.index("-b") + 1])
+            return ""
         if args[0] == "new" or args[:2] == ("window", "new"):
             created_sessions = sum(call[0] == "new" for call in type(self).calls)
             if args[0] == "new":
@@ -541,6 +544,22 @@ class NativeLauncher(unittest.TestCase):
         patcher = patch.object(FakeRex, "call", reject)
         patcher.start()
         return patcher
+
+    def test_cancel_interrupts_only_a_running_native_worker(self):
+        # A judgment launched on a goal known to be wrong had to run its full six minutes (#90).
+        record, qa = self.start()
+        rex = factory.connect(record)
+        with self.assertRaisesRegex(factory.FactoryError, "Only a native factory worker"):
+            factory.cancel_assignment(rex, record, assignment_id="qa")
+        self.assertNotIn("send-key", [call[0] for call in FakeRex.calls])
+        with patch.object(factory, "native_harness", return_value="claude"):
+            self.assertEqual(factory.cancel_assignment(rex, record, assignment_id="qa")["state"], "running")
+            self.assertEqual(FakeRex.calls[-1], ("send-key", "-s", record["session_id"], "-b", qa["block_id"], "ctrl+c"))
+            self.finish(qa, code=1)
+            with self.assertRaisesRegex(factory.FactoryError, "is failed, not running"):
+                factory.cancel_assignment(rex, record, assignment_id="qa")
+            with self.assertRaisesRegex(factory.FactoryError, "Only a launched assignment"):
+                factory.cancel_assignment(rex, record, assignment_id="absent")
 
     def test_rejected_first_launch_can_be_abandoned_and_the_task_moves_on(self):
         patcher = self.reject_creation()
