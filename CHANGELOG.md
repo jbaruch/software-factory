@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.33.0 — 2026-11-11
 
 - Each assignment's Rex pane shows one readable line per event worth watching: tool calls with their path or command, failures, agent text and the final outcome. It used to echo every raw native event, so a pane was thousands of JSON lines nobody could follow. The retained `.jsonl` stream is unchanged.
 - Antigravity keeps a report it wrote in its brain directory when it names the file without a directory. A Sonnet review's report was lost that way.
