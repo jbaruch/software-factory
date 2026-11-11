@@ -1105,7 +1105,18 @@ class ReadyRunner(unittest.TestCase):
             self.controller(value)
         value = self.plan([self.job()])
         value["jobs"][0]["harness"] = "gemini"
-        with self.assertRaisesRegex(factory.FactoryError, "harness must be one of"):
+        with self.assertRaisesRegex(factory.FactoryError, "^Job task/first: harness must be one of"):
+            self.controller(value)
+
+    def test_any_job_refusal_names_the_job_and_a_long_subject_its_length(self):
+        # In a seven-job plan the canary had to hunt for the two commit subjects over 72 characters.
+        subject = "fix(telegram): " + "x" * 67
+        value = self.plan([self.job(), self.job("second", task="other", write=True, commit_message=subject)])
+        with self.assertRaisesRegex(factory.FactoryError,
+                                    r"^Job other/second: .*at most 72 characters \(this subject has 82\)$"):
+            self.controller(value)
+        value = self.plan([self.job(), self.job("second", task="other", seconds=0)])
+        with self.assertRaisesRegex(factory.FactoryError, "^Job other/second: Repair job identity"):
             self.controller(value)
 
     def test_execution_lock_excludes_another_runner_and_manual_cli_launch(self):
