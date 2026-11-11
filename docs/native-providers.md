@@ -16,7 +16,9 @@ boundary is structural instead:
   (`TASK.ID.HARNESS.checkout`), removed after the run with every ignored file:
   Codex and Antigravity reviewers get every tool, and Grok loads the operator's
   MCP servers whatever `--tools` says, one of which wrote into a shared writer
-  worktree (#85). Tests, installs and MCP output never dirty the shared checkout;
+  worktree (#85). Every Grok assignment also runs with `--deny mcp__*`: Grok
+  reaches MCP tools through `use_tool` even under `--tools read_file`, and the
+  deny rule refuses those calls, as `--disallowedTools mcp__*` does for Claude. Tests, installs and MCP output never dirty the shared checkout;
 - a writer's ignored outputs (test caches, bytecode, installs) and the empty
   directories Git cannot track are discarded before the factory commit and listed
   in the receipt's `commit.discarded`;

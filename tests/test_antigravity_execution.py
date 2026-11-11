@@ -192,6 +192,20 @@ class AntigravityExecution(unittest.TestCase):
         miscounted["result"]["num_turns"] = 1
         self.rejects(lines[:-1] + [json.dumps(miscounted) + "\n"], "one completed supplied user turn")
 
+    def test_prose_glued_to_the_report_in_a_one_turn_response_decodes(self):
+        # Observed: a one-turn Sonnet review's response was 2204 characters of prose with the report glued on.
+        result = json.loads(LINES[-1])
+        report = result["result"]["structured_output"]
+        for response in ("UNTESTED by this review." + json.dumps(report) + "\n", json.dumps(report),
+                         "A {braced} aside.\n" + json.dumps(report)):
+            result["result"]["response"] = response
+            with self.subTest(response=response[:30]):
+                self.assertEqual(self.parse(LINES[:-1] + [json.dumps(result) + "\n"])["report"], report)
+        for response in (json.dumps(report) + " trailing prose", "prose only", json.dumps(dict(report, outcome="blocked"))):
+            result["result"]["response"] = response
+            with self.subTest(response=response[:30]):
+                self.rejects(LINES[:-1] + [json.dumps(result) + "\n"], "malformed JSON|disagrees")
+
     def test_every_identity_bearing_event_must_agree(self):
         for index in range(len(LINES)):
             for envelope in (True, False):

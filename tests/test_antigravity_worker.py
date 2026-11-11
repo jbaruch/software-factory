@@ -308,6 +308,21 @@ class AntigravityWorker(unittest.TestCase):
         self.assertEqual((kept / "qa-verification-report.md").stat().st_mode & 0o777, 0o600)
         self.assertEqual(receipt["report"], report)
 
+    def test_a_report_file_in_the_disposable_checkout_is_retained_but_cited_files_are_not(self):
+        # Observed: a review approved with only `review-retire-service-pins.md`, which went with its checkout.
+        events = stream(self.repo)
+        report = dict(outcome="approved", artifacts=["review-retire-service-pins.md", "README.md"])
+        cast(dict, events[-1]["result"]).update(structured_output=report,
+            response="Prose summary of the review." + json.dumps(report) + "\n")
+        def write_report(cwd):
+            (cwd / "review-retire-service-pins.md").write_text("# Review\nApproved.\n")
+        receipt = self.execute(self.args, events=events, act=write_report)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
+        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["review-retire-service-pins.md"])
+        self.assertEqual((kept / "review-retire-service-pins.md").read_text(), "# Review\nApproved.\n")
+        self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
+
     def test_api_overrides_refuse_before_native_artifacts(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), self.assertRaisesRegex(factory.FactoryError, "Gemini API"):
             self.execute(self.args)

@@ -352,7 +352,9 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
         elif kind == "result":
             if (pending or report is None or event.get("subtype") != "success" or event.get("is_error") is not False
                     or event.get("terminal_reason") != "completed" or event.get("api_error_status") is not None
-                    or type(event.get("num_turns")) is not int or not 1 <= event["num_turns"] <= max_turns
+                    # Claude Code enforces --max-turns itself (error_max_turns refuses) but can report more:
+                    # a Fable release judgment with 72 parallel Reads finished with 74 under a 30-turn budget (#89).
+                    or type(event.get("num_turns")) is not int or event["num_turns"] < 1
                     or type(event.get("safety_stops")) is not int or event["safety_stops"] != 0
                     or not isinstance(event.get("subagent_stats"), dict)
                     or type(event["subagent_stats"].get("spawned")) is not int or event["subagent_stats"]["spawned"] != 0

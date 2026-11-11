@@ -190,6 +190,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         receipt.update(report=native["report"], conversation_id=native["conversation_id"], usage=native["usage"],
                        duration_seconds=native["duration_seconds"], turns=native["turns"])
         retain_artifacts(native["report"]["artifacts"], native["conversation_id"], args.receipt)
+        if not args.write:
+            factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),

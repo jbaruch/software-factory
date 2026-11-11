@@ -151,8 +151,9 @@ def approvals(record, review, required):
         if (args.write or args.role != assignment["request"]["role"]
                 or native["report"]["outcome"] != "approved"
                 or (key == review and args.role != "release")
-                or (not hasattr(args, "codex") and args.role not in {"qa", "security", "code-review", "release"})):
-            raise factory.FactoryError("Selected relevant native judgments must be read-only approved reports, including release")
+                or (not hasattr(args, "codex") and args.role not in {"qa", "security", "code-review", "test-automation", "release"})):
+            raise factory.FactoryError(f"Selected approval {key} (role {args.role}, outcome {native['report']['outcome']}) must be a "
+                "read-only approved qa, security, code-review, test-automation or release report, and the review a release judgment")
         context = native_context(factory.native_harness(assignment["request"]["command"]), receipt)
         if not isinstance(context, str) or not context or context in contributors or context in contexts:
             raise factory.FactoryError("Selected approvals need distinct original native contexts independent of contributors")

@@ -155,7 +155,8 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
         command = self.spawns[-1][0]
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
-        self.assertNotIn("--tools", command)  # Writers get every built-in tool.
+        self.assertNotIn("--tools", command)  # Writers get every built-in tool, but no MCP server.
+        self.assertEqual(command[command.index("--deny") + 1], "mcp__*")
         self.assertIn("do not stage or commit", command[command.index("--rules") + 1])
         collected = self.collect_writer()
         result = collected["assignments"]["implement"]["result"]
@@ -241,6 +242,8 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
         self.assertNotIn("--sandbox", command)
         self.assertEqual(command[command.index("--tools") + 1], "read_file")
+        # Observed live (grok 1.0.77): use_tool reached MCP servers under --tools read_file; this rule refused it.
+        self.assertEqual(command[command.index("--deny") + 1], "mcp__*")
         self.assertEqual(command[command.index("--prompt-file") + 1], str(self.args.brief))
         self.assertNotIn("--single", command)
         self.assertNotIn("GH_TOKEN", options["env"])
@@ -324,6 +327,18 @@ class GrokWorker(unittest.TestCase):
         factory.check_checkout(str(self.base), str(self.repo), self.candidate)
         self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
         self.assertEqual(self.collect()["assignments"]["inspect"]["result"]["outcome"], "approved")
+
+    def test_a_report_file_left_in_the_reader_checkout_is_retained(self):
+        self.events[-1]["structuredOutput"] = dict(outcome="approved", artifacts=["qa-report.md", "README.md"])
+        self.process = FakeProcess(self.events)
+        spawn = self.spawn
+        async def write_report(*command, **options):
+            (Path(options["cwd"]) / "qa-report.md").write_text("# QA\nVerified.\n")
+            return await spawn(*command, **options)
+        self.spawn = write_report
+        self.assertEqual(self.execute()["state"], "completed")
+        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
+        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["qa-report.md"])
 
     def test_reset_restores_a_checkout_a_failed_reader_left_dirty(self):
         # The canary's worktree was dirtied by a reader that ran in place before readers got checkouts.
@@ -649,6 +664,16 @@ class GrokApprovals(unittest.TestCase):
     def test_a_grok_qa_report_cannot_be_the_release_judgment(self):
         with self.assertRaises(factory.FactoryError):
             integration.approvals(self.record, "grok-qa", ["qa"])
+
+    def test_a_test_automation_approval_counts_and_a_refusal_names_the_approval(self):
+        # Observed: the canary's `delivered --after tests` was refused with no hint which approval was wrong.
+        record, assignment, receipt = self.run_grok("grok-tests", "test-automation", "00000000-0000-0000-0000-00000000000e")
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            record = factory.collect_grok(self.fixture.path, "grok-tests", None, record, assignment)
+            self.assertIn("grok-tests", integration.approvals(record, "release", ["grok-qa", "grok-tests"]))
+            with self.assertRaisesRegex(factory.FactoryError, r"grok-qa \(role qa, outcome approved\)"):
+                integration.approvals(record, "grok-qa", ["qa"])
 
     def test_grok_gives_the_release_judgment_at_its_models_maximum_effort(self):
         session = "00000000-0000-0000-0000-00000000000c"

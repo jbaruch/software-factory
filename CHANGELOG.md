@@ -1,5 +1,13 @@
 # Changelog
 
+## Next
+
+- The Antigravity decoder accepts a result response that ends with the report glued straight onto the model's prose, with no newline, in a one-turn run. A Sonnet review failed collection with a valid `structured_output` because the response was 2204 characters of prose and then the report.
+- A report file a reader writes in its disposable checkout and names in its artifacts is copied beside its receipt (`TASK.ID.HARNESS.artifacts/`) before the checkout is removed; files of the candidate it cites stay where they are. Briefs also say a reader's checkout is deleted after the run. An Antigravity review approved with only `review-retire-service-pins.md`, which went with its checkout.
+- Every Grok assignment runs with `--deny mcp__*`. Grok reaches the operator's MCP servers through its `use_tool` meta-tool even under `--tools read_file`, so a read-only Grok reader could call homekit, browser or nanoclaw tools; a live probe on grok 1.0.77 confirmed the rule refuses those calls. The canary saw homekit tools listed in a Grok QA stream.
+- `integrate` and `delivered` accept a `test-automation` approval from Claude, Grok or Antigravity, as verification plans already allowed, and a refused approval names its ID, role and outcome. The canary's `delivered --after tests` was refused with no hint which approval was wrong.
+- Collection accepts a completed Claude run that reports more turns than its `--max-turns` budget. A Fable release judgment under the default 30 made 72 parallel Reads, finished normally and reported 74 turns, and the decoder refused it as an unsupported lifecycle. Claude Code enforces its own budget and reports `error_max_turns` when it hits it, which still refuses (#89).
+
 ## 0.32.0 — 2026-11-11
 
 - Grok readers work in a disposable checkout of the candidate, like Codex and Antigravity readers. Grok loads the operator's MCP servers whatever `--tools` says, and Playwright's wrote `.playwright-mcp/` into a writer worktree that a Grok QA reader shared, which blocked every later assignment there (#85). Reader receipts are version 4 and name the checkout; version 2 receipts still collect.
