@@ -590,16 +590,22 @@ def git_execution(prefix, environment):
         GIT_EXECUTION.reset(token)
 
 
+# Starting the Codex sandbox alone took 1.9 to 6.3 seconds on the operator's Mac, so a sandboxed Git
+# call gets more room than a plain one.
+GIT_SECONDS, SANDBOXED_GIT_SECONDS = 10, 60
+
+
 def git_run(repository, *args, environment=None):
+    scope = GIT_EXECUTION.get()
+    seconds = GIT_SECONDS if scope is None else SANDBOXED_GIT_SECONDS
     try:
         worktree = git_worktree(repository)
-        scope = GIT_EXECUTION.get()
         prefix = [] if scope is None else scope[0]()
         if scope is not None:
             environment = scope[1]
         result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
-                              timeout=10, check=False,
+                              timeout=seconds, check=False,
                               env=git_environment() if environment is None else environment)
         if scope is not None and result.returncode == 125:
             raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
@@ -607,7 +613,12 @@ def git_run(repository, *args, environment=None):
             result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
     except UnicodeDecodeError:
         raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        verb = next((arg for index, arg in enumerate(args)
+                     if not arg.startswith("-") and (index == 0 or args[index - 1] != "-c")), "")
+        raise FactoryError(f"Git did not finish within {seconds} seconds (git {verb}); "
+                           "inspect machine load and checkout access, then retry the command") from None
+    except OSError:
         raise FactoryError("Cannot run Git; restore Git availability and checkout access, then retry the command") from None
 
 
