@@ -303,6 +303,57 @@ class Integration(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "effort ordering"):
                 release_evidence.require_max_effort("high", efforts)
 
+    def release_skill_merges(self):
+        """The repository's release skill squashes the PR; the factory never calls merge on this path."""
+        self.transport.parents = [self.base]
+        self.transport.pr.update(state="closed", merged=True, merge_commit_sha=self.transport.merge_sha)
+
+    def confirm(self, **options):
+        args = dict(pr=self.transport.identity["url"], review="release", required=["qa"], transport=self.transport)
+        return integration.delivered(self.path, **{**args, **options})
+
+    def test_release_skill_delivery_confirms_the_judged_head_merged_and_records_it_once(self):
+        with self.assertRaisesRegex(factory.FactoryError, "not merged yet"):
+            self.confirm()
+        self.release_skill_merges()
+        receipt = self.confirm()
+        self.assertEqual((receipt["kind"], receipt["head"], receipt["merge_commit"]),
+                         ("release-skill-delivery", self.head, self.transport.merge_sha))
+        self.assertEqual(sorted(receipt["approvals"]), ["qa", "release"])
+        self.assertEqual(Path(receipt["receipt_path"]), self.tasks / "deliver.release.delivered.json")
+        self.assertEqual(self.confirm(), receipt)
+        self.assertEqual(self.transport.merges, [])
+        self.transport.merge_sha = "e" * 40  # A later observation that differs cannot replace the record.
+        self.transport.pr["merge_commit_sha"] = self.transport.merge_sha
+        self.transport.compare = dict(status="identical", merge_base_commit=dict(sha=self.transport.merge_sha))
+        with self.assertRaisesRegex(factory.FactoryError, "different delivery is already recorded"):
+            self.confirm()
+
+    def test_release_skill_delivery_refuses_an_unjudged_head_another_pr_or_a_missing_judgment(self):
+        self.release_skill_merges()
+        self.transport.pr["head"]["sha"] = "f" * 40
+        with self.assertRaisesRegex(factory.FactoryError, "never judged"):
+            self.confirm()
+        self.transport.pr["head"]["sha"] = self.head
+        with self.assertRaisesRegex(factory.FactoryError, "differs from the one the release judgment approved"):
+            self.confirm(pr="https://github.com/fixture/project/pull/8")
+        with self.assertRaisesRegex(factory.FactoryError, "read-only approved"):
+            self.confirm(review="qa", required=["release"])
+        self.transport.compare = dict(status="diverged", merge_base_commit=dict(sha=self.base))
+        with self.assertRaisesRegex(factory.FactoryError, "target ancestry"):
+            self.confirm()
+        self.assertFalse((self.tasks / "deliver.release.delivered.json").exists())
+
+    def test_delivered_cli_prints_the_receipt(self):
+        self.release_skill_merges()
+        command = ["--state-dir", str(self.tasks), "delivered", "--task", "deliver", "--pr", self.transport.identity["url"],
+            "--review", "release", "--after", "qa", "--gh", "/installed/gh",
+            "--release-scripts", "/installed/.tessl/plugins/jbaruch/coding-policy/skills/release"]
+        output = StringIO()
+        with patch.object(release_evidence, "GitHub", return_value=self.transport), redirect_stdout(output):
+            self.assertEqual(factory.main(command), 0)
+        self.assertEqual(json.loads(output.getvalue())["head"], self.head)
+
     def test_real_pane_lifecycle_and_ordinary_schema_nine_readers(self):
         started = self.launch_integration()
         self.assertEqual(started["state"], "launched")

@@ -252,16 +252,22 @@ def merged_source(intent, transport):
             or commit.get("sha") != merge or [p.get("sha") for p in commit["parents"]]
             != [intent["pr"]["base"], intent["pr"]["head"]]):
         raise factory.FactoryError("Merged commit does not confirm the frozen source/base parents")
+    return merge, target_contains(intent["pr"], merge, transport)
+
+
+def target_contains(pr, merge, transport):
+    """The current target branch has the merge commit in its history; returns the branch's head."""
     from urllib.parse import quote
-    branch = transport.api(f"{endpoint(intent)}/git/ref/heads/{quote(intent['pr']['target'], safe='')}")
+    root = "repos/" + pr["repository"]
+    branch = transport.api(f"{root}/git/ref/heads/{quote(pr['target'], safe='')}")
     target = branch.get("object", {}).get("sha") if isinstance(branch, dict) and isinstance(branch.get("object"), dict) else None
     if not isinstance(target, str) or not re.fullmatch(evidence.SHA, target):
         raise factory.FactoryError("Cannot confirm current target ref")
-    comparison = transport.api(f"{endpoint(intent)}/compare/{merge}...{target}")
+    comparison = transport.api(f"{root}/compare/{merge}...{target}")
     if (not isinstance(comparison, dict) or comparison.get("status") not in ("ahead", "identical")
             or not isinstance(comparison.get("merge_base_commit"), dict) or comparison["merge_base_commit"].get("sha") != merge):
         raise factory.FactoryError("Merge commit is not confirmed in target ancestry")
-    return merge, target
+    return target
 
 
 def postmerge(intent, transport) -> dict:
@@ -590,6 +596,43 @@ def accepted(record, integration_id, acceptance_id, transport):
     return dict(outcome="approved", assignment=acceptance_id, integration=integration_id,
                 native_receipt=str(args.receipt), delivery_receipt_digest=original["receipt_digest"],
                 assessed_delivery_digest=evidence.digest(assessed))
+
+
+def delivered(path, *, pr, review, required, transport) -> dict:
+    """Where integrate can't run, the repository's release skill merges; confirm it merged what the judgment approved (#77)."""
+    record = read_owner(path)
+    if record["admission"] is None:
+        raise factory.FactoryError("Admit the task before confirming its delivery")
+    if record["hold"] is not None:
+        raise factory.FactoryError("Delivery held: " + record["hold"])
+    selected = approvals(record, review, required)
+    approved = selected[review]["evidence"]["pr"]
+    if pr != approved["url"]:
+        raise factory.FactoryError("The PR differs from the one the release judgment approved")
+    observed = transport.api(f"repos/{approved['repository']}/pulls/{approved['number']}")
+    identity = evidence.pr_identity(observed, pr)
+    if observed.get("merged") is not True or observed.get("state") != "closed":
+        raise factory.FactoryError("The PR is not merged yet: merge it through the repository's release skill, then confirm again")
+    if any(identity[key] != approved[key] for key in ("repository_id", "head_repository_id", "head_ref", "target")):
+        raise factory.FactoryError("The merged PR's source or target differs from the one the release judgment approved")
+    if identity["head"] != approved["head"]:
+        raise factory.FactoryError(f"The release skill merged head {identity['head']}, but the release judgment approved "
+            f"{approved['head']}: the merged change was never judged. Report it to the operator")
+    merge = observed.get("merge_commit_sha")
+    if not isinstance(merge, str) or not re.fullmatch(evidence.SHA, merge):
+        raise factory.FactoryError("GitHub reports no merge commit for the merged PR")
+    target_contains(approved, merge, transport)
+    receipt = dict(schema_version=1, kind="release-skill-delivery", task=record["task"], inputs=record["inputs"],
+        pr=pr, head=approved["head"], merge_commit=merge, review=review, required=sorted(required),
+        approvals={key: {k: v for k, v in item.items() if k != "evidence"} for key, item in selected.items()})
+    receipt_path = path.parent / (record["task"] + "." + review + ".delivered.json")
+    with factory.task_lock(path.parent, record["task"], wait=True):
+        if os.path.lexists(receipt_path):
+            if factory.decode_json(factory.read_record(receipt_path, private=True)) != receipt:
+                raise factory.FactoryError("A different delivery is already recorded for this release judgment: " + str(receipt_path))
+        else:
+            factory.save(receipt_path, receipt, exclusive=True)
+    return dict(receipt, receipt_path=str(receipt_path))
 
 
 def main(argv=None):

@@ -22,9 +22,10 @@ read-only `release` assignment, use any native start command (`codex-start`,
 (`.codex/skills/acr__jbaruch__coding-policy__release`) or Tessl
 (`.tessl/plugins/jbaruch/coding-policy/skills/release`) installs it. The
 coordinator picks the strongest model available on any harness; the release role
-runs at that model's maximum effort, and launch refuses anything less: Claude
-and Antigravity `max` (so not an Antigravity model that refuses `--effort`), Grok
-and Codex the top effort their fresh model catalogs list. Codex was the only
+runs at that model's maximum effort. Launch refuses less for Claude and
+Antigravity (`max`, so not an Antigravity model that refuses `--effort`) and for
+Codex (the top effort its fresh catalog lists). Grok publishes its efforts only to
+its worker, so a Grok judgment below the top effort fails when its worker starts. Codex was the only
 release judge because release evidence was built before the other adapters, not
 by policy (#77).
 
@@ -50,6 +51,14 @@ python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/private/stat
   --gh '/absolute/installed/gh' \
   --release-scripts '/absolute/installed/acr__jbaruch__coding-policy__release'
 ```
+
+A repository without `integrate`'s prerequisites (a `checks.yml` `verify` job and
+strict classic protection) delivers through its own release skill instead: after the skill merges, `factory.py delivered --task TASK --pr URL --review
+RELEASE_REVIEW --after REQUIRED_APPROVAL --gh ... --release-scripts ...` re-checks
+the same approvals, requires the PR merged at the exact head the release judgment
+froze, with the merge commit in the target branch's history, and records
+`TASK.RELEASE_REVIEW.delivered.json` once. Any merge method is accepted; the factory
+makes no merge call on this path and leaves publication to the skill.
 
 Repeat `--after` for selected required approval IDs; selection is authorized input,
 not parsed from acceptance prose. Every selected judgment must be `approved`,
@@ -232,8 +241,9 @@ uncertain; a collected result requires its original receipt restored.
 temporary Git. These checks establish offline behavior only. Live merges,
 recovery, final acceptance, provider readiness and general judgment quality need
 separate original evidence. Keep state, logs, caches and test output outside the
-source checkout; the minimal isolated worker needs the release modules only when
-these opt-in evidence arguments are present.
+source checkout; the minimal isolated Codex worker needs the release modules only
+when these opt-in evidence arguments are present. The Claude, Grok and Antigravity
+workers always import them.
 
 Selected `qa`, `security`, `code-review` and `release` approvals may also come from
 strictly collected read-only Claude (version-1), Grok (version-2) or Antigravity

@@ -2754,6 +2754,13 @@ def main(argv=None):
     delivery.add_argument("--after", action="append", required=True)
     delivery.add_argument("--gh", type=Path, required=True)
     delivery.add_argument("--release-scripts", type=Path, required=True)
+    confirm = sub.add_parser("delivered", help="Confirm the release skill merged exactly what the release judgment approved")
+    confirm.add_argument("--task", required=True)
+    confirm.add_argument("--pr", required=True)
+    confirm.add_argument("--review", required=True, help="The approved release judgment")
+    confirm.add_argument("--after", action="append", required=True, help="Each other required approval")
+    confirm.add_argument("--gh", type=Path, required=True)
+    confirm.add_argument("--release-scripts", type=Path, required=True, help="The release skill's ACR or Tessl installation")
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -2848,6 +2855,18 @@ def main(argv=None):
                 receipt = {**receipt, "acceptance": integration.accepted(record, args.id, args.acceptance, transport)}
             print(json.dumps(receipt, indent=2))
             return 0 if receipt["state"] in {"launched", "delivered"} else 1
+        if args.action == "delivered":
+            import integration
+            import release_evidence
+            path = args.state_dir.resolve() / (args.task + ".json")
+            with task_lock(path.parent, args.task):
+                record = load_task(path)
+            if record["admission"] is None:
+                raise FactoryError("Admit the task before confirming its delivery")
+            transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
+            print(json.dumps(integration.delivered(path, pr=args.pr, review=args.review, required=args.after,
+                                                   transport=transport), indent=2))
+            return 0
         prepared = None
         frozen_release = frozen_delivery = None
         if args.action in {"codex-start", "claude-start", "grok-start", "antigravity-start"} and (
