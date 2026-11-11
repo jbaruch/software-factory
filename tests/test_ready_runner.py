@@ -798,6 +798,7 @@ class ReadyRunner(unittest.TestCase):
 
     def finish_grok(self, task, identity, outcome="approved", edit=False):
         import grok_worker
+        from test_grok_worker import echo_cwd as grok_echo_cwd
         record = factory.load_task(self.directory / (task + ".json"))
         assignment = record["assignments"][identity]
         request = assignment["request"]
@@ -812,7 +813,7 @@ class ReadyRunner(unittest.TestCase):
         async def spawn(*command, **options):
             if edit:
                 (self.repo / "delivery.txt").write_text("Useful fixture delivery\n")
-            return FakeProcess(events)
+            return grok_echo_cwd(FakeProcess(events), options)
         async def configuration(binary, cwd):
             return dict(schema_version=2, kind="grok-subscription-configuration", cwd=request["cwd"],
                         grok_home=str(self.root / "grok-profile"), cli_version="fixture", layers=[],
