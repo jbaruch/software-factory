@@ -130,6 +130,9 @@ and cloud provider environment selectors are refused, including empty values,
 before either child starts; remove overrides only when native account observation
 is intended. An explicit `CLAUDE_CONFIG_DIR` must be an accessible absolute
 directory and is forwarded unchanged, never silently replaced with the default.
+Assignment workers also get `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`. A background
+shell still running when the agent returns its result wakes the session again, so
+one run ends with two results that the worker cannot settle.
 Only path metadata is checked, not directory contents. Other credentials and
 runtime injection variables are not forwarded. Path/timeout/process failures
 emit no native diagnostics and no partial observation JSON.

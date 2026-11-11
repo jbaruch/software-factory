@@ -21,6 +21,7 @@ API_PROVIDERS = ("firstParty", "bedrock", "vertex", "foundry")
 OVERRIDE_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "AWS_", "BEDROCK_", "GOOGLE_",
                      "GCLOUD_", "GCP_", "CLOUDSDK_", "CLOUD_ML_", "VERTEX_", "AZURE_", "FOUNDRY_")
 CONFIG_DIRECTORY = "CLAUDE_CONFIG_DIR"
+BACKGROUND_SWITCH = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
 
 
 class ClaudeProbeError(Exception):
@@ -129,6 +130,8 @@ def environment():
     if any(name != CONFIG_DIRECTORY and name.startswith(OVERRIDE_PREFIXES) for name in os.environ):
         raise ClaudeProbeError("Unset Claude API/provider/auth overrides; restore the intended native subscription")
     result = native_environment()
+    # A background shell still running at the result wakes the session again, so one run ends with two results.
+    result[BACKGROUND_SWITCH] = "1"
     if CONFIG_DIRECTORY in os.environ:
         selected_path(os.environ[CONFIG_DIRECTORY], directory=True)
         result[CONFIG_DIRECTORY] = os.environ[CONFIG_DIRECTORY]
