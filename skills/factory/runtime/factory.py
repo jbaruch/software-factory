@@ -1043,10 +1043,11 @@ def reset_writer(path, *, assignment_id):
     record = load_task(path)
     assignment = record["assignments"].get(assignment_id)
     if record["admission"] is None or assignment is None:
-        raise FactoryError("Reset needs an admitted task and an existing writer assignment")
+        raise FactoryError("Reset needs an admitted task and an existing assignment")
     command = assignment["request"]["command"]
-    if native_harness(command) is None or "--write" not in command or "--receipt" not in command:
-        raise FactoryError("Only a native writer's checkout can be reset; readers never change theirs")
+    # A failed reader can be reset too: a Grok reader that ran in place left MCP output in a shared checkout (#85).
+    if native_harness(command) is None or "--receipt" not in command:
+        raise FactoryError("Only a native assignment's checkout can be reset")
     receipt = Path(command[command.index("--receipt") + 1])
     try:
         saved = decode_json(read_record(receipt, private=True))
@@ -1054,7 +1055,7 @@ def reset_writer(path, *, assignment_id):
     except (OSError, ValueError, UnicodeError, AttributeError):
         raise FactoryError("Cannot read the writer's original receipt; restore it before resetting") from None
     if state != "failed":
-        raise FactoryError("Reset only a writer whose original receipt failed; collect or inspect any other attempt")
+        raise FactoryError("Reset only an assignment whose original receipt failed; collect or inspect any other attempt")
     # No other assignment can be using this checkout: launches refuse a dirty one.
     cwd, candidate = assignment["request"]["cwd"], assignment["request"]["inputs"]["candidate"]
     check_repository(record["admission"])
@@ -1098,7 +1099,9 @@ def reset_writer(path, *, assignment_id):
                                + restored.stderr.decode("utf-8", "replace").strip())
     check_checkout(record["admission"]["repository"], cwd, candidate,
                    expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
-    if candidate == committed:
+    if "--write" not in command:
+        following = "The reader's checkout is restored; rerun the reader under a new ID, citing its report if it wrote one"
+    elif candidate == committed:
         following = ("The writer's factory commit is kept; select it with factory.py inputs and verify it with a plain "
                      "plan (no --from-writer); the patch holds only leftovers")
     else:
@@ -2420,7 +2423,10 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
     request = assignment["request"]
     keys = ("report", "request_id", "usage", "model_usage", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != (3 if args.write else 2) or receipt.get("kind") != "grok-execution"
+            or receipt["schema_version"] not in ((3,) if args.write else (2, 4)) or receipt.get("kind") != "grok-execution"
+            # Version 4 readers ran in the disposable checkout named beside their receipt.
+            or (receipt["schema_version"] == 4) != ("checkout" in receipt)
+            or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
                                 or "commit" not in receipt))
@@ -2451,7 +2457,7 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
     try:
         native_grok.validate_discovery(receipt["discovery"], args.grok, request["cwd"])
         native = native_grok.parse_execution(grok_worker.read_events(args.events), session_id=args.native_session,
-                                            cwd=request["cwd"], max_turns=args.turns)
+                                            cwd=receipt.get("checkout", request["cwd"]), max_turns=args.turns)
     except native_grok.GrokProbeError as exc:
         raise FactoryError(str(exc)) from None
     if json.dumps({key: receipt[key] for key in keys}, sort_keys=True) != json.dumps(

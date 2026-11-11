@@ -11,10 +11,12 @@ test and network commands turns every assignment into an approval queue. The
 boundary is structural instead:
 
 - each writer edits only its own provisioned worktree, and each reviewer reads a
-  clean one at the selected candidate. Codex and Antigravity reviewers get every
-  tool, so they work in a disposable worktree of the candidate beside their
-  receipt (`TASK.ID.HARNESS.checkout`), removed after the run with every ignored
-  file; tests and installs they run never dirty the shared checkout;
+  clean one at the selected candidate. Codex, Antigravity and Grok reviewers work
+  in a disposable worktree of the candidate beside their receipt
+  (`TASK.ID.HARNESS.checkout`), removed after the run with every ignored file:
+  Codex and Antigravity reviewers get every tool, and Grok loads the operator's
+  MCP servers whatever `--tools` says, one of which wrote into a shared writer
+  worktree (#85). Tests, installs and MCP output never dirty the shared checkout;
 - a writer's ignored outputs (test caches, bytecode, installs) and the empty
   directories Git cannot track are discarded before the factory commit and listed
   in the receipt's `commit.discarded`;
@@ -24,7 +26,8 @@ boundary is structural instead:
   The failed receipt stays failed; a new writer can cite the patch. A writer
   that failed after its own factory commit keeps that commit: reset clears only
   leftovers, and the coordinator selects the commit with `inputs` and verifies it
-  with a plain plan;
+  with a plain plan. A failed reader that left files in a shared checkout resets
+  the same way and reruns under a new ID;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
   secrets, runs hooks and signs, and integration stays with the runtime;
 - only a structured report counts as a result. Text, tool telemetry and

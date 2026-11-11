@@ -88,7 +88,7 @@ class GrokWorker(unittest.TestCase):
 
     async def spawn(self, *command, **options):
         self.spawns.append((command, options))
-        return self.process
+        return echo_cwd(self.process, options)
 
     async def probe(self, binary, cwd, *, configuration) -> dict[str, Any]:
         config = await configuration(binary, cwd)
@@ -234,8 +234,9 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(receipt["candidate"], self.candidate)
         self.assertEqual(receipt["discovery"]["probe_seconds"], 0.25)
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(grok_worker.read_events(self.args.events), self.events)
         command, options = self.spawns[0]
+        self.assertEqual(grok_worker.read_events(self.args.events),
+                         [{**event, "cwd": options["cwd"]} if event.get("type") == "end" else event for event in self.events])
         self.assertIn("--no-subagents", command)
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
         self.assertNotIn("--sandbox", command)
@@ -243,7 +244,10 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(command[command.index("--prompt-file") + 1], str(self.args.brief))
         self.assertNotIn("--single", command)
         self.assertNotIn("GH_TOKEN", options["env"])
-        self.assertEqual(options["cwd"], ".")
+        receipt = json.loads(self.args.receipt.read_text())
+        checkout = factory.reader_checkout_path(self.args.receipt)
+        self.assertEqual((receipt["schema_version"], options["cwd"]), (4, str(checkout)))
+        self.assertFalse(checkout.exists())
         result = self.collect()
         before = self.path.read_bytes()
         self.collect()
@@ -305,6 +309,33 @@ class GrokWorker(unittest.TestCase):
                 goal="Review the selected diff", cwd=str(self.repo), command=command, purpose="work")
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(len([call for call in FakeRex.calls[launches:] if call[0] in {"new", "window"}]), 0)
+
+    def test_a_reader_that_writes_into_its_directory_leaves_the_shared_worktree_clean(self):
+        # Observed (#85): Grok loads the operator's MCP servers whatever --tools says, and
+        # Playwright's wrote .playwright-mcp/ into the writer worktree a reader shared.
+        spawn = self.spawn
+        async def mcp_output(*command, **options):
+            output = Path(options["cwd"]) / ".playwright-mcp"
+            output.mkdir()
+            (output / "console.log").write_text("browser session\n")
+            return await spawn(*command, **options)
+        self.spawn = mcp_output
+        self.assertEqual(self.execute()["state"], "completed")
+        factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+        self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
+        self.assertEqual(self.collect()["assignments"]["inspect"]["result"]["outcome"], "approved")
+
+    def test_reset_restores_a_checkout_a_failed_reader_left_dirty(self):
+        # The canary's worktree was dirtied by a reader that ran in place before readers got checkouts.
+        self.process = FakeProcess(self.events, exit_code=1)
+        self.assertEqual(self.execute()["state"], "failed")
+        (self.repo / ".playwright-mcp").mkdir()
+        (self.repo / ".playwright-mcp" / "console.log").write_text("browser session\n")
+        with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
+            factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+        result = factory.reset_writer(self.path, assignment_id="inspect")
+        self.assertIn("rerun the reader under a new ID", result["next"])
+        factory.check_checkout(str(self.base), str(self.repo), self.candidate)
 
     def test_failed_native_process_cannot_supply_a_result(self):
         self.process = FakeProcess(self.events, exit_code=1)
@@ -519,6 +550,17 @@ class GrokWorker(unittest.TestCase):
 
 
 
+def echo_cwd(process, options):
+    """Grok reports the directory it runs in, and readers run in a disposable checkout (#85)."""
+    if options.get("cwd", ".") != ".":
+        events = [json.loads(line) for line in process.lines]
+        for event in events:
+            if event.get("type") == "end" and "cwd" in event:
+                event["cwd"] = options["cwd"]
+        process.lines = iter([json.dumps(event).encode() + b"\n" for event in events])
+    return process
+
+
 def fake_grok_discovery(repo, root, efforts=("high",)):
     async def configuration(binary, cwd):
         return dict(schema_version=2, kind="grok-subscription-configuration", cwd=str(repo),
@@ -571,7 +613,7 @@ class GrokApprovals(unittest.TestCase):
                        cwd=str(f.repo), num_turns=1, usage=None, modelUsage=None,
                        structuredOutput=dict(outcome="completed" if write else "approved", artifacts=["fixture"]))]
         async def spawn(*command, **options):
-            return FakeProcess(events)
+            return echo_cwd(FakeProcess(events), options)
         probe, configuration = fake_grok_discovery(f.repo, f.root, efforts)
         with redirect_stdout(StringIO()):
             receipt = asyncio.run(grok_worker.execute(args, spawn=spawn, probe=probe, configuration=configuration,

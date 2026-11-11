@@ -798,6 +798,7 @@ class ReadyRunner(unittest.TestCase):
 
     def finish_grok(self, task, identity, outcome="approved", edit=False):
         import grok_worker
+        from test_grok_worker import echo_cwd as grok_echo_cwd
         record = factory.load_task(self.directory / (task + ".json"))
         assignment = record["assignments"][identity]
         request = assignment["request"]
@@ -812,7 +813,7 @@ class ReadyRunner(unittest.TestCase):
         async def spawn(*command, **options):
             if edit:
                 (self.repo / "delivery.txt").write_text("Useful fixture delivery\n")
-            return FakeProcess(events)
+            return grok_echo_cwd(FakeProcess(events), options)
         async def configuration(binary, cwd):
             return dict(schema_version=2, kind="grok-subscription-configuration", cwd=request["cwd"],
                         grok_home=str(self.root / "grok-profile"), cli_version="fixture", layers=[],
@@ -1094,6 +1095,18 @@ class ReadyRunner(unittest.TestCase):
                 self.controller(value)
         self.assertEqual(PlanRex.calls, [])
         self.assertEqual(self.probes, 0)
+
+    def test_job_field_refusal_names_what_is_missing_or_unexpected(self):
+        # The canary dropped commit_message from read-only jobs and got no hint which field was wrong.
+        value = self.plan([self.job()])
+        del value["jobs"][0]["commit_message"]
+        value["jobs"][0]["model_name"] = "typo"
+        with self.assertRaisesRegex(factory.FactoryError, "missing commit_message; unexpected model_name.*commit_message to null"):
+            self.controller(value)
+        value = self.plan([self.job()])
+        value["jobs"][0]["harness"] = "gemini"
+        with self.assertRaisesRegex(factory.FactoryError, "harness must be one of"):
+            self.controller(value)
 
     def test_execution_lock_excludes_another_runner_and_manual_cli_launch(self):
         controller = self.controller(self.plan([self.job()]))

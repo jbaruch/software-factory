@@ -249,7 +249,7 @@ class AntigravityWorker(unittest.TestCase):
         (self.repo / "scratch.txt").write_text("untracked work\n")
         with self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
             factory.check_checkout(str(self.base), str(self.repo), self.candidate)
-        for identity, message in (("inspect", "Only a native writer"), ("missing", "existing writer")):
+        for identity, message in (("inspect", "receipt failed"), ("missing", "existing assignment")):
             with self.subTest(identity=identity), self.assertRaisesRegex(factory.FactoryError, message):
                 factory.reset_writer(self.path, assignment_id=identity)
         result = factory.reset_writer(self.path, assignment_id="implement")
