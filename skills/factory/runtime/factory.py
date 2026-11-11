@@ -590,14 +590,13 @@ def git_execution(prefix, environment):
         GIT_EXECUTION.reset(token)
 
 
-# Starting the Codex sandbox alone took 1.9 to 6.3 seconds on the operator's Mac, so a sandboxed Git
-# call gets more room than a plain one.
-GIT_SECONDS, SANDBOXED_GIT_SECONDS = 10, 60
+# A hang guard, not a performance bound: under a loaded machine a plain rev-parse took over 10 seconds,
+# and starting the Codex sandbox alone took 1.9 to 6.3.
+GIT_SECONDS = 60
 
 
 def git_run(repository, *args, environment=None):
-    scope = GIT_EXECUTION.get()
-    seconds = GIT_SECONDS if scope is None else SANDBOXED_GIT_SECONDS
+    scope, seconds = GIT_EXECUTION.get(), GIT_SECONDS
     try:
         worktree = git_worktree(repository)
         prefix = [] if scope is None else scope[0]()

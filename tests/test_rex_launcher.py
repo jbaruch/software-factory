@@ -930,12 +930,13 @@ class TaskAdmission(unittest.TestCase):
     def test_git_process_failures_explain_recovery_before_mutation(self):
         self.admit()
         before = self.path.read_bytes()
-        for error in (FileNotFoundError("git"), subprocess.TimeoutExpired("git", 10)):
+        for error, explained in ((FileNotFoundError("git"), "restore Git availability and checkout access"),
+                                 (subprocess.TimeoutExpired("git", 60), "did not finish within 60 seconds")):
             with patch.object(factory.subprocess, "run", side_effect=error):
                 for action in (lambda: factory.git_commit(str(self.repo), "HEAD"),
                                lambda: factory.git_common_dir(str(self.repo)),
                                lambda: factory.check_checkout(str(self.repo), str(self.repo), "a" * 40)):
-                    with self.assertRaisesRegex(factory.FactoryError, "restore Git availability and checkout access"):
+                    with self.assertRaisesRegex(factory.FactoryError, explained):
                         action()
             self.assertEqual(self.path.read_bytes(), before)
 
