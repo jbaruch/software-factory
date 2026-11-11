@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- Collection accepts a completed Claude run that reports more turns than its `--max-turns` budget. A Fable release judgment under the default 30 made 72 parallel Reads, finished normally and reported 74 turns, and the decoder refused it as an unsupported lifecycle. Claude Code enforces its own budget and reports `error_max_turns` when it hits it, which still refuses (#89).
+
 ## 0.32.0 — 2026-11-11
 
 - Grok readers work in a disposable checkout of the candidate, like Codex and Antigravity readers. Grok loads the operator's MCP servers whatever `--tools` says, and Playwright's wrote `.playwright-mcp/` into a writer worktree that a Grok QA reader shared, which blocked every later assignment there (#85). Reader receipts are version 4 and name the checkout; version 2 receipts still collect.
