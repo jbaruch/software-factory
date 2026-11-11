@@ -92,8 +92,10 @@ class ReaderEvidence(unittest.TestCase):
             claude=([dict(type="assistant", message=dict(content=[read])), dict(type="assistant", message=dict(content=[report]))],
                     [dict(type="assistant", message=dict(content=[report]))]),
             grok=([dict(type="tool_call", toolName="read_file"), dict(type="end")], [dict(type="thought"), dict(type="end")]),
-            antigravity=([json.dumps(dict(event="step_update", step_update=dict(step_type="tool", state="ACTIVE")))],
-                         [json.dumps(dict(event="step_update", step_update=dict(step_type="agent_response", state="DONE")))]),
+            antigravity=([json.dumps(dict(event="step_update", step_update=dict(step_type="tool", state="ACTIVE", tool_name="run_command")))],
+                         [json.dumps(dict(event="step_update", step_update=dict(step_type="agent_response", state="DONE"))),
+                          json.dumps(dict(event="step_update", step_update=dict(step_type="tool", state="ACTIVE", tool_name="finish",
+                                                                                tool_info=dict(name="finish"))))]),
             codex=([dict(type="item.started", item=dict(type="command_execution", command="cat a.md"))],
                    [dict(type="item.completed", item=dict(type="agent_message", text="{}"))]))
         for harness, (evidence, none) in cases.items():

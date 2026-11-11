@@ -2393,7 +2393,9 @@ def called_tool(harness, event):
     if harness == "grok":
         return event.get("type") == "tool_call"
     if harness == "antigravity":
-        return pane_object(event.get("step_update")).get("step_type") == "tool"
+        # The `finish` tool step delivers the report itself, like Claude's StructuredOutput.
+        step = pane_object(event.get("step_update"))
+        return step.get("step_type") == "tool" and "finish" not in (step.get("tool_name"), pane_object(step.get("tool_info")).get("name"))
     return event.get("type") == "item.started" and pane_object(event.get("item")).get("type") == "command_execution"
 
 
