@@ -650,6 +650,16 @@ class GrokApprovals(unittest.TestCase):
         with self.assertRaises(factory.FactoryError):
             integration.approvals(self.record, "grok-qa", ["qa"])
 
+    def test_a_test_automation_approval_counts_and_a_refusal_names_the_approval(self):
+        # Observed: the canary's `delivered --after tests` was refused with no hint which approval was wrong.
+        record, assignment, receipt = self.run_grok("grok-tests", "test-automation", "00000000-0000-0000-0000-00000000000e")
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            record = factory.collect_grok(self.fixture.path, "grok-tests", None, record, assignment)
+            self.assertIn("grok-tests", integration.approvals(record, "release", ["grok-qa", "grok-tests"]))
+            with self.assertRaisesRegex(factory.FactoryError, r"grok-qa \(role qa, outcome approved\)"):
+                integration.approvals(record, "grok-qa", ["qa"])
+
     def test_grok_gives_the_release_judgment_at_its_models_maximum_effort(self):
         session = "00000000-0000-0000-0000-00000000000c"
         record, assignment, receipt = self.run_grok("grok-release", "release", session, frozen=self.fixture.frozen)

@@ -771,7 +771,7 @@ class Integration(unittest.TestCase):
 
     def test_completed_is_not_an_approval(self):
         self.review("finished", "security", outcome="completed")
-        with self.assertRaisesRegex(factory.FactoryError, "approved reports"):
+        with self.assertRaisesRegex(factory.FactoryError, r"finished \(role security, outcome completed\)"):
             self.integrate(required=["finished"])
 
     def test_hold_preserves_attempts_and_blocks_mutation(self):
