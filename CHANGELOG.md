@@ -1,8 +1,11 @@
 # Changelog
 
-## Next
+## 0.35.0 — 2026-11-12
 
-- The release judgment checks specialist coverage. Its frozen evidence (version 2) carries the task's specialist roster: each assignment's ID, role, purpose, outcome and whether it still counts. The judge is told to name the change's effects and return `findings` when owner-facing UI lacks `ui-design`, persisted state lacks `data-engineering`, a trust boundary lacks `security`, or runtime behavior lacks `sre`. SKILL Step 3 maps effects to roles. Across about twenty nanoclaw tasks the coordinator chose backend, qa and code-review almost every time, and nothing checked the roster: card wording, schemas and boot changes shipped without their specialists. Version-1 evidence still validates and renders unchanged.
+- Make the release judgment check specialist coverage (#109)
+- Let Claude and Grok reviewers run commands (#108)
+- Decode unparsed tool input and ignore branch config in the commit guard (#110)
+- Keep the main guard after every test class (#107)
 
 ## 0.34.0 — 2026-11-11
 
