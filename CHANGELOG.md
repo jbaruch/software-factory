@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.37.0 — 2026-11-12
+
+- Carry approvals over code a replay left alone (#121)
+
 ## 0.36.1 — 2026-11-12
 
 - Fix three machinery failures from the ACR line (#119)
