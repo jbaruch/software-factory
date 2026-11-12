@@ -4,7 +4,7 @@
 Admission and inspection need no Rex connection or provider account:
 
 ```sh
-python3 -B skills/factory/runtime/factory.py admit --task example --goal 'Implement the agreed behavior' \
+python3 -B skills/factory/runtime/factory.py admit --task example --line example --goal 'Implement the agreed behavior' \
   --repo '/absolute/path/to/checkout' --acceptance 'docs/requirements.md#acceptance'
 python3 -B skills/factory/runtime/factory.py show --task example
 python3 -B skills/factory/runtime/factory.py pause --task example --reason 'Waiting for a scope decision'
