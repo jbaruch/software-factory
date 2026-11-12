@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.36.0 — 2026-11-12
+
+- Give each factory line its own Rex session, lock and runner scope (#113)
+- Realize coding-policy 0.9.0 rules (#112)
+
 ## 0.35.0 — 2026-11-12
 
 - Make the release judgment check specialist coverage (#109)
