@@ -363,7 +363,11 @@ def commit_policy(args, environment):
             flags.extend(["-c", "user.signingkey=" + values["user.signingkey"]])
     else:
         flags.extend(["-c", "commit.gpgsign=false"])
-    return dict(fingerprint=hashlib.sha256(observed.stdout.encode()).hexdigest(),
+    # Every worktree shares one config file, so a push -u or a merged-branch prune in another worktree rewrites
+    # branch.* sections mid-commit; they name upstreams and never change how a commit is made.
+    guarded = "\0".join(origin + "\0" + row for origin, row in zip(fields[0:-1:2], fields[1:-1:2])
+                        if not row.partition("\n")[0].lower().startswith("branch."))
+    return dict(fingerprint=hashlib.sha256(guarded.encode()).hexdigest(),
                 precommit="pre-commit" in active, flags=flags, drivers=drivers, config_paths=config_paths)
 
 

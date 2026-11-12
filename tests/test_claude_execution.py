@@ -365,6 +365,26 @@ class Decoder(unittest.TestCase):
                 with self.assertRaises(native_claude.ClaudeProbeError):
                     self.parse(data)
 
+    def test_unparsed_tool_input_answered_by_an_error_decodes(self):
+        # Observed on 2.1.322: a Read with a stray "\\n," in its JSON arguments; the CLI returned an input error.
+        def call(name, identity):
+            raw = '{"file_path": "/fixture/a.md", \\n, "limit": 60}'
+            return [dict(type="assistant", session_id=SESSION, parent_tool_use_id=None, message=dict(model=MODEL, content=[
+                        dict(type="tool_use", id=identity, name=name, input={"__unparsedToolInput": dict(raw=raw, len=len(raw))})])),
+                    dict(type="user", session_id=SESSION, parent_tool_use_id=None, message=dict(content=[
+                        dict(type="tool_result", tool_use_id=identity, is_error=True,
+                             content="<tool_use_error>InputValidationError: could not be parsed as JSON</tool_use_error>")]))]
+        data = events("/fixture")
+        data[1:1] = call("Read", "bad-read") + call("StructuredOutput", "bad-output")
+        report = self.parse(data)["report"]
+        self.assertEqual(report["outcome"], "approved")  # The later, valid StructuredOutput is the report.
+        data = events("/fixture")
+        unanswered = call("Read", "bad-read")
+        unanswered[1]["message"]["content"][0]["is_error"] = False
+        data[1:1] = unanswered
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
+
     def test_tool_escape_and_assistant_model_refuse(self):
         for name in ["Bash", "Agent", "mcp__tool"]:
             data=events("/fixture");data[1]["message"]["content"][0]["name"]=name

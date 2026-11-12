@@ -895,6 +895,18 @@ class NativeResults(unittest.TestCase):
             self.assertEqual(files[str(self.args.sandbox.resolve())], "read")
             self.assertNotIn(str(self.root.resolve()), files)
 
+    def test_branch_config_written_by_another_worktree_keeps_the_commit_policy(self):
+        # A push -u and a merged-branch prune in other worktrees rewrote branch.* mid-commit and killed two commits.
+        environment = factory.command_environment()
+        before = factory_commit.commit_policy(self.args, environment)
+        for key, value in (("branch.factory/other.remote", "origin"), ("branch.factory/other.merge", "refs/heads/other")):
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value], check=True)
+        self.assertEqual(factory_commit.commit_policy(self.args, environment), before)
+        subprocess.run(["git", "-C", str(self.repo), "config", "--remove-section", "branch.factory/other"], check=True)
+        self.assertEqual(factory_commit.commit_policy(self.args, environment), before)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.signingkey", "/fixture/key.pub"], check=True)
+        self.assertNotEqual(factory_commit.commit_policy(self.args, environment)["fingerprint"], before["fingerprint"])
+
     def test_precommit_grants_refuse_host_roots_and_source_overlap(self):
         tool = self.root / "precommit-venv"
         (tool / "bin").mkdir(parents=True)
