@@ -231,11 +231,12 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"], before["inputs"])
 
     def test_from_writer_launches_the_effect_specialists(self):
-        # The release judgment asks for ui-design, data-engineering and sre where a change has those effects.
+        # The release judgment asks for ui-design, data-engineering and sre where a change has those effects;
+        # the SKILL verifies a replay onto a moved base with integration (#127).
         self.completed_writer()
         plan = self.plan([self.job(role=role, identity=role, after=["implement"])
-                          for role in ("ui-design", "data-engineering", "sre")], workers=3, reserve=0)
-        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 3)
+                          for role in ("ui-design", "data-engineering", "sre", "integration")], workers=4, reserve=0)
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 4)
         with self.assertRaisesRegex(factory.FactoryError, "read-only verification jobs"):
             self.controller(self.plan([self.job("product", role="product", after=["implement"])]), from_writer="implement")
 

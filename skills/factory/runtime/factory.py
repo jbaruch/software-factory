@@ -2483,10 +2483,11 @@ def carries_judgment(args):
     return any(getattr(args, kind + suffix) is not None for kind in ("delivery", "release") for suffix in ("_evidence", "_evidence_digest"))
 
 
-# Specialists whose read-only verdict counts as an approval: the verifiers, plus every effect specialist the
-# release judgment checks for. One set serves --from-writer plans and integration.
+# Specialists whose read-only verdict counts as an approval: the verifiers, every effect specialist the
+# release judgment checks for, and integration, which verifies a replay onto a moved base (#127).
+# One set serves --from-writer plans and integration.
 VERIFIER_ROLES = frozenset({"qa", "code-review", "test-automation", "security", "ui-design", "accessibility",
-                            "data-engineering", "sre", "performance"})
+                            "data-engineering", "sre", "performance", "integration"})
 
 
 def called_tool(harness, event):
