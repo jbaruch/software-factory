@@ -142,7 +142,8 @@ class EvidenceRex(FakeRex):
         if args[:2] == ("block", "call") and args[-1] == "process":
             type(self).calls.append(args)
             block_id = args[args.index("-b") + 1]
-            integration_pane = any(window["label"].startswith("integration-") and
+            # Tabs carry their task: "<task>:integration-<id>-<hex>".
+            integration_pane = any(window["label"].split(":", 1)[-1].startswith("integration-") and
                 any(block["block_id"] == block_id for layer in window["layers"] for block in layer["blocks"])
                 for session in self.sessions for window in session["windows"])
             running = self.integration_running if integration_pane else self.running
