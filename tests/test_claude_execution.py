@@ -385,6 +385,23 @@ class Decoder(unittest.TestCase):
         with self.assertRaises(native_claude.ClaudeProbeError):
             self.parse(data)
 
+    def test_a_tool_the_cli_never_offered_answered_by_an_error_decodes(self):
+        # #114: a writer called "bash" (lowercase); Claude Code never ran it and answered with an error.
+        call = dict(type="assistant", session_id=SESSION, parent_tool_use_id=None, message=dict(model=MODEL, content=[
+            dict(type="tool_use", id="lowercase-1", name="bash", input=dict(command="ls"))]))
+        answer = dict(type="user", session_id=SESSION, parent_tool_use_id=None, message=dict(content=[
+            dict(type="tool_result", tool_use_id="lowercase-1", is_error=True,
+                 content="<tool_use_error>Error: No such tool available: bash.</tool_use_error>")]))
+        data = events("/fixture")
+        data[1:1] = [call, answer]
+        self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
+        ran = dict(type="user", session_id=SESSION, parent_tool_use_id=None, message=dict(content=[
+            dict(type="tool_result", tool_use_id="lowercase-1", is_error=False, content="listed")]))
+        data = events("/fixture")
+        data[1:1] = [call, ran]
+        with self.assertRaises(native_claude.ClaudeProbeError):
+            self.parse(data)
+
     def test_tool_escape_and_assistant_model_refuse(self):
         for name in ["Bash", "Agent", "mcp__tool"]:
             data=events("/fixture");data[1]["message"]["content"][0]["name"]=name

@@ -226,7 +226,7 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
         return text(identity) and identity in tasks
     expected_tools = WRITE_TOOLS if writer else REVIEW_TOOLS if checkout else READ_TOOLS
     callable_tools = set(expected_tools)
-    report, final, pending, tools, rates, unparsed = None, None, {}, {}, [], set()
+    report, final, pending, tools, rates, inert = None, None, {}, {}, [], set()
     initialized, denied, tasks, started = False, {}, set(), set()
     for event in events:
         if (not isinstance(event, dict) or final is not None or event.get("session_id") != session_id):
@@ -260,14 +260,15 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
                     refuse()
                 if block["type"] == "tool_use":
                     name, identity = block.get("name"), block.get("id")
-                    if name not in callable_tools or not isinstance(identity, str) or not identity or identity in tools:
+                    if not isinstance(identity, str) or not identity or identity in tools:
                         refuse()
                     tools[identity] = name
                     pending[identity] = block
-                    if unparsed_input(block.get("input")):
-                        # The model's arguments were not valid JSON, so the tool never ran; its result must be
-                        # the CLI's error, and an unparsed StructuredOutput is never the report.
-                        unparsed.add(identity)
+                    if name not in callable_tools or unparsed_input(block.get("input")):
+                        # A tool the CLI doesn't offer (a lowercase "bash" was observed) or arguments that were not
+                        # valid JSON: the tool never ran, so its result must be the CLI's error, and such a
+                        # StructuredOutput is never the report.
+                        inert.add(identity)
                         continue
                     if name == "Read" and (not isinstance(block.get("input"), dict)
                             or not isinstance(block["input"].get("file_path"), str)
@@ -306,9 +307,9 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
                 name = call["name"]
                 if (type(block.get("is_error", False)) is not bool
                         or (block["tool_use_id"] in denied and block.get("is_error") is not True)
-                        or (block["tool_use_id"] in unparsed and block.get("is_error") is not True)):
+                        or (block["tool_use_id"] in inert and block.get("is_error") is not True)):
                     refuse()
-                if block["tool_use_id"] in unparsed:
+                if block["tool_use_id"] in inert:
                     continue
                 if name == "Read" and block.get("is_error", False) is False:
                     result = event.get("tool_use_result")

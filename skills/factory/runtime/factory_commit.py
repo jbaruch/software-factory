@@ -26,7 +26,9 @@ import factory
 
 # What every writer is told, whichever harness carries it.
 WRITER_CONTRACT = ("Factory commit mode: edit and test only; do not stage or commit Git changes. "
-                   "The factory commits after a completed report. Keep temporary outputs outside this checkout. "
+                   "The factory commits after a completed report and only then: report completed once your change "
+                   "is in place, listing residual findings in your artifacts; findings or blocked leave your edits "
+                   "uncommitted. Keep temporary outputs outside this checkout. "
                    "Do not use git stash: every worktree of this repository shares one stash, so another writer "
                    "could pop your changes; to see old code, read it with git show HEAD:<path>. "
                    "Before committing, the factory scans the lines you add with Gitleaks default rules and ignores "
@@ -508,6 +510,28 @@ def check_git_operation(args):
         raise factory.FactoryError("In-progress Git operation; finish or abort it in the assigned worktree before a factory commit")
 
 
+def discard(root, entries):
+    """Remove the writer's ignored outputs without running Git on the host.
+
+    The sandboxed git clean cannot write the directories Codex's sandbox protects (.codex/, .agents/), where
+    an acr realize left output. The paths come from the sandboxed status; a link goes, its target stays.
+    """
+    for entry in entries:
+        target = root / entry.rstrip("/")
+        if (".." in Path(entry).parts or Path(entry).is_absolute()
+                or any(parent.is_symlink() for parent in target.parents if parent != root and root in parent.parents)):
+            raise factory.FactoryError("A writer's ignored output sits under a link or outside its checkout; inspect it before another attempt")
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+        except OSError as exc:
+            # A read-only tree (a node_modules with 0555 directories) must name itself, not pass as I/O trouble.
+            raise factory.FactoryError(f"Cannot discard the writer's ignored output {entry!r} ({exc.strerror}); "
+                                       "inspect it before another attempt") from None
+
+
 def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     """Commit an opted-in writer's finished work in the factory Git sandbox."""
     check_git_operation(args)
@@ -557,7 +581,8 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     # A provisioned worktree starts with no ignored files, so these are the writer's disposable
     # outputs (test caches, bytecode, installs). The factory discards them and records the paths.
     discarded = ignored()
-    if discarded and (git("clean", "-ffdXq", environment=environment).returncode or ignored()):
+    discard(root, discarded)
+    if discarded and ignored():
         raise factory.FactoryError("Cannot discard the writer's ignored outputs; inspect them before another attempt")
     # Git cannot track empty directories (test suites leave them), so they are disposable too.
     for current, _, _ in os.walk(root, topdown=False):
@@ -710,5 +735,11 @@ def commit_completed(args, receipt, identity, *, git_scope=isolated_git, scan=sc
             factory.check_checkout(".", ".", candidate, expected_identity=identity,
                                    expected_git_dir=args.worktree_git_dir)
         except factory.FactoryError as exc:
+            outcome = receipt["report"]["outcome"]
+            if args.commit_message is not None and outcome != "completed":
+                # Two writers reported findings after a green gate and lost their commits to a misleading error.
+                raise Refusal(f"The writer reported {outcome}, so the factory committed nothing and its edits remain "
+                              "in the checkout; save them with factory.py reset and have a new writer finish with "
+                              "outcome completed, listing residual findings in its artifacts") from None
             raise Refusal("The checkout is not clean after the run (" + str(exc) + ")") from None
     return candidate
