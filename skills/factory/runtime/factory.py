@@ -262,8 +262,10 @@ def task_line(record):
 
 
 def line_session_label(line):
-    """One Rex session holds every assignment of a line's tasks, one tab each."""
-    return "factory-" + line
+    """One Rex session holds every assignment of a line's tasks, one tab each: the session named
+    after the line, which is the coordinator's own when it carries that name. Lines first had
+    their own `factory-<line>` session beside the coordinator's, which split the line in two."""
+    return line
 
 
 def check_line(line):
@@ -357,8 +359,8 @@ def load_task(path) -> dict:
         raise FactoryError("Invalid pinned Rex identity; restore the original task record before continuing")
     if (not isinstance(record["session_label"], str)
             or ("line" in record and (not isinstance(record["line"], str) or not LINE.fullmatch(record["line"])))
-            # Its line's shared session, or a task's own session from before lines.
-            or (record["session_label"] != line_session_label(task_line(record))
+            # Its line's shared session, the `factory-<line>` session lines first used, or a task's own from before lines.
+            or (record["session_label"] not in (line_session_label(task_line(record)), "factory-" + task_line(record))
                 and not re.fullmatch("factory-" + re.escape(record["task"]) + r"-[0-9a-f]{8}", record["session_label"]))
             or (record["session_id"] is not None
                 and (not isinstance(record["session_id"], str) or not record["session_id"]))):
@@ -1876,7 +1878,9 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
         rex.instance_id = who["instance_id"]
-    if not record["session_id"] and record["session_label"] == line_session_label(task_line(record)):
+    if not record["session_id"]:
+        # A task holding no session joins its line's, whatever older label it carries; no launch is pending here.
+        record["session_label"] = line_session_label(task_line(record))
         # Launches run under the line's execution lock, so no other task of the line creates its session meanwhile.
         shared = [item["session_id"] for item in rex_sessions(rex) if item.get("label") == record["session_label"]]
         if len(shared) > 1:
