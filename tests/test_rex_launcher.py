@@ -372,6 +372,18 @@ class NativeLauncher(unittest.TestCase):
         self.assertTrue(factory.tidy(self.root / "other.json", rex, factory.load_task(self.root / "other.json"))["session_closed"])
         self.assertEqual([item["label"] for item in FakeRex.sessions], ["factory-acr"])
 
+    def test_cli_tidy_never_closes_the_line_session_under_a_launch(self):
+        # Review of #113: a CLI tidy holding only its task lock could kill the session another task was launching into.
+        record, qa = self.start()
+        self.finish(qa)
+        with factory.execution_lock(self.root):  # Another task of the line is mid-launch.
+            report, failed = factory.tidy_tasks(self.root)
+        self.assertFalse(failed)
+        self.assertEqual(report["task"], dict(closed=["qa"], running=[], session_closed=False))
+        self.assertEqual(len(FakeRex.sessions), 1)
+        report, failed = factory.tidy_tasks(self.root)
+        self.assertEqual((failed, report["task"]["session_closed"], FakeRex.sessions), (False, True, []))
+
     def test_line_moves_only_a_task_with_nothing_running(self):
         record, qa = self.start()
         with self.assertRaisesRegex(factory.FactoryError, "assignments open"):

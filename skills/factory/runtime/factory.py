@@ -150,13 +150,31 @@ class ExecutionBusy(FactoryError):
 EXIT_BUSY = 75
 
 
+def execution_lock_path(directory, line):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # The default line keeps the original lock file, so runners from before lines still exclude each other.
+    return directory / (".execution.lock" if line == DEFAULT_LINE else ".execution." + check_line(line) + ".lock")
+
+
+@contextmanager
+def try_execution_lock(directory, line=DEFAULT_LINE):
+    """The line's execution lock if it is free right now; yields whether it is held."""
+    fd = os.open(execution_lock_path(directory, line), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = True
+        except BlockingIOError:
+            held = False
+        yield held
+    finally:
+        os.close(fd)
+
+
 @contextmanager
 def execution_lock(directory, line=DEFAULT_LINE):
     """Serialize one line's controller/CLI launch decisions; other lines launch in parallel."""
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # The default line keeps the original lock file, so runners from before lines still exclude each other.
-    name = ".execution.lock" if line == DEFAULT_LINE else ".execution." + check_line(line) + ".lock"
-    fd = os.open(directory / name, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(execution_lock_path(directory, line), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1979,7 +1997,7 @@ def captured(rex, record, assignment):
     return output
 
 
-def tidy(path, rex, record, *, only=None) -> dict:
+def tidy(path, rex, record, *, only=None, close_session=True) -> dict:
     """Close finished assignment tabs; each keeps its final observation and output first."""
     closed, running = [], []
     view = session_view(rex, record)
@@ -2007,7 +2025,8 @@ def tidy(path, rex, record, *, only=None) -> dict:
         # block keeps any operator split; a lone block takes its tab along.
         if assignment["block_id"] in open_blocks:
             rex.call("block", "close", "-s", record["session_id"], assignment["block_id"], raw=True)
-    return dict(closed=closed, running=running, session_closed=close_idle_session(path, rex, record))
+    # The session is the line's: closing it needs the line's execution lock, or another task's launch could lose it.
+    return dict(closed=closed, running=running, session_closed=close_session and close_idle_session(path, rex, record))
 
 
 def move_line(path, line):
@@ -2963,8 +2982,12 @@ def tidy_tasks(directory, task=None, binary=None, server=None):
         try:
             with task_lock(directory, name) as path:
                 record = load_task(path)
-                report[name] = (dict(closed=[], running=[], session_closed=False) if record["rex"] is None
-                                else tidy(path, connect(record, binary, server), record))
+                if record["rex"] is None:
+                    report[name] = dict(closed=[], running=[], session_closed=False)
+                    continue
+                # Outside a launcher: the line's session closes only while its execution lock is free.
+                with try_execution_lock(directory, task_line(record)) as held:
+                    report[name] = tidy(path, connect(record, binary, server), record, close_session=held)
         except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             report[name], failed = dict(error=str(exc)), True
     return report, failed
@@ -3297,7 +3320,9 @@ def main(argv=None):
             if args.action.endswith("-collect"):
                 record = collector(args.action.removesuffix("-collect"))(path, args.id, rex, record, assignment)
                 try:
-                    tidy(path, rex, record, only={args.id})  # A collected result no longer needs its tab.
+                    # A collected result no longer needs its tab; the line's session closes only under its lock.
+                    with try_execution_lock(args.state_dir.resolve(), task_line(record)) as held:
+                        tidy(path, rex, record, only={args.id}, close_session=held)
                 except (FactoryError, OSError) as exc:
                     # The result is already saved; show it, then fail so the open tab is noticed.
                     print(json.dumps(task_view(record), indent=2))
