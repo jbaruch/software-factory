@@ -341,10 +341,9 @@ class NativeLauncher(unittest.TestCase):
         for key in keys:
             swapped["assignments"]["qa"][key], swapped["assignments"]["security"][key] = (
                 swapped["assignments"]["security"][key], swapped["assignments"]["qa"][key])
-        other, _ = factory.launch(self.root / "other.json", **{**self.arguments, "task": "other"})
+        # A line's tasks share its session; another task's own session (before lines) is still foreign.
         crossed = copy.deepcopy(original)
-        for key in ("rex", "session_label", "session_id"):
-            crossed[key] = other[key]
+        crossed["session_label"] = "factory-other-0123abcd"
         for record in (swapped, crossed):
             factory.save(self.path, record)
             before = self.path.read_bytes()
@@ -353,6 +352,47 @@ class NativeLauncher(unittest.TestCase):
                 self.start()
             self.assertEqual(FakeRex.calls, [])
             self.assertEqual(self.path.read_bytes(), before)
+
+    def test_a_lines_tasks_share_its_session_and_other_lines_get_their_own(self):
+        # The operator asked for one Rex session per factory line: every nanoclaw agent in one, every ACR agent in another.
+        record, qa = self.start()
+        other, other_qa = factory.launch(self.root / "other.json", **{**self.arguments, "task": "other"})
+        factory.save(self.root / "acr.json", factory.new_task("acr", "acr"))
+        acr, acr_qa = factory.launch(self.root / "acr.json", **{**self.arguments, "task": "acr"})
+        self.assertEqual(len(FakeRex.sessions), 2)
+        self.assertEqual(record["session_id"], other["session_id"])
+        self.assertNotEqual(record["session_id"], acr["session_id"])
+        self.assertEqual({item["label"] for item in FakeRex.sessions}, {"factory-default", "factory-acr"})
+        self.assertTrue(qa["window_label"].startswith("task:qa-qa-"))
+        self.assertTrue(other_qa["window_label"].startswith("other:qa-qa-"))
+        self.finish(qa)
+        rex = factory.connect(record)
+        self.assertFalse(factory.tidy(self.path, rex, factory.load_task(self.path))["session_closed"])  # "other" runs in it.
+        self.finish(other_qa)
+        self.assertTrue(factory.tidy(self.root / "other.json", rex, factory.load_task(self.root / "other.json"))["session_closed"])
+        self.assertEqual([item["label"] for item in FakeRex.sessions], ["factory-acr"])
+
+    def test_cli_tidy_never_closes_the_line_session_under_a_launch(self):
+        # Review of #113: a CLI tidy holding only its task lock could kill the session another task was launching into.
+        record, qa = self.start()
+        self.finish(qa)
+        with factory.execution_lock(self.root):  # Another task of the line is mid-launch.
+            report, failed = factory.tidy_tasks(self.root)
+        self.assertFalse(failed)
+        self.assertEqual(report["task"], dict(closed=["qa"], running=[], session_closed=False))
+        self.assertEqual(len(FakeRex.sessions), 1)
+        report, failed = factory.tidy_tasks(self.root)
+        self.assertEqual((failed, report["task"]["session_closed"], FakeRex.sessions), (False, True, []))
+
+    def test_line_moves_only_a_task_with_nothing_running(self):
+        record, qa = self.start()
+        with self.assertRaisesRegex(factory.FactoryError, "assignments open"):
+            factory.move_line(self.path, "nanoclaw")
+        self.finish(qa)
+        factory.tidy(self.path, factory.connect(record), factory.load_task(self.path))
+        moved = factory.move_line(self.path, "nanoclaw")
+        self.assertEqual((moved["line"], moved["session_id"], moved["session_label"]), ("nanoclaw", None, "factory-nanoclaw"))
+        self.assertEqual(factory.load_task(self.path)["line"], "nanoclaw")
 
     def test_lost_assignment_history_refuses_another_live_launch(self):
         self.start()
@@ -430,7 +470,7 @@ class NativeLauncher(unittest.TestCase):
         self.assertEqual(FakeRex.sessions, [])
         saved = factory.load_task(self.path)
         self.assertIsNone(saved["session_id"])
-        self.assertNotEqual(saved["session_label"], record["session_label"])
+        self.assertEqual(saved["session_label"], factory.line_session_label("default"))
         self.assertEqual(saved["assignments"]["security"]["closed"]["state"], "failed")
         _, reconnected = self.start()
         self.assertEqual(reconnected["closed"]["state"], "exited")
@@ -512,7 +552,7 @@ class NativeLauncher(unittest.TestCase):
         with redirect_stdout(output):
             self.assertEqual(factory.main(["--state-dir", str(self.root), "tidy"]), 0)
         report = json.loads(output.getvalue())
-        self.assertEqual(report["task"], dict(closed=["qa"], running=[], session_closed=True))
+        self.assertEqual(report["task"], dict(closed=["qa"], running=[], session_closed=False))  # "other" still runs in it.
         self.assertEqual(report["other"]["running"], ["qa"])
         self.assertEqual(report["idle"], dict(closed=[], running=[], session_closed=False))
         output = StringIO()
@@ -1651,9 +1691,8 @@ class TaskAdmission(unittest.TestCase):
 
     def test_default_correction_limit_is_four(self):
         # Owner decision (#66): two corrections were too few before the architect weighs in.
-        arguments = dict(task="task", goal="Verify the example", repository=str(self.repo),
-                         acceptance=["docs/example.md#acceptance"])
-        record = factory.admit(self.path, **arguments)
+        record = factory.admit(self.path, task="task", goal="Verify the example", repository=str(self.repo),
+                               acceptance=["docs/example.md#acceptance"])
         self.assertEqual(factory.task_view(record)["allowances"]["correction"], dict(limit=4, used=0, remaining=4))
 
     def test_allowance_survives_new_worker_id_and_controller_restart(self):
@@ -2024,7 +2063,7 @@ class TaskAdmission(unittest.TestCase):
         self.assertTrue(factory.task_view(reviewed)["assignments"]["qa"]["result_current"])
 
     def test_cli_admit_pause_resume_and_missing_task(self):
-        result, output, errors = self.cli("admit", "--task", "task", "--goal", "Inspect",
+        result, output, errors = self.cli("admit", "--task", "task", "--goal", "Inspect", "--line", "nanoclaw",
                                           "--repo", str(self.repo), "--acceptance", "criteria.md")
         self.assertEqual((result, errors), (0, ""))
         self.assertEqual(json.loads(output)["allowances"]["correction"]["limit"], 4)
@@ -2138,7 +2177,7 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual((result, output), (1, ""))
         self.assertIn("restore the original task record", errors)
         self.assertEqual(self.path.read_bytes(), before)
-        result, output, errors = self.cli("admit", "--task", "new-task", "--goal", "Fixture",
+        result, output, errors = self.cli("admit", "--task", "new-task", "--goal", "Fixture", "--line", "nanoclaw",
             "--repo", str(self.root / "missing-checkout"), "--acceptance", "requirements.md")
         self.assertEqual((result, output), (1, ""))
         self.assertIn("--repo", errors)

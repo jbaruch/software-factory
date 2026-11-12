@@ -1184,6 +1184,27 @@ class ReadyRunner(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "^Job other/second: Repair job identity"):
             self.controller(value)
 
+    def test_a_runner_serves_its_own_line_only(self):
+        # Two coordinators share one state directory; one line's agents and broken records must not stall the other.
+        self.admit("other")
+        factory.move_line(self.directory / "other.json", "acr")
+        acr = self.controller(self.plan([self.job("busy", task="other")], workers=1, reserve=0))
+        self.assertEqual(acr.line, "acr")
+        self.assertEqual(self.tick(acr)["metrics"]["launched"], 1)
+        (self.directory / "broken.json").write_text("{not json")
+        mine = self.controller(self.plan([self.job()], workers=1, reserve=0))
+        self.assertEqual(mine.line, "default")
+        with factory.execution_lock(self.directory, "acr"):  # The other line holding its lock doesn't stop this one.
+            result = self.tick(mine)
+        self.assertEqual(result["metrics"]["launched"], 1)
+        self.assertEqual([(issue["task"], issue["line"]) for issue in result["issues"]], [("broken", None)])
+        self.assertNotIn(("other", "busy"), {(row["task"], row["id"]) for row in result["jobs"]})
+        with factory.execution_lock(self.directory):
+            with self.assertRaisesRegex(factory.FactoryError, "owns execution"):
+                self.tick(self.controller(self.plan([self.job("second")])))
+        with self.assertRaisesRegex(factory.FactoryError, "mixes acr, default"):
+            self.controller(self.plan([self.job("third"), self.job("fourth", task="other")]))
+
     def test_execution_lock_excludes_another_runner_and_manual_cli_launch(self):
         controller = self.controller(self.plan([self.job()]))
         original = (self.directory / "task.json").read_bytes()
@@ -1195,7 +1216,16 @@ class ReadyRunner(unittest.TestCase):
                 code = factory.main(["--state-dir", str(self.directory), "codex-start", "--task", "task",
                     "--id", "manual", "--role", "qa", "--goal", "Fixture", "--cwd", str(self.repo),
                     "--purpose", "work", "--codex", sys.executable, "--model", "fixture-model", "--effort", "high"])
-            self.assertEqual(code, 1)
+            # A busy lock is a retry, not a failure: a rotation dropped 26 plans that treated it as one.
+            self.assertEqual(code, factory.EXIT_BUSY)
+            self.assertIn("controller", error.getvalue())
+            plan_file = self.root / "busy-plan.json"
+            plan_file.write_text(json.dumps(self.plan([self.job()])))
+            error = StringIO()
+            with redirect_stderr(error), redirect_stdout(StringIO()):
+                code = runner.main(["--state-dir", str(self.directory), "--plan", str(plan_file), "--codex", sys.executable,
+                                    "--rex", sys.executable, "--server", "unix:///test.sock", "--once"])
+            self.assertEqual(code, factory.EXIT_BUSY)
             self.assertIn("controller", error.getvalue())
         self.assertEqual((self.directory / "task.json").read_bytes(), original)
         self.assertEqual(PlanRex.calls, [])

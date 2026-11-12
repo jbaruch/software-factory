@@ -446,7 +446,7 @@ def integrate(path, *, assignment_id, pr, review, required, gh, scripts, transpo
                 or str(gh) != intent["gh"] or str(scripts) != intent["scripts"]):
             raise factory.FactoryError("Existing integration ID has different immutable inputs")
     # Ordinary launch lock covers only brief submission and Rex launch/reconnect.
-    with factory.execution_lock(path.parent), factory.task_lock(path.parent, record["task"]):
+    with factory.execution_lock(path.parent, factory.task_line(record)), factory.task_lock(path.parent, record["task"]):
         current = factory.load_task(path)
         if fresh:
             if current != record:

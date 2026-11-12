@@ -181,6 +181,13 @@ class Runner:
                 raise factory.FactoryError("--from-writer requires read-only verification jobs (" + ", ".join(sorted(factory.VERIFIER_ROLES))
                                            + "), IDs distinct from the writer and an explicit dependency on it in every job")
         self.directory, self.binary = Path(directory).resolve(), Path(codex).resolve()
+        # A runner serves one factory line: its lock, its occupancy, its tidying and its blocking issues.
+        # A task not created yet has no line and waits for its admission.
+        lines = {line for task in {job["task"] for job in self.plan["jobs"]}
+                 if (line := factory.peek_line(self.directory / (task + ".json"))) is not None}
+        if len(lines) > 1:
+            raise factory.FactoryError("A plan serves one factory line; this one mixes " + ", ".join(sorted(lines)))
+        self.line = lines.pop() if lines else factory.DEFAULT_LINE
         self.claude = Path(claude).resolve() if claude else None
         self.grok = Path(grok).resolve() if grok else None
         self.antigravity = Path(antigravity).resolve() if antigravity else None
@@ -287,6 +294,9 @@ class Runner:
         self.tidy_issues = []
         paths = sorted(p for p in self.directory.glob("*.json") if re.fullmatch(SLUG, p.stem))
         for source in paths:
+            line = factory.peek_line(source)
+            if line is not None and line != self.line:
+                continue  # Another line's task: its own runner observes, collects and tidies it.
             try:
                 with factory.task_lock(self.directory, source.stem) as path:
                     record = factory.load_task(path)
@@ -337,7 +347,8 @@ class Runner:
                         self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
                     records[source.stem] = record
             except (factory.FactoryError, OSError, ValueError) as exc:
-                issues.append(dict(task=source.stem, reason=str(exc)))
+                # An unreadable record names no line, so it is reported without blocking this line.
+                issues.append(dict(task=source.stem, reason=str(exc), line=line))
         return records, phases, active, issues
 
     def refresh_capacity(self):
@@ -375,6 +386,10 @@ class Runner:
             key = (job["task"], job["id"])
             phase = phases.get(key)
             record = records.get(job["task"])
+            moved = factory.peek_line(self.directory / (job["task"] + ".json")) if record is None else None
+            if moved is not None and moved != self.line:
+                phases[key] = dict(state="blocked", reason=f"Task belongs to line {moved!r}; run it with that line's plans")
+                continue
             if record is None or record["admission"] is None:
                 reason = next((issue["reason"] for issue in issues if issue["task"] == job["task"]),
                               "Admit this task before executing its plan")
@@ -410,7 +425,7 @@ class Runner:
                 continue
             elif any(phases.get((job["task"], dependency), {}).get("state") not in {"completed", "approved"} for dependency in job["after"]):
                 reason = "Waiting for successful, current dependency reports and terminal processes"
-            elif issues:
+            elif any(issue["line"] == self.line for issue in issues):
                 reason = "Task-store occupancy is unavailable; repair the listed state before launching"
             elif len(active) >= limits["workers"]:
                 reason = "Worker limit is occupied, including unknown processes"
@@ -461,7 +476,7 @@ class Runner:
                     saved = factory.load_task(self.directory / (job["task"] + ".json"))
                 except (factory.FactoryError, OSError, ValueError) as read_error:
                     phases[key] = dict(state="unknown", reason=str(exc))
-                    issues.append(dict(task=job["task"], reason=str(read_error)))
+                    issues.append(dict(task=job["task"], reason=str(read_error), line=self.line))
                     records.pop(job["task"], None)
                     active.append((job["task"], request))
                     continue
@@ -483,7 +498,7 @@ class Runner:
 
 def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) -> dict:
     started = timer()
-    with factory.execution_lock(runner.directory):
+    with factory.execution_lock(runner.directory, runner.line):
         runner.select_writer_candidate()
         while True:
             result = runner.tick()
@@ -527,7 +542,7 @@ def main(argv=None):
         return 0 if result["result"] == "complete" else 1
     except (factory.FactoryError, native_codex.CodexProbeError, OSError, ValueError, TimeoutError) as exc:
         print("ready-runner: " + str(exc), file=sys.stderr)
-        return 1
+        return factory.EXIT_BUSY if isinstance(exc, factory.ExecutionBusy) else 1
 
 
 if __name__ == "__main__":
