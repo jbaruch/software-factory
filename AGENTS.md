@@ -23,32 +23,6 @@ The operator temporarily waives waiting for Claude quality review while its subs
 <!-- acr:begin id=038f1ca62f562183118d50b2dbc027ccfd9b70cba2a7bbee8860f50150df8273 source=github:jbaruch/coding-policy artifact=package-rules-69d19e3a2abcf3824356cce166d313ddcf0986a5c4dbda600377a60fcd426ae1 adapter=codex prefix=none -->
 ## ACR package: github:jbaruch/coding-policy
 
-### Rule: agent-delegation
-
-
-# Agent Delegation
-
-## Direct Work
-
-- A standalone agent does the task directly.
-- Never simulate team roles, briefs or reports in standalone work.
-- Task size or caution does not establish a team session.
-
-## Delegated Work
-
-- Authorized delegation uses configured Herdr-managed agents through their owner scripts.
-- Native subagent, spawn, task and team mechanisms are forbidden delegation routes, including tools, skills and CLI wrappers.
-- The restriction covers nested delegation, research, review and read-only work.
-- If the route or an eligible worker is unavailable, retain task ownership and use the authorized recovery or escalation route.
-- An unavailable route never authorizes native fallback.
-- Explicit role restrictions and independence requirements remain binding.
-
-## Optional Team Policy
-
-- Team execution requires the separately installed `jbaruch/herdr-policy` contract and verified session authority.
-- Installing that package alone does not create a team session or authorize dispatch.
-- Ordinary direct work requires no team runtime, ledger, report or hook.
-
 ### Rule: agent-worktree-isolation
 
 
@@ -174,7 +148,8 @@ The operator temporarily waives waiting for Claude quality review while its subs
 
 - CI must pass before merging — sole exception: `rules/ci-safety.md` Bootstrap-Red Carve-Out
 - PR title follows `<type>(<scope>): <imperative summary>` format
-- Add a changelog entry for user-visible changes
+- The PR title is the changelog line
+- Never add a CHANGELOG entry in a PR
 - Keep PRs focused — large PRs are hard to review and risky to merge
 
 ### Rule: context-artifacts
@@ -207,7 +182,7 @@ Apply only when a working path matches: rules/**/*.md, skills/**/SKILL.md, READM
 
 ## Required Read
 
-- Before writing plugin prose, maintaining its CHANGELOG, judging policy edge cases, debugging directives or auditing rules, or relying on any exception to this rule, read `.codex/skills/acr__jbaruch__coding-policy__coding-contracts/references/context-writing-style.md` in full.
+- Before writing plugin prose or its PR descriptions, judging policy edge cases, debugging directives or auditing rules, or relying on any exception to this rule, read `.codex/skills/acr__jbaruch__coding-policy__coding-contracts/references/context-writing-style.md` in full.
 - Its full text and named sections bind as rule content.
 - Resolve the reference within its owning installed plugin.
 - Missing or unreadable content stops the affected action until the plugin is repaired.
@@ -662,6 +637,18 @@ Apply only when a working path matches: skills/**, scripts/**, skills/**/*.sh, s
 
 # Simplicity
 
+## KISS and YAGNI
+
+- Choose the simplest design that solves the stated problem today.
+- Build nothing for a need nobody has today.
+- Overengineering is forbidden.
+- Add no option, flag, schema version, fallback, abstraction or extension point without a current caller or an observed failure.
+- One caller gets no abstraction.
+- One value gets no setting.
+- Future consumers justify no machinery.
+- Prefer deleting code, state and process over adding them.
+- Delete code, options and files a change leaves unused in that change.
+
 ## Before Implementation
 
 - State problem and smallest sufficient solution in conversation or PR.
@@ -669,13 +656,13 @@ Apply only when a working path matches: skills/**, scripts/**, skills/**/*.sh, s
 - Treat issue proposals as suggestions; explain simpler options' gaps before adopting machinery.
 - Justify custom state, recovery, coordination and abstractions with requirements and platform gaps.
 - Weigh maintenance, rollout and failures against likelihood and impact.
-- Future consumers justify no machinery.
 - Explain briefly.
 - Add no approval gate.
 
 ## During Review
 
 - Apply `rules/review-severity.md`.
+- Flag machinery added without the justification above as a `[policy mismatch]` against this rule.
 - Recommend smallest sufficient remedy.
 - Consider deletion or authorized policy narrowing before safeguards.
 - Keep policy binding until an authorized amendment takes effect.
