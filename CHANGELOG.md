@@ -1,6 +1,6 @@
 # Changelog
 
-## Next
+## 0.34.0 — 2026-11-11
 
 - The factory skill tells the coordinator to keep every line busy: write the next phase's plan as soon as an assignment settles, launch admitted work when a worker frees, and triage the next items when admitted work runs out. Twice in one night the owner had to ask why the lines were idle: finished writers had no verification plans, and no next wave was admitted. The skill described each phase but never made the next one the coordinator's duty.
 - Every Git call gets 60 seconds instead of 10, and a Git timeout now says so ("Git did not finish within N seconds (git VERB)") instead of "Cannot run Git". Starting the Codex sandbox alone took 1.9 to 6.3 seconds on the operator's Mac, and a plain `git rev-parse` timed out at 10 seconds during a loaded test run. A writer that completed 70 turns of work then failed its factory commit with "Cannot run Git" during the secret scan, its change staged but uncommitted.
