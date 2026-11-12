@@ -74,10 +74,6 @@ class Pane(unittest.TestCase):
         self.assertNotIn("\n", line)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReaderEvidence(unittest.TestCase):
     """A verifier's verdict needs a tool call behind it: two Grok qa runs answered after one turn of thought."""
 
@@ -108,3 +104,7 @@ class ReaderEvidence(unittest.TestCase):
         factory.check_reader_evidence("grok", [], self.args(write=True))
         factory.check_reader_evidence("grok", [], self.args(release="{}"))
         factory.check_reader_evidence("claude", [], self.args(), coordination=dict(question="fixture"))
+
+
+if __name__ == "__main__":
+    unittest.main()
