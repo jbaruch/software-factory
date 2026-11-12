@@ -505,9 +505,11 @@ class ReadyRunner(unittest.TestCase):
         self.finish("task", "first", outcome="completed", edit=True)
         candidate = factory.git_commit(str(self.repo), "HEAD")
         self.assertNotEqual(candidate, self.candidate)
+        # The commit waits for its --from-writer verification to become the selection; nothing needs action (#123).
         completed = self.tick(self.controller(plan))
-        self.assertEqual(completed["result"], "needs_action")
-        self.assertEqual(self.states(completed)[("task", "first")], "stale")
+        self.assertEqual(completed["result"], "complete")
+        self.assertEqual(self.states(completed)[("task", "first")], "completed")
+        self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"]["candidate"], self.candidate)
         saved = factory.load_task(self.directory / "task.json")["assignments"]["first"]
         self.assertEqual(saved["result"]["outcome"], "completed")
         self.assertEqual(saved["result"]["candidate"], candidate)
@@ -518,6 +520,19 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.states(conflict)[("task", "first")], "conflict")
         self.assertEqual(factory.git_commit(str(self.repo), "HEAD"), candidate)
         self.assertEqual(conflict["metrics"]["launched"], 0)
+
+    def test_verifier_in_the_writer_plan_never_reviews_the_old_candidate(self):
+        # Only --from-writer selects the writer's commit; a dependent job on the plan's inputs refuses to launch.
+        plan = self.plan([self.job(role="backend", write=True, commit_message="feat(fixture): Deliver an explicit change"),
+                          self.job("qa", after=["first"])])
+        self.assertEqual(self.tick(self.controller(plan))["metrics"]["launched"], 1)
+        self.finish("task", "first", outcome="completed", edit=True)
+        result = self.tick(self.controller(plan))
+        self.assertEqual(result["result"], "needs_action")
+        self.assertEqual(self.states(result), {("task", "first"): "completed", ("task", "qa"): "blocked"})
+        self.assertIn("current inputs", result["jobs"][1]["reason"])
+        self.assertEqual(result["metrics"]["launched"], 0)
+        self.assertNotIn("qa", factory.load_task(self.directory / "task.json")["assignments"])
 
     def test_writer_to_verifier_handoff_never_runs_clean_filters_on_the_host(self):
         source = self.repo / "sample.audit"
@@ -544,7 +559,7 @@ class ReadyRunner(unittest.TestCase):
         self.assertFalse(effect.exists())
         subprocess.run(["git", "-C", str(self.repo), "config", "filter.audit.clean",
                         shlex.quote(sys.executable) + " -B filter.py"], check=True)
-        self.assertEqual(self.tick(self.controller(plan))["result"], "needs_action")
+        self.assertEqual(self.tick(self.controller(plan))["result"], "complete")
         self.candidate = factory.git_commit(str(self.repo), "HEAD")
         with factory.task_lock(self.directory, "task") as path:
             factory.set_inputs(path, candidate=self.candidate, requirements="requirements-1")

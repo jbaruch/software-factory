@@ -39,7 +39,8 @@ private when goals or paths are sensitive; never include credentials.
 
 The job fields, an example plan and the per-harness rules ship with the skill in
 [the ready-plan reference](../skills/factory/references/ready-plan.md), so an installed
-coordinator can read them. After a writer creates a commit, explicitly select that
+coordinator can read them. A writer plan reports `complete` once the writer's commit
+is collected; the commit is not yet the task's selection. Explicitly select that
 produced candidate and submit a verification phase, or use the opt-in handoff below.
 The original writer plan then reports stale.
 
