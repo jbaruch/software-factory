@@ -692,7 +692,7 @@ class Integration(unittest.TestCase):
 
     def test_bad_frozen_packet_versions_and_original_worker_binding_refuse(self):
         record = factory.load_task(self.path)
-        for version in (None, 0, 3, True, "1"):
+        for version in (None, 0, 4, True, "1"):
             with self.assertRaises(factory.FactoryError):
                 release_evidence.validate({**self.frozen, "schema_version": version}, record)
             with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
@@ -706,10 +706,25 @@ class Integration(unittest.TestCase):
         self.assertIn("ui-design", release_evidence.render(self.frozen))
         identity, item = next(iter(record["assignments"].items()))
         row = dict(id=identity, role=item["request"]["role"], purpose=item["request"].get("purpose"), outcome=None, current=False)
-        release_evidence.validate({**self.frozen, "specialists": [row]}, record)
-        for roster in (None, [{**row, "role": "ui-design-x"}], [{**row, "id": "absent"}], [{**row, "extra": 1}]):
+        # Version 3 names the candidate each specialist judged, so the judge can carry an approval over
+        # code a replay or correction left alone; version 2 briefs, recorded before it, still validate.
+        release_evidence.validate({**self.frozen, "schema_version": 2, "specialists": [row]}, record)
+        self.assertNotIn("earlier `candidate`", release_evidence.render({**self.frozen, "schema_version": 2, "specialists": [row]}))
+        self.assertIn("earlier `candidate`", release_evidence.render(self.frozen))
+        self.assertEqual(self.frozen["schema_version"], 3)
+        judged = {row["id"]: row["candidate"] for row in release_evidence.specialists(record)}
+        self.assertEqual(judged, {key: None if value.get("result") is None else value["result"]["candidate"]
+                                  for key, value in record["assignments"].items()})
+        self.assertTrue(any(judged.values()))
+        for candidate in (None, "a" * 40, "b" * 64):
+            release_evidence.validate({**self.frozen, "specialists": [{**row, "candidate": candidate}]}, record)
+        for roster in (None, [{**row, "role": "ui-design-x", "candidate": None}], [{**row, "id": "absent", "candidate": None}],
+                       [{**row, "candidate": None, "extra": 1}], [row], [{**row, "candidate": "HEAD"}],
+                       [{**row, "candidate": 1}], [{**row, "candidate": "A" * 40}]):
             with self.subTest(roster=roster), self.assertRaises(factory.FactoryError):
                 release_evidence.validate({**self.frozen, "specialists": roster}, record)
+        with self.assertRaises(factory.FactoryError):
+            release_evidence.validate({**self.frozen, "schema_version": 2, "specialists": [{**row, "candidate": None}]}, record)
         self.launch_integration()
         record = factory.load_task(self.path)
         intent = integration.intent_of(record["assignments"]["merge"])
