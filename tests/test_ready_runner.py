@@ -1216,7 +1216,16 @@ class ReadyRunner(unittest.TestCase):
                 code = factory.main(["--state-dir", str(self.directory), "codex-start", "--task", "task",
                     "--id", "manual", "--role", "qa", "--goal", "Fixture", "--cwd", str(self.repo),
                     "--purpose", "work", "--codex", sys.executable, "--model", "fixture-model", "--effort", "high"])
-            self.assertEqual(code, 1)
+            # A busy lock is a retry, not a failure: a rotation dropped 26 plans that treated it as one.
+            self.assertEqual(code, factory.EXIT_BUSY)
+            self.assertIn("controller", error.getvalue())
+            plan_file = self.root / "busy-plan.json"
+            plan_file.write_text(json.dumps(self.plan([self.job()])))
+            error = StringIO()
+            with redirect_stderr(error), redirect_stdout(StringIO()):
+                code = runner.main(["--state-dir", str(self.directory), "--plan", str(plan_file), "--codex", sys.executable,
+                                    "--rex", sys.executable, "--server", "unix:///test.sock", "--once"])
+            self.assertEqual(code, factory.EXIT_BUSY)
             self.assertIn("controller", error.getvalue())
         self.assertEqual((self.directory / "task.json").read_bytes(), original)
         self.assertEqual(PlanRex.calls, [])

@@ -542,7 +542,7 @@ def main(argv=None):
         return 0 if result["result"] == "complete" else 1
     except (factory.FactoryError, native_codex.CodexProbeError, OSError, ValueError, TimeoutError) as exc:
         print("ready-runner: " + str(exc), file=sys.stderr)
-        return 1
+        return factory.EXIT_BUSY if isinstance(exc, factory.ExecutionBusy) else 1
 
 
 if __name__ == "__main__":

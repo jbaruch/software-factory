@@ -131,7 +131,8 @@ lines refuses. It holds that line's execution lock (`.execution.lock` for `defau
 counts against `workers`/`tasks` and tidies only that line's tasks; another line's
 records and running agents never block it. An unreadable record names no line, so it
 is reported in `issues` without blocking. Other controllers and manual launch
-commands of the same line refuse while it owns execution. Status,
+commands of the same line refuse while it owns execution. They exit 75 (`EX_TEMPFAIL`) for that refusal, so a
+caller retries instead of treating it as a failure. Status,
 capture, result collection, admission, input selection and pause/resume remain
 available under their task locks. After the controller exits, manual launches
 retain their explicit-launch behavior; a later runner counts them.

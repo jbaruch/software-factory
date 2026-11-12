@@ -142,6 +142,14 @@ LINE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 DEFAULT_LINE = "default"
 
 
+class ExecutionBusy(FactoryError):
+    """Another launcher holds the execution lock: try again later, nothing failed."""
+
+
+# sysexits EX_TEMPFAIL: a busy execution lock is a retry, not a failure.
+EXIT_BUSY = 75
+
+
 @contextmanager
 def execution_lock(directory, line=DEFAULT_LINE):
     """Serialize one line's controller/CLI launch decisions; other lines launch in parallel."""
@@ -153,7 +161,7 @@ def execution_lock(directory, line=DEFAULT_LINE):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise FactoryError("Another launcher or ready-work controller owns execution; wait for it to finish before starting more work") from None
+            raise ExecutionBusy("Another launcher or ready-work controller owns execution; wait for it to finish before starting more work") from None
         yield
     finally:
         os.close(fd)
@@ -3303,7 +3311,7 @@ def main(argv=None):
                 print(json.dumps(status(rex, record, assignment), indent=2))
     except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         print("factory: " + str(exc), file=sys.stderr)
-        return 1
+        return EXIT_BUSY if isinstance(exc, ExecutionBusy) else 1
     return 0
 
 
