@@ -133,6 +133,19 @@ def writer(request):
     return not native_request(request) or "--write" in request["command"]
 
 
+def settled_current(record, assignment):
+    """Whether a collected result still answers the task's selected inputs.
+
+    A completed writer's commit becomes the selection only when its --from-writer verification
+    plan runs, so until then it answers the inputs it launched on. Reported stale, every
+    completed writer plan settled needs_action with nothing to act on (#123).
+    """
+    result = assignment["result"]
+    return factory.result_current(record, result) or (
+        result["outcome"] == "completed" and writer(assignment["request"])
+        and assignment["request"].get("inputs") == record["inputs"])
+
+
 def reserved(request):
     return (request.get("purpose") in {"correction", "investigation"}
             or (request["role"] in RESERVED_ROLES and not writer(request)))
@@ -333,7 +346,7 @@ class Runner:
                                     assignment = record["assignments"][identity]
                                 result = assignment["result"]
                                 if result is not None:
-                                    phase["state"] = result["outcome"] if factory.result_current(record, result) else "stale"
+                                    phase["state"] = result["outcome"] if settled_current(record, assignment) else "stale"
                             phases[key] = phase
                         except factory.FactoryError as exc:
                             phases[key] = dict(state="blocked" if terminal else "unknown", reason=str(exc))
