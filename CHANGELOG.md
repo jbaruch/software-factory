@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.36.1 — 2026-11-12
+
+- Fix three machinery failures from the ACR line (#119)
+- docs(task-state): Add the required --line to the admit example (#118)
+
 ## 0.36.0 — 2026-11-12
 
 - Give each factory line its own Rex session, lock and runner scope (#113)
