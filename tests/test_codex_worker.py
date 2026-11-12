@@ -487,7 +487,9 @@ class NativeResults(unittest.TestCase):
         self.spawn = with_cache
         receipt = self.execute()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["commit"]["state"], receipt["commit"]["discarded"]), ("created", ["cache/feature.cpython-311.pyc"]))
+        # The ignored file goes first; the directory it leaves empty goes with the empty-directory sweep.
+        self.assertEqual((receipt["commit"]["state"], receipt["commit"]["discarded"]),
+                         ("created", ["cache/feature.cpython-311.pyc", "cache/"]))
         self.assertFalse((self.repo / "cache").exists())
         self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
         factory_commit.check_commit_receipt(receipt, self.args, str(self.repo))
@@ -495,6 +497,38 @@ class NativeResults(unittest.TestCase):
             with self.subTest(discarded=damaged), self.assertRaisesRegex(factory.FactoryError, "commit evidence differs"):
                 factory_commit.check_commit_receipt({**receipt, "commit": {**receipt["commit"], "discarded": damaged}},
                                                     self.args, str(self.repo))
+
+    def test_writer_ignored_link_goes_and_its_target_stays(self):
+        # #115: ignored outputs are removed on the host without Git; a link must never be followed out of the checkout.
+        outside = self.root / "outside.txt"
+        outside.write_text("keep me\n")
+        (self.repo / ".gitignore").write_text("linked\n.codex/\n")
+        self.assertEqual(factory.git_run(".", "add", ".gitignore").returncode, 0)
+        self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                         "-c", "commit.gpgsign=false", "commit", "-qm", "Ignore outputs").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.writer()
+        original_spawn = self.spawn
+        async def with_outputs(*command, **options):
+            (self.repo / "linked").symlink_to(outside)
+            (self.repo / ".codex" / "skills").mkdir(parents=True)
+            (self.repo / ".codex" / "skills" / "SKILL.md").write_text("realized\n")
+            return await original_spawn(*command, **options)
+        self.spawn = with_outputs
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertFalse((self.repo / "linked").is_symlink())
+        self.assertFalse((self.repo / ".codex").exists())
+        self.assertEqual(outside.read_text(), "keep me\n")
+
+    def test_writer_reporting_findings_names_its_outcome(self):
+        # #116: two writers returned findings after a green gate and got a misleading working-tree-filter error.
+        self.writer(outcome="findings")
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("reported findings, so the factory committed nothing", receipt["error"])
+        self.assertIn("factory.py reset", receipt["error"])
+        self.assertIsNone(receipt["commit"])
 
     def test_writer_empty_directories_are_discarded_so_the_commit_collects(self):
         # Observed (#68): nanoclaw's vitest left empty directories that Git cannot track,
