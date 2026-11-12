@@ -13,6 +13,8 @@ Delivery starts after independent verifiers approve the task's current candidate
    python3 -B "$SKILL_DIR/runtime/factory.py" claude-collect --task TASK --id release
    ```
 
+   The judgment sees the task's specialist roster and returns `findings` naming any specialist the change's effects call for but that never approved the current candidate. Run each named specialist, then judge again under a new ID; a missing specialist is not an escalation.
+
    `RELEASE-SKILL` is coding-policy's release skill where ACR or Tessl installed it: `.codex/skills/acr__jbaruch__coding-policy__release` or `.tessl/plugins/jbaruch/coding-policy/skills/release`. `codex-start`, `grok-start` and `antigravity-start` take the same `--release-pr`, `--gh` and `--release-scripts` flags.
 
 3. Merge, naming every required approval with `--after`. Where the repository meets the [prerequisites](#prerequisites), integrate:

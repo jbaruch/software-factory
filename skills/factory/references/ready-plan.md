@@ -54,7 +54,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 
 After a writer is collected, run a verification plan with `--from-writer WRITER_ID`:
 
-- The plan may cover several tasks whose writers share that ID, so one runner serves every line. Every job is read-only `qa`, `security`, `code-review` or `test-automation`, uses an ID distinct from the writer and names the writer in `after`. The runner checks every task's writer before it moves any task's inputs, so one refused task changes none.
+- The plan may cover several tasks whose writers share that ID, so one runner serves every line. Every job is a read-only verifier (`qa`, `code-review`, `test-automation`, `security`, `ui-design`, `accessibility`, `data-engineering`, `sre` or `performance`), uses an ID distinct from the writer and names the writer in `after`. The runner checks every task's writer before it moves any task's inputs, so one refused task changes none.
 - Keep the plan's `candidate`/`requirements` at the writer's original input pair. The runner selects the writer's produced commit as the task's inputs and retargets the plan in memory.
 - Restart with the same plan and writer ID; selection is reused, never repeated.
 

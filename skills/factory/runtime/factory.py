@@ -2386,6 +2386,12 @@ def carries_judgment(args):
     return any(getattr(args, kind + suffix) is not None for kind in ("delivery", "release") for suffix in ("_evidence", "_evidence_digest"))
 
 
+# Specialists whose read-only verdict counts as an approval: the verifiers, plus every effect specialist the
+# release judgment checks for. One set serves --from-writer plans and integration.
+VERIFIER_ROLES = frozenset({"qa", "code-review", "test-automation", "security", "ui-design", "accessibility",
+                            "data-engineering", "sre", "performance"})
+
+
 def called_tool(harness, event):
     """Whether one native event calls a tool: the events a pane shows as `→` lines."""
     if harness == "antigravity" and isinstance(event, str):

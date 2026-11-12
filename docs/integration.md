@@ -245,7 +245,8 @@ source checkout; the minimal isolated Codex worker needs the release modules onl
 when these opt-in evidence arguments are present. The Claude, Grok and Antigravity
 workers always import them.
 
-Selected `qa`, `security`, `code-review`, `test-automation` and `release` approvals may also come from
+Selected approvals from any verifier role (`qa`, `code-review`, `test-automation`, `security`, `ui-design`,
+`accessibility`, `data-engineering`, `sre`, `performance`) and `release` judgments may also come from
 strictly collected read-only Claude (version-1), Grok (version-2) or Antigravity
 (version-1) execution receipts and their original version-1 event envelopes.
 Claude, Grok and Antigravity writers are contributors like Codex writers. The

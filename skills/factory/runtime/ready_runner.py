@@ -19,8 +19,6 @@ POLL_SECONDS = 5
 CAPACITY_MAX_AGE = 60
 PROBE_TIMEOUT = 30
 RESERVED_ROLES = {"qa", "code-review", "investigator", "judge", "standby-reasoner"}
-# Read-only roles a writer handoff may launch; integration accepts their approvals.
-VERIFIER_ROLES = {"qa", "security", "code-review", "test-automation"}
 JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
 LIMIT_FIELDS = {"workers", "tasks", "reserve_workers", "minimum_remaining_percent"}
@@ -177,10 +175,10 @@ class Runner:
         if from_writer is not None:
             jobs = self.plan["jobs"]
             if (not isinstance(from_writer, str) or not re.fullmatch(SLUG, from_writer) or not jobs
-                    or any(job["role"] not in VERIFIER_ROLES
+                    or any(job["role"] not in factory.VERIFIER_ROLES
                            or job["write"] or job["commit_message"] is not None
                            or job["id"] == from_writer or from_writer not in job["after"] for job in jobs)):
-                raise factory.FactoryError("--from-writer requires read-only verification jobs (" + ", ".join(sorted(VERIFIER_ROLES))
+                raise factory.FactoryError("--from-writer requires read-only verification jobs (" + ", ".join(sorted(factory.VERIFIER_ROLES))
                                            + "), IDs distinct from the writer and an explicit dependency on it in every job")
         self.directory, self.binary = Path(directory).resolve(), Path(codex).resolve()
         self.claude = Path(claude).resolve() if claude else None
