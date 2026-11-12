@@ -243,7 +243,7 @@ class GrokWorker(unittest.TestCase):
         self.assertIn("--no-subagents", command)
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
         self.assertNotIn("--sandbox", command)
-        self.assertEqual(command[command.index("--tools") + 1], "read_file")
+        self.assertNotIn("--tools", command)  # A reviewer in its throwaway checkout gets every built-in tool.
         # Observed live (grok 1.0.77): use_tool reached MCP servers under --tools read_file; this rule refused it.
         self.assertEqual(command[command.index("--deny") + 1], "mcp__*")
         self.assertEqual(command[command.index("--prompt-file") + 1], str(self.args.brief))

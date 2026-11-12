@@ -16,7 +16,7 @@ from factory import decode_json, RESULT_OUTCOMES
 from codex_worker import native_environment, stop_child
 
 API_KEY_ENVIRONMENT = ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
-# The reviewer's tool interface. Operator policy runs agents unconfined, so this is not a fence.
+# The metadata probes' tool interface. Assignments, reviewers included, get every built-in tool.
 READ_OPTIONS = ("--tools", "read_file")
 
 

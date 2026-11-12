@@ -61,6 +61,22 @@ def events(cwd, session=SESSION):
                  modelUsage={MODEL: dict(provider="firstParty", canonicalModel=MODEL, costBasis="list", costUSD=0.01, inputTokens=2, outputTokens=20)})]
 
 
+def in_checkout(process, options):
+    """A reviewer runs in its throwaway checkout with the review tools; Claude reports both in its init event."""
+    if options.get("cwd", ".") == ".":
+        return process  # Writers and coordination answers run in place.
+    def moved(line):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return line
+        if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
+            return (json.dumps({**event, "cwd": options["cwd"], "tools": list(native_claude.REVIEW_TOOLS)}) + "\n").encode()
+        return line
+    process.lines = iter([moved(line) for line in process.lines])
+    return process
+
+
 def read_events(cwd, session=SESSION):
     """A reader that read a file before its result; a verdict without any read is refused."""
     stream, path = events(cwd, session), str(Path(cwd) / "README.md")
@@ -681,7 +697,9 @@ class ClaudeWorker(unittest.TestCase):
         previous = Path.cwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, previous)
-        self.events = read_events(str(self.repo), self.args.native_session)
+        # A reviewer runs in its throwaway checkout with the review tools.
+        self.events = read_events(str(factory.reader_checkout_path(self.args.receipt)), self.args.native_session)
+        self.events[0]["tools"] = list(native_claude.REVIEW_TOOLS)
         self.process = FakeProcess(self.events)
         self.spawns = []
         self.probes = []
@@ -701,7 +719,7 @@ class ClaudeWorker(unittest.TestCase):
     async def spawn(self, *command, **options):
         self.prompt = options["stdin"].read().decode()
         self.spawns.append((command, options))
-        return self.process
+        return in_checkout(self.process, options)
 
     def probe(self, binary, cwd) -> dict:
         self.probes.append((binary, cwd))
@@ -867,7 +885,8 @@ class ClaudeWorker(unittest.TestCase):
         with patch.object(native_claude, "parse_execution", side_effect=native_claude.ClaudeProbeError("Unknown subtype")):
             self.assertEqual(self.execute()["state"], "failed")
         native = native_claude.parse_execution(claude_worker.read_events(self.args.events),
-            session_id=self.args.native_session, cwd=str(self.repo), model=MODEL, max_turns=3)
+            session_id=self.args.native_session, cwd=str(factory.reader_checkout_path(self.args.receipt)),
+            model=MODEL, max_turns=3, checkout=True)
         self.assertEqual(native["report"]["outcome"], "approved")
         before = (self.path.read_bytes(), self.args.receipt.read_bytes(), self.args.events.read_bytes())
         with self.assertRaises(factory.FactoryError):
@@ -1089,7 +1108,7 @@ class ClaudeApprovals(unittest.TestCase):
             "{brief_sha256}":assignment["request"]["instructions_sha256"],"{candidate}":record["inputs"]["candidate"],
             "{requirements}":record["inputs"]["requirements"],"{repository_identity}":json.dumps(record["admission"]["repository_identity"],sort_keys=True)}
         self.args=claude_worker.parser().parse_args([replacements.get(part,part) for part in command[4:]])
-        async def spawn(*command,**options):return FakeProcess(read_events(str(f.repo)))
+        async def spawn(*command,**options):return in_checkout(FakeProcess(read_events(str(f.repo))),options)
         def probe(binary,cwd):
             return dict(schema_version=1,kind="claude-native-auth",harness="claude",binary=str(binary),cwd=str(cwd),
                 cli_version="2.1.319 (Claude Code)",started_at=1000,observed_at=1000,probe_seconds=0,
@@ -1146,7 +1165,7 @@ class ClaudeApprovals(unittest.TestCase):
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = claude_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
         async def spawn(*command, **options):
-            return FakeProcess(events(str(f.repo), self.RELEASE_SESSION))
+            return in_checkout(FakeProcess(events(str(f.repo), self.RELEASE_SESSION)), options)
         def probe(binary, cwd):
             return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
                 cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,

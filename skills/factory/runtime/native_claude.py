@@ -155,7 +155,9 @@ def validate_auth(observation, binary, cwd):
 # the strict decoder still refuses any shape it does not recognize.
 MINIMUM_VERSION = (2, 1, 319)
 # Tool lists exactly as Claude Code reports them in its init event.
-READ_TOOLS = ["Read", "StructuredOutput"]
+READ_TOOLS = ["Read", "StructuredOutput"]  # Coordination answers, and reviewers before they had a checkout.
+# A reviewer works in a throwaway checkout of the candidate, so it may run tests and commands there.
+REVIEW_TOOLS = ["Bash", "Glob", "Grep", "Read", "StructuredOutput"]
 WRITE_TOOLS = ["Bash", "Edit", "Glob", "Grep", "Read", "StructuredOutput", "Write"]
 
 
@@ -187,21 +189,24 @@ def write_command(model, effort, session, turns):
 
 
 def read_command(model, effort, session, turns, coordination=None):
-    """A read-only specialist; a bounded coordination answer extends its report schema."""
+    """A reviewer in its throwaway checkout, or a read-only coordination answer with an extended schema."""
     from codex_worker import outcome_schema
-    return ["--safe-mode", "--print", "--tools", "Read",
+    tools = ["Read"] if coordination else ["Read", "Glob", "Grep", "Bash"]
+    prompt = ("Use only Read and StructuredOutput. Do not delegate, execute commands or change files." if coordination else
+              "This checkout is a throwaway copy of the candidate: read it, search it and run its tests or other commands "
+              "as the assignment needs. Do not delegate, and do not change Git state.")
+    return ["--safe-mode", "--print", "--tools", *tools,
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--disallowedTools", "mcp__*", "--disable-slash-commands", "--no-chrome",
             "--permission-mode", "bypassPermissions", "--permission-prompts", "none",
             "--model", model, "--effort", effort, "--session-id", session,
             "--max-turns", str(turns), "--no-session-persistence",
-            "--system-prompt", "You are an independent read-only specialist. Follow the supplied assignment. "
-            "Use only Read and StructuredOutput. Do not delegate, execute commands or change files.",
+            "--system-prompt", "You are an independent read-only specialist. Follow the supplied assignment. " + prompt,
             "--json-schema", json.dumps(outcome_schema(coordination)), "--output-format", "stream-json",
             "--verbose", "--include-hook-events"]
 
 
-def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, coordination=None):
+def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, coordination=None, checkout=False):
     """Decode the observed native lifecycle without supplying process/provenance authority."""
     def refuse() -> NoReturn:
         raise ClaudeProbeError("Unsupported or conflicting Claude lifecycle; inspect the original stream and pane without retrying")
@@ -213,7 +218,7 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
         return text(identity) and tools.get(identity) == "Bash"
     def known_task(identity):
         return text(identity) and identity in tasks
-    expected_tools = WRITE_TOOLS if writer else READ_TOOLS
+    expected_tools = WRITE_TOOLS if writer else REVIEW_TOOLS if checkout else READ_TOOLS
     callable_tools = set(expected_tools)
     report, final, pending, tools, rates = None, None, {}, {}, []
     initialized, denied, tasks, started = False, {}, set(), set()
