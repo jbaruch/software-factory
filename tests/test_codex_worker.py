@@ -521,6 +521,27 @@ class NativeResults(unittest.TestCase):
         self.assertFalse((self.repo / ".codex").exists())
         self.assertEqual(outside.read_text(), "keep me\n")
 
+    def test_writer_unremovable_ignored_output_names_itself(self):
+        # Review of #119: a read-only ignored tree raised a raw OSError instead of the discard refusal.
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        self.assertEqual(factory.git_run(".", "add", ".gitignore").returncode, 0)
+        self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                         "-c", "commit.gpgsign=false", "commit", "-qm", "Ignore modules").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.writer()
+        original_spawn = self.spawn
+        locked = self.repo / "node_modules" / "pkg"
+        async def with_locked_tree(*command, **options):
+            locked.mkdir(parents=True)
+            (locked / "index.js").write_text("module.exports = 1\n")
+            locked.chmod(0o555)
+            return await original_spawn(*command, **options)
+        self.spawn = with_locked_tree
+        self.addCleanup(lambda: locked.exists() and locked.chmod(0o755))
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("Cannot discard the writer's ignored output", receipt["error"])
+
     def test_writer_reporting_findings_names_its_outcome(self):
         # #116: two writers returned findings after a green gate and got a misleading working-tree-filter error.
         self.writer(outcome="findings")

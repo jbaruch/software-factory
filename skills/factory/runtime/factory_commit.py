@@ -521,10 +521,15 @@ def discard(root, entries):
         if (".." in Path(entry).parts or Path(entry).is_absolute()
                 or any(parent.is_symlink() for parent in target.parents if parent != root and root in parent.parents)):
             raise factory.FactoryError("A writer's ignored output sits under a link or outside its checkout; inspect it before another attempt")
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+        except OSError as exc:
+            # A read-only tree (a node_modules with 0555 directories) must name itself, not pass as I/O trouble.
+            raise factory.FactoryError(f"Cannot discard the writer's ignored output {entry!r} ({exc.strerror}); "
+                                       "inspect it before another attempt") from None
 
 
 def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
