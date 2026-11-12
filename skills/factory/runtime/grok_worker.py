@@ -134,12 +134,13 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         with os.fdopen(fd, "w") as stream:
             environment = native_grok.environment()
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
-                # Writers get every built-in tool and the factory commit contract; reviewers get only the read tool.
+                # Writers get every built-in tool and the factory commit contract.
                 "--permission-mode", "bypassPermissions",
                 # Grok loads the operator's MCP servers (homekit, browser, nanoclaw) whatever --tools says and
                 # reaches them through use_tool; the deny rule refuses every MCP call, even under bypass (#85).
                 "--deny", "mcp__*",
-                *(("--rules", factory_commit.WRITER_CONTRACT) if args.write else native_grok.READ_OPTIONS),
+                # A reviewer works in its throwaway checkout, so it gets every built-in tool too and may run tests.
+                *(("--rules", factory_commit.WRITER_CONTRACT) if args.write else ()),
                 "--max-turns", str(args.turns),
                 "--model", args.model, "--reasoning-effort", args.effort, "--session-id", args.native_session,
                 "--output-format", "streaming-json", "--json-schema", json.dumps(outcome_schema()),

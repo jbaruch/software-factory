@@ -796,8 +796,9 @@ class ReadyRunner(unittest.TestCase):
         args = claude_worker.parser().parse_args([replacements.get(part, part) for part in request["command"]][4:])
         report = dict(outcome=outcome, artifacts=["fixture/evidence.txt"])
         session, model = args.native_session, args.model
-        events = [dict(type="system", subtype="init", cwd=str(args.cwd), session_id=session, model=model,
-                       tools=list(native_claude.READ_TOOLS), mcp_servers=[], permissionMode="dontAsk", slash_commands=[],
+        # A reviewer runs in its throwaway checkout with the review tools.
+        events = [dict(type="system", subtype="init", cwd=str(factory.reader_checkout_path(args.receipt)), session_id=session,
+                       model=model, tools=list(native_claude.REVIEW_TOOLS), mcp_servers=[], permissionMode="dontAsk", slash_commands=[],
                        apiKeySource="none", claude_code_version="2.1.319", additional_directories=[]),
                   dict(type="assistant", session_id=session, parent_tool_use_id=None,
                        message=dict(model=model, content=[dict(type="tool_use", id="read-1", name="Read",

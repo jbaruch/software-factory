@@ -1,6 +1,7 @@
 """One explicit native Claude assignment, reviewer or writer, with retained original events."""
 import argparse
 import asyncio
+import contextlib
 import hashlib
 from io import StringIO
 import json
@@ -109,8 +110,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         native_claude.validate_auth(observation, binary, args.cwd)
     except native_claude.ClaudeProbeError as exc:
         raise factory.FactoryError(str(exc)) from None
-    # Version 1 reviews, version 2 writes and version 3 answers one bounded coordination question.
-    receipt = dict(schema_version=2 if args.write else 3 if coordination else 1, kind="claude-execution", state="starting", job=args.job,
+    # Version 2 writes, version 3 answers one bounded coordination question and version 4 reviews in a
+    # throwaway checkout where it may run commands (version 1 reviewed in place with Read only).
+    reviewer = not args.write and coordination is None
+    receipt = dict(schema_version=2 if args.write else 3 if coordination else 4, kind="claude-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -122,6 +125,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
     if args.write:
         # Version 2 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
+    if reviewer:
+        receipt.update(checkout=str(factory.reader_checkout_path(args.receipt)))
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         factory.save(args.receipt, receipt, exclusive=True)
@@ -129,7 +134,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         os.close(fd)
         raise
     started, process, events = timer(), None, []
+    checkouts, workdir = contextlib.ExitStack(), Path(".")
     try:
+        if reviewer:
+            workdir = checkouts.enter_context(factory.reader_checkout(
+                args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
             environment = native_claude.environment()
             # A private file provides EOF without argv limits or pipe backpressure.
@@ -138,7 +147,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                 prompt.seek(0)
                 command = (native_claude.write_command(args.model, args.effort, args.native_session, args.turns) if args.write
                            else native_claude.read_command(args.model, args.effort, args.native_session, args.turns, coordination))
-                process = await spawn(str(binary), *command, cwd=".", env=environment, limit=NATIVE_LINE_LIMIT,
+                process = await spawn(str(binary), *command, cwd=str(workdir), env=environment, limit=NATIVE_LINE_LIMIT,
                     stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
                 retained_bytes = 0
@@ -170,10 +179,14 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Claude exited unsuccessfully; inspect its retained events and original Rex pane")
-        native = native_claude.parse_execution(events, session_id=args.native_session, cwd=str(args.cwd), model=args.model,
-                                               max_turns=args.turns, writer=args.write, coordination=coordination)
+        native = native_claude.parse_execution(events, session_id=args.native_session,
+                                               cwd=receipt["checkout"] if reviewer else str(args.cwd), model=args.model,
+                                               max_turns=args.turns, writer=args.write, coordination=coordination,
+                                               checkout=reviewer)
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
         factory.check_reader_evidence("claude", events, args, coordination)
+        if reviewer:
+            factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
@@ -196,6 +209,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         if process is not None:
             await stop_child(process)
             receipt["exit_code"] = process.returncode
+        try:
+            checkouts.close()  # Only after the native process has stopped.
+        except factory.FactoryError as exc:
+            receipt.update(state="failed", error="Cannot remove the reader checkout " + receipt["checkout"]
+                           + "; remove it with git worktree remove --force --force before another attempt: " + str(exc))
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)
         factory.save(args.receipt, receipt)
     return receipt

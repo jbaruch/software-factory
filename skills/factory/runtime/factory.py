@@ -2215,7 +2215,8 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Restore original private Claude receipt and brief before collection") from None
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] != (2 if args.write else 3 if args.decision is not None else 1)
+            or receipt["schema_version"] not in ((2,) if args.write else (3,) if args.decision is not None else (1, 4))
+            or (receipt["schema_version"] == 4 and receipt.get("checkout") != str(reader_checkout_path(args.receipt)))
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
                                 or "commit" not in receipt))
@@ -2264,9 +2265,10 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
                 coordination_evidence.validate_claude_judge(coordination, args.model, args.effort)
         elif not args.write:
             review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
+        checkout = receipt["schema_version"] == 4
         native = native_claude.parse_execution(claude_worker.read_events(args.events),
-            session_id=args.native_session, cwd=request["cwd"], model=args.model, max_turns=args.turns,
-            writer=args.write, coordination=coordination)
+            session_id=args.native_session, cwd=receipt["checkout"] if checkout else request["cwd"], model=args.model,
+            max_turns=args.turns, writer=args.write, coordination=coordination, checkout=checkout)
     except (ValueError, native_claude.ClaudeProbeError) as exc:
         raise FactoryError(str(exc)) from None
     if any(receipt.get(k) != native[k] for k in ("report", "usage", "model_usage", "turns", "rate_limits")):

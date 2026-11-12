@@ -11,11 +11,12 @@ test and network commands turns every assignment into an approval queue. The
 boundary is structural instead:
 
 - each writer edits only its own provisioned worktree, and each reviewer reads a
-  clean one at the selected candidate. Codex, Antigravity and Grok reviewers work
-  in a disposable worktree of the candidate beside their receipt
-  (`TASK.ID.HARNESS.checkout`), removed after the run with every ignored file:
-  Codex and Antigravity reviewers get every tool, and Grok loads the operator's
-  MCP servers whatever `--tools` says, one of which wrote into a shared writer
+  clean one at the selected candidate. Every reviewer works in a disposable
+  worktree of the candidate beside its receipt (`TASK.ID.HARNESS.checkout`),
+  removed after the run with every ignored file, and may run tests and other
+  commands there: Codex, Antigravity and Grok reviewers get every tool, and Claude
+  reviewers get Read, Glob, Grep and Bash. Grok also loads the operator's MCP
+  servers whatever `--tools` says, and one of them wrote into a shared writer
   worktree (#85). Every Grok assignment also runs with `--deny mcp__*`: Grok
   reaches MCP tools through `use_tool` even under `--tools read_file`, and the
   deny rule refuses those calls, as `--disallowedTools mcp__*` does for Claude. Tests, installs and MCP output never dirty the shared checkout;
@@ -40,8 +41,9 @@ boundary is structural instead:
   A release judgment is exempt: its evidence is the frozen payload in its brief.
   Two Grok qa runs approved, then blocked, after one turn of thought and no reads.
 
-Claude and Grok reviewers are given read tools only. That is their tool
-interface, not a fence. Native user configuration that a CLI imports, such as
+A reviewer's tools are its interface, not a fence: verifying a change means running
+it, so reviewers run commands in their disposable checkout. Claude coordination
+answers keep Read only. Native user configuration that a CLI imports, such as
 plugins, hooks, MCP and LSP servers, is the operator's environment. It is recorded,
 not refused. Receipts and streams recorded under the earlier confined modes still
 decode and collect.
@@ -385,7 +387,7 @@ is used by the explicit worker and collector below.
 
 Grok assignments run under the [execution policy](#execution-policy). The native
 `strict` sandbox blocked the CLI's own startup on 1.0.77, so reviewers run in
-`bypassPermissions` mode with only the `read_file` tool. The command interface uses an admitted task, selected
+`bypassPermissions` mode with every built-in tool, in their disposable checkout. The command interface uses an admitted task, selected
 candidate/requirements and discovered model/effort, as with
 [native launcher commands](native-rex.md):
 
@@ -425,8 +427,8 @@ fields plus `writer: true`, the `sandbox` path and nullable `commit` evidence.
 Collection validates that commit, binds the result to the produced candidate and
 refuses reviewer receipts presented as writers or the reverse.
 
-A reviewer requests only the built-in `read_file` tool in `bypassPermissions`
-mode. It disables native subagents, web search and automatic updates, preserves native subscription configuration and excludes host credential
+A reviewer gets every built-in tool in `bypassPermissions` mode, in its
+disposable checkout. It disables native subagents, web search and automatic updates, preserves native subscription configuration and excludes host credential
 environment variables. API-key overrides, including empty ones, refuse. Metadata
 preflight requires cached OIDC sign-in, a reported subscription, no access gate,
 and the requested model/effort in the actual catalog. Before a model turn,
@@ -779,8 +781,11 @@ version-3 receipt carries it. Collected answers close their decision-inbox item.
 `native_claude.probe` before inference. Execution accepts Claude Code 2.1.319 or newer
 with claude.ai/firstParty sign-in only. Newer releases run until the strict decoder
 meets a shape it does not recognize, which refuses visibly rather than guessing. API/provider/auth environment overrides refuse even when
-empty. The private frozen brief goes to stdin with EOF. Safe mode, read tools
-plus internal StructuredOutput for reviewers, empty strict MCP configuration,
+empty. The private frozen brief goes to stdin with EOF. Safe mode; Read, Glob, Grep
+and Bash plus internal StructuredOutput for reviewers, which run in a disposable
+checkout and write version-4 receipts with its `checkout` path (version 1 reviewed
+in place with Read only and still collects); Read only for coordination answers;
+empty strict MCP configuration,
 disabled slash commands/Chrome, `bypassPermissions` and no session persistence
 are per-invocation controls. They do not establish subscription eligibility.
 Claude Code 2.1.319 emits `system`/`ui_invalidate` rendering notices in bypass
