@@ -691,14 +691,24 @@ class Integration(unittest.TestCase):
 
     def test_bad_frozen_packet_versions_and_original_worker_binding_refuse(self):
         record = factory.load_task(self.path)
-        for version in (None, 0, 2, True, "1"):
+        for version in (None, 0, 3, True, "1"):
             with self.assertRaises(factory.FactoryError):
                 release_evidence.validate({**self.frozen, "schema_version": version}, record)
-            if version != 2:
-                with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
-                    release_evidence.render_delivery({"schema_version": version})
+            with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
+                release_evidence.render_delivery({"schema_version": version})
             with self.assertRaisesRegex(factory.FactoryError, "Unsupported frozen"):
                 release_evidence.render({**self.frozen, "schema_version": version})
+        # Version 2 carries the specialist roster; version 1 briefs, recorded before it, still validate.
+        historical = {key: value for key, value in self.frozen.items() if key != "specialists"}
+        release_evidence.validate({**historical, "schema_version": 1}, record)
+        self.assertNotIn("ui-design", release_evidence.render({**historical, "schema_version": 1}))
+        self.assertIn("ui-design", release_evidence.render(self.frozen))
+        identity, item = next(iter(record["assignments"].items()))
+        row = dict(id=identity, role=item["request"]["role"], purpose=item["request"].get("purpose"), outcome=None, current=False)
+        release_evidence.validate({**self.frozen, "specialists": [row]}, record)
+        for roster in (None, [{**row, "role": "ui-design-x"}], [{**row, "id": "absent"}], [{**row, "extra": 1}]):
+            with self.subTest(roster=roster), self.assertRaises(factory.FactoryError):
+                release_evidence.validate({**self.frozen, "specialists": roster}, record)
         self.launch_integration()
         record = factory.load_task(self.path)
         intent = integration.intent_of(record["assignments"]["merge"])

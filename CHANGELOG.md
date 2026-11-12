@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- The release judgment checks specialist coverage. Its frozen evidence (version 2) carries the task's specialist roster: each assignment's ID, role, purpose, outcome and whether it still counts. The judge is told to name the change's effects and return `findings` when owner-facing UI lacks `ui-design`, persisted state lacks `data-engineering`, a trust boundary lacks `security`, or runtime behavior lacks `sre`. SKILL Step 3 maps effects to roles. Across about twenty nanoclaw tasks the coordinator chose backend, qa and code-review almost every time, and nothing checked the roster: card wording, schemas and boot changes shipped without their specialists. Version-1 evidence still validates and renders unchanged.
+
 ## 0.34.0 — 2026-11-11
 
 - The factory skill tells the coordinator to keep every line busy: write the next phase's plan as soon as an assignment settles, launch admitted work when a worker frees, and triage the next items when admitted work runs out. Twice in one night the owner had to ask why the lines were idle: finished writers had no verification plans, and no next wave was admitted. The skill described each phase but never made the next one the coordinator's duty.
