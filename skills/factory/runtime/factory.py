@@ -135,11 +135,20 @@ def save(path, value, *, exclusive=False):
             os.unlink(name)
 
 
+# A factory line is one coordinator's stream of work, such as nanoclaw or ACR. Its tasks share one Rex session
+# and one execution lock, and its runner counts, tidies and blocks on its own tasks only. Tasks admitted
+# before lines existed belong to the default line.
+LINE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+DEFAULT_LINE = "default"
+
+
 @contextmanager
-def execution_lock(directory):
-    """Serialize controller/CLI launch decisions within one factory instance."""
+def execution_lock(directory, line=DEFAULT_LINE):
+    """Serialize one line's controller/CLI launch decisions; other lines launch in parallel."""
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(directory / ".execution.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    # The default line keeps the original lock file, so runners from before lines still exclude each other.
+    name = ".execution.lock" if line == DEFAULT_LINE else ".execution." + check_line(line) + ".lock"
+    fd = os.open(directory / name, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -222,13 +231,33 @@ def relocate(entry, argv, *, root=None, home=None, execv=os.execv):
     execv(sys.executable, [sys.executable, "-B", str(installed / "runtime" / entry), *argv])
 
 
-def new_session_label(task):
-    return "factory-" + task + "-" + uuid.uuid4().hex[:8]
+def task_line(record):
+    return record.get("line", DEFAULT_LINE)
 
 
-def new_task(task) -> dict:
-    return dict(schema_version=10, task=task, admission=None, inputs=None, hold=None, control_events=[], allowance_events=[], provisioning=None, rex=None,
-                session_label=new_session_label(task), session_id=None, assignments={})
+def line_session_label(line):
+    """One Rex session holds every assignment of a line's tasks, one tab each."""
+    return "factory-" + line
+
+
+def check_line(line):
+    if not isinstance(line, str) or not LINE.fullmatch(line):
+        raise FactoryError("A factory line is a lowercase slug of at most 32 characters, such as nanoclaw")
+    return line
+
+
+def peek_line(path):
+    """A task's line read without its lock, or None when the record cannot be read; the lock holder re-checks it."""
+    try:
+        record = json.loads(read_record(path))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return task_line(record) if isinstance(record, dict) else None
+
+
+def new_task(task, line=DEFAULT_LINE) -> dict:
+    return dict(schema_version=10, task=task, line=check_line(line), admission=None, inputs=None, hold=None, control_events=[], allowance_events=[],
+                provisioning=None, rex=None, session_label=line_session_label(line), session_id=None, assignments={})
 
 
 def read_record(path, *, private=False, max_bytes=None):
@@ -301,7 +330,10 @@ def load_task(path) -> dict:
             or not Path(connection["binary"]).is_absolute() or not connection["server"].startswith("unix://")):
         raise FactoryError("Invalid pinned Rex identity; restore the original task record before continuing")
     if (not isinstance(record["session_label"], str)
-            or not re.fullmatch("factory-" + re.escape(record["task"]) + r"-[0-9a-f]{8}", record["session_label"])
+            or ("line" in record and (not isinstance(record["line"], str) or not LINE.fullmatch(record["line"])))
+            # Its line's shared session, or a task's own session from before lines.
+            or (record["session_label"] != line_session_label(task_line(record))
+                and not re.fullmatch("factory-" + re.escape(record["task"]) + r"-[0-9a-f]{8}", record["session_label"]))
             or (record["session_id"] is not None
                 and (not isinstance(record["session_id"], str) or not record["session_id"]))):
         raise FactoryError("Invalid Rex session identity; restore the original task record before continuing")
@@ -352,8 +384,9 @@ def load_task(path) -> dict:
                        for key in ("brief", "window_label"))
                 or not Path(assignment["brief"]).is_absolute()):
             raise FactoryError("Invalid assignment identity or request; restore the original task record")
-        if not re.fullmatch(re.escape(request["role"] + "-" + assignment_id) + r"-[0-9a-f]{8}",
-                            assignment["window_label"]):
+        # The task prefix tells tabs apart in the shared session; earlier tabs carry role and ID only.
+        if not re.fullmatch("(?:" + re.escape(record["task"] + ":") + ")?" + re.escape(request["role"] + "-" + assignment_id)
+                            + r"-[0-9a-f]{8}", assignment["window_label"]):
             raise FactoryError("Assignment window marker differs from its owner; restore the original task record")
         if "inputs" in request and (admission is None or not valid_inputs(request["inputs"])):
             raise FactoryError("Invalid assignment inputs; restore the original task record")
@@ -787,7 +820,7 @@ def check_tracked_bytes(cwd, candidate):
         raise FactoryError("Cannot read assignment source; restore candidate files and access before launching") from None
 
 
-def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None):
+def admit(path, *, task, goal, repository, acceptance, corrections=None, investigations=None, line=DEFAULT_LINE):
     """Record operator-supplied scope once, without starting Rex or any worker."""
     if not goal.strip() or not acceptance or any(not ref.strip() for ref in acceptance):
         raise FactoryError("Supply a goal and at least one nonempty acceptance reference")
@@ -811,7 +844,10 @@ def admit(path, *, task, goal, repository, acceptance, corrections=None, investi
     except OSError:
         raise FactoryError("Cannot access --repo; supply an existing accessible Git checkout") from None
     admission = dict(goal=goal, repository=repository, acceptance=acceptance, limits=limits)
-    record = load_task(path) if os.path.lexists(path) else new_task(task)
+    check_line(line)
+    record = load_task(path) if os.path.lexists(path) else new_task(task, line)
+    if task_line(record) != line:
+        raise FactoryError(f"Task belongs to line {task_line(record)!r}; move it with factory.py line or use a new task ID")
     if record["admission"] is not None:
         if any(record["admission"].get(key) != value for key, value in admission.items()):
             raise FactoryError("Task already has different admission inputs; use a new task ID")
@@ -1431,10 +1467,14 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
     return record
 
 
-def factory_marker(label):
-    """A window label the factory could have created: "<catalog role>-<assignment>-<8 hex>"."""
+def factory_marker(label, task):
+    """A window label the factory could have created for this task: "<task>:<catalog role>-<assignment>-<8 hex>".
+
+    Tabs from a task's own session (before the shared session) carry no task prefix. Other tasks' tabs in the
+    shared session carry theirs, so they are never this task's lost history.
+    """
     roles = json.loads((ROLES_PATH).read_text())["roles"]
-    return any(re.fullmatch(re.escape(item["id"]) + r"-[a-z0-9][a-z0-9-]{0,63}-[0-9a-f]{8}", label)
+    return any(re.fullmatch("(?:" + re.escape(task + ":") + ")?" + re.escape(item["id"]) + r"-[a-z0-9][a-z0-9-]{0,63}-[0-9a-f]{8}", label)
                for item in roles)
 
 
@@ -1539,7 +1579,7 @@ def check_session(rex, record, session_id):
             raise FactoryError("Malformed Rex response; inspect the pinned binary/server API compatibility")
         if window["window_id"] in ids or (label in owned and label in labels):
             raise FactoryError("Duplicate Rex window identity; inspect the original session before continuing")
-        if label is not None and label not in owned and factory_marker(label):
+        if label is not None and label not in owned and factory_marker(label, record["task"]):
             # Operator tabs are fine; an unrecorded factory marker means lost task history.
             raise FactoryError("Rex assignment windows differ from saved history; inspect the pinned session and restore its windows or the original task history before continuing")
         labels.add(label)
@@ -1588,8 +1628,11 @@ def abandon_launch(path, rex, *, assignment_id, reason) -> dict:
     if not isinstance(reason, str) or not reason.strip():
         raise FactoryError("Supply the nonempty reason the launch is known not to have happened")
     if record["session_id"] is None:
-        if any(item.get("label") == record["session_label"] for item in rex_sessions(rex)):
-            raise FactoryError("The pending task session exists; reconcile the launch with status instead")
+        for item in rex_sessions(rex):
+            if item.get("label") == record["session_label"]:
+                view = rex_object(rex.call("session", "inspect", item["session_id"], "--json"), strings=("session_id",))
+                if any(window.get("label") == assignment["window_label"] for window in view_windows(view)):
+                    raise FactoryError("A pane with this launch marker exists; reconcile the launch with status instead")
     else:
         view = session_view(rex, record)
         if view is not None and any(item.get("label") == assignment["window_label"] for item in view_windows(view)):
@@ -1807,6 +1850,14 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
         rex.instance_id = who["instance_id"]
+    if not record["session_id"] and record["session_label"] == line_session_label(task_line(record)):
+        # Launches run under the line's execution lock, so no other task of the line creates its session meanwhile.
+        shared = [item["session_id"] for item in rex_sessions(rex) if item.get("label") == record["session_label"]]
+        if len(shared) > 1:
+            raise FactoryError("Several Rex sessions carry this line's label; close the extras before launching")
+        if shared:
+            check_session(rex, record, shared[0])
+            record["session_id"] = shared[0]
     brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
     replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
@@ -1822,7 +1873,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, native_collected=False, brief=str(brief_path),
-                            window_label=role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8],
+                            window_label=task + ":" + role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8],
                             rex_instance=current_instance(rex))
     record["assignments"][assignment_id] = assignment
     save(path, record)
@@ -1951,8 +2002,21 @@ def tidy(path, rex, record, *, only=None) -> dict:
     return dict(closed=closed, running=running, session_closed=close_idle_session(path, rex, record))
 
 
+def move_line(path, line):
+    """Tag a task with its line. Its session and lock follow, so nothing of it may be running."""
+    record = load_task(path)
+    if any(item["state"] == "launching" or (item["state"] == "launched" and item.get("closed") is None)
+           for item in record["assignments"].values()):
+        raise FactoryError("The task has assignments open; move it once they finish or are tidied")
+    if task_line(record) == line:
+        return record
+    record.update(line=line, session_id=None, session_label=line_session_label(line))
+    save(path, record)
+    return record
+
+
 def close_idle_session(path, rex, record):
-    """Kill the task session once nothing open remains in it; the next launch starts a new one."""
+    """Leave the session once the task has nothing open; kill it when no tab of any task remains."""
     if record["session_id"] is None or any(
             item["state"] == "launching" or (item["state"] == "launched" and item.get("closed") is None)
             for item in record["assignments"].values()):
@@ -1960,9 +2024,9 @@ def close_idle_session(path, rex, record):
     view = session_view(rex, record)
     if view is not None:
         if view_windows(view):
-            return False  # Operator tabs remain; leave their session alone.
+            return False  # Other tasks' or the operator's tabs remain; leave the session alone.
         rex.call("kill", record["session_id"], raw=True)
-    record.update(session_id=None, session_label=new_session_label(record["task"]))
+    record.update(session_id=None, session_label=line_session_label(task_line(record)))
     save(path, record)
     return True
 
@@ -2972,6 +3036,10 @@ def main(argv=None):
     admission.add_argument("--acceptance", action="append", required=True, help="Original evidence reference")
     admission.add_argument("--corrections", type=int)
     admission.add_argument("--investigations", type=int)
+    admission.add_argument("--line", required=True, help="The factory line (coordinator) this task belongs to, such as nanoclaw")
+    moving = sub.add_parser("line", help="Move a task with nothing running to another factory line")
+    moving.add_argument("--task", required=True)
+    moving.add_argument("--line", required=True)
     extension = sub.add_parser("extend-allowance", help="Record an operator-approved addition without resetting history")
     extension.add_argument("--task", required=True)
     extension.add_argument("--purpose", choices=("correction", "investigation"), required=True)
@@ -3105,7 +3173,15 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        with (execution_lock(args.state_dir.resolve()) if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset", "release-worktree", "rebase-worktree"} else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
+                                 "release-worktree", "rebase-worktree", "line"}
+        line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE
+        with (execution_lock(args.state_dir.resolve(), line) if locked else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+            if locked and os.path.lexists(path) and task_line(load_task(path)) != line:
+                raise FactoryError("The task moved to another line while waiting for its lock; run the command again")
+            if args.action == "line":
+                print(json.dumps(task_view(move_line(path, check_line(args.line))), indent=2))
+                return 0
             if args.action == "rebase-worktree":
                 print(json.dumps(rebase_worktree(path, onto=args.onto), indent=2))
                 return 0
@@ -3121,7 +3197,7 @@ def main(argv=None):
                 if args.action == "admit":
                     record = admit(path, task=args.task, goal=args.goal, repository=args.repo,
                                    acceptance=args.acceptance, corrections=args.corrections,
-                                   investigations=args.investigations)
+                                   investigations=args.investigations, line=args.line)
                 elif args.action == "show":
                     record = load_task(path)
                 elif args.action == "extend-allowance":
