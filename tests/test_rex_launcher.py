@@ -362,7 +362,7 @@ class NativeLauncher(unittest.TestCase):
         self.assertEqual(len(FakeRex.sessions), 2)
         self.assertEqual(record["session_id"], other["session_id"])
         self.assertNotEqual(record["session_id"], acr["session_id"])
-        self.assertEqual({item["label"] for item in FakeRex.sessions}, {"factory-default", "factory-acr"})
+        self.assertEqual({item["label"] for item in FakeRex.sessions}, {"default", "acr"})
         self.assertTrue(qa["window_label"].startswith("task:qa-qa-"))
         self.assertTrue(other_qa["window_label"].startswith("other:qa-qa-"))
         self.finish(qa)
@@ -370,7 +370,40 @@ class NativeLauncher(unittest.TestCase):
         self.assertFalse(factory.tidy(self.path, rex, factory.load_task(self.path))["session_closed"])  # "other" runs in it.
         self.finish(other_qa)
         self.assertTrue(factory.tidy(self.root / "other.json", rex, factory.load_task(self.root / "other.json"))["session_closed"])
-        self.assertEqual([item["label"] for item in FakeRex.sessions], ["factory-acr"])
+        self.assertEqual([item["label"] for item in FakeRex.sessions], ["acr"])
+
+    def test_a_line_joins_its_coordinators_session_and_never_closes_it(self):
+        # The operator found a release tab in factory-nanoclaw beside the foreman's own nanoclaw session.
+        foreman: dict[str, Any] = dict(session_id="session-foreman", label="nanoclaw", windows=[dict(
+            window_id="window-900", label="claude", layers=[dict(blocks=[dict(block_id="block-900")])])])
+        FakeRex.sessions.append(foreman)
+        factory.save(self.root / "nc.json", factory.new_task("nc", "nanoclaw"))
+        record, qa = factory.launch(self.root / "nc.json", **{**self.arguments, "task": "nc"})
+        self.assertEqual((record["session_id"], record["session_label"]), ("session-foreman", "nanoclaw"))
+        self.assertFalse(any(call[0] == "new" for call in FakeRex.calls))
+        self.assertEqual([window["label"] for window in foreman["windows"]], ["claude", qa["window_label"]])
+        self.finish(qa)
+        rex = factory.connect(record)
+        report = factory.tidy(self.root / "nc.json", rex, factory.load_task(self.root / "nc.json"))
+        self.assertEqual(report, dict(closed=["qa"], running=[], session_closed=False))
+        self.assertEqual(FakeRex.sessions, [foreman])
+        self.assertEqual([window["label"] for window in foreman["windows"]], ["claude"])
+
+    def test_tasks_from_the_factory_line_sessions_join_the_line_named_session(self):
+        # 0.36 recorded factory-<line>; a task holding that session keeps it, one holding none joins the line's.
+        factory.save(self.root / "held.json", factory.new_task("held", "nanoclaw"))
+        held, _ = factory.launch(self.root / "held.json", **{**self.arguments, "task": "held"})
+        FakeRex.sessions[0]["label"] = held["session_label"] = "factory-nanoclaw"
+        factory.save(self.root / "held.json", held)
+        again, _ = factory.launch(self.root / "held.json", **{**self.arguments, "task": "held", "assignment_id": "security", "role": "security"})
+        self.assertEqual((again["session_id"], again["session_label"]), (held["session_id"], "factory-nanoclaw"))
+        idle = factory.new_task("idle", "nanoclaw")
+        idle["session_label"] = "factory-nanoclaw"
+        factory.save(self.root / "idle.json", idle)
+        joined, _ = factory.launch(self.root / "idle.json", **{**self.arguments, "task": "idle"})
+        self.assertEqual(joined["session_label"], "nanoclaw")
+        self.assertNotEqual(joined["session_id"], held["session_id"])
+        self.assertEqual(sorted(item["label"] for item in FakeRex.sessions), ["factory-nanoclaw", "nanoclaw"])
 
     def test_cli_tidy_never_closes_the_line_session_under_a_launch(self):
         # Review of #113: a CLI tidy holding only its task lock could kill the session another task was launching into.
@@ -391,7 +424,7 @@ class NativeLauncher(unittest.TestCase):
         self.finish(qa)
         factory.tidy(self.path, factory.connect(record), factory.load_task(self.path))
         moved = factory.move_line(self.path, "nanoclaw")
-        self.assertEqual((moved["line"], moved["session_id"], moved["session_label"]), ("nanoclaw", None, "factory-nanoclaw"))
+        self.assertEqual((moved["line"], moved["session_id"], moved["session_label"]), ("nanoclaw", None, "nanoclaw"))
         self.assertEqual(factory.load_task(self.path)["line"], "nanoclaw")
 
     def test_lost_assignment_history_refuses_another_live_launch(self):

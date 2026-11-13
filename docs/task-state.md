@@ -142,12 +142,14 @@ A tidied assignment's `closed` object holds its final process `state` (`exited`,
 otherwise), the `session_id` the pane lived in, the absolute path of its retained
 terminal `capture` (null when lost) and the UTC epoch time `at`. A task's optional
 `line` names its factory line (absent means `default`); every task of a line shares
-one session, `session_label` `factory-<line>`. Once the session holds no tab at all,
-tidying kills it and sets the task's `session_id` to null; the next launch of any of
-the line's tasks opens it again under the same label. `factory.py line --task TASK
---line LINE` moves a task with nothing open to another line. Tasks recorded before
-the shared session keep their own `factory-<task>-<8 hex>` label until their session
-closes.
+one session, whose `session_label` is the line's name, so a coordinator whose Rex
+session carries that name gets its line's tabs beside its own. Once the session holds
+no tab at all, tidying kills it and sets the task's `session_id` to null; the next
+launch of any of the line's tasks joins or opens the session under that label.
+`factory.py line --task TASK --line LINE` moves a task with nothing open to another
+line. A task still holding a session from before keeps its label, the `factory-<line>`
+session lines first used or its own `factory-<task>-<8 hex>`, until that session
+closes; a task holding none joins its line's.
 
 An assignment's launch state is `launching` (intent saved, pane not yet confirmed),
 `launched` (pane IDs returned) or `abandoned`. Only `factory.py abandon` sets
