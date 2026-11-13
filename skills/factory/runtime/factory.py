@@ -1132,12 +1132,19 @@ def retain_checkout_reports(artifacts, checkout, receipt):
         target.chmod(0o600)
 
 
+def reset_patch(receipt):
+    """Where reset keeps an attempt's leftover edits; its presence also marks the attempt stopped."""
+    receipt = Path(receipt)
+    return receipt.with_name(receipt.name.removesuffix(".json") + ".reset.patch")
+
+
 def reset_writer(path, *, assignment_id):
     """Recover a failed writer's checkout: keep its leftover edits as a patch, then restore the candidate.
 
     The failed receipt stays failed. A writer that failed after editing (a decoder refusal, a
     timeout, a refused commit) leaves the task's provisioned worktree dirty, and every later
     assignment refuses a dirty checkout. The patch keeps the work for a new writer to cite.
+    A writer lost with its host, its receipt never finished, resets the same way.
     Caller holds the owner's execution and task locks.
     """
     record = load_task(path)
@@ -1154,7 +1161,13 @@ def reset_writer(path, *, assignment_id):
         state, commit = saved.get("state"), saved.get("commit")
     except (OSError, ValueError, UnicodeError, AttributeError):
         raise FactoryError("Cannot read the writer's original receipt; restore it before resetting") from None
-    if state != "failed":
+    if state == "starting":
+        # A worker that died with its host never finishes its receipt (#133); Rex reporting the attempt
+        # lost is the proof it stopped.
+        if status(connect(record), record, assignment)["state"] != "lost":
+            raise FactoryError("This attempt's receipt is unfinished and Rex does not report it lost; "
+                               "let it finish, or cancel it, before resetting")
+    elif state != "failed":
         raise FactoryError("Reset only an assignment whose original receipt failed; collect or inspect any other attempt")
     # No other assignment can be using this checkout: launches refuse a dirty one.
     cwd, candidate = assignment["request"]["cwd"], assignment["request"]["inputs"]["candidate"]
@@ -1166,7 +1179,7 @@ def reset_writer(path, *, assignment_id):
         raise FactoryError("Writer checkout moved off its input candidate and its own factory commit; inspect it by hand")
     # A writer that failed after its factory commit keeps that commit; only leftovers are reset.
     candidate = head
-    patch = receipt.with_name(receipt.name.removesuffix(".json") + ".reset.patch")
+    patch = reset_patch(receipt)
     if os.path.lexists(patch):
         raise FactoryError("This writer was already reset; inspect its saved patch")
     worktree = git_worktree(cwd)
@@ -1231,7 +1244,8 @@ def owned_quiet_worktree(record):
             state = decode_json(read_record(command[command.index("--receipt") + 1], private=True)).get("state")
         except (OSError, ValueError, UnicodeError, AttributeError):
             raise FactoryError(f"Cannot read assignment {identity}'s receipt; restore it before releasing the worktree") from None
-        if state == "starting":
+        if state == "starting" and not os.path.lexists(reset_patch(command[command.index("--receipt") + 1])):
+            # A reset attempt stopped for good, even with its receipt unfinished after a reboot (#133).
             raise FactoryError(f"Assignment {identity} is still running in this worktree; let it finish first")
     return item, directory
 
