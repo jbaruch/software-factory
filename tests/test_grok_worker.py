@@ -129,7 +129,10 @@ class GrokWorker(unittest.TestCase):
         return grok_worker.parser().parse_args(argv[4:])
 
     def execute_writer(self, args, *, edit=True):
-        events = [dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="writer-request",
+        # A writer reads before it reports; one that calls no tool fails (#134).
+        events = [dict(type="tool_call", toolCallId="read-1", toolName="read_file", title="read_file",
+                       rawInput=dict(target_file="README.md")),
+                  dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="writer-request",
                        cwd=str(self.repo), num_turns=2, structuredOutput=dict(outcome="completed", artifacts=["NOTES.md"]),
                        usage=dict(input_tokens=1, output_tokens=2), modelUsage=None)]
         async def spawn(*command, **options):
