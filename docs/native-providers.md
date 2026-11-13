@@ -587,8 +587,11 @@ hook in the common/worktree Git hooks directory, unsigned commits or file-based
 SSH signing with the operating system's signer. Active external hook directories,
 clean/smudge/process filters, other executable hook types, custom
 signing programs and partial clones refuse visibly; use an inspected explicit
-local commit for those configurations. Required checks/signatures are never
-silently disabled.
+local commit for those configurations. A hooks directory inside the checkout
+whose every hook Git ignores, such as husky's `.husky/_` that `npm install`
+generates, is the writer's own output: it is discarded with the other ignored
+output, listed in the receipt's `discarded`, and never run. Required
+checks/signatures are never silently disabled.
 Factory commits use UTF-8 and refuse in-progress merges, cherry-picks, reverts,
 rebases and bisects before native launch and again before staging. Finish or
 abort the existing Git operation in the assigned checkout before retrying.

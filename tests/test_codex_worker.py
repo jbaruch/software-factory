@@ -1253,6 +1253,41 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
         self.assertFalse(effect.exists())
 
+    def husky(self, *, ignored):
+        """The writer's npm install runs husky, which generates .husky/_ mid-run."""
+        effect, original = self.root / "generated-hook-effect", self.spawn
+        async def install(*command, **options):
+            hooks = self.repo / ".husky" / "_"
+            hooks.mkdir(parents=True)
+            if ignored:
+                (hooks / ".gitignore").write_text("*\n")  # As husky writes it.
+            (hooks / "pre-commit").write_text(f"#!/bin/sh\nprintf called > {shlex.quote(str(effect))}\n")
+            (hooks / "pre-commit").chmod(0o700)
+            return await original(*command, **options)
+        self.spawn = install
+        self.assertEqual(factory.git_run(".", "config", "core.hooksPath", ".husky/_").returncode, 0)
+        return effect
+
+    def test_hooks_the_writer_generated_as_ignored_output_are_discarded_not_run(self):
+        # Observed (#138): nanoclaw's core.hooksPath is .husky/_, which npm install generates and Git ignores;
+        # a writer that installed got refused, one that didn't committed.
+        self.writer()
+        effect = self.husky(ignored=True)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertIn(".husky/_/pre-commit", receipt["commit"]["discarded"])
+        self.assertFalse(effect.exists())
+        self.assertNotEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
+    def test_in_checkout_hooks_git_does_not_ignore_are_still_refused(self):
+        self.writer()
+        effect = self.husky(ignored=False)
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("external hook paths", receipt["error"])
+        self.assertFalse(effect.exists())
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+
     def test_failed_commit_hook_retains_changes_and_never_retries(self):
         self.writer()
         hooks = self.repo / ".git/hooks"

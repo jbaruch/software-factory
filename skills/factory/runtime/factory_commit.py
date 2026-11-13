@@ -316,6 +316,18 @@ def trusted_git_runtime(args):
     return python
 
 
+def generated_hooks(directory, names, root, environment):
+    """Whether every active hook sits inside the checkout and Git ignores it: the writer generated them."""
+    resolved = directory.resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        return False
+    paths = [str((resolved / name).relative_to(root.resolve())) for name in names]
+    if any("\n" in path for path in paths):
+        return False  # check-ignore's -z needs --stdin; one path per line.
+    ignored = factory.git_run(".", "check-ignore", "--", *paths, environment=environment)
+    return ignored.returncode == 0 and set(ignored.stdout.splitlines()) == set(paths)
+
+
 def commit_policy(args, environment):
     """Keep executable callbacks out of metadata-writing and signing phases."""
     observed = factory.git_run(".", "config", "--null", "--list", "--show-origin", "--includes", environment=environment)
@@ -352,7 +364,11 @@ def commit_policy(args, environment):
     active = sorted(path.name for path in directory.iterdir() if path.is_file() and os.access(path, os.X_OK)
                     and not path.name.endswith(".sample")) if directory.is_dir() else []
     if active and directory.resolve() not in {common / "hooks", args.worktree_git_dir / "hooks"}:
-        raise factory.FactoryError("Unsupported configured hooks/signing: external hook paths require an inspected explicit local commit")
+        if not generated_hooks(directory, active, root, environment):
+            raise factory.FactoryError("Unsupported configured hooks/signing: external hook paths require an inspected explicit local commit")
+        # The writer's own install produced them, like husky's `.husky/_` from npm install (#138): ignored output,
+        # discarded before the commit and listed in the receipt's `discarded`, never run on the host.
+        active = []
     if any(name != "pre-commit" for name in active):
         raise factory.FactoryError("Unsupported configured hooks/signing: only the separately confined pre-commit hook is supported")
     enabled = factory.git_run(".", "config", "--bool", "--get", "commit.gpgsign", environment=environment)
