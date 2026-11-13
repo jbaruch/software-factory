@@ -132,7 +132,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             workdir = checkouts.enter_context(factory.reader_checkout(
                 args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
-            environment = native_grok.environment()
+            environment = factory.reader_environment(native_grok.environment(), args.write)
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
                 # Writers get every built-in tool and the factory commit contract.
                 "--permission-mode", "bypassPermissions",

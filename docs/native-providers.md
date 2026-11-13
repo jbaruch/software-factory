@@ -514,6 +514,15 @@ it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
 The native child receives only the locale/path/temp and subscription-configuration
 settings allowed by `native_environment()`; host credential variables are not forwarded.
+Read-only assignments (verifiers and judgments) never get the operator's GitHub
+identity, after a release judgment merged a PR and deployed it: `GH_CONFIG_DIR`
+points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` carry the
+read-only token from `~/.config/software-factory/github-read-token` (mode 0600)
+when it exists, and pushes to GitHub are rewritten to an invalid host. Create
+that token as a fine-grained personal access token with read-only Contents,
+Issues, Pull requests and Metadata on the repositories the factory serves;
+without it, readers can't read private GitHub issues or pull requests. Writers keep
+the operator's identity: the factory owns their commits and nothing pushes.
 
 New Codex model children additionally use per-run
 `allow_login_shell=false`, `features.shell_snapshot=false` and

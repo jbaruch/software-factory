@@ -1528,6 +1528,37 @@ def role_spec(role_id):
     return role
 
 
+# A read-only assignment reads GitHub but can never change it: a release judgment merged a PR and
+# deployed it under the operator's identity. Writers keep the operator's identity; the factory owns
+# their commits and nothing pushes.
+GITHUB_READ_TOKEN = Path.home() / ".config" / "software-factory" / "github-read-token"
+READER_GH_CONFIG = Path.home() / ".config" / "software-factory" / "gh-reader"
+PUSH_REFUSED = "https://push-refused.invalid/"
+
+
+def reader_environment(environment, write):
+    """A reader's native environment: the read-only token (or no GitHub identity) and pushes refused."""
+    if write:
+        return environment
+    READER_GH_CONFIG.mkdir(mode=0o700, parents=True, exist_ok=True)  # Holds no credentials, so gh can't fall back to the operator's.
+    result = {key: value for key, value in environment.items() if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+    result["GH_CONFIG_DIR"] = str(READER_GH_CONFIG)
+    if os.path.lexists(GITHUB_READ_TOKEN):
+        info = GITHUB_READ_TOKEN.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise FactoryError(f"Keep the read-only GitHub token in a regular file only you can read: chmod 600 {GITHUB_READ_TOKEN}")
+        token = GITHUB_READ_TOKEN.read_text(encoding="utf-8").strip()
+        if not token or any(character.isspace() for character in token):
+            raise FactoryError(f"{GITHUB_READ_TOKEN} must hold one read-only GitHub token")
+        result.update(GH_TOKEN=token, GITHUB_TOKEN=token)
+    hosts = ("git@github.com:", "ssh://git@github.com/", "https://github.com/")
+    result["GIT_CONFIG_COUNT"] = str(len(hosts))
+    for index, host in enumerate(hosts):
+        result[f"GIT_CONFIG_KEY_{index}"] = f"url.{PUSH_REFUSED}.pushInsteadOf"
+        result[f"GIT_CONFIG_VALUE_{index}"] = host
+    return result
+
+
 def check_role_write(role_id):
     if not isinstance(role_id, str) or role_spec(role_id).get("write_allowed") is not True:
         raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")
