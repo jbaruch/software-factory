@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.0 — 2026-11-12
+
+- Open a line's tabs in the coordinator's session (#128)
+
 ## 0.37.1 — 2026-11-12
 
 - Settle a completed writer plan complete (#124)
