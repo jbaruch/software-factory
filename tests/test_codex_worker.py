@@ -118,7 +118,7 @@ class NativeResults(unittest.TestCase):
             "allow_login_shell": False,
             "features": {"shell_snapshot": False},
             "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}})
-        self.assertEqual(command.count("--strict-config"), 1)
+        self.assertNotIn("--strict-config", command)  # tessl's `tessl` tables made it fatal on every launch.
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
         self.assertEqual(options["limit"], worker.NATIVE_LINE_LIMIT)
         prompt = options["stdin"]
@@ -154,7 +154,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
         self.assertNotIn("--sandbox", self.spawns[0])
-        self.assertEqual(self.spawns[0][4:8], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
+        self.assertEqual(self.spawns[0][3:7], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         # Readers work in a disposable checkout of the candidate, removed after the run (#53).
         checkout = self.spawns[0][self.spawns[0].index("--cd") + 1]
         self.assertTrue(checkout.endswith(".checkout"), checkout)

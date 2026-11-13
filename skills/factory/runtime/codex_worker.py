@@ -276,7 +276,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     with tempfile.TemporaryFile() as prompt:
                         prompt.write(instructions.encode("utf-8"))
                         prompt.seek(0)
-                        process = await spawn(str(binary), "--no-daemon", "--strict-config", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                        # No --strict-config: tessl writes its own `tessl` tables into .codex/config.toml, which
+                        # Codex ignores with a warning and strict mode made fatal for every assignment.
+                        process = await spawn(str(binary), "--no-daemon", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
                                           "--json", "--color", "never",
                                           "--output-schema", str(schema), "--model", args.model,
                                           # Operator policy: agents run unconfined and never prompt; the factory
