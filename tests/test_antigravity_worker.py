@@ -281,6 +281,22 @@ class AntigravityWorker(unittest.TestCase):
         factory.check_checkout(str(self.base), str(self.repo), committed)
         self.assertEqual(self.git("-C", str(self.repo), "show", "HEAD:NOTES.md", directory=self.repo).stdout, "Notes\n")
 
+    def test_reset_recovers_a_writer_lost_with_its_host(self):
+        # Observed (#133): a reboot killed six writers mid-run; their receipts stayed "starting",
+        # reset and collect both refused them, and the coordinator saved the patches by hand.
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        failed = self.execute(args, edit=True, exit_code=3)
+        args.receipt.write_text(json.dumps({**failed, "state": "starting"}))  # The worker died before finishing it.
+        with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "does not report it lost"):
+            factory.reset_writer(self.path, assignment_id="implement")
+        FakeRex.instance = "restarted-instance"
+        self.addCleanup(setattr, FakeRex, "instance", "test-instance")
+        with patch.object(factory, "Rex", FakeRex):
+            result = factory.reset_writer(self.path, assignment_id="implement")
+        self.assertIn("+Notes", Path(result["patch"]).read_text())
+        self.assertIn("new writer ID", result["next"])
+        factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+
     def test_reset_refuses_a_writer_whose_receipt_did_not_fail(self):
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
         receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)

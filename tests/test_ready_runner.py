@@ -230,6 +230,27 @@ class ReadyRunner(unittest.TestCase):
             self.handoff(plan)
         self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"], before["inputs"])
 
+    def test_from_writer_plan_keeps_serving_after_its_task_moves_on_to_a_correction(self):
+        # Observed (#130): one task's correction dirtied its writer worktree, and the next cycle of a
+        # four-task verification plan refused the whole plan on that worktree.
+        # Claude's reader re-checks the live worktree unless asked for collected evidence; only the run
+        # that moves the inputs asks for the live one.
+        self.completed_writer()
+        plan = self.plan([self.job("verify", after=["implement"])])
+        reader, asked = factory.evidence_reader, []
+        def recording(harness):
+            def read(*args, **options):
+                asked.append(options.get("collected", False))
+                return reader(harness)(*args, **options)
+            return read
+        with patch.object(factory, "evidence_reader", side_effect=recording):
+            self.assertEqual(self.handoff(plan)["metrics"]["launched"], 1)
+            (self.repo / "delivery.txt").write_text("A correction is rewriting the delivery\n")
+            result = self.handoff(plan)
+        self.assertEqual(asked, [False, True])
+        self.assertEqual(result["jobs"][0]["state"], "running")
+        self.assertEqual(result["metrics"]["launched"], 0)
+
     def test_from_writer_launches_the_effect_specialists(self):
         # The release judgment asks for ui-design, data-engineering and sre where a change has those effects;
         # the SKILL verifies a replay onto a moved base with integration (#127).
@@ -377,7 +398,8 @@ class ReadyRunner(unittest.TestCase):
                 requirements="requirements-1", outcome="completed", artifacts=["manual-report"])
         PlanRex.processes[(record["session_id"], record["assignments"]["implement"]["block_id"])] = "exited"
         before = path.read_bytes()
-        with self.assertRaisesRegex(factory.FactoryError, "receipt is missing"):
+        # Recorded at the selected candidate, it is checked as collected evidence, which a manual record never is.
+        with self.assertRaisesRegex(factory.FactoryError, "lacks proven strict collection"):
             self.handoff()
         self.assertEqual(path.read_bytes(), before)
 

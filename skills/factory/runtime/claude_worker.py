@@ -184,7 +184,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                                                max_turns=args.turns, writer=args.write, coordination=coordination,
                                                checkout=reviewer)
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
-        factory.check_reader_evidence("claude", events, args, coordination)
+        factory.check_tool_evidence("claude", events, args, coordination)
         if reviewer:
             factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
         if args.write:

@@ -192,7 +192,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
                                                     expected_schema=outcome_schema())
         receipt.update(report=native["report"], conversation_id=native["conversation_id"], usage=native["usage"],
                        duration_seconds=native["duration_seconds"], turns=native["turns"])
-        factory.check_reader_evidence("antigravity", lines, args)
+        factory.check_tool_evidence("antigravity", lines, args)
         retain_artifacts(native["report"]["artifacts"], native["conversation_id"], args.receipt)
         if not args.write:
             factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)

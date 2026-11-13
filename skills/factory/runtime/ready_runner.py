@@ -278,8 +278,12 @@ class Runner:
             raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
         factory.check_repository(record["admission"])
         rex = factory.connect(record, self.rex, self.server)
+        # Only a run that moves the inputs checks the writer's live worktree. Once an earlier run selected
+        # its commit, the task may move on (a correction edits that worktree) while the plan still serves
+        # its other tasks, and each verifier's launch checks its own checkout (#130).
+        selected = record["inputs"] == dict(candidate=source["result"]["candidate"], requirements=original["requirements"])
         args, receipt, native = factory.evidence_reader(harness)(self.from_writer, record, source,
-            observe=lambda: factory.status(rex, record, source))
+            observe=lambda: factory.status(rex, record, source), collected=selected)
         if not args.write or args.commit_message is None or receipt.get("commit") is None:
             raise factory.FactoryError("--from-writer needs an explicit validated factory commit")
         expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],

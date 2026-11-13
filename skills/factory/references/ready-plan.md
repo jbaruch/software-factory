@@ -1,6 +1,6 @@
 # Ready plan
 
-`ready_runner.py` runs a plan: one JSON file, schema 1. Plans are declarative operator input, not mutable queue history. Unknown versions, unknown fields, duplicate JSON keys, non-finite values and invalid job graphs refuse before execution. Keep plans private when goals or paths are sensitive, and never put credentials in one. The runner's full contract (recovery, capacity, results) is in [docs/ready-runner.md](https://github.com/jbaruch/software-factory/blob/main/docs/ready-runner.md).
+`ready_runner.py` runs a plan: one JSON file, schema 1. Plans are declarative operator input, not mutable queue history. Unknown versions, unknown fields, duplicate JSON keys, non-finite values and invalid job graphs refuse before execution. Keep plans private when goals or paths are sensitive, and never put credentials in one. Keep plan files in a durable directory, such as `~/.local/state/software-factory/plans/LINE/`, never a session scratchpad: macOS clears `/private/tmp` on reboot, and recovering after one means re-running the same plans. The runner's full contract (recovery, capacity, results) is in [docs/ready-runner.md](https://github.com/jbaruch/software-factory/blob/main/docs/ready-runner.md).
 
 Every job supplies all fields shown here. Replace the candidate and model with the actual selected commit and a discovered eligible model ID:
 
@@ -54,7 +54,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 
 After a writer is collected, run a verification plan with `--from-writer WRITER_ID`:
 
-- The plan may cover several tasks whose writers share that ID, so one runner serves every line. Every job is a read-only verifier (`qa`, `code-review`, `test-automation`, `security`, `ui-design`, `accessibility`, `data-engineering`, `sre`, `performance` or `integration`, which verifies a replay), uses an ID distinct from the writer and names the writer in `after`. The runner checks every task's writer before it moves any task's inputs, so one refused task changes none.
+- The plan may cover several of the line's tasks whose writers share that ID; one task moving on to a correction doesn't stop the others' verification. Every job is a read-only verifier (`qa`, `code-review`, `test-automation`, `security`, `ui-design`, `accessibility`, `data-engineering`, `sre`, `performance` or `integration`, which verifies a replay), uses an ID distinct from the writer and names the writer in `after`. The runner checks every task's writer before it moves any task's inputs, so one refused task changes none.
 - Keep the plan's `candidate`/`requirements` at the writer's original input pair. The runner selects the writer's produced commit as the task's inputs and retargets the plan in memory.
 - Restart with the same plan and writer ID; selection is reused, never repeated.
 

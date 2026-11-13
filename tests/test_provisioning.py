@@ -143,6 +143,12 @@ class WorktreeProvisioning(unittest.TestCase):
                 factory.task_lock(self.state, "fixture"), self.assertRaisesRegex(factory.FactoryError, "still running"):
             factory.release_worktree(self.path)
         self.assertTrue(self.destination.exists())
+        # A reset attempt stopped for good, though a reboot left its receipt unfinished (#133).
+        factory.reset_patch(receipt).write_text("")
+        with patch.object(factory, "load_task", return_value=running), factory.execution_lock(self.state), \
+                factory.task_lock(self.state, "fixture"):
+            factory.release_worktree(self.path)
+        self.assertFalse(self.destination.exists())
 
     def test_control_character_filenames_preserve_tree_index_and_disk_names(self):
         names = ["name\rsegment", "name\nsegment", "name\r\nsegment"]
