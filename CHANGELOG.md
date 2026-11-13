@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.39.1 — 2026-11-13
+
+- Treat hooks the writer generated as ignored output (#140)
+
 ## 0.39.0 — 2026-11-13
 
 - Recover lost writers, keep shared verification plans serving, fail toolless writers (#135)
