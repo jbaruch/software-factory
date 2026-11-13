@@ -1568,6 +1568,21 @@ def reader_environment(environment, write):
     return result
 
 
+SCRUBBED = b"[read-only GitHub token]"
+
+
+def reader_secret(write):
+    """The token a reader's gh can read; its worker scrubs it from every line it keeps or shows (review of #144)."""
+    if write or not os.path.lexists(GITHUB_READ_TOKEN):
+        return None
+    return GITHUB_READ_TOKEN.read_text(encoding="utf-8").strip().encode() or None
+
+
+def scrub_line(line, secret):
+    """One native output line with the reader's token replaced, before it is stored, parsed or shown."""
+    return line.replace(secret, SCRUBBED) if secret else line
+
+
 def check_role_write(role_id):
     if not isinstance(role_id, str) or role_spec(role_id).get("write_allowed") is not True:
         raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")

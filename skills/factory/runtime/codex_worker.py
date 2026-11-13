@@ -297,9 +297,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
 
                 async def consume():
+                    secret = factory.reader_secret(args.write)
                     while True:
                         try:
-                            line = await process.stdout.readline()
+                            line = factory.scrub_line(await process.stdout.readline(), secret)
                         except ValueError:
                             raise factory.FactoryError("Native event exceeded the 1 MiB line limit; inspect the existing Rex pane and retained stream, then reduce command output or update the adapter before authorizing another attempt") from None
                         if not line:

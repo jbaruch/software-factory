@@ -147,9 +147,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                 "--prompt-file", str(args.brief), cwd=str(workdir), env=environment, limit=NATIVE_LINE_LIMIT,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
             async def consume():
+                secret = factory.reader_secret(args.write)
                 while True:
                     try:
-                        line = await process.stdout.readline()
+                        line = factory.scrub_line(await process.stdout.readline(), secret)
                     except ValueError:
                         raise factory.FactoryError("Grok event exceeded 1 MiB; inspect the retained stream and reduce output before a new attempt") from None
                     if not line:
