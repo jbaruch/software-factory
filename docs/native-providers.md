@@ -514,18 +514,15 @@ it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
 The native child receives only the locale/path/temp and subscription-configuration
 settings allowed by `native_environment()`; host credential variables are not forwarded.
-Read-only assignments (verifiers and judgments) never get the operator's GitHub
-identity, after a release judgment merged a PR and deployed it: `GH_CONFIG_DIR`
-points at a factory directory whose `hosts.yml` (mode 0600) holds the read-only
-token from `~/.config/software-factory/github-read-token` (mode 0600) when it
-exists, so no token sits in the environment for an `env` dump to log, and pushes
-to GitHub are rewritten to an invalid host. This stops a misbriefed agent, not a
-hostile one: an unconfined agent can still reach the operator's credentials on
-disk. Create
-that token as a fine-grained personal access token with read-only Contents,
-Issues, Pull requests and Metadata on the repositories the factory serves;
-without it, readers can't read private GitHub issues or pull requests. Writers keep
-the operator's identity: the factory owns their commits and nothing pushes.
+Read-only assignments (verifiers and judgments) get no GitHub identity, after a
+release judgment merged a PR and deployed it with the operator's: `GH_CONFIG_DIR`
+points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` are removed, and
+pushes to GitHub are rewritten to an invalid host. Readers work on a local
+checkout, and a release judgment's GitHub evidence is captured before launch, so
+neither needs GitHub; a reader can't look up private issues or pull requests on
+its own. This stops a misbriefed agent, not a hostile one: an unconfined agent can
+still reach the operator's credentials on disk. Writers keep the operator's
+identity: the factory owns their commits and nothing pushes.
 
 New Codex model children additionally use per-run
 `allow_login_shell=false`, `features.shell_snapshot=false` and

@@ -1,4 +1,4 @@
-"""Read-only assignments read GitHub but never change it: a Codex release judgment merged and deployed."""
+"""Read-only assignments get no GitHub identity: a Codex release judgment merged and deployed."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import subprocess
 import tempfile
@@ -14,11 +14,9 @@ class ReaderEnvironment(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.token = self.root / "github-read-token"
-        for name, value in (("GITHUB_READ_TOKEN", self.token), ("READER_GH_CONFIG", self.root / "gh-reader")):
-            patcher = patch.object(factory, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        patcher = patch.object(factory, "READER_GH_CONFIG", self.root / "gh-reader")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.base = dict(PATH="/usr/bin", HOME=str(self.root), GH_TOKEN="operator-token")
 
     def test_writers_keep_their_environment(self):
@@ -39,27 +37,13 @@ class ReaderEnvironment(unittest.TestCase):
         self.assertEqual(pushed.stdout.strip(), factory.PUSH_REFUSED + "jbaruch/nanoclaw.git")
         self.assertEqual(fetched.stdout.strip(), "git@github.com:jbaruch/nanoclaw.git")
 
-    def test_readers_reach_the_read_only_token_through_gh_never_the_environment(self):
-        self.token.write_text("github_pat_readonly\n")
-        self.token.chmod(0o600)
-        environment = factory.reader_environment(self.base, False)
-        self.assertNotIn("github_pat_readonly", "\n".join(environment.values()))  # An `env` dump can't log it.
-        hosts = self.root / "gh-reader" / "hosts.yml"
-        self.assertIn("oauth_token: github_pat_readonly", hosts.read_text())
-        self.assertEqual(hosts.stat().st_mode & 0o777, 0o600)
-        self.token.unlink()
+    def test_a_credential_an_earlier_version_left_is_removed(self):
+        # 0.39.3 drafts wrote a read-only token into the reader's gh config; readers now hold none.
+        config = self.root / "gh-reader"
+        config.mkdir()
+        (config / "hosts.yml").write_text("github.com:\n    oauth_token: github_pat_left\n")
         factory.reader_environment(self.base, False)
-        self.assertFalse(hosts.exists())
-
-    def test_an_exposed_or_malformed_token_refuses(self):
-        self.token.write_text("github_pat_readonly\n")
-        self.token.chmod(0o644)
-        with self.assertRaisesRegex(factory.FactoryError, "chmod 600"):
-            factory.reader_environment(self.base, False)
-        self.token.write_text("two tokens\n")
-        self.token.chmod(0o600)
-        with self.assertRaisesRegex(factory.FactoryError, "one read-only GitHub token"):
-            factory.reader_environment(self.base, False)
+        self.assertFalse((config / "hosts.yml").exists())
 
 
 if __name__ == "__main__":

@@ -164,10 +164,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
                 process = await spawn(*command(binary, args.model, args.effort), cwd=str(workdir), env=factory.reader_environment(native_environment(), args.write),
                                       limit=NATIVE_LINE_LIMIT, stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
-                secret = factory.reader_secret(args.write)
                 while True:
                     try:
-                        line = factory.scrub_line(await process.stdout.readline(), secret)
+                        line = await process.stdout.readline()
                     except ValueError:
                         raise factory.FactoryError("Antigravity event exceeded 1 MiB; inspect the retained stream and reduce output before a new attempt") from None
                     if not line:

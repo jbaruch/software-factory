@@ -1528,59 +1528,31 @@ def role_spec(role_id):
     return role
 
 
-# A read-only assignment reads GitHub but can never change it: a release judgment merged a PR and
-# deployed it under the operator's identity. Writers keep the operator's identity; the factory owns
-# their commits and nothing pushes.
-# SOFTWARE_FACTORY_CONFIG relocates it; the tests point it at an empty directory, so they never read the real token.
+# A read-only assignment gets no GitHub identity: a release judgment merged a PR and deployed it under
+# the operator's. Readers work on a local checkout, and release evidence is captured before launch.
+# Writers keep the operator's identity; the factory owns their commits and nothing pushes.
+# SOFTWARE_FACTORY_CONFIG relocates the factory's configuration; the tests point it at an empty directory.
 CONFIG_DIRECTORY = Path(os.environ.get("SOFTWARE_FACTORY_CONFIG") or Path.home() / ".config" / "software-factory")
-GITHUB_READ_TOKEN = CONFIG_DIRECTORY / "github-read-token"
 READER_GH_CONFIG = CONFIG_DIRECTORY / "gh-reader"
 PUSH_REFUSED = "https://push-refused.invalid/"
 
 
 def reader_environment(environment, write):
-    """A reader's native environment: gh on the read-only token (or no GitHub identity) and pushes refused."""
+    """A reader's native environment: gh with no login to fall back on, and pushes to GitHub refused."""
     if write:
         return environment
-    # gh reads the token from its own config here, never the operator's, and an `env` dump can't log it.
     READER_GH_CONFIG.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for entry in READER_GH_CONFIG.iterdir():
+        if entry.name == "hosts.yml":
+            entry.unlink()  # A credential an earlier factory version left; readers hold none.
     result = {key: value for key, value in environment.items() if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
     result["GH_CONFIG_DIR"] = str(READER_GH_CONFIG)
-    hosts = READER_GH_CONFIG / "hosts.yml"
-    if os.path.lexists(GITHUB_READ_TOKEN):
-        info = GITHUB_READ_TOKEN.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-            raise FactoryError(f"Keep the read-only GitHub token in a regular file only you can read: chmod 600 {GITHUB_READ_TOKEN}")
-        token = GITHUB_READ_TOKEN.read_text(encoding="utf-8").strip()
-        if not token or any(character.isspace() for character in token):
-            raise FactoryError(f"{GITHUB_READ_TOKEN} must hold one read-only GitHub token")
-        partial = hosts.with_name(hosts.name + "." + uuid.uuid4().hex)
-        with open(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
-            stream.write(f"github.com:\n    oauth_token: {token}\n    git_protocol: https\n")
-        os.replace(partial, hosts)
-    elif os.path.lexists(hosts):
-        hosts.unlink()  # The operator removed the read-only token; readers get no GitHub identity.
     hosts = ("git@github.com:", "ssh://git@github.com/", "https://github.com/")
     result["GIT_CONFIG_COUNT"] = str(len(hosts))
     for index, host in enumerate(hosts):
         result[f"GIT_CONFIG_KEY_{index}"] = f"url.{PUSH_REFUSED}.pushInsteadOf"
         result[f"GIT_CONFIG_VALUE_{index}"] = host
     return result
-
-
-SCRUBBED = b"[read-only GitHub token]"
-
-
-def reader_secret(write):
-    """The token a reader's gh can read; its worker scrubs it from every line it keeps or shows (review of #144)."""
-    if write or not os.path.lexists(GITHUB_READ_TOKEN):
-        return None
-    return GITHUB_READ_TOKEN.read_text(encoding="utf-8").strip().encode() or None
-
-
-def scrub_line(line, secret):
-    """One native output line with the reader's token replaced, before it is stored, parsed or shown."""
-    return line.replace(secret, SCRUBBED) if secret else line
 
 
 def check_role_write(role_id):

@@ -232,23 +232,6 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual([call for call in FakeRex.calls if call[0] == "new"],
                          [call for call in calls if call[0] == "new"])
 
-    def test_a_reader_that_prints_its_github_token_leaves_no_trace(self):
-        # Review of #144: an unconfined reader can print the read-only token from its gh config.
-        token = self.root / "github-read-token"
-        token.write_text("github_pat_fixturetoken\n")
-        token.chmod(0o600)
-        self.events[0] = {**self.events[0], "title": "cat hosts.yml: oauth_token: github_pat_fixturetoken"}
-        self.process = FakeProcess(self.events)
-        pane = StringIO()
-        with patch.object(factory, "GITHUB_READ_TOKEN", token), patch.object(factory, "READER_GH_CONFIG", self.root / "gh-reader"), \
-                redirect_stdout(pane):
-            receipt = asyncio.run(grok_worker.execute(self.args, spawn=self.spawn, probe=self.probe,
-                configuration=self.configuration, clock=lambda: 1000, timer=lambda: 10))
-        self.assertEqual(receipt["state"], "completed", receipt["error"])
-        for kept in (self.args.events.read_text(), self.args.receipt.read_text(), pane.getvalue()):
-            self.assertNotIn("github_pat_fixturetoken", kept)
-        self.assertIn("[read-only GitHub token]", self.args.events.read_text())
-
     def test_original_events_bound_receipt_and_idempotent_collection(self):
         with patch.dict(os.environ, {"GH_TOKEN": "fixture-private-token"}):
             receipt = self.execute()
