@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.39.0 — 2026-11-13
+
+- Recover lost writers, keep shared verification plans serving, fail toolless writers (#135)
+
 ## 0.38.1 — 2026-11-12
 
 - Name what Git said when a writer commit fails (#131)
