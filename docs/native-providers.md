@@ -515,7 +515,7 @@ Owned workers disable both native multi-agent features for these leaf assignment
 The native child receives only the locale/path/temp and subscription-configuration
 settings allowed by `native_environment()`; host credential variables are not forwarded.
 
-New Codex model children additionally use `--strict-config` and per-run
+New Codex model children additionally use per-run
 `allow_login_shell=false`, `features.shell_snapshot=false` and
 `shell_environment_policy.experimental_use_profile=false`. Each child gets one
 private, initially empty absolute directory as `ZDOTDIR`, both in a fresh native
@@ -524,6 +524,9 @@ override. The [configuration reference](https://learn.chatgpt.com/docs/config-fi
 defines the controls: omitted login uses nonlogin execution, explicit login
 requests are rejected, and shell snapshots/profile loading are disabled. Native
 HOME/CODEX_HOME, authentication, sandbox, model, effort and deadlines are preserved.
+Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
+into each checkout's `.codex/config.toml`, which Codex ignores with a warning
+and strict mode turned into a startup failure for every assignment.
 Shared environment consumers, other providers and factory Git helper environments
 are unchanged; existing receipts and reconnect/collection need no migration.
 
