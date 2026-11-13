@@ -39,6 +39,14 @@ WRITER_CONTRACT = ("Factory commit mode: edit and test only; do not stage or com
 SANDBOX_HINT = "; inspect native Git sandbox support and offline hook/signing access before another attempt; no host fallback was used"
 
 
+def git_said(result, limit=2000):
+    """Git's exit status and the end of what it or a hook printed, so a failed commit names its cause:
+    the receipt of a writer that finished during a laptop's dark wake could not tell a timeout,
+    a hook and a signing refusal apart."""
+    said = (result.stderr.strip() or result.stdout.strip())[-limit:]
+    return f" (git exited {result.returncode}" + (": " + said if said else "") + ")"
+
+
 class Refusal(factory.FactoryError):
     """A factory decision about the writer's own work, not a Git sandbox failure."""
 
@@ -639,7 +647,8 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
             if checked.returncode:
                 raise factory.FactoryError("Pre-commit changed its private index; inspect staged inputs before an explicit local commit")
         if hooked.returncode:
-            raise factory.FactoryError("Writer commit failed; inspect the retained commit intent, Git HEAD and configured hooks/signing. No commit was retried")
+            raise factory.FactoryError("Writer commit failed: pre-commit refused" + git_said(hooked)
+                                       + "; inspect the retained commit intent, Git HEAD and configured hooks/signing. No commit was retried")
     if commit_policy(args, environment) != policy:
         raise factory.FactoryError("Git configuration changed during pre-commit; inspect the retained work before another attempt")
     try:
@@ -648,7 +657,8 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     except factory.FactoryError:
         raise factory.FactoryError("Writer commit outcome is uncertain; inspect the retained commit intent, Git HEAD and hooks before another action. No commit was retried") from None
     if committed.returncode:
-        raise factory.FactoryError("Writer commit failed; inspect the retained commit intent, Git HEAD and configured hooks/signing before authorizing a correction. No commit was retried")
+        raise factory.FactoryError("Writer commit failed" + git_said(committed) + "; inspect the retained commit intent, "
+                                   "Git HEAD and configured hooks/signing before authorizing a correction. No commit was retried")
     candidate = factory.git_commit(".", "HEAD")
     parent = git("show", "-s", "--format=%P", candidate)
     if parent.returncode or parent.stdout.strip() != args.candidate:

@@ -1258,12 +1258,15 @@ class NativeResults(unittest.TestCase):
         hooks = self.repo / ".git/hooks"
         log = self.root / "hook-calls"
         hook = hooks / "pre-commit"
-        hook.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nwith Path({str(log)!r}).open('a') as f: f.write('called\\n')\nraise SystemExit(1)\n")
+        hook.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\nwith Path({str(log)!r}).open('a') as f: f.write('called\\n')\n"
+                        "print('lint: feature.py is not formatted', file=sys.stderr)\nraise SystemExit(1)\n")
         hook.chmod(0o700)
         subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", str(hooks)], check=True)
         receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("inspect the retained commit intent, Git HEAD", receipt["error"])
+        # The receipt names the cause, not only the step.
+        self.assertIn("pre-commit refused (git exited 1: lint: feature.py is not formatted)", receipt["error"])
         self.assertEqual(receipt["commit"]["state"], "committing")
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
         self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
@@ -1291,6 +1294,20 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(factory.git_commit(".", "HEAD"), candidate)
         self.assertEqual(len(self.spawns), 1)
+
+    def test_refused_commit_names_what_git_said(self):
+        self.writer()
+        git_run = factory.git_run
+        def refused(repository, *args, **options):
+            if "commit" in args:
+                return subprocess.CompletedProcess(args, 128, "", "error: signing failed: agent refused operation\n")
+            return git_run(repository, *args, **options)
+        with patch.object(factory, "git_run", side_effect=refused):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("Writer commit failed (git exited 128: error: signing failed: agent refused operation)", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "committing")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
 
     def test_factory_commit_works_from_an_admitted_subdirectory(self):
         self.writer()
