@@ -1528,6 +1528,33 @@ def role_spec(role_id):
     return role
 
 
+# A read-only assignment gets no GitHub identity: a release judgment merged a PR and deployed it under
+# the operator's. Readers work on a local checkout, and release evidence is captured before launch.
+# Writers keep the operator's identity; the factory owns their commits and nothing pushes.
+# SOFTWARE_FACTORY_CONFIG relocates the factory's configuration; the tests point it at an empty directory.
+CONFIG_DIRECTORY = Path(os.environ.get("SOFTWARE_FACTORY_CONFIG") or Path.home() / ".config" / "software-factory")
+READER_GH_CONFIG = CONFIG_DIRECTORY / "gh-reader"
+PUSH_REFUSED = "https://push-refused.invalid/"
+
+
+def reader_environment(environment, write):
+    """A reader's native environment: gh with no login to fall back on, and pushes to GitHub refused."""
+    if write:
+        return environment
+    READER_GH_CONFIG.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for entry in READER_GH_CONFIG.iterdir():
+        if entry.name == "hosts.yml":
+            entry.unlink()  # A credential an earlier factory version left; readers hold none.
+    result = {key: value for key, value in environment.items() if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+    result["GH_CONFIG_DIR"] = str(READER_GH_CONFIG)
+    hosts = ("git@github.com:", "ssh://git@github.com/", "https://github.com/")
+    result["GIT_CONFIG_COUNT"] = str(len(hosts))
+    for index, host in enumerate(hosts):
+        result[f"GIT_CONFIG_KEY_{index}"] = f"url.{PUSH_REFUSED}.pushInsteadOf"
+        result[f"GIT_CONFIG_VALUE_{index}"] = host
+    return result
+
+
 def check_role_write(role_id):
     if not isinstance(role_id, str) or role_spec(role_id).get("write_allowed") is not True:
         raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")

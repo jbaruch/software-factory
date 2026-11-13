@@ -266,7 +266,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                                      dir=Path(tempfile.gettempdir()).resolve()))
                 except OSError:
                     raise factory.FactoryError("Cannot allocate the private native shell directory; restore temporary storage access/space and reconcile this attempt before another launch") from None
-                environment = {**native_environment(), "ZDOTDIR": str(directory)}
+                environment = factory.reader_environment({**native_environment(), "ZDOTDIR": str(directory)}, args.write)
                 # JSON basic-string escapes also fit TOML, except raw DEL;
                 # keep non-BMP Unicode literal rather than JSON surrogate pairs.
                 shell_path = json.dumps(str(directory), ensure_ascii=False).replace("\x7f", "\\u007f")

@@ -329,21 +329,21 @@
     },
     {
       "id": "release",
-      "write_allowed": true,
-      "purpose": "Deliver verified changes through the selected release procedure.",
-      "activate_when": "Merge, publication or deployment of an eligible candidate.",
+      "write_allowed": false,
+      "purpose": "Judge whether a pull request is ready for the repository's release policy.",
+      "activate_when": "A pull request awaits its release judgment or final acceptance.",
       "capabilities": [
         "repository release policy",
-        "CI",
-        "publication tooling"
+        "CI evidence",
+        "review feedback"
       ],
-      "decision_authority": "Release execution within granted authority and required project gates.",
-      "result": "Actual delivery references, confirmations and concrete blocks.",
+      "decision_authority": "Release readiness judgment only; the repository's release skill merges, publishes and deploys after it.",
+      "result": "A readiness judgment with blocking findings or approval, citing the evidence read.",
       "model_binding": "per_assignment",
       "instructions": [
-        "Run the actual repository release procedure under existing authority.",
-        "Confirm the required merged/published/deployed result against the correct source.",
-        "Return source corrections to implementation; do not silently repair reviewed production code."
+        "Judge only. Never merge, publish, deploy, push, comment on or change the pull request, and never change the checkout.",
+        "Read the frozen evidence and the candidate; run nothing that writes outside your own temporary directory.",
+        "Return blocking findings to implementation; do not repair code yourself."
       ]
     },
     {
