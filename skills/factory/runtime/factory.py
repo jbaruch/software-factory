@@ -1531,8 +1531,10 @@ def role_spec(role_id):
 # A read-only assignment reads GitHub but can never change it: a release judgment merged a PR and
 # deployed it under the operator's identity. Writers keep the operator's identity; the factory owns
 # their commits and nothing pushes.
-GITHUB_READ_TOKEN = Path.home() / ".config" / "software-factory" / "github-read-token"
-READER_GH_CONFIG = Path.home() / ".config" / "software-factory" / "gh-reader"
+# SOFTWARE_FACTORY_CONFIG relocates it; the tests point it at an empty directory, so they never read the real token.
+CONFIG_DIRECTORY = Path(os.environ.get("SOFTWARE_FACTORY_CONFIG") or Path.home() / ".config" / "software-factory")
+GITHUB_READ_TOKEN = CONFIG_DIRECTORY / "github-read-token"
+READER_GH_CONFIG = CONFIG_DIRECTORY / "gh-reader"
 PUSH_REFUSED = "https://push-refused.invalid/"
 
 
