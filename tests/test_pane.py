@@ -74,8 +74,9 @@ class Pane(unittest.TestCase):
         self.assertNotIn("\n", line)
 
 
-class ReaderEvidence(unittest.TestCase):
-    """A verifier's verdict needs a tool call behind it: two Grok qa runs answered after one turn of thought."""
+class ToolEvidence(unittest.TestCase):
+    """A verifier's verdict needs a tool call behind it: two Grok qa runs answered after one turn of thought.
+    So does a writer's report: a Grok correction filed its opening progress note as blocked (#134)."""
 
     def args(self, *, write=False, release=None):
         return argparse.Namespace(write=write, release_evidence=release, release_evidence_digest=None,
@@ -95,15 +96,22 @@ class ReaderEvidence(unittest.TestCase):
             codex=([dict(type="item.started", item=dict(type="command_execution", command="cat a.md"))],
                    [dict(type="item.completed", item=dict(type="agent_message", text="{}"))]))
         for harness, (evidence, none) in cases.items():
-            with self.subTest(harness=harness):
-                factory.check_reader_evidence(harness, evidence, self.args())
-                with self.assertRaisesRegex(factory.FactoryError, "without a single tool call"):
-                    factory.check_reader_evidence(harness, none, self.args())
+            for write in (False, True):
+                with self.subTest(harness=harness, write=write):
+                    factory.check_tool_evidence(harness, evidence, self.args(write=write))
+                    with self.assertRaisesRegex(factory.FactoryError, "without a single tool call"):
+                        factory.check_tool_evidence(harness, none, self.args(write=write))
+        with self.assertRaisesRegex(factory.FactoryError, "nothing was read, edited or tested"):
+            factory.check_tool_evidence("grok", [dict(type="thought"), dict(type="end")], self.args(write=True))
 
-    def test_writers_judgments_and_coordination_are_exempt(self):
-        factory.check_reader_evidence("grok", [], self.args(write=True))
-        factory.check_reader_evidence("grok", [], self.args(release="{}"))
-        factory.check_reader_evidence("claude", [], self.args(), coordination=dict(question="fixture"))
+    def test_a_codex_edit_counts_as_a_tool_call(self):
+        # The pane shows a Codex file_change as "→ edit"; a writer that only patched files did work.
+        edit = dict(type="item.completed", item=dict(type="file_change", changes=[dict(path="a.py", kind="update")]))
+        factory.check_tool_evidence("codex", [edit], self.args(write=True))
+
+    def test_judgments_and_coordination_are_exempt(self):
+        factory.check_tool_evidence("grok", [], self.args(release="{}"))
+        factory.check_tool_evidence("claude", [], self.args(), coordination=dict(question="fixture"))
 
 
 if __name__ == "__main__":

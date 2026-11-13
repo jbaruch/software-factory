@@ -2524,13 +2524,18 @@ def called_tool(harness, event):
         # The `finish` tool step delivers the report itself, like Claude's StructuredOutput.
         step = pane_object(event.get("step_update"))
         return step.get("step_type") == "tool" and "finish" not in (step.get("tool_name"), pane_object(step.get("tool_info")).get("name"))
-    return event.get("type") == "item.started" and pane_object(event.get("item")).get("type") == "command_execution"
+    item = pane_object(event.get("item"))
+    return ((event.get("type") == "item.started" and item.get("type") == "command_execution")
+            or (event.get("type") == "item.completed" and item.get("type") == "file_change"))
 
 
-def check_reader_evidence(harness, events, args, coordination=None):
-    """A read-only verifier's verdict rests on something it read; a judgment's evidence is its frozen brief."""
-    if (not args.write and coordination is None and not carries_judgment(args)
-            and not any(called_tool(harness, event) for event in events)):
+def check_tool_evidence(harness, events, args, coordination=None):
+    """A verdict rests on something read and a writer's report on something tried; a judgment's evidence is its frozen brief."""
+    if coordination is None and not carries_judgment(args) and not any(called_tool(harness, event) for event in events):
+        if args.write:
+            # A Grok correction returned its opening progress note as a blocked report after one turn (#134).
+            raise FactoryError("Ended without a single tool call, so nothing was read, edited or tested and the "
+                               "report is no result; inspect the brief and launch a new attempt")
         # Two Grok qa runs thought for one turn and returned approved, then blocked, with an "UNTESTED" placeholder.
         raise FactoryError("Returned a verdict without a single tool call, so nothing was read or checked; "
                            "inspect the brief and launch a new attempt")
