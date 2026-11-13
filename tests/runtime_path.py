@@ -9,4 +9,6 @@ if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 
 # Never the operator's factory configuration, which holds a GitHub token; worker subprocesses inherit this.
-os.environ["SOFTWARE_FACTORY_CONFIG"] = tempfile.mkdtemp(prefix="factory-test-config-")
+# The object lives as long as the test process and removes the directory when it ends.
+CONFIG = tempfile.TemporaryDirectory(prefix="factory-test-config-")
+os.environ["SOFTWARE_FACTORY_CONFIG"] = CONFIG.name

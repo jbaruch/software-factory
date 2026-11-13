@@ -516,9 +516,12 @@ The native child receives only the locale/path/temp and subscription-configurati
 settings allowed by `native_environment()`; host credential variables are not forwarded.
 Read-only assignments (verifiers and judgments) never get the operator's GitHub
 identity, after a release judgment merged a PR and deployed it: `GH_CONFIG_DIR`
-points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` carry the
-read-only token from `~/.config/software-factory/github-read-token` (mode 0600)
-when it exists, and pushes to GitHub are rewritten to an invalid host. Create
+points at a factory directory whose `hosts.yml` (mode 0600) holds the read-only
+token from `~/.config/software-factory/github-read-token` (mode 0600) when it
+exists, so no token sits in the environment for an `env` dump to log, and pushes
+to GitHub are rewritten to an invalid host. This stops a misbriefed agent, not a
+hostile one: an unconfined agent can still reach the operator's credentials on
+disk. Create
 that token as a fine-grained personal access token with read-only Contents,
 Issues, Pull requests and Metadata on the repositories the factory serves;
 without it, readers can't read private GitHub issues or pull requests. Writers keep

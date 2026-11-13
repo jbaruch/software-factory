@@ -39,11 +39,17 @@ class ReaderEnvironment(unittest.TestCase):
         self.assertEqual(pushed.stdout.strip(), factory.PUSH_REFUSED + "jbaruch/nanoclaw.git")
         self.assertEqual(fetched.stdout.strip(), "git@github.com:jbaruch/nanoclaw.git")
 
-    def test_readers_use_the_read_only_token_when_present(self):
+    def test_readers_reach_the_read_only_token_through_gh_never_the_environment(self):
         self.token.write_text("github_pat_readonly\n")
         self.token.chmod(0o600)
         environment = factory.reader_environment(self.base, False)
-        self.assertEqual((environment["GH_TOKEN"], environment["GITHUB_TOKEN"]), ("github_pat_readonly", "github_pat_readonly"))
+        self.assertNotIn("github_pat_readonly", "\n".join(environment.values()))  # An `env` dump can't log it.
+        hosts = self.root / "gh-reader" / "hosts.yml"
+        self.assertIn("oauth_token: github_pat_readonly", hosts.read_text())
+        self.assertEqual(hosts.stat().st_mode & 0o777, 0o600)
+        self.token.unlink()
+        factory.reader_environment(self.base, False)
+        self.assertFalse(hosts.exists())
 
     def test_an_exposed_or_malformed_token_refuses(self):
         self.token.write_text("github_pat_readonly\n")

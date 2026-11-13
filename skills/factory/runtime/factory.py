@@ -1539,12 +1539,14 @@ PUSH_REFUSED = "https://push-refused.invalid/"
 
 
 def reader_environment(environment, write):
-    """A reader's native environment: the read-only token (or no GitHub identity) and pushes refused."""
+    """A reader's native environment: gh on the read-only token (or no GitHub identity) and pushes refused."""
     if write:
         return environment
-    READER_GH_CONFIG.mkdir(mode=0o700, parents=True, exist_ok=True)  # Holds no credentials, so gh can't fall back to the operator's.
+    # gh reads the token from its own config here, never the operator's, and an `env` dump can't log it.
+    READER_GH_CONFIG.mkdir(mode=0o700, parents=True, exist_ok=True)
     result = {key: value for key, value in environment.items() if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
     result["GH_CONFIG_DIR"] = str(READER_GH_CONFIG)
+    hosts = READER_GH_CONFIG / "hosts.yml"
     if os.path.lexists(GITHUB_READ_TOKEN):
         info = GITHUB_READ_TOKEN.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
@@ -1552,7 +1554,12 @@ def reader_environment(environment, write):
         token = GITHUB_READ_TOKEN.read_text(encoding="utf-8").strip()
         if not token or any(character.isspace() for character in token):
             raise FactoryError(f"{GITHUB_READ_TOKEN} must hold one read-only GitHub token")
-        result.update(GH_TOKEN=token, GITHUB_TOKEN=token)
+        partial = hosts.with_name(hosts.name + "." + uuid.uuid4().hex)
+        with open(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
+            stream.write(f"github.com:\n    oauth_token: {token}\n    git_protocol: https\n")
+        os.replace(partial, hosts)
+    elif os.path.lexists(hosts):
+        hosts.unlink()  # The operator removed the read-only token; readers get no GitHub identity.
     hosts = ("git@github.com:", "ssh://git@github.com/", "https://github.com/")
     result["GIT_CONFIG_COUNT"] = str(len(hosts))
     for index, host in enumerate(hosts):
