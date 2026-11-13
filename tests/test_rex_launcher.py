@@ -374,7 +374,7 @@ class NativeLauncher(unittest.TestCase):
 
     def test_a_line_joins_its_coordinators_session_and_never_closes_it(self):
         # The operator found a release tab in factory-nanoclaw beside the foreman's own nanoclaw session.
-        foreman = dict(session_id="session-foreman", label="nanoclaw", windows=[dict(
+        foreman: dict[str, Any] = dict(session_id="session-foreman", label="nanoclaw", windows=[dict(
             window_id="window-900", label="claude", layers=[dict(blocks=[dict(block_id="block-900")])])])
         FakeRex.sessions.append(foreman)
         factory.save(self.root / "nc.json", factory.new_task("nc", "nanoclaw"))
