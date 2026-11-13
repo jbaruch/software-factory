@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.1 — 2026-11-12
+
+- Name what Git said when a writer commit fails (#131)
+
 ## 0.38.0 — 2026-11-12
 
 - Open a line's tabs in the coordinator's session (#128)
