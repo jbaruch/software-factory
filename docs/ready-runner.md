@@ -98,6 +98,16 @@ report and successful process observation. It is not task acceptance. Other
 results are `needs_action`, `pending` for a one-cycle observation, and
 `pending_at_budget`. The CLI returns zero only for `complete`.
 
+The CLI result also carries `harnesses`, one entry per harness binary passed, so a
+coordinator routes new work to a harness the moment its quota resets. Each entry is
+`{error, windows}`: `windows` lists `{pool, remaining_percent, resets_at}`, and a
+non-null `error` means the capacity is unknown, with the reason. Codex comes from
+its live quota snapshot. Antigravity comes from its live weekly quota groups, one
+window per group, with no model turn. Claude comes from the newest receipt of the
+same Claude binary, adding `observed_at` (that run's finish time) and each window's
+`status`; it is an observation, not a live probe, and an unreadable newest receipt
+reports `error`. Grok always reports `error`, because it exposes no usage.
+
 ## Limits and reservations
 
 Worker slots and active task slots are reserved from observed processes, including

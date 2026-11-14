@@ -515,9 +515,15 @@ class ReadyRunner(unittest.TestCase):
         # Antigravity reset and neither line noticed for hours; the operator had to relay it by hand.
         import native_antigravity
         receipt = self.directory / "task.old.claude.json"
-        receipt.write_text(json.dumps(dict(finished_at=900.0, rate_limits=[dict(
-            rateLimitType="seven_day", utilization=0.92, resetsAt=1794693600, status="allowed_warning")])))
+        receipt.write_text(json.dumps(dict(kind="claude-execution", binary=str(Path(sys.executable).resolve()), finished_at=900.0,
+            rate_limits=[dict(rateLimitType="seven_day", utilization=0.92, resetsAt=1794693600, status="allowed_warning")])))
         receipt.chmod(0o600)
+        other = self.directory / "task.other-route.claude.json"  # Another Claude binary's receipt speaks for its own route.
+        other.write_text(json.dumps(dict(kind="claude-execution", binary="/elsewhere/claude", finished_at=950.0,
+            rate_limits=[dict(rateLimitType="seven_day", utilization=0.10, resetsAt=1, status="allowed")])))
+        other.chmod(0o600)
+        os.utime(receipt, (900, 900))
+        os.utime(other, (950, 950))
         groups = [dict(group="Gemini", window="weekly", percent_remaining=100.0, resets_at="2026-11-20T00:00:00Z")]
         controller = self.controller(self.plan([self.job()]), claude=sys.executable, grok=sys.executable,
                                      antigravity=sys.executable)
@@ -532,6 +538,10 @@ class ReadyRunner(unittest.TestCase):
         with patch.object(native_antigravity, "probe", side_effect=native_antigravity.UsageError("signed out")):
             self.assertEqual(controller.harnesses()["antigravity"], dict(error="signed out", windows=[]))
         self.assertEqual(set(self.controller(self.plan([self.job()])).harnesses()), {"codex"})
+        broken = self.directory / "task.newest.claude.json"
+        broken.write_text("{not json")
+        broken.chmod(0o600)
+        self.assertIn("Cannot read Claude receipt task.newest.claude.json", controller.harnesses()["claude"]["error"])
 
     def test_readonly_verifier_cannot_request_writer_mode(self):
         before = (self.directory / "task.json").read_bytes()
