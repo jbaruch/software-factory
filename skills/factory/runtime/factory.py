@@ -359,12 +359,20 @@ def load_task(path) -> dict:
         raise FactoryError("Invalid pinned Rex identity; restore the original task record before continuing")
     if (not isinstance(record["session_label"], str)
             or ("line" in record and (not isinstance(record["line"], str) or not LINE.fullmatch(record["line"])))
+
             # Its line's shared session, the `factory-<line>` session lines first used, or a task's own from before lines.
             or (record["session_label"] not in (line_session_label(task_line(record)), "factory-" + task_line(record))
                 and not re.fullmatch("factory-" + re.escape(record["task"]) + r"-[0-9a-f]{8}", record["session_label"]))
             or (record["session_id"] is not None
                 and (not isinstance(record["session_id"], str) or not record["session_id"]))):
         raise FactoryError("Invalid Rex session identity; restore the original task record before continuing")
+    # The acceptance `inputs` captured for a requirements revision; readers render it only for that revision.
+    if "acceptance" in record and (not isinstance(record["acceptance"], dict)
+                                   or set(record["acceptance"]) != {"requirements", "captured"}
+                                   or not isinstance(record["acceptance"]["requirements"], str)
+                                   or not record["acceptance"]["requirements"].strip()
+                                   or not isinstance(record["acceptance"]["captured"], str)):
+        raise FactoryError("Invalid captured acceptance; restore the original task record or select the inputs again")
     if version == 0:
         if "admission" in record or "hold" in record:
             raise FactoryError("Unversioned task has new fields; restore its schema version before continuing")
@@ -1417,7 +1425,8 @@ def provision_worktree(path, *, worktree_id, destination):
     return record
 
 
-def set_inputs(path, *, candidate, requirements):
+def set_inputs(path, *, candidate, requirements, acceptance=None):
+    """Select the task's inputs; `inputs` passes the acceptance it captured for this revision, stored in the same save."""
     record = load_task(path)
     if record["admission"] is None or not requirements.strip():
         raise FactoryError("Admit a task and supply a nonempty requirements revision first")
@@ -1425,6 +1434,8 @@ def set_inputs(path, *, candidate, requirements):
     record["inputs"] = dict(candidate=pinned_commit(record["admission"]["repository"], candidate,
                                                    record["admission"]["repository_identity"]),
                             requirements=requirements)
+    if acceptance is not None:
+        record["acceptance"] = acceptance
     save(path, record)
     return record
 
@@ -1547,8 +1558,13 @@ def read_token():
     """The read-only GitHub token from the macOS Keychain, or None when this Mac has none."""
     if not os.path.exists(SECURITY):
         return None
-    found = subprocess.run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-                           capture_output=True, text=True, timeout=30, check=False)
+    try:
+        found = subprocess.run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+                               capture_output=True, text=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        raise FactoryError(f"The Keychain did not answer within 30 seconds for {KEYCHAIN_SERVICE}; unlock the login Keychain and retry") from None
+    except (OSError, UnicodeError) as exc:
+        raise FactoryError(f"Cannot read {KEYCHAIN_SERVICE} from the Keychain ({type(exc).__name__}); check {SECURITY} and retry") from None
     if found.returncode == 44:  # The Keychain has no such item.
         return None
     if found.returncode:
@@ -1563,37 +1579,33 @@ def acceptance_issues(admission):
     return [match.groups() for match in (ACCEPTANCE_ISSUE.fullmatch(ref.strip()) for ref in admission["acceptance"]) if match]
 
 
-def acceptance_path(path, requirements):
-    """One frozen capture per requirements revision, so every reader of it judges the same acceptance text."""
-    path = Path(path)
-    return path.parent / f"{path.stem}.acceptance-{hashlib.sha256(requirements.encode()).hexdigest()[:16]}.md"
+def capture_acceptance(admission, requirements):
+    """The acceptance text `inputs` stores with a requirements revision, or None when acceptance names no issue.
 
-
-def capture_acceptance(path):
-    """Freeze the acceptance issues for the task's current requirements; callers run it before taking any lock."""
-    record = load_task(Path(path))
-    if record["admission"] is None or not acceptance_issues(record["admission"]):
-        return
-    target = acceptance_path(path, record["inputs"]["requirements"])
-    if os.path.lexists(target):
-        return
+    Callers run it before taking any lock. It fails closed: an issue it cannot read refuses the inputs, so a
+    revision never has two different captures (review of #152).
+    """
+    if not acceptance_issues(admission):
+        return None
     token = read_token()
     if token is None:
-        return  # The reader's brief says the references could not be captured.
-    save(target, acceptance_evidence(record["admission"], record["inputs"]["requirements"], token))
+        raise FactoryError(f"The acceptance references are GitHub issues, and this Mac has no read-only token for the "
+                           f"factory to capture them for readers: store it with `security add-generic-password -s "
+                           f"{KEYCHAIN_SERVICE} -a \"$USER\" -w`, then select the inputs again")
+    return dict(requirements=requirements, captured=acceptance_evidence(admission, requirements, token))
 
 
-def captured_acceptance(path, record, command):
-    """The frozen acceptance text a semantic reader gets; reading it never touches the network."""
+def rendered_acceptance(record, command):
+    """The stored acceptance text a semantic reader's brief carries; rendering never touches the network."""
     if record["admission"] is None or "--write" in command or native_harness(command) is None:
         return ""
-    if not acceptance_issues(record["admission"]):
-        return ""
-    target = acceptance_path(path, record["inputs"]["requirements"])
-    if os.path.lexists(target):
-        return read_record(target, private=True)
-    return (f"\nThe acceptance references are GitHub issues you cannot reach, and this Mac has no read-only token in the "
-            f"Keychain ({KEYCHAIN_SERVICE}) for the factory to capture them.\n")
+    stored = record.get("acceptance")
+    if stored is not None and stored["requirements"] == record["inputs"]["requirements"]:
+        return stored["captured"]
+    if acceptance_issues(record["admission"]):
+        return ("\nThe acceptance references are GitHub issues you cannot reach, and none were captured for this "
+                "requirements revision.\n")
+    return ""
 
 
 def acceptance_evidence(admission, requirements, token):
@@ -1901,7 +1913,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
         check_role_write(role)
-    instructions = "" if existing else brief(role, goal, designs="--write" in command) + captured_acceptance(path, record, command)
+    instructions = "" if existing else brief(role, goal, designs="--write" in command) + rendered_acceptance(record, command)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
@@ -3433,9 +3445,13 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
-        if args.action in {"codex-start", "grok-start", "claude-start", "antigravity-start"} and not args.write and \
-                os.path.lexists(args.state_dir.resolve() / (args.task + ".json")):
-            capture_acceptance(args.state_dir.resolve() / (args.task + ".json"))  # Network, before any lock.
+        acceptance = None
+        if args.action == "inputs":
+            with task_lock(args.state_dir.resolve(), args.task) as path:
+                prepared = load_task(path)
+            if prepared["admission"] is None:
+                raise FactoryError("Admit a task and supply a nonempty requirements revision first")
+            acceptance = capture_acceptance(prepared["admission"], args.requirements)  # Network, before any lock.
         locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
                                  "release-worktree", "rebase-worktree", "line"}
         line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE
@@ -3467,7 +3483,7 @@ def main(argv=None):
                     record = extend_allowance(path, purpose=args.purpose, additional=args.additional,
                         expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason)
                 elif args.action == "inputs":
-                    record = set_inputs(path, candidate=args.candidate, requirements=args.requirements)
+                    record = set_inputs(path, candidate=args.candidate, requirements=args.requirements, acceptance=acceptance)
                 elif args.action == "provision":
                     record = provision_worktree(path, worktree_id=args.id, destination=args.path)
                 elif args.action == "result":
