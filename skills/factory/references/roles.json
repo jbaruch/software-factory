@@ -113,7 +113,7 @@
       "instructions": [
         "Define interfaces, ownership and useful parallel delivery boundaries.",
         "Evaluate alternatives against actual requirements, constraints and failure modes.",
-        "Involve security, data and operations for decisions in their disciplines.",
+        "Involve security, data or operations only where the change actually touches their discipline.",
         "When a task's corrections run out, diagnose why it is not converging, overengineering first, and return a simpler plan within the admitted goal or a supported reason the goal cannot be met. Call the investigator for facts; a disagreement goes to the judge."
       ]
     },
