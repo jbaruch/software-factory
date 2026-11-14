@@ -520,7 +520,13 @@ points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` are removed, and
 pushes to GitHub are rewritten to an invalid host. Readers work on a local
 checkout, and a release judgment's GitHub evidence is captured before launch, so
 neither needs GitHub; a reader can't look up private issues or pull requests on
-its own. This stops a misbriefed agent, not a hostile one: an unconfined agent can
+its own. The factory reads its acceptance issues for it: at launch it fetches each
+`https://github.com/OWNER/REPO/issues/N` acceptance reference with the read-only
+token in `~/.config/software-factory/github-read-token` (mode 0600, a fine-grained
+token with read-only Contents, Issues, Pull requests and Metadata) and appends the
+issues' text to the reader's brief as untrusted data. The token never enters the
+agent's environment or brief. Without the token, the brief says the references
+could not be captured; a failed read refuses the launch. This stops a misbriefed agent, not a hostile one: an unconfined agent can
 still reach the operator's credentials on disk. Writers keep the operator's
 identity: the factory owns their commits and nothing pushes.
 
