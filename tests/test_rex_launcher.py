@@ -284,7 +284,7 @@ class NativeLauncher(unittest.TestCase):
         record["schema_version"] = 9
         factory.save(self.path, record)
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 10)
+        self.assertEqual(migrated["schema_version"], 11)
         self.assertNotIn("rex_instance", migrated["assignments"]["qa"])
         self.restart_rex()
         rex = factory.connect(migrated)
@@ -1793,7 +1793,7 @@ class TaskAdmission(unittest.TestCase):
             assignment.pop("rex_instance", None)
         self.path.write_text(json.dumps(record))
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 10)
+        self.assertEqual(migrated["schema_version"], 11)
         self.assertIsNone(factory.task_view(migrated)["allowances"])
         self.assertEqual(migrated["assignments"],
                          {key: {**item, "result": None, "native_collected": False} for key, item in record["assignments"].items()})
@@ -1914,7 +1914,7 @@ class TaskAdmission(unittest.TestCase):
         record["assignments"]["qa"].pop("rex_instance", None)
         self.path.write_text(json.dumps(record))
         upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 10)
+        self.assertEqual(upgraded["schema_version"], 11)
         self.assertIsNone(upgraded["assignments"]["qa"]["result"])
         self.assertNotIn("inputs", upgraded["assignments"]["qa"]["request"])
         with self.assertRaisesRegex(factory.FactoryError, "predates input binding"):
@@ -1938,7 +1938,7 @@ class TaskAdmission(unittest.TestCase):
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No historical pin can be inferred")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 10)
+        self.assertEqual(upgraded["schema_version"], 11)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["assignments"], {key: {k: v for k, v in item.items() if k != "rex_instance"}
                                                    for key, item in original["assignments"].items()})
@@ -1988,7 +1988,7 @@ class TaskAdmission(unittest.TestCase):
         factory.save(self.path, legacy)
         with patch.object(factory, "repository_identity", side_effect=AssertionError("No inferred historical identity")):
             upgraded = factory.load_task(self.path)
-        self.assertEqual(upgraded["schema_version"], 10)
+        self.assertEqual(upgraded["schema_version"], 11)
         self.assertIsNone(upgraded["admission"]["repository_identity"])
         self.assertEqual(upgraded["admission"]["legacy_repository_identity"], pin)
         self.assertEqual(upgraded["assignments"],

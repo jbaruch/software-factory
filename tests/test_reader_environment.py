@@ -103,6 +103,28 @@ class AcceptanceEvidence(unittest.TestCase):
             self.capture(updated_at="2026-11-14T09:00:00Z")
         self.assertIsNone(factory.capture_acceptance(dict(acceptance=["fixture/notes.md"]), self.requirements))
 
+    def test_repeated_inputs_keep_the_first_capture_of_a_revision(self):
+        # Review of #152: re-running inputs after an issue edit must not replace what earlier readers judged.
+        stored = dict(requirements=self.requirements, captured="first capture")
+        with patch.object(factory, "capture_acceptance", side_effect=AssertionError("refetched")):
+            self.assertIsNone(factory.inputs_acceptance(dict(admission=self.admission, acceptance=stored), self.requirements))
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond("2026-11-14T00:00:00Z"):
+            fresh = factory.inputs_acceptance(dict(admission=self.admission, acceptance=stored), "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z")
+        assert fresh is not None
+        self.assertEqual(fresh["requirements"], "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z")
+
+    def test_fetch_and_tls_failures_explain_recovery(self):
+        import http.client
+        import ssl
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
+                patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial")), \
+                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance jbaruch/nanoclaw#1368"):
+            factory.capture_acceptance(self.admission, self.requirements)
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
+                patch.object(ssl, "create_default_context", side_effect=ssl.SSLError("bad store")), \
+                self.assertRaisesRegex(factory.FactoryError, "Cannot set up TLS for GitHub"):
+            factory.capture_acceptance(self.admission, self.requirements)
+
     def test_the_token_comes_from_the_keychain_and_its_failures_explain_recovery(self):
         for code, out, expected in ((44, "", None), (0, "github_pat_keychainonly\n", "github_pat_keychainonly")):
             with self.subTest(code=code), patch.object(factory.os.path, "exists", return_value=True), \

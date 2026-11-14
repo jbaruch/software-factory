@@ -14,5 +14,21 @@ class Briefs(unittest.TestCase):
         self.assertIn("no option, flag, schema version, fallback", factory.SIMPLICITY)
 
 
+class TaskSchema(unittest.TestCase):
+    """Version 11 adds the optional `acceptance` capture (review of #152)."""
+
+    def test_version_10_migrates_and_never_carries_a_capture(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.json"
+            factory.save(path, {**factory.new_task("task"), "schema_version": 10})
+            self.assertEqual(factory.load_task(path)["schema_version"], 11)
+            factory.save(path, {**factory.new_task("task"), "schema_version": 10,
+                                "acceptance": dict(requirements="r", captured="text")})
+            with self.assertRaisesRegex(factory.FactoryError, "Legacy task has newer fields"):
+                factory.load_task(path)
+
+
 if __name__ == "__main__":
     unittest.main()

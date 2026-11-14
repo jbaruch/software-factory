@@ -284,7 +284,7 @@ def peek_line(path):
 
 
 def new_task(task, line=DEFAULT_LINE) -> dict:
-    return dict(schema_version=10, task=task, line=check_line(line), admission=None, inputs=None, hold=None, control_events=[], allowance_events=[],
+    return dict(schema_version=11, task=task, line=check_line(line), admission=None, inputs=None, hold=None, control_events=[], allowance_events=[],
                 provisioning=None, rex=None, session_label=line_session_label(line), session_id=None, assignments={})
 
 
@@ -325,9 +325,11 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if (version < 6 or version == 7) and "provisioning" in record:
+        raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
+    if version < 11 and "acceptance" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 7 and "allowance_events" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
@@ -519,8 +521,9 @@ def load_task(path) -> dict:
     if version < 7:
         record["allowance_events"] = []
     allowance_limits(record)
-    if version < 10:
-        record["schema_version"] = 10
+    if version < 11:
+        # Version 11 adds the optional `acceptance` capture; a migrated record has none until `inputs` captures one.
+        record["schema_version"] = 11
         try:
             save(path, record)
         except OSError:
@@ -1595,6 +1598,14 @@ def capture_acceptance(admission, requirements):
     return dict(requirements=requirements, captured=acceptance_evidence(admission, requirements, token))
 
 
+def inputs_acceptance(record, requirements):
+    """What `inputs` stores: a new capture, or None to keep the first one an unchanged revision already has."""
+    stored = record.get("acceptance")
+    if stored is not None and stored["requirements"] == requirements:
+        return None  # One capture per requirements revision, whatever the issue or the token did since.
+    return capture_acceptance(record["admission"], requirements)
+
+
 def rendered_acceptance(record, command):
     """The stored acceptance text a semantic reader's brief carries; rendering never touches the network."""
     if record["admission"] is None or "--write" in command or native_harness(command) is None:
@@ -1615,14 +1626,19 @@ def acceptance_evidence(admission, requirements, token):
     an edit between two readers' launches would have them judge different acceptance (review of #152).
     """
     issues = acceptance_issues(admission)
+    import http.client
     import ssl
     import urllib.error
     import urllib.request
-    context = ssl.create_default_context()
-    paths = ssl.get_default_verify_paths()
-    if not (paths.cafile or paths.capath) and os.path.exists("/etc/ssl/cert.pem"):
-        # The python.org macOS build has no roots until its Install Certificates step runs; the system has them.
-        context.load_verify_locations("/etc/ssl/cert.pem")
+    try:
+        context = ssl.create_default_context()
+        paths = ssl.get_default_verify_paths()
+        if not (paths.cafile or paths.capath) and os.path.exists("/etc/ssl/cert.pem"):
+            # The python.org macOS build has no roots until its Install Certificates step runs; the system has them.
+            context.load_verify_locations("/etc/ssl/cert.pem")
+    except (ssl.SSLError, OSError) as exc:
+        raise FactoryError(f"Cannot set up TLS for GitHub ({type(exc).__name__}: {exc}); repair Python's or the system's "
+                           "certificate store, then select the inputs again") from None
     captured = []
     for owner, repo, number in issues:
         request = urllib.request.Request(f"https://api.github.com/repos/{owner}/{repo}/issues/{number}", headers={
@@ -1630,7 +1646,7 @@ def acceptance_evidence(admission, requirements, token):
         try:
             with urllib.request.urlopen(request, timeout=30, context=context) as response:
                 issue = decode_json(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError, UnicodeError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, UnicodeError) as exc:
             raise FactoryError(f"Cannot capture acceptance {owner}/{repo}#{number} for the reader ({type(exc).__name__}: "
                                f"{getattr(exc, 'reason', exc)}); restore GitHub access or the read-only token, then launch again") from None
         if not isinstance(issue, dict):
@@ -3451,7 +3467,7 @@ def main(argv=None):
                 prepared = load_task(path)
             if prepared["admission"] is None:
                 raise FactoryError("Admit a task and supply a nonempty requirements revision first")
-            acceptance = capture_acceptance(prepared["admission"], args.requirements)  # Network, before any lock.
+            acceptance = inputs_acceptance(prepared, args.requirements)  # Network, before any lock.
         locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
                                  "release-worktree", "rebase-worktree", "line"}
         line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE

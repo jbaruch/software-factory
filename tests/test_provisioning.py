@@ -675,7 +675,7 @@ class WorktreeProvisioning(unittest.TestCase):
         factory.save(self.path, legacy)
         upgraded = factory.load_task(self.path)
         self.assertEqual(upgraded, original)
-        self.assertEqual(upgraded["schema_version"], 10)
+        self.assertEqual(upgraded["schema_version"], 11)
         for broken in ({**upgraded, "schema_version": 5}, {**upgraded, "provisioning": {}},
                        {key: value for key, value in upgraded.items() if key != "provisioning"}):
             factory.save(self.path, broken)

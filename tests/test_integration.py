@@ -365,7 +365,7 @@ class Integration(unittest.TestCase):
         self.assertEqual((started["window_id"], started["block_id"]),
                          (assignment["window_id"], assignment["block_id"]))
         self.assertEqual(len(FakeRex.sessions[0]["windows"]), 3)
-        self.assertEqual(factory.task_view(record)["schema_version"], 10)
+        self.assertEqual(factory.task_view(record)["schema_version"], 11)
         rex = factory.connect(record)
         EvidenceRex.integration_running = True
         try:
@@ -746,7 +746,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(result["delivery"]["acceptance"], "pending_native_judgment")
         self.assertEqual(result["delivery"]["publication"], "inapplicable")
         saved = factory.load_task(self.path)
-        self.assertEqual(saved["schema_version"], 10)
+        self.assertEqual(saved["schema_version"], 11)
         self.assertEqual(saved["assignments"]["qa"], original["assignments"]["qa"])
         self.assertEqual(saved["assignments"]["release"], original["assignments"]["release"])
         self.assertEqual(factory.task_view(saved)["allowances"], allowance)
@@ -1177,7 +1177,7 @@ class Integration(unittest.TestCase):
                     artifacts[path] = path.read_bytes()
         with patch.object(factory, "status", side_effect=AssertionError("Migration cannot infer collection")):
             migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 10)
+        self.assertEqual(migrated["schema_version"], 11)
         self.assertEqual({key: value for key, value in migrated.items() if key not in ("schema_version", "assignments")},
             {key: value for key, value in legacy.items() if key not in ("schema_version", "assignments")})
         for key, assignment in migrated["assignments"].items():

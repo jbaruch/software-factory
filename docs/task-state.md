@@ -147,9 +147,11 @@ session carries that name gets its line's tabs beside its own. Once the session 
 no tab at all, tidying kills it and sets the task's `session_id` to null; the next
 launch of any of the line's tasks joins or opens the session under that label.
 `factory.py line --task TASK --line LINE` moves a task with nothing open to another
-line. An optional `acceptance` object, `{requirements, captured}`, holds the acceptance
-issues' text `inputs` captured for that requirements revision; readers render it
-only while `inputs.requirements` still equals its `requirements`. A task still holding a session from before keeps its label, the `factory-<line>`
+line. Schema version 11 adds an optional `acceptance` object, `{requirements, captured}`:
+the acceptance issues' text `inputs` captured for that requirements revision.
+Readers render it only while `inputs.requirements` still equals its `requirements`,
+and repeating `inputs` at that revision keeps the first capture. Migrating version 10
+adds no capture. A task still holding a session from before keeps its label, the `factory-<line>`
 session lines first used or its own `factory-<task>-<8 hex>`, until that session
 closes; a task holding none joins its line's.
 
