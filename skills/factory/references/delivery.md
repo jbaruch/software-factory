@@ -2,7 +2,7 @@
 
 Delivery starts after independent verifiers approve the task's current candidate. `SKILL_DIR` is the `factory` skill's directory, as in the skill. The factory never pushes; specialists have no push or merge authority. The full contract is in [docs/integration.md](https://github.com/jbaruch/software-factory/blob/main/docs/integration.md).
 
-1. Push the writer's branch (`factory/TASK/WRITER_ID`) and open the PR through the project's installed release skill. PR preparation, issue declarations and feedback correction stay with that skill.
+1. Push the writer's branch (`factory/TASK/WRITER_ID`) and open the PR with `Skill(skill: "release")`, the project's installed release skill. PR preparation, issue declarations and feedback correction stay with that skill.
 2. Run the release judgment: a read-only `release` assignment over the complete PR feedback, on the strongest model available on any harness, at that model's maximum effort. Claude and Antigravity need `max`, Grok and Codex the top effort of their model catalogs. Launch refuses a lower effort, except on Grok, whose worker fails at start instead. For example, on Claude:
 
    ```sh
@@ -25,7 +25,7 @@ Delivery starts after independent verifiers approve the task's current candidate
      --gh /absolute/gh --release-scripts /absolute/repo/RELEASE-SKILL
    ```
 
-   Otherwise merge through the repository's release skill, which runs its own gates and any publication, then confirm that it merged what the release judgment approved:
+   Otherwise merge with `Skill(skill: "release")`, which runs its own gates and any publication, then confirm that it merged what the release judgment approved:
 
    ```sh
    python3 -B "$SKILL_DIR/runtime/factory.py" delivered --task TASK \
@@ -37,7 +37,7 @@ Delivery starts after independent verifiers approve the task's current candidate
 
 If the branch conflicts with a moved base before step 1 or during review, run `python3 -B "$SKILL_DIR/runtime/factory.py" rebase-worktree --task TASK --onto BASE-COMMIT`, then a writer (`purpose: work`) whose goal applies the printed patch with `git apply --3way`, resolves the conflicts and re-runs the gate, and verify the produced commit with `--from-writer`: `integration`, the approvals you will name with `--after`, and each effect specialist whose code the resolution changed. Writers cannot make merge commits, so the factory refreshes by replaying.
 
-4. After the merge, remove the task's provisioned worktree with `python3 -B "$SKILL_DIR/runtime/factory.py" release-worktree --task TASK`. It refuses while the worktree is dirty or an assignment there may still run, and keeps the branch: deleting branches belongs to the repository's release policy, so run the release skill's worktree prune afterwards, which removes a merged branch only after checking it has no unmerged commits.
+4. After the merge, remove the task's provisioned worktree with `python3 -B "$SKILL_DIR/runtime/factory.py" release-worktree --task TASK`. It refuses while the worktree is dirty or an assignment there may still run, and keeps the branch: deleting branches belongs to the repository's release policy, so run the worktree prune of `Skill(skill: "release")` afterwards, which removes a merged branch only after checking it has no unmerged commits.
 
 ## Prerequisites
 
@@ -48,4 +48,4 @@ If the branch conflicts with a moved base before step 1 or during review, run `p
 - The repository's `checks.yml` defines the required `verify` job, and the canonical review watcher reports the PR ready, including its Claude review.
 - The target branch has classic branch protection: strict required status checks, administrator enforcement, no force pushes or deletion, no bypass allowances, and required `verify` bound to the GitHub Actions app (ID 15368).
 
-A repository that doesn't meet them delivers through its release skill and `delivered` (step 3).
+A repository that doesn't meet them delivers with `Skill(skill: "release")` and `delivered` (step 3).
