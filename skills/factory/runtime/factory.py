@@ -1560,10 +1560,21 @@ def check_role_write(role_id):
         raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")
 
 
-def brief(role_id, goal):
+# Baruch: the simplicity mandate is critical. Every design and every change carries coding-policy's
+# rules/simplicity.md as a binding instruction, against overengineering by default.
+SIMPLICITY = ("Simplicity is binding (coding-policy rules/simplicity.md): choose the simplest design that solves "
+              "today's problem. Add no option, flag, schema version, fallback, abstraction, extension point or state "
+              "store without a current caller or an observed failure; one caller gets no abstraction and one value no "
+              "setting. Prefer deleting code, state and process, reuse existing contracts, and delete what your change "
+              "leaves unused. Name the observed need each new component serves.")
+
+
+def brief(role_id, goal, *, designs=False):
+    """The assignment's instructions; a writer or an architect also carries the simplicity mandate."""
     role = role_spec(role_id)
     return (f"# Assignment: {role_id}\n\n{goal}\n\n"
             + "\n".join("- " + item for item in role["instructions"])
+            + ("\n- " + SIMPLICITY if designs or role_id == "architecture" else "")
             + "\n\nAuthority: " + role["decision_authority"]
             + "\nReturn: " + role["result"]
             # Read-only specialists cannot write files, so the report is their only collected output.
@@ -1764,7 +1775,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
         check_role_write(role)
-    instructions = "" if existing else brief(role, goal)
+    instructions = "" if existing else brief(role, goal, designs="--write" in command)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
