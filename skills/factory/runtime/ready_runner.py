@@ -6,10 +6,12 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import time
+from typing import Any
 
 import codex_capacity
 import factory
@@ -149,6 +151,23 @@ def settled_current(record, assignment):
 def reserved(request):
     return (request.get("purpose") in {"correction", "investigation"}
             or (request["role"] in RESERVED_ROLES and not writer(request)))
+
+
+def claude_limits(directory):
+    """Claude's limits as its latest run observed them; Claude has no probe that costs no turn."""
+    receipts = sorted(Path(directory).glob("*.claude.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for receipt in receipts:
+        try:
+            value = factory.decode_json(factory.read_record(receipt, private=True))
+        except (OSError, ValueError, UnicodeError):
+            continue  # One unreadable receipt doesn't hide the others' observations.
+        limits = value.get("rate_limits") if isinstance(value, dict) else None
+        if isinstance(limits, list) and limits:
+            return dict(error=None, observed_at=value.get("finished_at"), windows=[
+                dict(pool=limit.get("rateLimitType"), remaining_percent=None if not isinstance(limit.get("utilization"), (int, float))
+                     else round(100 * (1 - limit["utilization"]), 1), resets_at=limit.get("resetsAt"), status=limit.get("status"))
+                for limit in limits if isinstance(limit, dict)])
+    return dict(error="No Claude run has reported its limits yet", windows=[])
 
 
 def capacity_reason(snapshot, binary, now, minimum, job):
@@ -389,6 +408,31 @@ class Runner:
             if self.probe_failures == self.probe_limit:
                 self.capacity_error += "; metadata retry allowance exhausted: restore the service before restarting this controller"
 
+    def harnesses(self):
+        """Each passed harness's remaining capacity, so a coordinator routes new work to a harness the
+        moment its quota resets instead of waiting for the operator to say so."""
+        self.refresh_capacity()
+        snapshot: dict[str, Any] = self.capacity if isinstance(self.capacity, dict) else {}
+        pools: list[Any] = snapshot.get("pools") or []
+        report: dict[str, Any] = dict(codex=dict(error=self.capacity_error, windows=[
+            dict(pool=pool.get("limit_id"), remaining_percent=window.get("remaining_percent"), resets_at=window.get("resets_at"))
+            for pool in pools for window in (pool.get("primary"), pool.get("secondary")) if window]))
+        if self.antigravity is not None:
+            import native_antigravity
+            try:
+                usage: dict[str, Any] = native_antigravity.probe(str(self.antigravity), str(self.directory))
+                groups: list[Any] = usage["groups"]
+                report["antigravity"] = dict(error=None, windows=[
+                    dict(pool=group["group"], remaining_percent=group["percent_remaining"], resets_at=group["resets_at"])
+                    for group in groups])
+            except (native_antigravity.UsageError, OSError, subprocess.TimeoutExpired) as exc:
+                report["antigravity"] = dict(error=str(exc), windows=[])
+        if self.claude is not None:
+            report["claude"] = claude_limits(self.directory)
+        if self.grok is not None:
+            report["grok"] = dict(error="Grok reports no usage; a launch is the only test", windows=[])
+        return report
+
     def tick(self) -> dict:
         self.metrics["polls"] += 1
         records, phases, active, issues = self.observe()
@@ -555,6 +599,7 @@ def main(argv=None):
         runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, antigravity=args.antigravity, rex=args.rex, server=args.server,
                         from_writer=args.from_writer)
         result = run(runner, seconds=args.seconds, once=args.once)
+        result["harnesses"] = runner.harnesses()
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0 if result["result"] == "complete" else 1
     except (factory.FactoryError, native_codex.CodexProbeError, OSError, ValueError, TimeoutError) as exc:
