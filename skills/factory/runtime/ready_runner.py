@@ -153,26 +153,6 @@ def reserved(request):
             or (request["role"] in RESERVED_ROLES and not writer(request)))
 
 
-def claude_limits(directory, binary):
-    """Claude's limits as the newest run of the selected Claude binary observed them; Claude has no free probe."""
-    receipts = sorted(Path(directory).glob("*.claude.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for receipt in receipts:
-        try:
-            value = factory.decode_json(factory.read_record(receipt, private=True))
-        except (OSError, ValueError, UnicodeError) as exc:
-            return dict(error=f"Cannot read Claude receipt {receipt.name} ({type(exc).__name__}); restore or remove it", windows=[])
-        # Only this route's own receipts speak for its capacity.
-        if not isinstance(value, dict) or value.get("kind") != "claude-execution" or value.get("binary") != str(binary):
-            continue
-        limits = value.get("rate_limits")
-        if isinstance(limits, list) and limits:
-            return dict(error=None, observed_at=value.get("finished_at"), windows=[
-                dict(pool=limit.get("rateLimitType"), remaining_percent=None if not isinstance(limit.get("utilization"), (int, float))
-                     else round(100 * (1 - limit["utilization"]), 1), resets_at=limit.get("resetsAt"), status=limit.get("status"))
-                for limit in limits if isinstance(limit, dict)])
-    return dict(error="No run of this Claude binary has reported its limits yet", windows=[])
-
-
 def capacity_reason(snapshot, binary, now, minimum, job):
     """Gate selected requests; metadata never selects a model or accepts work."""
     if (type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] != 1 or snapshot.get("binary") != str(binary)
@@ -430,8 +410,9 @@ class Runner:
                     for group in groups])
             except (native_antigravity.UsageError, OSError, subprocess.TimeoutExpired) as exc:
                 report["antigravity"] = dict(error=str(exc), windows=[])
+        # Neither has a live usage probe, and a past run's numbers can't vouch for today's account.
         if self.claude is not None:
-            report["claude"] = claude_limits(self.directory, self.claude)
+            report["claude"] = dict(error="Claude reports its limits only inside a run; a launch is the only test", windows=[])
         if self.grok is not None:
             report["grok"] = dict(error="Grok reports no usage; a launch is the only test", windows=[])
         return report
