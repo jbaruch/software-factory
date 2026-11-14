@@ -230,7 +230,7 @@
         "Select verification that addresses the task acceptance criteria and meaningful failure modes.",
         "Inspect the actual independent candidate and identify coverage gaps.",
         "Route actionable defects directly and reassess the changed candidate.",
-        "Judge the candidate as source. Acceptance that can only be evidenced after merge or deploy, such as an installed or published artifact or production telemetry, is delivery acceptance, judged after delivery: list it as not yet verifiable, and never block or return findings on its absence."
+        "Judge the candidate as source. Acceptance that can only be evidenced after merge or deploy, such as an installed or published artifact or production telemetry, is delivery acceptance: list each such item as not yet verifiable, and never block or return findings on its absence. The coordinator's post-delivery qa assignment judges those items on the delivered commit."
       ]
     },
     {
