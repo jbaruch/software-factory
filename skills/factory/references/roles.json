@@ -344,6 +344,7 @@
       "instructions": [
         "Judge only. Never merge, publish, deploy, push, comment on or change the pull request, and never change the checkout.",
         "Read the frozen evidence and the candidate; run nothing that writes outside your own temporary directory.",
+        "Judge acceptance that can be evidenced before merge. List acceptance that can only be evidenced after merge or deploy, such as an installed or published artifact or production telemetry, as not yet verifiable, and never block on its absence; the coordinator's post-delivery qa assignment judges it.",
         "Return blocking findings to implementation; do not repair code yourself."
       ]
     },
