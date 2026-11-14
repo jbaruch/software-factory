@@ -1537,28 +1537,72 @@ def role_spec(role_id):
 CONFIG_DIRECTORY = Path(os.environ.get("SOFTWARE_FACTORY_CONFIG") or Path.home() / ".config" / "software-factory")
 READER_GH_CONFIG = CONFIG_DIRECTORY / "gh-reader"
 # The factory, never the agent, reads GitHub for a reader: the token stays out of the agent's environment and brief.
-GITHUB_READ_TOKEN = CONFIG_DIRECTORY / "github-read-token"
+# No-secrets keeps it out of plain files: it lives in the macOS Keychain under this service, one entry per Mac.
+KEYCHAIN_SERVICE = "software-factory-github-read"
+SECURITY = "/usr/bin/security"
 ACCEPTANCE_ISSUE = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(?:issues|pull)/(\d+)")
 
 
-def acceptance_evidence(admission, requirements):
+def read_token():
+    """The read-only GitHub token from the macOS Keychain, or None when this Mac has none."""
+    if not os.path.exists(SECURITY):
+        return None
+    found = subprocess.run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+                           capture_output=True, text=True, timeout=30, check=False)
+    if found.returncode == 44:  # The Keychain has no such item.
+        return None
+    if found.returncode:
+        raise FactoryError(f"Cannot read {KEYCHAIN_SERVICE} from the Keychain: {found.stderr.strip()}; unlock the Keychain or fix the entry")
+    token = found.stdout.strip()
+    if not token or any(character.isspace() for character in token):
+        raise FactoryError(f"The Keychain entry {KEYCHAIN_SERVICE} must hold one read-only GitHub token")
+    return token
+
+
+def acceptance_issues(admission):
+    return [match.groups() for match in (ACCEPTANCE_ISSUE.fullmatch(ref.strip()) for ref in admission["acceptance"]) if match]
+
+
+def acceptance_path(path, requirements):
+    """One frozen capture per requirements revision, so every reader of it judges the same acceptance text."""
+    path = Path(path)
+    return path.parent / f"{path.stem}.acceptance-{hashlib.sha256(requirements.encode()).hexdigest()[:16]}.md"
+
+
+def capture_acceptance(path):
+    """Freeze the acceptance issues for the task's current requirements; callers run it before taking any lock."""
+    record = load_task(Path(path))
+    if record["admission"] is None or not acceptance_issues(record["admission"]):
+        return
+    target = acceptance_path(path, record["inputs"]["requirements"])
+    if os.path.lexists(target):
+        return
+    token = read_token()
+    if token is None:
+        return  # The reader's brief says the references could not be captured.
+    save(target, acceptance_evidence(record["admission"], record["inputs"]["requirements"], token))
+
+
+def captured_acceptance(path, record, command):
+    """The frozen acceptance text a semantic reader gets; reading it never touches the network."""
+    if record["admission"] is None or "--write" in command or native_harness(command) is None:
+        return ""
+    if not acceptance_issues(record["admission"]):
+        return ""
+    target = acceptance_path(path, record["inputs"]["requirements"])
+    if os.path.lexists(target):
+        return read_record(target, private=True)
+    return (f"\nThe acceptance references are GitHub issues you cannot reach, and this Mac has no read-only token in the "
+            f"Keychain ({KEYCHAIN_SERVICE}) for the factory to capture them.\n")
+
+
+def acceptance_evidence(admission, requirements, token):
     """The acceptance issues' text, captured for a reader that has no GitHub identity of its own.
 
     Approvals stay current for one requirements revision, so an issue the revision names must still be at it:
     an edit between two readers' launches would have them judge different acceptance (review of #152).
     """
-    issues = [match.groups() for match in (ACCEPTANCE_ISSUE.fullmatch(ref.strip()) for ref in admission["acceptance"]) if match]
-    if not issues:
-        return ""
-    if not os.path.lexists(GITHUB_READ_TOKEN):
-        return ("\nThe acceptance references are GitHub issues you cannot reach, and the factory has no read-only token "
-                f"({GITHUB_READ_TOKEN}) to capture them.\n")
-    info = GITHUB_READ_TOKEN.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-        raise FactoryError(f"Keep the read-only GitHub token in a regular file only you can read: chmod 600 {GITHUB_READ_TOKEN}")
-    token = GITHUB_READ_TOKEN.read_text(encoding="utf-8").strip()
-    if not token or any(character.isspace() for character in token):
-        raise FactoryError(f"{GITHUB_READ_TOKEN} must hold one read-only GitHub token")
+    issues = acceptance_issues(admission)
     import ssl
     import urllib.error
     import urllib.request
@@ -1857,9 +1901,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
         check_role_write(role)
-    instructions = "" if existing else brief(role, goal, designs="--write" in command) + (
-        acceptance_evidence(record["admission"], record["inputs"]["requirements"])
-        if "--write" not in command and record["admission"] is not None else "")
+    instructions = "" if existing else brief(role, goal, designs="--write" in command) + captured_acceptance(path, record, command)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
@@ -3391,6 +3433,9 @@ def main(argv=None):
                     raise FactoryError("Supply --gh and --release-scripts explicit installed paths")
                 transport = release_evidence.GitHub(args.gh, args.release_scripts, prepared["admission"]["repository"])
                 frozen_release = release_evidence.capture(prepared, args.release_pr, transport, cwd=args.cwd)
+        if args.action in {"codex-start", "grok-start", "claude-start", "antigravity-start"} and not args.write and \
+                os.path.lexists(args.state_dir.resolve() / (args.task + ".json")):
+            capture_acceptance(args.state_dir.resolve() / (args.task + ".json"))  # Network, before any lock.
         locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
                                  "release-worktree", "rebase-worktree", "line"}
         line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE

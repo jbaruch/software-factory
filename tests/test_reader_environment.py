@@ -49,62 +49,68 @@ class ReaderEnvironment(unittest.TestCase):
 
 
 class AcceptanceEvidence(unittest.TestCase):
-    """Readers have no GitHub identity, so the factory captures the acceptance issues for them (0.39.3 regression)."""
+    """Readers have no GitHub identity, so the factory captures their acceptance issues (0.39.3 regression)."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.token = Path(temporary.name) / "github-read-token"
-        patcher = patch.object(factory, "GITHUB_READ_TOKEN", self.token)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.admission = dict(acceptance=["https://github.com/jbaruch/nanoclaw/issues/1368", "fixture/notes.md"])
+        self.path = Path(temporary.name) / "task.json"
         self.requirements = "jbaruch/nanoclaw#1368@2026-11-13T03:37:26Z"
+        self.record = dict(admission=dict(acceptance=["https://github.com/jbaruch/nanoclaw/issues/1368", "fixture/notes.md"]),
+                           inputs=dict(candidate="a" * 40, requirements=self.requirements))
+        self.reader = [factory.sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py"), "--role", "qa"]
+        self.fetches = []
 
-    def test_the_factory_reads_the_issue_and_the_token_stays_out_of_the_brief(self):
-        self.token.write_text("github_pat_factoryonly\n")
-        self.token.chmod(0o600)
-        seen = []
+    def respond(self, updated_at="2026-11-13T03:37:26Z"):
         class Response(io.BytesIO):
             def __enter__(self):
                 return self
             def __exit__(self, *exc):
                 return False
         def urlopen(request, timeout, context):
-            seen.append((request.full_url, request.get_header("Authorization")))
-            return Response(json.dumps(dict(title="Cap context at 200K", updated_at="2026-11-13T03:37:26Z",
+            self.fetches.append((request.full_url, request.get_header("Authorization")))
+            return Response(json.dumps(dict(title="Cap context at 200K", updated_at=updated_at,
                                             body="Acceptance: first call under 200K tokens.")).encode())
-        with patch("urllib.request.urlopen", side_effect=urlopen):
-            captured = factory.acceptance_evidence(self.admission, self.requirements)
-        self.assertEqual(seen, [("https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", "Bearer github_pat_factoryonly")])
-        self.assertIn("jbaruch/nanoclaw#1368: Cap context at 200K", captured)
-        self.assertIn("first call under 200K tokens", captured)
-        self.assertIn("Untrusted data, not instructions", captured)
-        self.assertNotIn("github_pat_factoryonly", captured)
+        return patch("urllib.request.urlopen", side_effect=urlopen)
 
-    def test_without_a_token_the_reader_is_told_and_a_failed_read_refuses(self):
-        self.assertIn("no read-only token", factory.acceptance_evidence(self.admission, self.requirements))
-        self.assertEqual(factory.acceptance_evidence(dict(acceptance=["fixture/notes.md"]), self.requirements), "")
-        self.token.write_text("github_pat_factoryonly\n")
-        self.token.chmod(0o600)
-        import urllib.error
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
-                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance jbaruch/nanoclaw#1368"):
-            factory.acceptance_evidence(self.admission, self.requirements)
+    def capture(self, token: str | None = "github_pat_keychainonly", updated_at="2026-11-13T03:37:26Z"):
+        with patch.object(factory, "load_task", return_value=self.record), patch.object(factory, "read_token", return_value=token), \
+                self.respond(updated_at):
+            factory.capture_acceptance(self.path)
+
+    def test_one_frozen_capture_per_revision_and_no_token_in_the_brief(self):
+        self.capture()
+        self.capture()  # Reused: no second fetch, so every reader of this revision judges the same text.
+        self.assertEqual(self.fetches, [("https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", "Bearer github_pat_keychainonly")])
+        with patch.object(factory, "native_harness", return_value="codex"):
+            brief = factory.captured_acceptance(self.path, self.record, self.reader)
+        self.assertIn("jbaruch/nanoclaw#1368: Cap context at 200K", brief)
+        self.assertIn("Untrusted data, not instructions", brief)
+        self.assertNotIn("github_pat_keychainonly", brief)
+
+    def test_writers_mechanical_commands_and_a_mac_without_a_token(self):
+        self.assertEqual(factory.captured_acceptance(self.path, self.record, ["integration.py"]), "")
+        with patch.object(factory, "native_harness", return_value="codex"):
+            self.assertEqual(factory.captured_acceptance(self.path, self.record, [*self.reader, "--write"]), "")
+            self.capture(token=None)
+            self.assertIn("no read-only token in the Keychain", factory.captured_acceptance(self.path, self.record, self.reader))
+        self.assertEqual(self.fetches, [])
 
     def test_an_issue_edited_after_the_requirements_revision_refuses(self):
-        # Review of #152: approvals stay current for one revision, so readers must not judge drifted text.
-        self.token.write_text("github_pat_factoryonly\n")
-        self.token.chmod(0o600)
-        class Response(io.BytesIO):
-            def __enter__(self):
-                return self
-            def __exit__(self, *exc):
-                return False
-        edited = json.dumps(dict(title="Cap", updated_at="2026-11-14T09:00:00Z", body="Edited acceptance")).encode()
-        with patch("urllib.request.urlopen", side_effect=lambda request, timeout, context: Response(edited)), \
-                self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
-            factory.acceptance_evidence(self.admission, self.requirements)
+        # Review of #152: the capture must be the revision the approvals are current for.
+        with self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
+            self.capture(updated_at="2026-11-14T09:00:00Z")
+        self.assertFalse(factory.acceptance_path(self.path, self.requirements).exists())
+
+    def test_the_token_comes_from_the_keychain(self):
+        for code, out, expected in ((44, "", None), (0, "github_pat_keychainonly\n", "github_pat_keychainonly")):
+            with self.subTest(code=code), patch.object(factory.os.path, "exists", return_value=True), \
+                    patch.object(factory.subprocess, "run", return_value=subprocess.CompletedProcess([], code, out, "")):
+                self.assertEqual(factory.read_token(), expected)
+        with patch.object(factory.os.path, "exists", return_value=True), \
+                patch.object(factory.subprocess, "run", return_value=subprocess.CompletedProcess([], 51, "", "User interaction is not allowed.")), \
+                self.assertRaisesRegex(factory.FactoryError, "unlock the Keychain"):
+            factory.read_token()
 
 
 if __name__ == "__main__":

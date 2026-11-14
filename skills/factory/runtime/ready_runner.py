@@ -521,6 +521,8 @@ class Runner:
                 phases[key] = dict(state="waiting", reason=reason)
                 continue
             try:
+                if not job["write"]:
+                    factory.capture_acceptance(self.directory / (job["task"] + ".json"))  # Network, before the task lock.
                 with factory.task_lock(self.directory, job["task"]) as path:
                     current = factory.load_task(path)
                     if current["inputs"] != record["inputs"] or current["hold"] is not None:
