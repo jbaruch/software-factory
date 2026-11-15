@@ -563,7 +563,10 @@ with `codex mcp list --json`, across every layer, and passes
 `-c mcp_servers.NAME.enabled=false` for each. Codex splits a `-c` key on every dot
 and keeps quotes literally, so the name stays bare; a listed name with a dot, or an
 unavailable list, refuses the launch. Overriding a name no configuration file
-defines, such as a plugin-backed server, would fail Codex's configuration load. Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
+defines, such as a plugin-backed server, would fail Codex's configuration load.
+Managed configuration outranks command-line flags, so before launching, the worker
+asks Codex with the same overrides (`mcp list --json`, `features list`) and refuses
+when any server, `apps` or `plugins` stays on. Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
 into each checkout's `.codex/config.toml`, which Codex ignores with a warning
 and strict mode turned into a startup failure for every assignment.
 Shared environment consumers, other providers and factory Git helper environments

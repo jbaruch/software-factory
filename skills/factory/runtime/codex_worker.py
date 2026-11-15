@@ -179,26 +179,51 @@ async def stop_child(process):
 RUNTIME_MCP_OFF = ("--disable", "apps", "--disable", "plugins")
 
 
-def configured_mcp_servers(binary, cwd, environment):
-    """Every MCP server the checkout's Codex configuration files define, across all layers. With plugins off, the
-    list holds only names a `-c` override can address."""
+def codex_says(binary, cwd, environment, arguments):
+    """Ask Codex about its effective configuration in this checkout; an answer it cannot give refuses the launch."""
     try:
-        listed = subprocess.run([str(binary), *RUNTIME_MCP_OFF, "mcp", "list", "--json"], cwd=str(cwd), env=environment,
+        answer = subprocess.run([str(binary), *arguments], cwd=str(cwd), env=environment,
                                 capture_output=True, text=True, timeout=60, check=False)
-        servers = json.loads(listed.stdout) if listed.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-        raise factory.FactoryError(f"Cannot list the MCP servers Codex would start here ({type(exc).__name__}); "
-                                   "the worker refuses to launch with servers it cannot turn off") from None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise factory.FactoryError(f"Cannot ask Codex `{' '.join(arguments[-3:])}` here ({type(exc).__name__}); "
+                                   "the worker refuses to launch with MCP servers it cannot turn off") from None
+    if answer.returncode != 0:
+        raise factory.FactoryError(f"Codex `{' '.join(arguments[-3:])}` failed; the worker refuses to launch with MCP "
+                                   "servers it cannot turn off: " + (answer.stderr.strip()[:300] or f"exit {answer.returncode}"))
+    return answer.stdout
+
+
+def mcp_listing(binary, cwd, environment, arguments):
+    try:
+        servers = json.loads(codex_says(binary, cwd, environment, [*arguments, "mcp", "list", "--json"]))
+    except ValueError:
+        servers = None
     if not isinstance(servers, list) or any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in servers):
         raise factory.FactoryError("Codex returned no readable MCP server list; the worker refuses to launch with servers "
-                                   "it cannot turn off: " + (listed.stderr.strip()[:300] or "inspect `codex mcp list --json`"))
-    names = [item["name"] for item in servers]
+                                   "it cannot turn off: inspect `codex mcp list --json`")
+    return servers
+
+
+def configured_mcp_servers(binary, cwd, environment):
+    """Every MCP server the checkout's Codex configuration files define, across all layers, once Codex confirms
+    the worker's overrides leave none of them, and no runtime contribution, on. With plugins off, the list holds
+    only names a `-c` override can address."""
+    names = [item["name"] for item in mcp_listing(binary, cwd, environment, RUNTIME_MCP_OFF)]
     # Codex splits a `-c` key on every dot and keeps quotes literally, so `mcp_servers."a.b".enabled` would define a
     # new, invalid server and fail the launch; a name it cannot address refuses instead.
     unaddressable = [name for name in names if not re.fullmatch(r"[A-Za-z0-9_:@/-]+", name)]
     if unaddressable:
         raise factory.FactoryError(f"Codex MCP server {unaddressable[0]!r} cannot be turned off with a `-c` override; "
                                    "rename it without dots or remove it, then launch again")
+    # Managed configuration outranks command-line flags (review of #159), so Codex itself reports what stays on.
+    overrides = [*RUNTIME_MCP_OFF, *mcp_overrides(names)]
+    still_on = [item["name"] for item in mcp_listing(binary, cwd, environment, overrides) if item.get("enabled") is not False]
+    states = {fields[0]: fields[-1] for fields in map(str.split, codex_says(binary, cwd, environment, [*overrides, "features", "list"]).splitlines())
+              if len(fields) >= 3}
+    still_on += [f"the {feature} feature" for feature in ("apps", "plugins") if states.get(feature) != "false"]
+    if still_on:
+        raise factory.FactoryError(f"Codex keeps {', '.join(still_on)} on despite the worker's overrides, as managed "
+                                   "configuration can; the worker refuses to launch with MCP")
     return names
 
 

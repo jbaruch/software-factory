@@ -165,27 +165,46 @@ class NativeResults(unittest.TestCase):
                                                clock=lambda: 1000.0, timer=lambda: 10.0,
                                                git_scope=self.git_scope, scan=self.scan))
 
+    def codex_fixture(self, listed, *, verified="[]", features="apps stable false\nplugins stable false", failing=None):
+        """A provider-free `codex` answering the worker's configuration questions: the configured servers, what
+        stays on under the worker's overrides, and the effective feature states."""
+        binary = self.root / "codex-fixture"
+        binary.write_text("#!/bin/sh\n" + (failing + "\n" if failing else "") + "case \" $* \" in\n"
+                          f"  *' features list '*) printf '%s\\n' {shlex.quote(features)};;\n"
+                          f"  *' -c '*) printf '%s' {shlex.quote(verified)};;\n"
+                          f"  *) printf '%s' {shlex.quote(listed)};;\nesac\n")
+        binary.chmod(0o700)
+        return REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
+
     def test_mcp_servers_come_from_codex_and_an_unreadable_list_refuses(self):
         # A provider-free fixture standing in for `codex mcp list --json` (#153).
-        binary = self.root / "codex-fixture"
-        for payload, expected in (('[{"name": "tessl", "enabled": true}, {"name": "port-eu", "enabled": false}]', ["tessl", "port-eu"]),
-                                  ("[]", [])):
-            binary.write_text("#!/bin/sh\nprintf '%s' " + shlex.quote(payload) + "\n")
-            binary.chmod(0o700)
-            with self.subTest(payload=payload):
-                self.assertEqual(REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ)), expected)
-        for script in ("printf 'not json'", "echo boom >&2; exit 3", "printf '[{\"enabled\": true}]'"):
-            binary.write_text("#!/bin/sh\n" + script + "\n")
-            with self.subTest(script=script), self.assertRaisesRegex(factory.FactoryError, "refuses to launch"):
-                REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
+        self.assertEqual(self.codex_fixture('[{"name": "tessl", "enabled": true}, {"name": "port-eu", "enabled": false}]',
+                                            verified='[{"name": "tessl", "enabled": false}, {"name": "port-eu", "enabled": false}]'),
+                         ["tessl", "port-eu"])
+        self.assertEqual(self.codex_fixture("[]"), [])
+        for listed, failing in (("not json", None), ("[]", "echo boom >&2; exit 3"), ('[{"enabled": true}]', None)):
+            with self.subTest(listed=listed, failing=failing), self.assertRaisesRegex(factory.FactoryError, "refuses to launch"):
+                self.codex_fixture(listed, failing=failing)
         self.assertEqual(worker.mcp_overrides(["port-eu", "a@b/c:d"]),
                          ["-c", "mcp_servers.port-eu.enabled=false", "-c", "mcp_servers.a@b/c:d.enabled=false"])
-        binary.write_text("#!/bin/sh\nprintf '[{\"name\": \"a.b\"}]'\n")
         with self.assertRaisesRegex(factory.FactoryError, "cannot be turned off"):
-            REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
-        # Plugin-backed servers leave the list with plugins off: overriding one would fail Codex's configuration load.
-        binary.write_text("#!/bin/sh\ncase \" $* \" in *' --disable plugins '*) printf '[]';; *) printf '[{\"name\": \"code-review\"}]';; esac\n")
+            self.codex_fixture('[{"name": "a.b"}]')
+
+    def test_plugin_servers_leave_the_list_before_any_override(self):
+        # Overriding a plugin-backed server, which no configuration file defines, fails Codex's configuration load.
+        binary = self.root / "codex-fixture"
+        binary.write_text("#!/bin/sh\ncase \" $* \" in *' features list '*) printf 'apps stable false\\nplugins stable false\\n';;"
+                          " *' --disable plugins mcp '*) printf '[]';; *) printf '[{\"name\": \"code-review\"}]';; esac\n")
+        binary.chmod(0o700)
         self.assertEqual(REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ)), [])
+
+    def test_whatever_codex_keeps_on_under_the_overrides_refuses(self):
+        # Review of #159: managed configuration outranks the worker's flags; Codex's own answer decides.
+        for verified, features, kept in (('[{"name": "tessl", "enabled": true}]', "apps stable false\nplugins stable false", "tessl"),
+                                         ('[{"name": "tessl", "enabled": false}]', "apps stable true\nplugins stable false", "apps feature"),
+                                         ('[{"name": "tessl", "enabled": false}]', "apps stable false", "plugins feature")):
+            with self.subTest(kept=kept), self.assertRaisesRegex(factory.FactoryError, f"keeps .*{kept}.* on"):
+                self.codex_fixture('[{"name": "tessl", "enabled": true}]', verified=verified, features=features)
 
     def test_the_runtime_fixture_sees_every_server_codex_would_start(self):
         # Control for effective_mcp_servers(): a launch without the overrides would start them all.
@@ -2002,7 +2021,8 @@ class NativeResults(unittest.TestCase):
         payload = "\n".join(json.dumps(event) for event in payload_events)
         binary.write_text("#!/bin/bash\nset -euo pipefail\n"
                           # Answers the worker's MCP listing as real Codex would, then plays the run (#153).
-                          "case \" $* \" in *' mcp list '*) printf '[]\\n'; exit 0;; esac\n"
+                          "case \" $* \" in *' mcp list '*) printf '[]\\n'; exit 0;;"
+                          " *' features list '*) printf 'apps stable false\\nplugins stable false\\n'; exit 0;; esac\n"
                           "printf '%s\\n' " + shlex.quote(payload) + "\n")
         binary.chmod(0o700)
         self.launch_assignment(codex=str(binary), execute=False)
