@@ -347,7 +347,8 @@ replays the patch and resolves any conflicts.
 
 `release-worktree --task TASK` removes the provisioned worktree once the task's
 work is done: it verifies the ownership marker, refuses a dirty checkout or an
-assignment there that may still run, unlocks and removes the worktree, and keeps
+assignment there that may still run (an unfinished receipt counts as stopped beside
+a reset patch or once Rex reports the attempt lost), unlocks and removes the worktree, and keeps
 the branch; the repository's release policy prunes merged branches. Collected writers keep their provenance after the checkout is gone.
 
 Provisioning does not launch a writer, select new task inputs, hand off a produced

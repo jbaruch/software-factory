@@ -1244,8 +1244,10 @@ def owned_quiet_worktree(record):
             state = decode_json(read_record(command[command.index("--receipt") + 1], private=True)).get("state")
         except (OSError, ValueError, UnicodeError, AttributeError):
             raise FactoryError(f"Cannot read assignment {identity}'s receipt; restore it before releasing the worktree") from None
-        if state == "starting" and not os.path.lexists(reset_patch(command[command.index("--receipt") + 1])):
-            # A reset attempt stopped for good, even with its receipt unfinished after a reboot (#133).
+        # A worker that died with its host never finishes its receipt: a reset patch beside it (#133), or Rex
+        # reporting the attempt lost, as reset itself accepts, proves it stopped (#162).
+        if state == "starting" and not os.path.lexists(reset_patch(command[command.index("--receipt") + 1])) \
+                and status(connect(record), record, assignment)["state"] != "lost":
             raise FactoryError(f"Assignment {identity} is still running in this worktree; let it finish first")
     return item, directory
 
