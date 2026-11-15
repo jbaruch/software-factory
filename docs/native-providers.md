@@ -321,7 +321,8 @@ reviewer receipts, which reviewed in place, still collect. A completed run copie
 that is a file in agy's per-conversation brain directory into a private
 `TASK.ID.antigravity.artifacts/` beside its receipt, because agy does not keep
 that directory; the receipt and report stay unchanged. Events are
-version-1 `antigravity-event-line` envelopes holding each original line.
+version-1 `antigravity-event-line` envelopes holding each original line; native
+lines are limited to 64 MiB, and a longer one stops the child with a failed receipt.
 Integration counts collected `qa`, `security` and `code-review` approvals under
 their conversation ID and treats writers as contributors; a writer that failed
 before `init` is identified by its assignment.
@@ -457,7 +458,7 @@ outcome. The native CLI installation must remain outside the checkout/Git metada
 `grok_worker.py` owns version-2 reviewer and version-3 writer `*.grok.json` receipts and version-1 `*.grok.jsonl` streams.
 Every stream record has `schema_version: 1`, `kind: grok-event-line` and `data`,
 the unchanged native line including its newline. Invalid bytes stay escaped
-inspection evidence and refuse collection. Native lines are limited to 1 MiB.
+inspection evidence and refuse collection. Native lines are limited to 64 MiB.
 The event reader accepts only version 1; unversioned captures and unsupported versions
 remain inspection-only. Neither reader migrates or rewrites old evidence.
 
@@ -678,7 +679,7 @@ Inspect the retained receipt, stream and worktree before authorizing any retry.
 private JSONL streams. Each stream record has `schema_version: 1`,
 `kind: codex-event-line` and `data`, the unchanged original native line including
 its newline. Native fields remain inside that line; the local version belongs
-to the worker. Native event lines support up to 1 MiB, including verbose command
+to the worker. Native event lines support up to 64 MiB, including verbose command
 results. Larger lines fail the attempt with a recovery diagnostic; inspect the
 existing pane/retained stream before authorizing another attempt. The stream reader
 accepts only version 1. Earlier unversioned raw streams
@@ -834,7 +835,7 @@ checks before writing each envelope or appending its decoded event; overflow sto
 the child and saves an actionable failed receipt with the original retained prefix.
 Collection applies the same byte bound through `factory.read_record(max_bytes=...)`
 before parsing or retaining decoded events; it never rewrites oversized evidence.
-This is a stream bound, not a task-attempt allowance. Native lines are bounded to 1 MiB; invalid UTF-8
+This is a stream bound, not a task-attempt allowance. Native lines are bounded to 64 MiB; invalid UTF-8
 stays escaped inspection evidence and refuses collection. Original events retain
 native list-price equivalents, which are not actual monetary spend. Raw native
 rate-limit observations retain unknowns and never establish shared pools.

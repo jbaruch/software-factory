@@ -17,7 +17,9 @@ sys.dont_write_bytecode = True
 import factory
 import factory_commit
 
-NATIVE_LINE_LIMIT = 1024 * 1024
+# One native event line's bound. At 1 MiB, ordinary agent output (an `rg --files` across home directories,
+# a few large files printed in one shell call) ended whole runs (#147); 64 MiB still bounds memory per line.
+NATIVE_LINE_LIMIT = 64 * 1024 * 1024
 
 
 def native_environment():
@@ -301,7 +303,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                         try:
                             line = await process.stdout.readline()
                         except ValueError:
-                            raise factory.FactoryError("Native event exceeded the 1 MiB line limit; inspect the existing Rex pane and retained stream, then reduce command output or update the adapter before authorizing another attempt") from None
+                            raise factory.FactoryError(f"Native event exceeded the {NATIVE_LINE_LIMIT // (1024 * 1024)} MiB line limit; inspect the existing Rex pane and retained stream, then reduce command output or update the adapter before authorizing another attempt") from None
                         if not line:
                             break
                         text = line.decode("utf-8", errors="surrogateescape")

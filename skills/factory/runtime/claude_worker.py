@@ -155,7 +155,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                     try:
                         line = await process.stdout.readline()
                     except ValueError:
-                        raise factory.FactoryError("Claude event exceeded 1 MiB; inspect the retained stream and reduce output before a new attempt") from None
+                        raise factory.FactoryError(f"Claude event exceeded {NATIVE_LINE_LIMIT // (1024 * 1024)} MiB; inspect the retained stream and reduce output before a new attempt") from None
                     if not line:
                         break
                     text = line.decode("utf-8", errors="surrogateescape")
