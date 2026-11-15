@@ -385,7 +385,11 @@ class Integration(unittest.TestCase):
         path = Path(receipt["receipt_path"])
         saved = path.read_text()
         for damage in (lambda value: value.pop("merge_commit"), lambda value: value.update(schema_version=2),
-                       lambda value: value.update(extra=True), lambda value: value.update(required=[])):
+                       lambda value: value.update(extra=True), lambda value: value.update(required=[]),
+                       lambda value: value["approvals"].update(qa=None),
+                       lambda value: value["approvals"]["qa"].update(receipt="not-a-digest"),
+                       lambda value: value["approvals"]["release"].pop("context"),
+                       lambda value: value.update(required=["qa", "qa"])):
             value = json.loads(saved)
             damage(value)
             path.write_text(json.dumps(value))

@@ -593,9 +593,16 @@ def delivered_receipt(record, review) -> dict:
             or not isinstance(receipt["pr"], str) or not isinstance(receipt["head"], str)
             or not isinstance(receipt["merge_commit"], str) or re.fullmatch(SHA, receipt["merge_commit"]) is None
             or not isinstance(receipt["required"], list) or not receipt["required"]
-            or any(not isinstance(item, str) for item in receipt["required"])
+            or any(not isinstance(item, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item) for item in receipt["required"])
+            or len(set(receipt["required"])) != len(receipt["required"]) or review in receipt["required"]
             or not isinstance(receipt["approvals"], dict)
-            or set(receipt["approvals"]) != {review, *receipt["required"]}):
+            or set(receipt["approvals"]) != {review, *receipt["required"]}
+            # Each approval as integration.approvals selected it: its native context and two digests.
+            or any(not isinstance(item, dict) or set(item) != {"context", "receipt", "result"}
+                   or not isinstance(item["context"], str) or not item["context"]
+                   or any(not isinstance(item[key], str) or re.fullmatch(r"[0-9a-f]{64}", item[key]) is None
+                          for key in ("receipt", "result"))
+                   for item in receipt["approvals"].values())):
         raise factory.FactoryError("Unsupported or damaged `delivered` receipt for release judgment " + review
                                    + "; restore the original or confirm the delivery again")
     pr_url(receipt["pr"])

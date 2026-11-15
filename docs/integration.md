@@ -228,9 +228,12 @@ source and native run at an equal or later attempt.
 Version 3 (`review`, `receipt`, `receipt_digest`) freezes a repository's release-skill
 delivery instead: `delivered_receipt` reads the version-1 `TASK.REVIEW.delivered.json`
 that `integration.delivered` writes (`schema_version`, `kind: release-skill-delivery`,
-`task`, `inputs`, `pr`, `head`, `merge_commit`, `review`, `required`, `approvals`),
-refusing missing, extra or ill-typed fields, another version, or a receipt that no
-longer confirms the task's current inputs and head. It carries no fresh observation:
+`task`, `inputs`, `pr`, `head`, `merge_commit`, `review`, `required`, `approvals`).
+`required` lists distinct slug IDs other than `review`; `approvals` has one entry per
+`review` and `required` ID, each exactly `{context, receipt, result}`: the approval's
+native context and the SHA-256 digests of its receipt and result. It refuses missing,
+extra or ill-typed fields, another version, or a receipt that no longer confirms the
+task's current inputs and head. It carries no fresh observation:
 those repositories lack the `checks.yml` push CI version 2 observes, and the final
 judge reads the merged state itself. Native launch and brief validation,
 `validate_delivery`/`from_delivery_assignment` and `delivered_accepted` read it, the
