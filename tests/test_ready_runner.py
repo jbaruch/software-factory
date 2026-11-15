@@ -11,7 +11,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from typing import Callable
+from typing import Any, Callable
 import unittest
 from unittest.mock import patch
 
@@ -526,7 +526,13 @@ class ReadyRunner(unittest.TestCase):
         self.assertIn("unverified", report["antigravity"]["reason"])
         self.assertEqual((report["claude"]["available"], report["grok"]["available"]), (None, None))
         with patch.object(native_antigravity, "probe", side_effect=native_antigravity.UsageError("signed out")):
-            self.assertEqual(controller.harnesses()["antigravity"], dict(available=False, reason="signed out", windows=[]))
+            self.assertEqual(controller.harnesses()["antigravity"], dict(available=None, reason="signed out", windows=[]))
+        # The CLI result carries the report, and its metrics count the probes behind it (review of #154).
+        fresh = self.controller(self.plan([self.job()]), antigravity=sys.executable)
+        with patch.object(native_antigravity, "probe", return_value=dict(groups=groups)):
+            result: dict[str, Any] = runner.report(fresh, dict(metrics=dict(quota_probes=0)), 0.0)
+        self.assertEqual(result["harnesses"]["antigravity"]["windows"][0]["pool"], "Gemini")
+        self.assertEqual(result["metrics"]["quota_probes"], 2)  # Codex and Antigravity.
         # Quota shown but ordinary use refused: the launch gate says no, so does the report (review of #154).
         self.capacity["ordinaryUsageAllowed"] = False
         blocked = self.controller(self.plan([self.job()])).harnesses()["codex"]

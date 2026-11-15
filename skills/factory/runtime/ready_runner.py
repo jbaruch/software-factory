@@ -413,6 +413,7 @@ class Runner:
             for pool in pools for window in (pool.get("primary"), pool.get("secondary")) if window]))
         if self.antigravity is not None:
             import native_antigravity
+            self.metrics["quota_probes"] += 1
             try:
                 usage: dict[str, Any] = native_antigravity.probe(str(self.antigravity), str(self.directory))
                 groups: list[Any] = usage["groups"]
@@ -422,7 +423,8 @@ class Runner:
                     dict(pool=group["group"], remaining_percent=group["percent_remaining"], resets_at=group["resets_at"])
                     for group in groups])
             except (native_antigravity.UsageError, OSError, subprocess.TimeoutExpired) as exc:
-                report["antigravity"] = dict(available=False, reason=str(exc), windows=[])
+                # An unreadable usage report doesn't stop Antigravity's worker, so it stays unverified, not unavailable.
+                report["antigravity"] = dict(available=None, reason=str(exc), windows=[])
         # Neither has a live usage probe, and a past run's numbers can't vouch for today's account.
         if self.claude is not None:
             report["claude"] = dict(available=None, reason="Claude reports its limits only inside a run; a launch is the test", windows=[])
@@ -574,6 +576,14 @@ def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) 
                 return result
 
 
+def report(runner, result, started):
+    """The CLI result: the harness report's probes run before its measured fields are taken, so they count."""
+    result["harnesses"] = runner.harnesses()
+    result.update(metrics=dict(runner.metrics), capacity=runner.capacity, capacity_error=runner.capacity_error,
+                  elapsed_seconds=time.monotonic() - started)
+    return result
+
+
 def main(argv=None):
     factory.relocate("ready_runner.py", sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -595,8 +605,8 @@ def main(argv=None):
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
         runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, antigravity=args.antigravity, rex=args.rex, server=args.server,
                         from_writer=args.from_writer)
-        result = run(runner, seconds=args.seconds, once=args.once)
-        result["harnesses"] = runner.harnesses()
+        started = time.monotonic()
+        result = report(runner, run(runner, seconds=args.seconds, once=args.once), started)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0 if result["result"] == "complete" else 1
     except (factory.FactoryError, native_codex.CodexProbeError, OSError, ValueError, TimeoutError) as exc:
