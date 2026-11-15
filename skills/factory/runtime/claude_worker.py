@@ -175,7 +175,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                     if shown is not None:
                         print(shown, flush=True)
                 return await process.wait()
-            receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
+            receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Claude exited unsuccessfully; inspect its retained events and original Rex pane")

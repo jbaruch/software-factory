@@ -1555,6 +1555,34 @@ def reader_environment(environment, write):
     return result
 
 
+# macOS's time.monotonic, and asyncio's loop clock with it, stops while the Mac sleeps: a 7200-second Grok writer
+# measured 6055 seconds across 53815 wall-clock seconds of maintenance sleep and kept running (#137). The
+# budget counts sleep: CLOCK_MONOTONIC does on macOS, Linux needs CLOCK_BOOTTIME.
+BUDGET_CLOCK = getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC)
+BUDGET_CHECK_SECONDS = 5
+
+
+async def within_budget(coroutine, seconds, *, clock=None):
+    """Await a native worker's coroutine until `seconds` pass on a clock that counts sleep, then raise TimeoutError."""
+    import asyncio
+    clock = clock or (lambda: time.clock_gettime(BUDGET_CLOCK))
+    deadline = clock() + seconds
+    task = asyncio.ensure_future(coroutine)
+    try:
+        while not task.done():
+            remaining = deadline - clock()
+            if remaining <= 0:
+                task.cancel()
+                await asyncio.wait({task})
+                raise TimeoutError("Native execution allowance expired")
+            # Short waits, so the first check after a wake sees the sleep the loop clock missed.
+            await asyncio.wait({task}, timeout=min(remaining, BUDGET_CHECK_SECONDS))
+        return task.result()
+    finally:
+        if not task.done():
+            task.cancel()  # An interrupted worker never leaves its child-reading task behind.
+
+
 def check_role_write(role_id):
     if not isinstance(role_id, str) or role_spec(role_id).get("write_allowed") is not True:
         raise FactoryError("Selected specialty does not permit writer assignments; select an authorized implementation role")
