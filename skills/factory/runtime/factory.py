@@ -368,12 +368,10 @@ def load_task(path) -> dict:
             or (record["session_id"] is not None
                 and (not isinstance(record["session_id"], str) or not record["session_id"]))):
         raise FactoryError("Invalid Rex session identity; restore the original task record before continuing")
-    # The acceptance `inputs` captured for a requirements revision; readers render it only for that revision.
+    # The first acceptance `inputs` captured for each requirements revision; readers render the current one.
     if "acceptance" in record and (not isinstance(record["acceptance"], dict)
-                                   or set(record["acceptance"]) != {"requirements", "captured"}
-                                   or not isinstance(record["acceptance"]["requirements"], str)
-                                   or not record["acceptance"]["requirements"].strip()
-                                   or not isinstance(record["acceptance"]["captured"], str)):
+                                   or any(not isinstance(revision, str) or not revision.strip() or not isinstance(text, str)
+                                          for revision, text in record["acceptance"].items())):
         raise FactoryError("Invalid captured acceptance; restore the original task record or select the inputs again")
     if version == 0:
         if "admission" in record or "hold" in record:
@@ -1438,7 +1436,7 @@ def set_inputs(path, *, candidate, requirements, acceptance=None):
                                                    record["admission"]["repository_identity"]),
                             requirements=requirements)
     if acceptance is not None:
-        record["acceptance"] = acceptance
+        record["acceptance"] = {**record.get("acceptance", {}), requirements: acceptance}
     save(path, record)
     return record
 
@@ -1583,7 +1581,7 @@ def acceptance_issues(admission):
 
 
 def capture_acceptance(admission, requirements):
-    """The acceptance text `inputs` stores with a requirements revision, or None when acceptance names no issue.
+    """The acceptance text `inputs` stores for a requirements revision, or None when acceptance names no issue.
 
     Callers run it before taking any lock. It fails closed: an issue it cannot read refuses the inputs, so a
     revision never has two different captures (review of #152).
@@ -1595,14 +1593,13 @@ def capture_acceptance(admission, requirements):
         raise FactoryError(f"The acceptance references are GitHub issues, and this Mac has no read-only token for the "
                            f"factory to capture them for readers: store it with `security add-generic-password -s "
                            f"{KEYCHAIN_SERVICE} -a \"$USER\" -w`, then select the inputs again")
-    return dict(requirements=requirements, captured=acceptance_evidence(admission, requirements, token))
+    return acceptance_evidence(admission, requirements, token)
 
 
 def inputs_acceptance(record, requirements):
-    """What `inputs` stores: a new capture, or None to keep the first one an unchanged revision already has."""
-    stored = record.get("acceptance")
-    if stored is not None and stored["requirements"] == requirements:
-        return None  # One capture per requirements revision, whatever the issue or the token did since.
+    """What `inputs` stores: a new capture, or None to keep the first one a revision already has."""
+    if requirements in record.get("acceptance", {}):
+        return None  # One capture per revision, kept even after other revisions: A, B, then A again reuses A's.
     return capture_acceptance(record["admission"], requirements)
 
 
@@ -1610,9 +1607,9 @@ def rendered_acceptance(record, command):
     """The stored acceptance text a semantic reader's brief carries; rendering never touches the network."""
     if record["admission"] is None or "--write" in command or native_harness(command) is None:
         return ""
-    stored = record.get("acceptance")
-    if stored is not None and stored["requirements"] == record["inputs"]["requirements"]:
-        return stored["captured"]
+    stored = record.get("acceptance", {}).get(record["inputs"]["requirements"])
+    if stored is not None:
+        return stored
     if acceptance_issues(record["admission"]):
         return ("\nThe acceptance references are GitHub issues you cannot reach, and none were captured for this "
                 "requirements revision.\n")
@@ -1648,7 +1645,7 @@ def acceptance_evidence(admission, requirements, token):
                 issue = decode_json(response.read().decode("utf-8"))
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, UnicodeError) as exc:
             raise FactoryError(f"Cannot capture acceptance {owner}/{repo}#{number} for the reader ({type(exc).__name__}: "
-                               f"{getattr(exc, 'reason', exc)}); restore GitHub access or the read-only token, then launch again") from None
+                               f"{getattr(exc, 'reason', exc)}); restore GitHub access or the read-only token, then run factory.py inputs again") from None
         if not isinstance(issue, dict):
             raise FactoryError(f"GitHub returned no issue for {owner}/{repo}#{number}; inspect the acceptance reference")
         pinned = re.fullmatch(re.escape(f"{owner}/{repo}#{number}@") + r"(.+)", requirements)

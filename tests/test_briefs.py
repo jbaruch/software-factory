@@ -25,7 +25,7 @@ class TaskSchema(unittest.TestCase):
             factory.save(path, {**factory.new_task("task"), "schema_version": 10})
             self.assertEqual(factory.load_task(path)["schema_version"], 11)
             factory.save(path, {**factory.new_task("task"), "schema_version": 10,
-                                "acceptance": dict(requirements="r", captured="text")})
+                                "acceptance": {"r": "text"}})
             with self.assertRaisesRegex(factory.FactoryError, "Legacy task has newer fields"):
                 factory.load_task(path)
 

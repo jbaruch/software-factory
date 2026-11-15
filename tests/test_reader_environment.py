@@ -75,13 +75,12 @@ class AcceptanceEvidence(unittest.TestCase):
 
     def record(self, acceptance, requirements=None):
         return dict(admission=self.admission, inputs=dict(candidate="a" * 40, requirements=requirements or self.requirements),
-                    acceptance=acceptance)
+                    acceptance={self.requirements: acceptance})
 
     def test_inputs_capture_renders_for_its_revision_without_the_token(self):
         acceptance = self.capture()
         assert acceptance is not None
         self.assertEqual(self.fetches, [("https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", "Bearer github_pat_keychainonly")])
-        self.assertEqual(acceptance["requirements"], self.requirements)
         with patch.object(factory, "native_harness", return_value="codex"):
             brief = factory.rendered_acceptance(self.record(acceptance), self.reader)
             moved = factory.rendered_acceptance(self.record(acceptance, "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z"), self.reader)
@@ -105,20 +104,21 @@ class AcceptanceEvidence(unittest.TestCase):
 
     def test_repeated_inputs_keep_the_first_capture_of_a_revision(self):
         # Review of #152: re-running inputs after an issue edit must not replace what earlier readers judged.
-        stored = dict(requirements=self.requirements, captured="first capture")
+        # A, then B, then A again after an issue edit: A keeps its first capture.
+        stored = {self.requirements: "first capture of A", "jbaruch/nanoclaw#1368@B": "capture of B"}
         with patch.object(factory, "capture_acceptance", side_effect=AssertionError("refetched")):
             self.assertIsNone(factory.inputs_acceptance(dict(admission=self.admission, acceptance=stored), self.requirements))
         with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond("2026-11-14T00:00:00Z"):
             fresh = factory.inputs_acceptance(dict(admission=self.admission, acceptance=stored), "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z")
         assert fresh is not None
-        self.assertEqual(fresh["requirements"], "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z")
+        self.assertIn("Cap context at 200K", fresh)
 
     def test_fetch_and_tls_failures_explain_recovery(self):
         import http.client
         import ssl
         with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
                 patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial")), \
-                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance jbaruch/nanoclaw#1368"):
+                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance jbaruch/nanoclaw#1368.*run factory.py inputs again"):
             factory.capture_acceptance(self.admission, self.requirements)
         with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
                 patch.object(ssl, "create_default_context", side_effect=ssl.SSLError("bad store")), \
