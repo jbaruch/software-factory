@@ -209,7 +209,8 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.tick(self.controller(reader))["metrics"]["launched"], 1)
         other = subprocess.check_output([factory.git_binary(), "-C", str(self.repo), "-c", "user.name=Fixture",
             "-c", "user.email=fixture@example.invalid", "commit-tree", self.candidate + "^{tree}", "-p", self.candidate,
-            "-m", "Another candidate"], text=True).strip()
+            "-m", "Another candidate"], text=True, env={**factory.git_environment(),
+            "GIT_AUTHOR_DATE": "2000-01-04T00:00:00Z", "GIT_COMMITTER_DATE": "2000-01-04T00:00:00Z"}).strip()
         factory.record_result(self.directory / "task.json", assignment_id="reader", candidate=other,
                               requirements="requirements-1", outcome="completed", artifacts=["report.md"])
         factory.set_inputs(self.directory / "task.json", candidate=other, requirements="requirements-1")
