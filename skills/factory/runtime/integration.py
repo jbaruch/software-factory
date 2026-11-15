@@ -92,6 +92,11 @@ def contributor_context(key, record, assignment):
         # a failed writer keeps the identity its receipt and events must carry.
         if not isinstance(receipt, dict) or receipt.get("native_session") != args.native_session:
             raise factory.FactoryError("Contributor receipt differs from its frozen native session")
+        if receipt.get("state") == "starting" and assignment["result"] is None and \
+                factory.status(factory.connect(record), record, assignment)["state"] == "lost":
+            # A writer lost with its host never finished its receipt or produced a result a reviewer could
+            # share; like a failed writer, its frozen session is its identity (#156).
+            return args.native_session
         if receipt.get("state") != "failed":
             collected_native(key, record, assignment, current=False)
         return args.native_session

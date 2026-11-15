@@ -1280,6 +1280,19 @@ class ClaudeApprovals(unittest.TestCase):
         self.assertEqual(receipt["state"], "failed")
         self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
 
+    def test_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):
+        # Observed (#156): a writer lost to the 2026-11-12 reboot kept a starting receipt and blocked delivery for good.
+        writer_session = "00000000-0000-0000-0000-000000000004"
+        record, assignment, receipt = self.run_claude_writer(writer_session, exit_code=1)
+        command = assignment["request"]["command"]
+        receipt_path = Path(command[command.index("--receipt") + 1])
+        receipt_path.write_text(json.dumps({**receipt, "state": "starting"}))  # The worker died before finishing it.
+        with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="running")), \
+                self.assertRaises(factory.FactoryError):
+            integration.contributor_context("claude-writer", record, assignment)  # Not lost: it may still produce work.
+        with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="lost")):
+            self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+
     def test_claude_writer_cannot_approve_its_own_work(self):
         record, assignment, _ = self.run_claude_writer(SESSION)
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
