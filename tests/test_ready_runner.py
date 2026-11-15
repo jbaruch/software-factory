@@ -538,6 +538,10 @@ class ReadyRunner(unittest.TestCase):
         blocked = self.controller(self.plan([self.job()])).harnesses()["codex"]
         self.assertEqual((blocked["available"], blocked["windows"][0]["remaining_percent"]), (False, 80))
         self.assertIn("ordinary-usage", blocked["reason"])
+        self.capacity.update(ordinaryUsageAllowed=True, models=[dict(model="fixture-model", effort_ids=[])])
+        empty = self.controller(self.plan([self.job()])).harnesses()["codex"]
+        self.assertEqual(empty["available"], False)
+        self.assertIn("no model with a supported effort", empty["reason"])
         self.assertEqual(set(self.controller(self.plan([self.job()])).harnesses()), {"codex"})
 
     def test_readonly_verifier_cannot_request_writer_mode(self):

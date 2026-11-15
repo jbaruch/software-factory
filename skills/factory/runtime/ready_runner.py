@@ -408,6 +408,9 @@ class Runner:
         pools: list[Any] = snapshot.get("pools") or []
         reason = self.capacity_error or (pool_reason(snapshot, self.binary, self.clock(), self.plan["limits"]["minimum_remaining_percent"])
                                          if self.capacity is not None else "Capacity is unavailable")
+        if reason is None and not any(model.get("effort_ids") for model in snapshot.get("models") or []):
+            # Healthy pools with no launchable model/effort would still refuse every Codex job.
+            reason = "The fresh native catalog has no model with a supported effort; refresh it before planning Codex work"
         report: dict[str, Any] = dict(codex=dict(available=reason is None, reason=reason, windows=[
             dict(pool=pool.get("limit_id"), remaining_percent=window.get("remaining_percent"), resets_at=window.get("resets_at"))
             for pool in pools for window in (pool.get("primary"), pool.get("secondary")) if window]))
