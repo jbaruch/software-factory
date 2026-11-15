@@ -91,14 +91,14 @@ def private_signer(key, python):
         except OSError:
             raise factory.FactoryError("Cannot start the private SSH signer; restore local OpenSSH and socket access before another attempt") from None
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + factory.GIT_SECONDS  # Load stretches every local step (#175).
             while not Path(socket).exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not Path(socket).exists() or process.poll() is not None:
                 raise factory.FactoryError("Private SSH signing agent did not start; restore local OpenSSH/socket access before another attempt")
             try:
                 loaded = subprocess.run([add, "-q", "-k", "-t", "300", str(key)], env=environment,
-                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False, start_new_session=True)
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=factory.GIT_SECONDS, check=False, start_new_session=True)
             except (OSError, subprocess.TimeoutExpired):
                 raise factory.FactoryError("Private SSH key loading failed or timed out; restore noninteractive local signing access before another attempt") from None
             if loaded.returncode:
@@ -485,7 +485,7 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
             # some versions report success after Git stderr errors without scanning them.
             patch = subprocess.run([*prefix(), factory.git_binary(), "--no-replace-objects", "diff", "--no-ext-diff",
                 "--no-textconv", "--text", "--unified=0", "--no-renames", "--no-color", parent, staged],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, timeout=60, check=False)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, timeout=factory.GIT_SECONDS, check=False)
             if patch.returncode:
                 raise factory.FactoryError("Cannot read the writer's changes for secret scanning; inspect the retained tree before another attempt")
             header = (identity_text + "\n" + args.commit_message + "\n" + paths.stdout.replace("\0", "\n")).encode()
@@ -501,9 +501,9 @@ def scan_staged(args, receipt, *, git_scope=isolated_git):
                 stream.seek(0)
                 result = subprocess.run([*prefix(), str(args._gitleaks), "stdin",
                     "--config", str(config), "--gitleaks-ignore-path", os.devnull, "--ignore-gitleaks-allow",
-                    "--redact=100", "--no-banner", "--log-level", "error", "--timeout", "30",
+                    "--redact=100", "--no-banner", "--log-level", "error", "--timeout", str(factory.GIT_SECONDS),
                     "--report-format", "json", "--report-path", str(report)],
-                    stdin=stream, env=environment, capture_output=True, timeout=35, check=False)
+                    stdin=stream, env=environment, capture_output=True, timeout=factory.GIT_SECONDS + 5, check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise factory.FactoryError("Secret scanner unavailable; inspect the retained staged tree and restore offline Gitleaks before another attempt") from None
         if result.returncode or result.stderr:

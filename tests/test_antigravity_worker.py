@@ -286,7 +286,7 @@ class AntigravityWorker(unittest.TestCase):
         # #175: three writers reported completed with green gates, then lost the commit to a Git timeout at load
         # 265-346; reset would have turned the work into a patch that needs a new correction.
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
-        timeout = factory.FactoryError("Git did not finish within 60 seconds (git rev-parse); inspect machine load")
+        timeout = factory.FactoryError("Git did not finish within 600 seconds (git rev-parse); inspect machine load")
         with patch.object(factory_commit, "commit_changes", side_effect=timeout):
             failed = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True, exit_code=0)
         self.assertEqual((failed["state"], failed["commit"]["state"]), ("failed", "preparing"), failed["error"])
@@ -300,6 +300,10 @@ class AntigravityWorker(unittest.TestCase):
         with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "has not stopped"):
             factory.recommit_writer(self.path, assignment_id="implement", **seams)
         FakeRex.exits[block] = 1
+        # The recommit can lose its own commit the same way; that leaves only intent, and it retries.
+        with patch.object(factory, "Rex", FakeRex), patch.object(factory_commit, "commit_changes", side_effect=timeout), \
+                self.assertRaisesRegex(factory.FactoryError, "did not finish"):
+            factory.recommit_writer(self.path, assignment_id="implement", **seams)
         with patch.object(factory, "Rex", FakeRex):
             result = factory.recommit_writer(self.path, assignment_id="implement", **seams)
         self.assertNotEqual(result["candidate"], self.candidate)

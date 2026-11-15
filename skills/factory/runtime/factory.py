@@ -667,6 +667,7 @@ def git_execution(prefix, environment):
 # A hang guard, not a performance bound: under a loaded machine a plain rev-parse took over 10 seconds,
 # and starting the Codex sandbox alone took 1.9 to 6.3.
 # Three finished writers lost their commits to `git rev-parse` passing 60 seconds at load 265-346 on 16 cores (#175).
+# The factory commit's scanner and signing steps share the bound.
 GIT_SECONDS = 600
 
 
@@ -1285,7 +1286,13 @@ def recommit_writer(path, *, assignment_id, git_scope=None, scan=None):
         raise FactoryError("The writer's process has not stopped; let it finish, or cancel it, before recommitting")
     recommitted = args.receipt.with_name(args.receipt.name.removesuffix(".json") + ".recommit.json")
     if os.path.lexists(recommitted):
-        raise FactoryError(f"This writer was already recommitted; inspect {recommitted}")
+        try:
+            earlier = decode_json(read_record(recommitted, private=True))
+        except (OSError, ValueError, UnicodeError):
+            raise FactoryError(f"Cannot read the earlier recommit receipt {recommitted}; inspect it before another attempt") from None
+        # A recommit that failed before its commit (another timeout, a hook) left only intent: retry it.
+        if not isinstance(earlier, dict) or earlier.get("candidate") is not None:
+            raise FactoryError(f"This writer was already recommitted; inspect {recommitted}")
     identity = record["admission"]["repository_identity"]
     check_repository(record["admission"])
     cwd = assignment["request"]["cwd"]
