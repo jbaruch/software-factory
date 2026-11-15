@@ -263,7 +263,8 @@ class ReadyRunner(unittest.TestCase):
         def unchanged(harness):
             def read(*args, **kwargs):
                 parsed, receipt, native = real(harness)(*args, **kwargs)
-                return parsed, {**receipt, "commit": {**receipt["commit"], "state": "unchanged"}}, native
+                commit = {**receipt["commit"], "state": "unchanged", "candidate": receipt["commit"]["parent"]}
+                return parsed, {**receipt, "commit": commit, "candidate": commit["candidate"]}, native
             return read
         with patch.object(factory, "evidence_reader", side_effect=unchanged), \
                 self.assertRaisesRegex(factory.FactoryError, "committed nothing"):
