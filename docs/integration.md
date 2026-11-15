@@ -1,7 +1,12 @@
 # Exact-candidate integration
 
-PR preparation, issue declarations and feedback correction stay with the installed
-release skill. The coordinator's delivery steps and prerequisites ship with the skill
+The line's foreman opens the PR itself: it pushes the task's selected candidate to the
+provisioned worktree's branch and runs `gh pr create`, so the release judgment runs before
+anything can merge (#149); the release skill runs end to end, merge included. The release
+judgment's capture refuses a PR whose head isn't the selected candidate or whose repository
+isn't the admitted origin. Findings become factory corrections, and the foreman pushes each
+newly verified candidate to move the PR.
+The coordinator's delivery steps and prerequisites ship with the skill
 in [the delivery reference](../skills/factory/references/delivery.md). This adapter implements the selected repository's `checks.yml`
 contract with no publication channel. It does not provision worktrees, publish,
 dismiss reviews, close issues, comment, delete branches or perform cleanup.
@@ -53,7 +58,8 @@ python3 -B skills/factory/runtime/factory.py --state-dir '/absolute/private/stat
 ```
 
 A repository without `integrate`'s prerequisites (a `checks.yml` `verify` job and
-strict classic protection) delivers through its own release skill instead: after the skill merges, `factory.py delivered --task TASK --pr URL --review
+strict classic protection) merges through its own release skill instead, invoked with
+`existing-pr` from the task's worktree: after the skill merges, `factory.py delivered --task TASK --pr URL --review
 RELEASE_REVIEW --after REQUIRED_APPROVAL --gh ... --release-scripts ...` re-checks
 the same approvals, requires the PR merged at the exact head the release judgment
 froze, with the merge commit in the target branch's history, and records
