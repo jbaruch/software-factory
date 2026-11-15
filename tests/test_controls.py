@@ -81,7 +81,7 @@ class TaskControls(ControlRecord):
         del legacy["allowance_events"]
         factory.save(self.path, legacy)
         migrated = factory.load_task(self.path)
-        self.assertEqual(migrated["schema_version"], 10)
+        self.assertEqual(migrated["schema_version"], 11)
         self.assertEqual(migrated["control_events"], [])
         self.assertEqual(migrated["hold"], legacy["hold"])
         self.assertEqual(migrated["assignments"], legacy["assignments"])

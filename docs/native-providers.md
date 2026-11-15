@@ -521,7 +521,25 @@ points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` are removed, and
 pushes to GitHub are rewritten to an invalid host. Readers work on a local
 checkout, and a release judgment's GitHub evidence is captured before launch, so
 neither needs GitHub; a reader can't look up private issues or pull requests on
-its own. This stops a misbriefed agent, not a hostile one: an unconfined agent can
+its own. The factory reads its acceptance issues for it. `factory.py inputs`, before
+taking any lock, fetches each `https://github.com/OWNER/REPO/issues/N` acceptance
+reference and stores the text in the task record with the requirements revision, in
+the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
+Every agent's brief, writers and generic `start` assignments included, renders it as
+untrusted data while the revision is current; only the mechanical integrate command
+gets none, and launches never touch the network. A task migrated from schema 10 has
+no capture, so a new launch refuses until `inputs` selects the revision again. When the requirements revision names
+the issue (`owner/repo#N@T`, owner and repository compared without case, surrounding
+whitespace ignored), its `updated_at` must still be `T`. The read-only token
+lives in the macOS Keychain, one entry per Mac (`security add-generic-password -s
+software-factory-github-read -a "$USER" -w`; a fine-grained token with read-only
+Contents, Issues, Pull requests and Metadata). Where there is no Keychain, such as
+Linux, the factory reads `SOFTWARE_FACTORY_GITHUB_READ_TOKEN` once when it loads and
+removes it from its own environment, so no child process, agent, generic command or
+Git, inherits it; only an ACR-realized copy hands it to the installed runtime it
+re-executes, which removes it again. Only the factory reads it, and it never enters an agent's
+environment, brief or the task record. Capture fails
+closed: without the token, or with an unreadable issue, `inputs` refuses. This stops a misbriefed agent, not a hostile one: an unconfined agent can
 still reach the operator's credentials on disk. Writers keep the operator's
 identity: the factory owns their commits and nothing pushes.
 

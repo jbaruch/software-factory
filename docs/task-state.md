@@ -121,14 +121,15 @@ no-follow/nonblocking open and descriptor-based regular-file checks, plus owner,
 single-link and private-permission checks with `private=True`. The default reader
 behavior is unchanged. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 10:
+`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 11:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `10` on every task record |
+| `schema_version` | Integer `11` on every task record |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
+| `acceptance` | Optional; maps each requirements revision `inputs` selected to the acceptance issues' text captured for it the first time |
 | `hold` | `null`, or the operator's nonempty pause reason |
 | `control_events` | Ordered pause/resume requests; each has a unique `id`, nullable integer `expected_revision`, `previous_hold`, resulting `hold`, and `at` in UTC epoch seconds |
 | `provisioning` | `null`, or one immutable writer-worktree request, unique owner token, effect state and nullable returned Git directory |
@@ -147,7 +148,12 @@ session carries that name gets its line's tabs beside its own. Once the session 
 no tab at all, tidying kills it and sets the task's `session_id` to null; the next
 launch of any of the line's tasks joins or opens the session under that label.
 `factory.py line --task TASK --line LINE` moves a task with nothing open to another
-line. A task still holding a session from before keeps its label, the `factory-<line>`
+line. Schema version 11 adds the optional `acceptance` map: for each requirements
+revision `inputs` selected, the acceptance issues' text captured the first time.
+Every agent's brief renders the entry for the current `inputs.requirements`; selecting
+a revision again, even after others, reuses its first capture. Migrating version 10 adds
+none, so a migrated task whose acceptance names issues refuses new launches until
+`inputs` selects the revision again and captures it. A task still holding a session from before keeps its label, the `factory-<line>`
 session lines first used or its own `factory-<task>-<8 hex>`, until that session
 closes; a task holding none joins its line's.
 
