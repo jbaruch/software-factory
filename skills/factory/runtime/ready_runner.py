@@ -620,7 +620,11 @@ def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep, 
 
 
 def main(argv=None):
-    factory.relocate("ready_runner.py", sys.argv[1:] if argv is None else argv)
+    try:
+        factory.relocate("ready_runner.py", sys.argv[1:] if argv is None else argv)
+    except (factory.FactoryError, OSError) as exc:  # A runtime that can't install refuses like any other command.
+        print("ready-runner: " + str(exc), file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=factory.default_state_dir())
     parser.add_argument("--plan", type=Path, required=True)

@@ -5,9 +5,11 @@ description: "Deliver changes through the software factory: take over, continue 
 
 # Factory entrypoint
 
-This skill is an action router: pick the step that matches the user's intent and execute only that step. Implementing, reviewing or delivering a change, and taking over, continuing or handing off work, is Step 1. Task authority and repository coding/release requirements remain binding.
+This skill is an action router — pick the step that matches the user's intent and execute only that step. Do not run other steps; do not parallelize.
 
-The application ships in this skill's `runtime/` directory. Set `SKILL_DIR` to this skill's directory, such as `.claude/skills/acr__jbaruch__software-factory__factory` in an installed project or `skills/factory` in the factory's own checkout. Below, `factory.py` means `python3 -B "$SKILL_DIR/runtime/factory.py"` and `ready_runner.py` means `python3 -B "$SKILL_DIR/runtime/ready_runner.py"`. Either installs or upgrades the per-user runtime on first use and runs from there; task state lives in `~/.local/state/software-factory`.
+Implementing, reviewing or delivering a change, and taking over, continuing or handing off work, is Step 1. Task authority and repository coding/release requirements remain binding.
+
+The application ships in this skill's `runtime/` directory. Set `SKILL_DIR` to this skill's directory, such as `.claude/skills/acr__jbaruch__software-factory__factory` in an installed project or `skills/factory` in the factory's own checkout. Below, `factory.py` means `python3 -B "$SKILL_DIR/runtime/factory.py"` and `ready_runner.py` means `python3 -B "$SKILL_DIR/runtime/ready_runner.py"`. Either installs or upgrades the per-user runtime on first use and runs from there; task state lives in `~/.local/state/software-factory`. Each command's input, output and failure contract is in [the command reference](references/commands.md).
 
 For specialty selection or an assigned role, consult only the relevant entries in [the role catalog](references/roles.json). Each entry defines activation, capabilities, decision authority and focused instructions; it does not require a permanently occupied agent.
 
@@ -50,14 +52,14 @@ Report the task ID, its state and the PR. A collected result is not task accepta
 
 Use this only for a single assignment a ready plan cannot express, such as a release judgment or a recovery launch. It never completes a task; return to Step 1 for the rest.
 
-The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOINT`.
+The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOINT`, before the subcommand.
 
 - Claude: `factory.py claude-start --task TASK --id ID --role ROLE --purpose work --goal GOAL --cwd WORKTREE --claude /absolute/claude --model MODEL --effort EFFORT`
 - Grok: `factory.py grok-start` with `--grok /absolute/grok` and the same task, role and model flags.
 - Antigravity: `factory.py antigravity-start` with `--agy /absolute/agy`. Omit `--effort` for a model that refuses it, such as `claude-opus-4-6-thinking`.
 - Codex: `factory.py codex-start` with `--codex /absolute/codex`.
 
-Writers add `--write --commit-message MESSAGE`, plus `--sandbox /absolute/codex` outside Codex; code reviews add `--base COMMIT`. Check it with `factory.py status --task TASK --id ID`, collect it with the matching `*-collect` command, and close finished tabs with `factory.py tidy`. Finish here.
+Writers add `--write --commit-message MESSAGE`, plus `--sandbox /absolute/codex` outside Codex. A code review judges a range, so it runs on Claude, Grok or Antigravity with `--base COMMIT`; Codex takes no `--base`. Check it with `factory.py status --task TASK --id ID`, collect it with the matching `*-collect` command, and close finished tabs with `factory.py tidy`; [the command reference](references/commands.md) gives each one's output. Finish here.
 
 ## Step 3 — Inspect current state
 

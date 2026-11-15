@@ -1,11 +1,14 @@
 """The per-user runtime that ACR-installed project copies run from."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
+from contextlib import redirect_stderr
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import factory
 
@@ -98,6 +101,17 @@ class Relocate(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "Unsupported factory version"):
             self.relocate(self.copy("latest"))
         self.assertFalse((self.home / "skill").exists())
+
+    def test_a_runtime_that_cannot_install_refuses_like_any_command(self):
+        # Review of #146: relocate ran outside the CLI's error boundary, so a failed install printed a traceback.
+        import ready_runner
+        failure = factory.FactoryError("Cannot install the per-user runtime")
+        for main, prefix in ((factory.main, "factory: "), (ready_runner.main, "ready-runner: ")):
+            errors = io.StringIO()
+            with self.subTest(prefix=prefix), patch.object(factory, "relocate", side_effect=failure), \
+                    redirect_stderr(errors):
+                self.assertEqual(main(["status"]), 1)
+                self.assertEqual(errors.getvalue(), prefix + "Cannot install the per-user runtime\n")
 
 
 if __name__ == "__main__":
