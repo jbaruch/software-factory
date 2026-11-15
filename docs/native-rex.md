@@ -18,6 +18,8 @@ python3 -B skills/factory/runtime/factory.py capture --task example --id qa
 python3 -B skills/factory/runtime/factory.py tidy [--task example]
 ```
 
+`status` prints the assignment's status object, and `capture` prints `{task, id, text}`, where `text` is the pane's output, live or kept from a tidied tab.
+
 The actual native agent flags depend on that harness. `{instructions}` as a whole argument expands to the selected role instructions and assignment goal. `{brief}` expands to a private Markdown file with the same content. Put the appropriate placeholder where that command accepts its prompt or prompt-file argument. Merely labeling an assignment `qa` does not make an arbitrary program read the brief. No provider/model is selected or permission mode weakened by the launcher.
 
 State defaults to the per-user `~/.local/state/software-factory` (or `$XDG_STATE_HOME/software-factory`), shared by every project that installs the factory; `--state-dir PATH` overrides it. Each task has one private JSON record and a short-lived advisory lock. The record pins the Rex binary, endpoint and host identity and retains assignment inputs, a unique session/window marker and returned full IDs. A short role brief is the only generated handoff artifact.

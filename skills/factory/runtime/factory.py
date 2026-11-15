@@ -3659,7 +3659,8 @@ def main(argv=None):
                     return 1
                 print(json.dumps(task_view(record), indent=2))
             elif args.action == "capture":
-                print(captured(rex, record, assignment), end="")
+                # One JSON document like every other command; the pane text is a field (#149).
+                print(json.dumps(dict(task=args.task, id=args.id, text=captured(rex, record, assignment)), indent=2))
             else:
                 print(json.dumps(status(rex, record, assignment), indent=2))
     except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
