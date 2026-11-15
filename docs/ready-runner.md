@@ -139,12 +139,14 @@ candidate handoff can use the opt-in source validation above.
 
 A runner serves one factory line, the line of its plan's tasks; a plan that mixes
 lines refuses. It holds that line's execution lock (`.execution.lock` for `default`,
-`.execution.<line>.lock` otherwise) during its invocation, and it observes, collects,
+`.execution.<line>.lock` otherwise) for each tick, never while it polls, and it observes, collects,
 counts against `workers`/`tasks` and tidies only that line's tasks; another line's
 records and running agents never block it. An unreadable record names no line, so it
 is reported in `issues` without blocking. Other controllers and manual launch
-commands of the same line refuse while it owns execution. They exit 75 (`EX_TEMPFAIL`) for that refusal, so a
-caller retries instead of treating it as a failure. Status,
+commands of the same line refuse only while a tick owns execution, so many plans can
+share one line and its commands run between ticks. They exit 75 (`EX_TEMPFAIL`) for that refusal, so a
+caller retries instead of treating it as a failure. A runner's first tick refuses a busy
+line the same way; a later tick another holder has is skipped, so the budget holds. Status,
 capture, result collection, admission, input selection and pause/resume remain
 available under their task locks. After the controller exits, manual launches
 retain their explicit-launch behavior; a later runner counts them.
