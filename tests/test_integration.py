@@ -213,7 +213,7 @@ class Integration(unittest.TestCase):
             kind, payload = ("delivery", frozen_delivery) if delivery else ("release", frozen_release)
             index = command.index("--" + kind + "-evidence-digest")
             command[index:index + 2] = ["--" + kind + "-evidence", json.dumps(payload, sort_keys=True)]
-        with patch.object(factory, "Rex", FakeRex):
+        with patch.object(factory, "Rex", EvidenceRex):
             record, assignment = factory.launch(self.path, task="deliver", assignment_id=key, role=role,
                 goal="Judge the original complete evidence", cwd=str(cwd), command=command, purpose=purpose,
                 binary=sys.executable, server="unix:///fixture.sock",
@@ -389,11 +389,12 @@ class Integration(unittest.TestCase):
                        lambda value: value["approvals"].update(qa=None),
                        lambda value: value["approvals"]["qa"].update(receipt="not-a-digest"),
                        lambda value: value["approvals"]["release"].pop("context"),
-                       lambda value: value.update(required=["qa", "qa"])):
+                       lambda value: value.update(required=["qa", "qa"]),
+                       lambda value: value["approvals"]["qa"].update(receipt="0" * 64)):
             value = json.loads(saved)
             damage(value)
             path.write_text(json.dumps(value))
-            with self.subTest(damage=value), self.assertRaisesRegex(factory.FactoryError, "Unsupported or damaged"):
+            with self.subTest(damage=value), self.assertRaisesRegex(factory.FactoryError, "Unsupported or damaged|differ from the task's collected"):
                 release_evidence.delivered_receipt(factory.load_task(self.path), "release")
         path.write_text(saved)
         # A receipt changed after the judgment no longer matches what the judge assessed.

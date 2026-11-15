@@ -610,6 +610,12 @@ def delivered_receipt(record, review) -> dict:
             or receipt["inputs"] != record["inputs"] or receipt["head"] != record["inputs"]["candidate"]):
         raise factory.FactoryError("The `delivered` receipt does not confirm the task's current delivery; "
                                    "judge final acceptance before selecting other inputs")
+    # The recorded approvals are a hint: they must equal what the collected assignments give now.
+    import integration
+    live = integration.approvals(record, review, receipt["required"])
+    if {key: {k: v for k, v in item.items() if k != "evidence"} for key, item in live.items()} != receipt["approvals"]:
+        raise factory.FactoryError("The `delivered` receipt's approvals differ from the task's collected approvals; "
+                                   "restore the original receipt or confirm the delivery again")
     return dict(schema_version=3, review=review, receipt=receipt, receipt_digest=digest(receipt))
 
 
