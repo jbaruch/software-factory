@@ -323,7 +323,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                             receipt["thread_id"] = event["thread_id"]
                     return await process.wait()
 
-                receipt["exit_code"] = await asyncio.wait_for(consume(), timeout=args.seconds)
+                receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
                 os.fsync(stream.fileno())
             if receipt["exit_code"] != 0:
                 raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
