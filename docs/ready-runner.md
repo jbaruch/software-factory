@@ -58,7 +58,9 @@ assignment with that ID. Every job must be a read-only verifier (`qa`, `code-rev
 that existing writer explicitly in `after`. Every task's writer is checked before
 any task's inputs move, so one refused task leaves all of them unchanged. Additional explicit
 dependencies retain their normal gates. The source must already have a collected
-`completed` native result, on any harness, and an explicit factory commit. The runner
+`completed` native result, on any harness, and an explicit factory commit that created a
+commit: a writer that committed nothing (`unchanged`, which runtimes before 0.39.5 collected
+as completed) refuses, because its candidate is the one already verified. The runner
 revalidates its original receipt/events, commit and repository/worktree binding,
 observes its successful terminal Rex process, and compares the saved result with
 that evidence. A manually recorded completion alone is insufficient. Collect the

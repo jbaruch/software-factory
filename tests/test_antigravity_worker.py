@@ -408,6 +408,8 @@ class AntigravityApprovals(unittest.TestCase):
         args = antigravity_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
         events = stream(f.repo, outcome="completed" if write else "approved", conversation=conversation)
         async def spawn(*command, **options):
+            if write and not exit_code:
+                (self.fixture.repo / "NOTES.md").write_text("Notes\n")  # A completed writer commits its change (#166).
             return FakeProcess([] if exit_code else echo_cwd(events, options), exit_code=exit_code)
         with redirect_stdout(StringIO()):
             receipt = asyncio.run(antigravity_worker.execute(args, spawn=spawn, probe=usage_probe, clock=lambda: 1000,
@@ -419,6 +421,11 @@ class AntigravityApprovals(unittest.TestCase):
         self.assertEqual(selected["agy-qa"]["context"], "11111111-1111-4111-8111-111111111111")
 
     def test_writer_contributes_and_a_failed_unstarted_writer_still_counts(self):
+        # The failed writer runs first: the completed one commits and moves the checkout on (#166).
+        record, failed, receipt = self.run_agy("agy-failed", "backend", "unused", write=True, exit_code=3)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(integration.contributor_context("agy-failed", record, failed),
+                         "antigravity-unstarted:deliver/agy-failed")
         record, assignment, receipt = self.run_agy("agy-writer", "backend", "22222222-2222-4222-8222-222222222222", write=True)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
@@ -426,10 +433,6 @@ class AntigravityApprovals(unittest.TestCase):
             self.assertEqual(integration.contributor_context("agy-writer", record, record["assignments"]["agy-writer"]),
                              "22222222-2222-4222-8222-222222222222")
             self.assertIn("agy-qa", integration.approvals(record, "release", ["agy-qa"]))
-        record, assignment, receipt = self.run_agy("agy-failed", "backend", "unused", write=True, exit_code=3)
-        self.assertEqual(receipt["state"], "failed")
-        self.assertEqual(integration.contributor_context("agy-failed", record, assignment),
-                         "antigravity-unstarted:deliver/agy-failed")
 
     def test_an_antigravity_qa_report_cannot_be_the_release_judgment(self):
         with self.assertRaises(factory.FactoryError):

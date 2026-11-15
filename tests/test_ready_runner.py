@@ -255,6 +255,22 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(result["jobs"][0]["state"], "running")
         self.assertEqual(result["metrics"]["launched"], 0)
 
+    def test_from_writer_refuses_a_writer_that_committed_nothing(self):
+        # #166: runtime 0.39.4 collected a completed writer with an unchanged commit, and verifying it re-checked
+        # the old candidate. Its receipt has that shape; the runner refuses before moving any inputs.
+        before = self.completed_writer()
+        real = factory.evidence_reader
+        def unchanged(harness):
+            def read(*args, **kwargs):
+                parsed, receipt, native = real(harness)(*args, **kwargs)
+                commit = {**receipt["commit"], "state": "unchanged", "candidate": receipt["commit"]["parent"]}
+                return parsed, {**receipt, "commit": commit, "candidate": commit["candidate"]}, native
+            return read
+        with patch.object(factory, "evidence_reader", side_effect=unchanged), \
+                self.assertRaisesRegex(factory.FactoryError, "committed nothing"):
+            self.handoff()
+        self.assertEqual(factory.load_task(self.directory / "task.json")["inputs"], before["inputs"])
+
     def test_from_writer_launches_the_effect_specialists(self):
         # The release judgment asks for ui-design, data-engineering and sre where a change has those effects;
         # the SKILL verifies a replay onto a moved base with integration (#127).

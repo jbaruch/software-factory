@@ -747,7 +747,9 @@ Version 5 adds nullable `commit` evidence. A factory-owned commit records `state
 before staging and again before committing. Pre-commit runs against a disposable
 index; changes to that private index refuse the commit. The candidate stays bound
 to the factory-recorded staged tree, and the clean source check binds the output
-assessed by later verification. A completed receipt requires a terminal commit state matching
+assessed by later verification. A writer that reports `completed` but whose checkout
+ends identical to the candidate fails: there is nothing to commit or verify, and a writer
+with nothing to change reports `blocked` with its reasons (#166). A completed receipt requires a terminal commit state matching
 its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
 for a new commit, the actual Git parent. Collection revalidates the retained
 assigned checkout's repository marker and frozen worktree Git directory for both

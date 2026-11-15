@@ -811,10 +811,13 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
         self.assertTrue(collected["assignments"]["implement"]["native_collected"])
 
-    def test_writer_without_edits_records_an_unchanged_commit(self):
+    def test_a_completed_writer_without_edits_fails_and_commits_nothing(self):
+        # #166: a completed writer whose checkout ends unchanged has nothing to commit or verify.
         receipt = self.execute_writer(self.launch_writer(), edit=False)
-        self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["commit"]["state"], receipt["candidate"]), ("unchanged", self.candidate))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("nothing to commit or verify", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "unchanged")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
 
     def test_writer_mode_requires_a_writing_role_commit_message_and_supported_effort(self):
         for changes, message in ((dict(role="qa"), "does not permit writer"),
@@ -1253,6 +1256,8 @@ class ClaudeApprovals(unittest.TestCase):
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = claude_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
         async def spawn(*command, **options):
+            if not exit_code:
+                (f.repo / "NOTES.md").write_text("Notes\n")  # A completed writer commits its change (#166).
             return FakeProcess(writer_events(str(f.repo), session, model="claude-opus-5-5"), exit_code=exit_code)
         def probe(binary, cwd):
             return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
@@ -1266,7 +1271,7 @@ class ClaudeApprovals(unittest.TestCase):
     def test_claude_writer_contributes_without_breaking_integration_approvals(self):
         writer_session = "00000000-0000-0000-0000-000000000002"
         record, assignment, receipt = self.run_claude_writer(writer_session)
-        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "unchanged"), receipt["error"])
+        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("completed", "created"), receipt["error"])
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
             record = factory.collect_claude(self.fixture.path, "claude-writer", None, record, assignment)
             self.assertEqual(integration.contributor_context("claude-writer", record, record["assignments"]["claude-writer"]),

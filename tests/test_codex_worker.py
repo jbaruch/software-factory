@@ -1277,7 +1277,9 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(factory.git_run(".", "show", receipt["candidate"] + ":feature.py").stdout, "answer = 42\n")
         self.assertEqual(factory.git_run(".", "status", "--porcelain").stdout, "")
 
-    def test_factory_commit_with_no_changes_does_not_create_an_empty_commit(self):
+    def test_a_completed_writer_whose_checkout_ends_unchanged_fails_without_an_empty_commit(self):
+        # #166: a writer's deletions were restored mid-run; it collected as completed and a round verified the old
+        # candidate. Nothing to commit means nothing to verify.
         self.args.write = True
         self.args.role = "backend"
         self.brief.write_text("# Assignment: backend\n\nKeep existing behavior.\n")
@@ -1285,10 +1287,10 @@ class NativeResults(unittest.TestCase):
         self.args.commit_message = "feat(example): Keep existing behavior"
         self.process = FakeProcess(events("completed"))
         receipt = self.execute()
-        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("nothing to commit or verify", receipt["error"])
         self.assertEqual(receipt["commit"]["state"], "unchanged")
-        self.assertEqual(receipt["candidate"], self.candidate)
-        factory_commit.check_commit_receipt(receipt, self.args, str(self.repo))
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
 
     def test_unsuccessful_native_writer_does_not_commit_partial_changes(self):
         for index, (outcome, code) in enumerate((("completed", 1), ("blocked", 0), ("findings", 0))):

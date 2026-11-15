@@ -13,6 +13,11 @@ class Briefs(unittest.TestCase):
         self.assertNotIn(factory.SIMPLICITY, factory.brief("qa", "Check it"))
         self.assertIn("no option, flag, schema version, fallback", factory.SIMPLICITY)
 
+    def test_writers_learn_that_completed_means_a_change_to_commit(self):
+        # #166: a completed writer whose checkout ends unchanged fails, so one with nothing to change says blocked.
+        self.assertIn("with nothing to change, report blocked", factory.brief("backend", "Change it", designs=True))
+        self.assertNotIn("report blocked", factory.brief("qa", "Check it"))
+
 
 class TaskSchema(unittest.TestCase):
     """Version 11 adds the optional `acceptance` capture (review of #152)."""
