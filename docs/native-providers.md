@@ -32,7 +32,7 @@ boundary is structural instead:
   with a plain plan. A failed reader that left files in a shared checkout resets
   the same way and reruns under a new ID;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
-  secrets, runs hooks and signs, and integration stays with the runtime. Its Git
+  secrets, runs hooks and signs, and merging stays with the release skill. Its Git
   calls, secret scan and signing steps wait up to 600 seconds, and the signing key
   lives twice that: at load 265-346 on 16 cores a `git rev-parse` passed the earlier
   60 seconds and three finished writers lost their commits (#175);
@@ -326,7 +326,7 @@ that is a file in agy's per-conversation brain directory into a private
 that directory; the receipt and report stay unchanged. Events are
 version-1 `antigravity-event-line` envelopes holding each original line; native
 lines are limited to 64 MiB, and a longer one stops the child with a failed receipt.
-Integration counts collected `qa`, `security` and `code-review` approvals under
+`delivered` counts collected `qa`, `security` and `code-review` approvals under
 their conversation ID and treats writers as contributors; a writer that failed
 before `init` is identified by its assignment.
 
@@ -541,8 +541,7 @@ taking any lock, fetches each `https://github.com/OWNER/REPO/issues/N` acceptanc
 reference through GitHub's GraphQL API and stores the text in the task record with the requirements revision, in
 the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
 Every agent's brief, writers and generic `start` assignments included, renders it as
-untrusted data while the revision is current; only the mechanical integrate command
-gets none, and launches never touch the network. A task migrated from schema 10 has
+untrusted data while the revision is current, and launches never touch the network. A task migrated from schema 10 has
 no capture, so a new launch refuses until `inputs` selects the revision again. When the requirements revision names
 the issue (`owner/repo#N@T`, owner and repository compared without case, surrounding
 whitespace ignored), its title and body must not have changed after `T`: its creation,
@@ -811,7 +810,7 @@ collection reuses the same immutable result. Changing task inputs leaves an
 older result visible but stale. A native exit or specialist approval does not
 accept the task, establish independent verification or satisfy release gates.
 
-See the [implementation inventory](implementation.md) for mechanical integration
+See the [implementation inventory](implementation.md) for delivery
 observations and the remaining live specialist verification.
 
 ## Explicit Claude assignments
@@ -893,7 +892,7 @@ native list-price equivalents, which are not actual monetary spend. Raw native
 rate-limit observations retain unknowns and never establish shared pools.
 
 `native_claude.parse_execution` is the pure strict decoder. The worker writes;
-`factory.claude_evidence`, collection and integration read the original receipt,
+`factory.claude_evidence`, collection and delivery approvals read the original receipt,
 brief and events without migration. Init cwd/model/session/tool controls, assistant
 model/session, matched tool results, one structured report and successful final
 result/usage must agree. Unsupported/malformed/ambiguous lifecycles, tool escapes,

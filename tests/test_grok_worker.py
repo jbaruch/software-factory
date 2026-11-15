@@ -620,7 +620,7 @@ def fake_grok_discovery(repo, root, efforts=("high",)):
 
 
 class GrokApprovals(unittest.TestCase):
-    """Grok reports count toward integration like Claude's: independent, collected, current."""
+    """Grok reports count toward delivery approvals like Claude's: independent, collected, current."""
     REVIEW_SESSION = "00000000-0000-0000-0000-00000000000a"
 
     def setUp(self):

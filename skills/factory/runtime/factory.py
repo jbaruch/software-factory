@@ -1,4 +1,4 @@
-"""Task admission, explicit native Rex launches and mechanical integration."""
+"""Task admission and explicit native Rex launches."""
 import argparse
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -308,12 +308,6 @@ def read_record(path, *, private=False, max_bytes=None):
         if len(content) > max_bytes:
             raise OSError("Record exceeds its byte limit; inspect the original without rewriting it")
         return content.decode("utf-8")
-
-
-def integration_request(request):
-    """Recognize only the factory-owned mechanical adapter; imports stay lazy."""
-    return (request.get("role") == "integration" and request.get("command", [])[:5]
-            == [sys.executable, "-E", "-s", str(ROOT / "integration.py"), "--intent"])
 
 
 def load_task(path) -> dict:
@@ -1454,8 +1448,6 @@ def record_result(path, *, assignment_id, candidate, requirements, outcome, arti
     if assignment_id not in record["assignments"]:
         raise FactoryError(f"Unknown assignment {assignment_id!r}; use show --task {record['task']} to find its ID")
     assignment = record["assignments"][assignment_id]
-    if integration_request(assignment["request"]):
-        raise FactoryError("Mechanical delivery results belong to factory integrate, not manual reports")
     inputs = assignment["request"].get("inputs")
     if not valid_inputs(inputs):
         raise FactoryError("Assignment predates input binding; launch a new explicit assignment ID")
@@ -1622,13 +1614,13 @@ def inputs_acceptance(record, requirements):
 
 
 def rendered_acceptance(record, command, role):
-    """The stored acceptance text every agent's brief carries, writers and generic starts included; only the
-    mechanical integrate command carries none. Rendering never touches the network.
+    """The stored acceptance text every agent's brief carries, writers and generic starts included. Rendering never
+    touches the network.
 
     `inputs` always captures issue acceptance, so only a task migrated from schema 10 can lack a capture for its
     revision, and a reader with no GitHub identity must not judge without it: the launch refuses (review of #152).
     """
-    if record["admission"] is None or record["inputs"] is None or integration_request(dict(role=role, command=command)):
+    if record["admission"] is None or record["inputs"] is None:
         return ""
     stored = record.get("acceptance", {}).get(record["inputs"]["requirements"])
     if stored is not None:
@@ -2141,10 +2133,6 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("Supply the original release evidence matching the command digest before launching")
         frozen = release_evidence.validate(frozen, record)
         instructions += release_evidence.render(frozen)
-    if not existing and integration_request(request):
-        import integration
-        integration.validate_launch(record, request, task, assignment_id, path)
-        instructions += integration.render_intent(decode_json(command[5]))
     request["instructions_sha256"] = (existing["request"]["instructions_sha256"] if existing
                                       else hashlib.sha256(instructions.encode()).hexdigest())
     if existing:
@@ -2818,7 +2806,7 @@ def carries_judgment(args):
 
 # Specialists whose read-only verdict counts as an approval: the verifiers, every effect specialist the
 # release judgment checks for, and integration, which verifies a replay onto a moved base (#127).
-# One set serves --from-writer plans and integration.
+# One set serves --from-writer plans and the approvals `delivered` checks.
 VERIFIER_ROLES = frozenset({"qa", "code-review", "test-automation", "security", "ui-design", "accessibility",
                             "data-engineering", "sre", "performance", "integration"})
 
@@ -3401,8 +3389,8 @@ def main(argv=None):
         if action == "start":
             start.add_argument("command", nargs=argparse.REMAINDER)
         else:
-            start.add_argument("--delivery", help="Freeze an original confirmed integration, or the release judgment a "
-                               "delivered receipt names, for final release judgment")
+            start.add_argument("--delivery", help="Freeze the delivered receipt of this release judgment ID for final "
+                               "release judgment")
             start.add_argument("--release-pr", help="Freeze complete canonical feedback for a native read-only judgment")
             start.add_argument("--gh", type=Path)
             start.add_argument("--release-scripts", type=Path, help="The release skill's ACR or Tessl installation")
@@ -3433,15 +3421,6 @@ def main(argv=None):
                 start.add_argument("--decision-store", type=Path, help="Original Jev decision store for a bounded answer")
                 start.add_argument("--decision", help="Exact original Jev decision ID")
                 start.add_argument("--question", help="One unresolved question from that decision")
-    delivery = sub.add_parser("integrate", help="Integrate selected exact-input native approvals; existing IDs reconcile read-only")
-    delivery.add_argument("--task", required=True)
-    delivery.add_argument("--id", required=True)
-    delivery.add_argument("--pr", required=True)
-    delivery.add_argument("--review", required=True)
-    delivery.add_argument("--acceptance", help="Explicit final native release judgment; read-only after delivery")
-    delivery.add_argument("--after", action="append", required=True)
-    delivery.add_argument("--gh", type=Path, required=True)
-    delivery.add_argument("--release-scripts", type=Path, required=True)
     confirm = sub.add_parser("delivered", help="Confirm the release skill merged exactly what the release judgment approved")
     confirm.add_argument("--task", required=True)
     confirm.add_argument("--pr", required=True)
@@ -3533,24 +3512,6 @@ def main(argv=None):
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
             print(json.dumps(report, indent=2))
             return 1 if failed else 0
-        if args.action == "integrate":
-            import integration
-            path = args.state_dir.resolve() / (args.task + ".json")
-            if args.acceptance is not None:
-                with task_lock(path.parent, args.task):
-                    original = load_task(path)["assignments"].get(args.id)
-                    if original is None or original["result"] is None:
-                        raise FactoryError("Final acceptance only observes an existing terminal integration")
-            receipt = integration.integrate(path, assignment_id=args.id, pr=args.pr, review=args.review,
-                required=args.after, gh=args.gh, scripts=args.release_scripts)
-            if args.acceptance is not None:
-                import release_evidence
-                with task_lock(path.parent, args.task):
-                    record = load_task(path)
-                transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
-                receipt = {**receipt, "acceptance": integration.accepted(record, args.id, args.acceptance, transport)}
-            print(json.dumps(receipt, indent=2))
-            return 0 if receipt["state"] in {"launched", "delivered"} else 1
         if args.action == "delivered":
             import integration
             import release_evidence
@@ -3580,16 +3541,11 @@ def main(argv=None):
             if args.delivery is not None:
                 if original is not None:
                     frozen_delivery = release_evidence.from_delivery_assignment(prepared, original)
-                    if frozen_delivery.get("assignment", frozen_delivery.get("review")) != args.delivery:
+                    if frozen_delivery["review"] != args.delivery:
                         raise FactoryError("Original delivery differs; use a new final review assignment")
                 else:
-                    delivered = release_evidence.delivery_source(prepared, args.delivery)
-                    if delivered["schema_version"] == 3:
-                        frozen_delivery = delivered  # A `delivered` receipt; the judge observes the merge itself (#151).
-                    else:
-                        intent = delivered["receipt"]["intent"]
-                        transport = release_evidence.GitHub(intent["gh"], intent["scripts"], prepared["admission"]["repository"])
-                        frozen_delivery = release_evidence.capture_delivery(prepared, args.delivery, transport, cwd=args.cwd)
+                    # The `delivered` receipt; the judge observes the merge itself (#151).
+                    frozen_delivery = release_evidence.delivered_receipt(prepared, args.delivery)
             elif original is not None:
                 frozen_release = release_evidence.from_assignment(prepared, original)
                 if frozen_release["pr"]["url"] != args.release_pr:

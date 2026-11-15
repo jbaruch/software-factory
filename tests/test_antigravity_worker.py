@@ -377,7 +377,7 @@ class AntigravityWorker(unittest.TestCase):
 
 
 class AntigravityApprovals(unittest.TestCase):
-    """Antigravity reports count toward integration under their native conversation identity."""
+    """Antigravity reports count toward delivery approvals under their native conversation identity."""
 
     def setUp(self):
         environment = {key: value for key, value in os.environ.items() if key not in native_antigravity.API_ENVIRONMENT}

@@ -3,9 +3,8 @@
 `ready_runner.py` executes an operator-selected plan of native Codex, Claude, Grok and Antigravity jobs. It observes existing
 Rex jobs, collects successful native receipts, then launches ready assignments.
 It uses the existing task store and its cumulative attempt limits. It does not
-select models, interpret findings, accept tasks or release changes. The separate
-[integration command](integration.md) owns mechanical delivery; the runner only
-observes its existing pending/terminal assignment and never starts or retries it.
+select models, interpret findings, accept tasks or release changes;
+[delivery](integration.md) belongs to the release skill and `delivered`.
 
 Admit tasks and select their exact candidate/requirements through
 [the task owner](task-state.md). Keep one state directory per factory instance;

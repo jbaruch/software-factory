@@ -1182,12 +1182,12 @@ class ClaudeApprovals(unittest.TestCase):
         def judged(role):
             return patch.object(integration, "collected_native", return_value=(
                 Namespace(role=role, write=False, claude=Path(sys.executable)), {}, dict(report=dict(outcome="approved"))))
-        with patch.object(integration.evidence, "delivery", return_value={}):
+        with patch.object(integration.evidence, "delivered_receipt", return_value={}):
             with judged("qa"), self.assertRaisesRegex(factory.FactoryError, "native release"):
-                integration.accepted(self.record, "delivery", "claude-qa", self.fixture.transport)
+                integration.delivered_accepted(self.fixture.path, "release", "claude-qa")
             # A Claude release judgment passes the harness gate and stops only at its missing delivery payload.
             with judged("release"), self.assertRaisesRegex(factory.FactoryError, "frozen delivery"):
-                integration.accepted(self.record, "delivery", "claude-qa", self.fixture.transport)
+                integration.delivered_accepted(self.fixture.path, "release", "claude-qa")
 
     RELEASE_SESSION = "00000000-0000-0000-0000-000000000004"
 
