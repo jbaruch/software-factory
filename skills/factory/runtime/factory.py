@@ -666,7 +666,9 @@ def git_execution(prefix, environment):
 
 # A hang guard, not a performance bound: under a loaded machine a plain rev-parse took over 10 seconds,
 # and starting the Codex sandbox alone took 1.9 to 6.3.
-GIT_SECONDS = 60
+# Three finished writers lost their commits to `git rev-parse` passing 60 seconds at load 265-346 on 16 cores (#175).
+# The factory commit's scanner and signing steps share the bound.
+GIT_SECONDS = 600
 
 
 def git_run(repository, *args, environment=None):

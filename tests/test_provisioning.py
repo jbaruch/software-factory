@@ -776,12 +776,13 @@ class GitTimeouts(unittest.TestCase):
                 factory.git_run(str(self.repo), "-c", "core.fsmonitor=false", "diff", "--name-only")
         return seen, str(error.exception)
 
-    def test_git_gets_sixty_seconds_and_a_timeout_says_so(self):
+    def test_git_gets_ten_minutes_and_a_timeout_says_so(self):
+        # #175: at load 265-346 on 16 cores, git rev-parse passed the earlier 60 seconds.
         for sandboxed in (True, False):
             with self.subTest(sandboxed=sandboxed):
                 seen, message = self.timeout_of(sandboxed=sandboxed)
-                self.assertEqual(seen, [60])
-                self.assertIn("did not finish within 60 seconds (git diff)", message)
+                self.assertEqual(seen, [600])
+                self.assertIn("did not finish within 600 seconds (git diff)", message)
                 self.assertNotIn("Cannot run Git", message)
 
 

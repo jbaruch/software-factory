@@ -32,7 +32,10 @@ boundary is structural instead:
   with a plain plan. A failed reader that left files in a shared checkout resets
   the same way and reruns under a new ID;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
-  secrets, runs hooks and signs, and integration stays with the runtime;
+  secrets, runs hooks and signs, and integration stays with the runtime. Its Git
+  calls, secret scan and signing steps wait up to 600 seconds, and the signing key
+  lives twice that: at load 265-346 on 16 cores a `git rev-parse` passed the earlier
+  60 seconds and three finished writers lost their commits (#175);
 - only a structured report counts as a result. Text, tool telemetry and
   permission labels never supply completion, acceptance or authority.
 - a read-only verifier's verdict needs at least one tool call behind it. A

@@ -1004,7 +1004,7 @@ class TaskAdmission(unittest.TestCase):
         self.admit()
         before = self.path.read_bytes()
         for error, explained in ((FileNotFoundError("git"), "restore Git availability and checkout access"),
-                                 (subprocess.TimeoutExpired("git", 60), "did not finish within 60 seconds")):
+                                 (subprocess.TimeoutExpired("git", 600), "did not finish within 600 seconds")):
             with patch.object(factory.subprocess, "run", side_effect=error):
                 for action in (lambda: factory.git_commit(str(self.repo), "HEAD"),
                                lambda: factory.git_common_dir(str(self.repo)),
