@@ -1647,11 +1647,13 @@ ACCEPTANCE_QUERY = ("query($owner: String!, $name: String!, $number: Int!) { rep
 
 
 def github_time(value):
+    """A GitHub timestamp with its zone, or None; a zoneless time can't be compared with GitHub's (review of #173)."""
     from datetime import datetime
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
     except ValueError:
         return None
+    return parsed if parsed is not None and parsed.tzinfo is not None else None
 
 
 def acceptance_evidence(admission, requirements, token):
@@ -1707,7 +1709,7 @@ def acceptance_evidence(admission, requirements, token):
             revision = github_time(pinned.group(1))
             if revision is None:
                 raise FactoryError(f"The requirements revision names {owner}/{repo}#{number} at {pinned.group(1)!r}, which "
-                                   "is not a time; use the issue's updatedAt, such as 2026-11-12T06:07:07Z")
+                                   "is not a time with its zone; use the issue's updatedAt, such as 2026-11-12T06:07:07Z")
             if changed > revision:
                 raise FactoryError(f"Acceptance {owner}/{repo}#{number} changed since the task's requirements revision "
                                    f"({pinned.group(1)}; its title or body changed at {changed.isoformat()}); select inputs "

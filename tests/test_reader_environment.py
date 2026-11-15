@@ -193,9 +193,10 @@ class AcceptanceEvidence(unittest.TestCase):
                        errors=[dict(type="NOT_FOUND", message="Could not resolve to an issue or pull request with the number of 1368.")])
         with self.assertRaisesRegex(factory.FactoryError, "returned no issue .*Could not resolve"):
             self.capture(answer=missing)
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond(), \
-                self.assertRaisesRegex(factory.FactoryError, "is not a time"):
-            factory.capture_acceptance(self.admission, "jbaruch/nanoclaw#1368@yesterday")
+        for revision in ("yesterday", "2026-11-13T03:37:26", "2026-11-13"):  # A zoneless time can't be compared.
+            with self.subTest(revision=revision), patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
+                    self.respond(), self.assertRaisesRegex(factory.FactoryError, "is not a time"):
+                factory.capture_acceptance(self.admission, "jbaruch/nanoclaw#1368@" + revision)
 
     def test_whitespace_or_case_never_dodges_the_revision_guard(self):
         # Review of #152: ' Owner/Repo#N@T' must still be checked against the issue's last title or body change.
