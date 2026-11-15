@@ -7,53 +7,60 @@ import unittest
 import factory
 
 
+def plain(line):
+    """A pane line without the factory's own styling codes."""
+    for code in (factory.RED, factory.DIM, factory.RESET):
+        line = line.replace(code, "")
+    return line
+
+
 class Pane(unittest.TestCase):
     def test_claude_tool_calls_text_errors_and_result(self):
         assistant = dict(type="assistant", message=dict(content=[
             dict(type="thinking", thinking="private"), dict(type="text", text="Checking the\nrule"),
             dict(type="tool_use", name="Read", input=dict(file_path="/repo/rules/a.md"))]))
-        self.assertEqual(factory.pane_line("claude", assistant), "▸ Checking the rule\n→ Read /repo/rules/a.md")
+        self.assertEqual(plain(factory.pane_line("claude", assistant)), "▸ Checking the rule\n→ Read /repo/rules/a.md")
         failed = dict(type="user", message=dict(content=[dict(type="tool_result", is_error=True, content="No such file")]))
-        self.assertEqual(factory.pane_line("claude", failed), "✗ No such file")
+        self.assertEqual(plain(factory.pane_line("claude", failed)), "✗ No such file")
         result = dict(type="result", subtype="success", num_turns=36, structured_output=dict(outcome="completed", artifacts=["a", "b"]))
-        self.assertEqual(factory.pane_line("claude", result), "= success: completed (2 artifacts), 36 turns")
+        self.assertEqual(plain(factory.pane_line("claude", result)), "= success: completed (2 artifacts), 36 turns")
         for skipped in (dict(type="system", subtype="thinking_tokens"), dict(type="rate_limit_event"),
                         dict(type="user", message=dict(content=[dict(type="tool_result", content="ok")]))):
             self.assertIsNone(factory.pane_line("claude", skipped))
 
     def test_grok_shows_calls_and_failures_but_not_streamed_fragments(self):
         call = dict(type="tool_call", toolName="read_file", rawInput=dict(target_file="/repo/README.md", limit=40))
-        self.assertEqual(factory.pane_line("grok", call), "→ read_file /repo/README.md")
-        self.assertEqual(factory.pane_line("grok", dict(type="tool_call_update", status="failed",
-            content="Denied by permission policy")), "✗ Denied by permission policy")
+        self.assertEqual(plain(factory.pane_line("grok", call)), "→ read_file /repo/README.md")
+        self.assertEqual(plain(factory.pane_line("grok", dict(type="tool_call_update", status="failed",
+            content="Denied by permission policy"))), "✗ Denied by permission policy")
         for fragment in (dict(type="text", data=" by"), dict(type="thought", data="I will"), dict(type="usage")):
             self.assertIsNone(factory.pane_line("grok", fragment))
         end = dict(type="end", stopReason="end_turn", num_turns=20, structuredOutput=dict(outcome="approved", artifacts=["x"]))
-        self.assertEqual(factory.pane_line("grok", end), "= end_turn: approved (1 artifacts), 20 turns")
+        self.assertEqual(plain(factory.pane_line("grok", end)), "= end_turn: approved (1 artifacts), 20 turns")
 
     def test_antigravity_reads_raw_lines_and_shows_malformed_ones_as_they_came(self):
         step = dict(event="step_update", step_update=dict(step_type="tool", state="ACTIVE", tool_name="run_command",
             tool_info=dict(parameters=dict(CommandLine="git diff --stat"))))
-        self.assertEqual(factory.pane_line("antigravity", json.dumps(step) + "\n"), "→ run_command git diff --stat")
+        self.assertEqual(plain(factory.pane_line("antigravity", json.dumps(step) + "\n")), "→ run_command git diff --stat")
         delta = dict(event="step_update", step_update=dict(step_type="agent_response", state="ACTIVE", text_delta="Now"))
         self.assertIsNone(factory.pane_line("antigravity", json.dumps(delta)))
-        self.assertEqual(factory.pane_line("antigravity", "not json\n"), "not json")
+        self.assertEqual(plain(factory.pane_line("antigravity", "not json\n")), "not json")
 
     def test_codex_commands_failures_messages_and_turns(self):
         started = dict(type="item.started", item=dict(type="command_execution", command="pytest -q"))
-        self.assertEqual(factory.pane_line("codex", started), "→ $ pytest -q")
+        self.assertEqual(plain(factory.pane_line("codex", started)), "→ $ pytest -q")
         failed = dict(type="item.completed", item=dict(type="command_execution", command="pytest -q", exit_code=1))
-        self.assertEqual(factory.pane_line("codex", failed), "✗ exit 1: pytest -q")
+        self.assertEqual(plain(factory.pane_line("codex", failed)), "✗ exit 1: pytest -q")
         self.assertIsNone(factory.pane_line("codex", dict(type="item.completed",
             item=dict(type="command_execution", command="ls", exit_code=0))))
-        self.assertEqual(factory.pane_line("codex", dict(type="turn.completed")), "= completed")
+        self.assertEqual(plain(factory.pane_line("codex", dict(type="turn.completed"))), "= completed")
 
     def test_control_characters_never_reach_the_terminal(self):
         # An escape sequence in tool output a prompt-injected agent read must not clear or retitle the pane.
         for harness, event in (("codex", dict(type="item.completed", item=dict(type="agent_message", text="ok\x1b[2J\x1b]0;owned\x07"))),
                                ("antigravity", "raw \x1b[2J line"),
                                ("claude", dict(type="user", message=dict(content=[dict(type="tool_result", is_error=True, content="\x1b[31mred")])))):
-            line = factory.pane_line(harness, event)
+            line = plain(factory.pane_line(harness, event))  # Only the factory's own styling may color a line.
             self.assertTrue(line.isprintable(), (harness, line))
             self.assertNotIn("\x1b", line)
 
@@ -65,13 +72,31 @@ class Pane(unittest.TestCase):
                                ("codex", dict(type="item.completed", item="oops")), ("codex", dict(type=7))):
             with self.subTest(harness=harness, event=event):
                 factory.pane_line(harness, event)  # Must not raise.
-        self.assertEqual(factory.pane_line("grok", dict(type="end", stopReason="end_turn", num_turns=1,
-            structuredOutput=dict(outcome="approved", artifacts="many"))), "= end_turn: approved (0 artifacts), 1 turns")
+        self.assertEqual(plain(factory.pane_line("grok", dict(type="end", stopReason="end_turn", num_turns=1,
+            structuredOutput=dict(outcome="approved", artifacts="many")))), "= end_turn: approved (0 artifacts), 1 turns")
 
-    def test_long_text_is_cut_to_one_line(self):
-        line = factory.pane_line("codex", dict(type="item.completed", item=dict(type="agent_message", text="x" * 500)))
-        self.assertEqual(len(line), 2 + factory.PANE_WIDTH)
-        self.assertNotIn("\n", line)
+    def test_agent_notes_wrap_in_full_while_commands_stay_short(self):
+        # The pane read as a list of tool calls: the agent's notes, the story of the run, were cut to one line.
+        note = "word " * 100
+        lines = factory.pane_line("codex", dict(type="item.completed", item=dict(type="agent_message", text=note))).split("\n")
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(all(len(line) <= factory.PANE_WIDTH for line in lines))
+        self.assertEqual(" ".join(line.removeprefix("▸").strip() for line in lines), note.strip())
+        wrapped = dict(type="item.started", item=dict(type="command_execution",
+            command="/bin/zsh -c 'set -euo pipefail go test -race ./internal/realize " + "x" * 200 + "'"))
+        command = plain(factory.pane_line("codex", wrapped))
+        self.assertTrue(command.startswith("→ $ set -euo pipefail go test -race ./internal/realize"))
+        self.assertLessEqual(len(command), len("→ $ ") + factory.PANE_COMMAND_WIDTH)
+        edit = dict(type="item.completed", item=dict(type="file_change", changes=[
+            dict(path="/Users/jbaruch/.worktrees/acr-183-writer/internal/realize/filesystem.go")]))
+        self.assertEqual(plain(factory.pane_line("codex", edit)), "→ edit realize/filesystem.go")
+
+    def test_failures_are_red_and_tool_calls_dimmed(self):
+        failed = factory.pane_line("codex", dict(type="item.completed", item=dict(type="command_execution", command="go test", exit_code=1)))
+        self.assertEqual(failed, factory.RED + "✗ exit 1: go test" + factory.RESET)
+        self.assertEqual(factory.pane_line("codex", dict(type="item.started", item=dict(type="command_execution", command="ls"))),
+                         factory.DIM + "→ $ ls" + factory.RESET)
+        self.assertEqual(factory.pane_line("codex", dict(type="item.completed", item=dict(type="agent_message", text="done"))), "▸ done")
 
 
 class ToolEvidence(unittest.TestCase):
