@@ -37,7 +37,7 @@ class ReaderEnvironment(unittest.TestCase):
         git("commit", "--quiet", "-m", "Fixture")
         git("worktree", "add", "--quiet", "--detach", str(linked))
         self.assertNotIn("GOCACHE", factory.worker_environment(self.base, str(repo)))
-        self.assertNotIn("GIT_CONFIG_COUNT", factory.worker_environment(self.base, str(repo)))  # No GitHub origin.
+        self.assertEqual(factory.worker_environment(self.base, str(repo))["GIT_CONFIG_VALUE_0"], "git@github.com:")
         git("remote", "add", "origin", "git@github.com:jbaruch/fixture.git")
         self.assertEqual(factory.worker_environment(self.base, str(repo))["GIT_CONFIG_VALUE_0"], "git@github.com:jbaruch/fixture")
         cache = Path(factory.worker_environment(self.base, str(linked))["GOCACHE"])
@@ -100,7 +100,8 @@ class ReaderEnvironment(unittest.TestCase):
         fixture = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "--push", "fixture"],
                                  env=environment, capture_output=True, text=True, check=True)
         self.assertEqual(fixture.stdout.strip(), "https://github.com/acme/widgets.git")
-        self.assertNotIn("GIT_CONFIG_COUNT", factory.no_github_identity(self.base))
+        # Without a recognised origin, every GitHub push is refused, as before.
+        self.assertEqual(factory.no_github_identity(self.base)["GIT_CONFIG_VALUE_0"], "git@github.com:")
 
     def test_a_credential_an_earlier_version_left_is_removed(self):
         # 0.39.3 drafts wrote a read-only token into the reader's gh config; workers now hold none.

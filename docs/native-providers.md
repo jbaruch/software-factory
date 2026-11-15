@@ -527,11 +527,13 @@ directory gets Time Machine's sticky exclusion, the attribute `tmutil addexclusi
 No native worker gets a GitHub identity. Readers lost it after a release judgment
 merged a PR and deployed it with the operator's, and writers need none: the factory
 commits their work and the line's foreman pushes it, so a writer misled by text it
-read (a message in a log, a comment on a public PR) can't act on GitHub as the
-operator. `GH_CONFIG_DIR` points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN`
-are removed, and pushes to the worker's own GitHub repository are rewritten to an invalid host. Only that
-repository: the rewrite reaches every git process, the checkout's test suite included, and a suite's throwaway
-repositories with other GitHub remotes must resolve as they do in CI (#188). Readers work on a
+read (a message in a log, a comment on a public PR) can't use `gh` as the operator
+or push its own repository. `GH_CONFIG_DIR` points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN`
+are removed, and pushes to the worker's own GitHub repository (all of GitHub when its origin isn't a
+recognised GitHub URL) are rewritten to an invalid host. Only that repository, because the rewrite reaches
+every git process, the checkout's test suite included, and a suite's throwaway repositories with other GitHub
+remotes must resolve as they do in CI (#188). Pushes to other repositories, or through a differently cased
+URL, are not refused: the guard stops a misbriefed push, not a hostile one. Readers work on a
 local checkout, and a release judgment's GitHub evidence is captured before launch, so
 no worker needs GitHub; a worker can't look up private issues or pull requests on its
 own. The factory reads its acceptance issues for it. `factory.py inputs`, before

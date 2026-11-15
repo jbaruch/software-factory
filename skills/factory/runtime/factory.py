@@ -1552,8 +1552,8 @@ def role_spec(role_id):
 
 # No native worker gets a GitHub identity: a release judgment merged a PR and deployed it under the operator's.
 # Readers work on a local checkout, and release evidence is captured before launch. Writers need none either:
-# the factory commits their work and the line's foreman pushes it, so a misled writer can't act on GitHub as the
-# operator. The gh directory keeps the name it had when only readers used it.
+# the factory commits their work and the line's foreman pushes it, so a misled writer can't use gh as the
+# operator or push its own repository. The gh directory keeps the name it had when only readers used it.
 # SOFTWARE_FACTORY_CONFIG relocates the factory's configuration; the tests point it at an empty directory.
 CONFIG_DIRECTORY = Path(os.environ.get("SOFTWARE_FACTORY_CONFIG") or Path.home() / ".config" / "software-factory")
 READER_GH_CONFIG = CONFIG_DIRECTORY / "gh-reader"
@@ -1729,7 +1729,9 @@ def no_github_identity(environment, repository=None):
 
     The refusal rides in GIT_CONFIG_* variables that every git process inherits, the checkout's own test suite
     included, so it covers only the worker's GitHub REPOSITORY (OWNER/REPO): a suite that builds throwaway
-    repositories with other GitHub remotes then resolves their push URLs as it does in CI (#188).
+    repositories with other GitHub remotes then resolves their push URLs as it does in CI (#188). Without a
+    recognised repository it refuses pushes to all of GitHub, as before. It stops a misbriefed push, not a hostile
+    one: a differently cased URL or another repository gets through.
     """
     READER_GH_CONFIG.mkdir(mode=0o700, parents=True, exist_ok=True)
     for entry in READER_GH_CONFIG.iterdir():
@@ -1737,9 +1739,7 @@ def no_github_identity(environment, repository=None):
             entry.unlink()  # A credential an earlier factory version left; workers hold none.
     result = {key: value for key, value in environment.items() if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
     result["GH_CONFIG_DIR"] = str(READER_GH_CONFIG)
-    if repository is None:
-        return result
-    prefixes = (f"git@github.com:{repository}", f"ssh://git@github.com/{repository}", f"https://github.com/{repository}")
+    prefixes = tuple(host + (repository or "") for host in ("git@github.com:", "ssh://git@github.com/", "https://github.com/"))
     result["GIT_CONFIG_COUNT"] = str(len(prefixes))
     for index, prefix in enumerate(prefixes):
         result[f"GIT_CONFIG_KEY_{index}"] = f"url.{PUSH_REFUSED}.pushInsteadOf"
