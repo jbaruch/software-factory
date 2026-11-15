@@ -191,6 +191,31 @@ class ReadyRunner(unittest.TestCase):
         for path, content in originals.items():
             self.assertEqual(path.read_bytes(), content)
 
+    def test_a_writer_whose_commit_is_the_selection_reports_its_result(self):
+        # The canary's writer committed, its commit became the selection, and its plan still said stale (#139).
+        self.completed_writer()
+        self.assertEqual(self.handoff()["metrics"]["launched"], 1)
+        self.finish("task", "verify")
+        writer = self.job("implement", write=True, commit_message="feat(fixture): Deliver candidate")
+        self.assertEqual(self.states(self.tick(self.controller(self.plan([writer]))))[("task", "implement")], "completed")
+        # The verifier's result is current too, but this plan names the original pair it never ran on.
+        result = self.tick(self.controller(self.verification_plan()))
+        self.assertEqual(result["jobs"][0]["state"], "stale")
+
+    def test_a_reader_with_a_recorded_result_for_the_selection_still_reports_stale(self):
+        # Review of #180: a read-only job assessed its planned pair; a result recorded for another candidate
+        # through `factory.py result` must not make that plan current once the other candidate is selected.
+        reader = self.plan([self.job("reader")])
+        self.assertEqual(self.tick(self.controller(reader))["metrics"]["launched"], 1)
+        other = subprocess.check_output([factory.git_binary(), "-C", str(self.repo), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit-tree", self.candidate + "^{tree}", "-p", self.candidate,
+            "-m", "Another candidate"], text=True, env={**factory.git_environment(),
+            "GIT_AUTHOR_DATE": "2000-01-04T00:00:00Z", "GIT_COMMITTER_DATE": "2000-01-04T00:00:00Z"}).strip()
+        factory.record_result(self.directory / "task.json", assignment_id="reader", candidate=other,
+                              requirements="requirements-1", outcome="completed", artifacts=["report.md"])
+        factory.set_inputs(self.directory / "task.json", candidate=other, requirements="requirements-1")
+        self.assertEqual(self.tick(self.controller(reader))["jobs"][0]["state"], "stale")
+
     def second_writer(self, task):
         """A completed writer for another task, in its own worktree of the fixture repository."""
         checkout = self.root / (task + "-worktree")
