@@ -1617,17 +1617,21 @@ def inputs_acceptance(record, requirements):
 
 
 def rendered_acceptance(record, command, role):
-    """The stored acceptance text every reader's brief carries, generic starts included; writers and the
-    mechanical integrate command carry none. Rendering never touches the network."""
-    if (record["admission"] is None or record["inputs"] is None or "--write" in command
-            or integration_request(dict(role=role, command=command))):
+    """The stored acceptance text every agent's brief carries, writers and generic starts included; only the
+    mechanical integrate command carries none. Rendering never touches the network.
+
+    `inputs` always captures issue acceptance, so only a task migrated from schema 10 can lack a capture for its
+    revision, and a reader with no GitHub identity must not judge without it: the launch refuses (review of #152).
+    """
+    if record["admission"] is None or record["inputs"] is None or integration_request(dict(role=role, command=command)):
         return ""
     stored = record.get("acceptance", {}).get(record["inputs"]["requirements"])
     if stored is not None:
         return stored
     if acceptance_issues(record["admission"]):
-        return ("\nThe acceptance references are GitHub issues you cannot reach, and none were captured for this "
-                "requirements revision.\n")
+        raise FactoryError("The acceptance references are GitHub issues, and none were captured for this requirements "
+                           f"revision: select the inputs again (`factory.py inputs --task {record['task']} --candidate "
+                           f"{record['inputs']['candidate']} --requirements {record['inputs']['requirements']}`), then launch")
     return ""
 
 

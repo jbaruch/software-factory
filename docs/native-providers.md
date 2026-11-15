@@ -525,9 +525,10 @@ its own. The factory reads its acceptance issues for it. `factory.py inputs`, be
 taking any lock, fetches each `https://github.com/OWNER/REPO/issues/N` acceptance
 reference and stores the text in the task record with the requirements revision, in
 the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
-Every reader's brief, generic `start` readers included, renders it as untrusted data
-while the revision is current; writers and the mechanical integrate command get none,
-and launches never touch the network. When the requirements revision names
+Every agent's brief, writers and generic `start` assignments included, renders it as
+untrusted data while the revision is current; only the mechanical integrate command
+gets none, and launches never touch the network. A task migrated from schema 10 has
+no capture, so a new launch refuses until `inputs` selects the revision again. When the requirements revision names
 the issue (`owner/repo#N@T`, owner and repository compared without case, surrounding
 whitespace ignored), its `updated_at` must still be `T`. The read-only token
 lives in the macOS Keychain, one entry per Mac (`security add-generic-password -s

@@ -150,8 +150,10 @@ launch of any of the line's tasks joins or opens the session under that label.
 `factory.py line --task TASK --line LINE` moves a task with nothing open to another
 line. Schema version 11 adds the optional `acceptance` map: for each requirements
 revision `inputs` selected, the acceptance issues' text captured the first time.
-Readers render the entry for the current `inputs.requirements`; selecting a revision
-again, even after others, reuses its first capture. Migrating version 10 adds none. A task still holding a session from before keeps its label, the `factory-<line>`
+Every agent's brief renders the entry for the current `inputs.requirements`; selecting
+a revision again, even after others, reuses its first capture. Migrating version 10 adds
+none, so a migrated task whose acceptance names issues refuses new launches until
+`inputs` selects the revision again and captures it. A task still holding a session from before keeps its label, the `factory-<line>`
 session lines first used or its own `factory-<task>-<8 hex>`, until that session
 closes; a task holding none joins its line's.
 
