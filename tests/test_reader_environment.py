@@ -130,6 +130,8 @@ class AcceptanceEvidence(unittest.TestCase):
         import codex_worker
         with patch.dict(factory.os.environ, {factory.TOKEN_VARIABLE: "github_pat_linux"}):
             self.assertNotIn(factory.TOKEN_VARIABLE, codex_worker.native_environment())
+            # Generic `start` commands and the factory's own Git children run with command_environment().
+            self.assertNotIn(factory.TOKEN_VARIABLE, factory.command_environment())
 
     def test_capture_fails_closed_without_a_token_or_on_drift(self):
         with self.assertRaisesRegex(factory.FactoryError, "no read-only token"):
