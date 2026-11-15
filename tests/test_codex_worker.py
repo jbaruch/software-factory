@@ -1965,7 +1965,10 @@ class NativeResults(unittest.TestCase):
         payload_events = events()
         payload_events.insert(2, dict(type="item.completed", item=dict(type="command_execution", aggregated_output="x" * 100000)))
         payload = "\n".join(json.dumps(event) for event in payload_events)
-        binary.write_text("#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' " + shlex.quote(payload) + "\n")
+        binary.write_text("#!/bin/bash\nset -euo pipefail\n"
+                          # Answers the worker's MCP listing as real Codex would, then plays the run (#153).
+                          "if [ \"${1:-}\" = mcp ]; then printf '[]\\n'; exit 0; fi\n"
+                          "printf '%s\\n' " + shlex.quote(payload) + "\n")
         binary.chmod(0o700)
         self.launch_assignment(codex=str(binary), execute=False)
         engine = self.root / "engine"
