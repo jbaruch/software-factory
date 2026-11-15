@@ -19,7 +19,7 @@ class Pane(unittest.TestCase):
         assistant = dict(type="assistant", message=dict(content=[
             dict(type="thinking", thinking="private"), dict(type="text", text="Checking the\nrule"),
             dict(type="tool_use", name="Read", input=dict(file_path="/repo/rules/a.md"))]))
-        self.assertEqual(plain(factory.pane_line("claude", assistant)), "▸ Checking the rule\n→ Read /repo/rules/a.md")
+        self.assertEqual(plain(factory.pane_line("claude", assistant)), "▸ Checking the rule\n→ Read rules/a.md")
         failed = dict(type="user", message=dict(content=[dict(type="tool_result", is_error=True, content="No such file")]))
         self.assertEqual(plain(factory.pane_line("claude", failed)), "✗ No such file")
         result = dict(type="result", subtype="success", num_turns=36, structured_output=dict(outcome="completed", artifacts=["a", "b"]))
@@ -30,7 +30,7 @@ class Pane(unittest.TestCase):
 
     def test_grok_shows_calls_and_failures_but_not_streamed_fragments(self):
         call = dict(type="tool_call", toolName="read_file", rawInput=dict(target_file="/repo/README.md", limit=40))
-        self.assertEqual(plain(factory.pane_line("grok", call)), "→ read_file /repo/README.md")
+        self.assertEqual(plain(factory.pane_line("grok", call)), "→ read_file repo/README.md")
         self.assertEqual(plain(factory.pane_line("grok", dict(type="tool_call_update", status="failed",
             content="Denied by permission policy"))), "✗ Denied by permission policy")
         for fragment in (dict(type="text", data=" by"), dict(type="thought", data="I will"), dict(type="usage")):
@@ -90,6 +90,21 @@ class Pane(unittest.TestCase):
         edit = dict(type="item.completed", item=dict(type="file_change", changes=[
             dict(path="/Users/jbaruch/.worktrees/acr-183-writer/internal/realize/filesystem.go")]))
         self.assertEqual(plain(factory.pane_line("codex", edit)), "→ edit realize/filesystem.go")
+
+    def test_every_harness_shortens_paths_and_commands_alike(self):
+        long_command = "git rev-parse HEAD && git status --porcelain --ignored && git log -5 --oneline && " + "x" * 200
+        cases = (("claude", dict(type="assistant", message=dict(content=[dict(type="tool_use", name="Bash",
+                    input=dict(command=long_command))])), "→ Bash "),
+                 ("grok", dict(type="tool_call", toolName="run_terminal_command", rawInput=dict(command=long_command)), "→ run_terminal_command "),
+                 ("antigravity", json.dumps(dict(event="step_update", step_update=dict(step_type="tool", state="ACTIVE",
+                    tool_name="run_command", tool_info=dict(parameters=dict(CommandLine=long_command))))), "→ run_command "))
+        for harness, event, prefix in cases:
+            with self.subTest(harness=harness):
+                line = plain(factory.pane_line(harness, event))
+                self.assertTrue(line.startswith(prefix + "git rev-parse HEAD"))
+                self.assertLessEqual(len(line), len(prefix) + factory.PANE_COMMAND_WIDTH)
+        read = dict(type="tool_call", toolName="read_file", rawInput=dict(target_file="/Users/jbaruch/.worktrees/acr-181-writer/AGENTS.md"))
+        self.assertEqual(plain(factory.pane_line("grok", read)), "→ read_file acr-181-writer/AGENTS.md")
 
     def test_failures_are_red_and_tool_calls_dimmed(self):
         failed = factory.pane_line("codex", dict(type="item.completed", item=dict(type="command_execution", command="go test", exit_code=1)))

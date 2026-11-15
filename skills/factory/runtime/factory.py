@@ -3012,11 +3012,17 @@ def pane_outcome(report, turns, status):
 
 
 def pane_argument(arguments):
-    """The argument that says what a tool call is doing, such as the path it reads or the command it runs."""
+    """The argument that says what a tool call is doing, shortened the same way for every harness: a path to its
+    last two components, a command to one short line."""
     if not isinstance(arguments, dict):
         return ""
     lowered = {str(key).lower(): value for key, value in arguments.items()}
-    return next((str(lowered[key]) for key in PANE_KEYS if key in lowered), "")
+    key = next((key for key in PANE_KEYS if key in lowered), None)
+    if key in ("file_path", "path", "target_file"):
+        return pane_path(lowered[key])
+    if key in ("command", "commandline"):
+        return pane_command(lowered[key])
+    return "" if key is None else str(lowered[key])
 
 
 def pane_line(harness, event):
