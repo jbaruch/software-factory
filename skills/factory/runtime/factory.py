@@ -1605,7 +1605,7 @@ def inputs_acceptance(record, requirements):
 
 def rendered_acceptance(record, command):
     """The stored acceptance text a semantic reader's brief carries; rendering never touches the network."""
-    if record["admission"] is None or "--write" in command or native_harness(command) is None:
+    if record["admission"] is None or record["inputs"] is None or "--write" in command or native_harness(command) is None:
         return ""
     stored = record.get("acceptance", {}).get(record["inputs"]["requirements"])
     if stored is not None:
@@ -1636,12 +1636,17 @@ def acceptance_evidence(admission, requirements, token):
     except (ssl.SSLError, OSError) as exc:
         raise FactoryError(f"Cannot set up TLS for GitHub ({type(exc).__name__}: {exc}); repair Python's or the system's "
                            "certificate store, then select the inputs again") from None
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        """Never follow a redirect: urllib would forward the token's Authorization header to the new host."""
+        def redirect_request(self, *args, **kwargs):
+            return None
+    opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=context))
     captured = []
     for owner, repo, number in issues:
         request = urllib.request.Request(f"https://api.github.com/repos/{owner}/{repo}/issues/{number}", headers={
             "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json", "User-Agent": "software-factory"})
         try:
-            with urllib.request.urlopen(request, timeout=30, context=context) as response:
+            with opener.open(request, timeout=30) as response:
                 issue = decode_json(response.read().decode("utf-8"))
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, UnicodeError) as exc:
             raise FactoryError(f"Cannot capture acceptance {owner}/{repo}#{number} for the reader ({type(exc).__name__}: "

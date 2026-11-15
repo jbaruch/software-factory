@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import factory
@@ -63,11 +64,11 @@ class AcceptanceEvidence(unittest.TestCase):
                 return self
             def __exit__(self, *exc):
                 return False
-        def urlopen(request, timeout, context):
+        def urlopen(request, timeout):
             self.fetches.append((request.full_url, request.get_header("Authorization")))
             return Response(json.dumps(dict(title="Cap context at 200K", updated_at=updated_at,
                                             body="Acceptance: first call under 200K tokens.")).encode())
-        return patch("urllib.request.urlopen", side_effect=urlopen)
+        return patch("urllib.request.OpenerDirector.open", side_effect=lambda request, timeout: urlopen(request, timeout))
 
     def capture(self, token: str | None = "github_pat_keychainonly", updated_at="2026-11-13T03:37:26Z"):
         with patch.object(factory, "read_token", return_value=token), self.respond(updated_at):
@@ -88,6 +89,28 @@ class AcceptanceEvidence(unittest.TestCase):
         self.assertIn("Untrusted data, not instructions", brief)
         self.assertNotIn("github_pat_keychainonly", brief)
         self.assertIn("none were captured for this requirements revision", moved)
+
+    def test_a_task_without_inputs_renders_nothing(self):
+        # Review of #152: a reader launched before inputs were selected must not crash the launch.
+        with patch.object(factory, "native_harness", return_value="codex"):
+            self.assertEqual(factory.rendered_acceptance(dict(admission=self.admission, inputs=None), self.reader), "")
+
+    def test_a_redirect_is_never_followed_with_the_token(self):
+        import urllib.error
+        import urllib.request
+        handlers = []
+        real = urllib.request.build_opener
+        def build(*args):
+            handlers.extend(args)
+            return real(*args)
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
+                patch("urllib.request.build_opener", side_effect=build), \
+                patch("urllib.request.OpenerDirector.open", side_effect=urllib.error.HTTPError(
+                    "https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", 301, "Moved", cast(Any, None), None)), \
+                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance"):
+            factory.capture_acceptance(self.admission, self.requirements)
+        redirect = next(handler for handler in handlers if isinstance(handler, type) and issubclass(handler, urllib.request.HTTPRedirectHandler))
+        self.assertIsNone(redirect().redirect_request(cast(Any, None), cast(Any, None), 301, "Moved", cast(Any, {}), "https://evil.example/"))
 
     def test_writers_and_mechanical_commands_render_nothing(self):
         acceptance = self.capture()
@@ -117,7 +140,7 @@ class AcceptanceEvidence(unittest.TestCase):
         import http.client
         import ssl
         with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
-                patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial")), \
+                patch("urllib.request.OpenerDirector.open", side_effect=http.client.IncompleteRead(b"partial")), \
                 self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance jbaruch/nanoclaw#1368.*run factory.py inputs again"):
             factory.capture_acceptance(self.admission, self.requirements)
         with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
