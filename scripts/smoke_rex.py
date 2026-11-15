@@ -41,7 +41,7 @@ def main():
             time.sleep(0.1)
         if current["state"] != "exited":
             raise RuntimeError("Smoke command did not exit successfully: " + json.dumps(current))
-        captured = call("capture", "--task", task, "--id", role)
+        captured = json.loads(call("capture", "--task", task, "--id", role))["text"]
         if "NATIVE_REX_OK role=" + role not in captured or "cwd=" + str(state) not in captured:
             raise RuntimeError("Smoke output did not confirm role and cwd: " + captured)
         repeated = json.loads(call(*launch))
@@ -60,7 +60,7 @@ def main():
         retained = json.loads(call("status", "--task", task, "--id", role))
         if retained.get("closed") is not True or retained["state"] != "exited" or retained["block_id"] != original["block_id"]:
             raise RuntimeError("Tidied tab lost its final status: " + json.dumps(retained))
-        if "NATIVE_REX_OK role=" + role not in call("capture", "--task", task, "--id", role):
+        if "NATIVE_REX_OK role=" + role not in json.loads(call("capture", "--task", task, "--id", role))["text"]:
             raise RuntimeError("Tidied tab lost its terminal output: " + role)
     print(json.dumps(dict(result="passed", state_dir=str(state), assignments=results, tidy=tidied), indent=2))
 
