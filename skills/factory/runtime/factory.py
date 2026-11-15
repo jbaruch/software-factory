@@ -2397,6 +2397,9 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None and write:
         check_role_write(role)
+    if existing is None and role == "code-review":
+        # Codex takes no --base, so a review would see the whole tree and guess what changed.
+        raise FactoryError("Codex takes no review range; run code reviews on Claude, Grok or Antigravity with --base")
     if existing is None:
         try:
             binary = Path(codex).resolve(strict=True)
