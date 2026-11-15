@@ -194,6 +194,22 @@ class AcceptanceEvidence(unittest.TestCase):
         assert fresh is not None
         self.assertIn("Cap context at 200K", fresh)
 
+    def test_overlapping_inputs_keep_the_capture_saved_first(self):
+        # Review of #152: both runs decided to capture before either saved; the save under the lock keeps the first.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repo, path = Path(temporary.name) / "repo", Path(temporary.name) / "state" / "task.json"
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet",
+                        "--allow-empty", "-m", "Fixture"], check=True)
+        path.parent.mkdir(mode=0o700)
+        factory.admit(path, task="task", goal="Cap the context", repository=str(repo), acceptance=self.admission["acceptance"])
+        candidate = factory.git_commit(str(repo), "HEAD")
+        factory.set_inputs(path, candidate=candidate, requirements=self.requirements, acceptance="saved first")
+        factory.set_inputs(path, candidate=candidate, requirements=self.requirements, acceptance="fetched after an edit")
+        self.assertEqual(factory.load_task(path)["acceptance"], {self.requirements: "saved first"})
+
     def test_fetch_and_tls_failures_explain_recovery(self):
         import http.client
         import ssl
