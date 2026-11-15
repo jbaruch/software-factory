@@ -518,6 +518,12 @@ it does not establish authentication type or eligibility from that check alone.
 Owned workers disable both native multi-agent features for these leaf assignments.
 The native child receives only the locale/path/temp and subscription-configuration
 settings allowed by `native_environment()`; host credential variables are not forwarded.
+A worker in a linked worktree, a provisioned writer worktree or a reader's disposable
+checkout, gets `GOCACHE` in that worktree's Git admin directory, so the Go build cache goes
+when `git worktree remove` does. Each worktree otherwise wrote its own copy of every entry
+into the shared cache, which Go keeps five days, and filled the disk (#183). On macOS the
+directory gets Time Machine's sticky exclusion, the attribute `tmutil addexclusion` sets, as
+`~/Library/Caches` has by default. The main checkout keeps the user's cache.
 Read-only assignments (verifiers and judgments) get no GitHub identity, after a
 release judgment merged a PR and deployed it with the operator's: `GH_CONFIG_DIR`
 points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` are removed, and

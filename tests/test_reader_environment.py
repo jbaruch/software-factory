@@ -3,6 +3,7 @@ import runtime_path  # noqa: F401  Must precede runtime imports.
 import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,59 @@ class ReaderEnvironment(unittest.TestCase):
 
     def test_writers_keep_their_environment(self):
         self.assertIs(factory.reader_environment(self.base, True), self.base)
+
+    def test_a_linked_worktree_gets_its_own_go_cache_that_goes_with_it(self):
+        # Each worktree wrote its own copy of every Go cache entry into the shared cache, kept five days (#183).
+        repo, linked = self.root / "repo", self.root / "linked"
+        def git(*args, cwd=repo):
+            subprocess.run([factory.git_binary(), "-C", str(cwd), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                           check=True, capture_output=True, env=factory.git_environment())
+        repo.mkdir()
+        git("init", "--quiet")
+        (repo / "go.mod").write_text("module fixture\n")
+        git("add", "go.mod")
+        git("commit", "--quiet", "-m", "Fixture")
+        git("worktree", "add", "--quiet", "--detach", str(linked))
+        self.assertIs(factory.worker_environment(self.base, True, str(repo)), self.base)
+        cache = Path(factory.worker_environment(self.base, True, str(linked))["GOCACHE"])
+        self.assertEqual(cache, factory.git_dir(str(linked)) / "go-build")
+        self.assertEqual(cache.parent.parent, factory.git_common_dir(str(repo)) / "worktrees")
+        reader = factory.worker_environment(self.base, False, str(linked))
+        self.assertEqual((reader["GOCACHE"], reader["GH_CONFIG_DIR"]), (str(cache), str(self.root / "gh-reader")))
+        if sys.platform == "darwin":
+            # Hourly Time Machine backups would otherwise carry the cache to the NAS.
+            excluded = subprocess.run(["/usr/bin/tmutil", "isexcluded", str(cache)], capture_output=True, text=True, check=True)
+            self.assertTrue(excluded.stdout.startswith("[Excluded]"), excluded.stdout)
+        (cache / "00").mkdir(parents=True, exist_ok=True)
+        (cache / "00" / "entry-d").write_bytes(b"compiled")
+        git("worktree", "remove", "--force", str(linked))
+        self.assertFalse(cache.exists())
+        # Review of #184: a newline in a checkout's path is still one Git directory.
+        odd = self.root / "linked\nname"
+        git("worktree", "add", "--quiet", "--detach", str(odd))
+        self.assertEqual(Path(factory.worker_environment(self.base, True, str(odd))["GOCACHE"]),
+                         factory.git_dir(str(odd)) / "go-build")
+
+    def test_time_machine_exclusion_falls_back_to_tmutil_and_explains_a_double_failure(self):
+        # Review of #184: a volume without extended attributes must not stop every worker without an alternative.
+        calls = []
+        def run(command, **options):
+            calls.append(command[0])
+            return subprocess.CompletedProcess(command, 0 if command[0] == "/usr/bin/tmutil" else 1, "", "Operation not supported")
+        with patch.object(factory.subprocess, "run", side_effect=run):
+            factory.exclude_from_time_machine(self.root)
+        self.assertEqual(calls, ["/usr/bin/xattr", "/usr/bin/tmutil"])
+        calls.clear()
+        with patch.object(factory.subprocess, "run", side_effect=lambda command, **options: (
+                calls.append(command[0]), subprocess.CompletedProcess(command, 0, "", ""))[1]):
+            factory.exclude_from_time_machine(self.root)
+        self.assertEqual(calls, ["/usr/bin/xattr"])
+        with patch.object(factory.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess([], 1, "", "Operation not supported"), OSError("tmutil missing")]), \
+                self.assertRaisesRegex(factory.FactoryError, r"xattr: Operation not supported; tmutil: tmutil missing\)\. "
+                                       "Move the repository"):
+            factory.exclude_from_time_machine(self.root)
 
     def test_readers_get_no_operator_identity_and_pushes_refused(self):
         environment = factory.reader_environment(self.base, False)

@@ -140,7 +140,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             workdir = checkouts.enter_context(factory.reader_checkout(
                 args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
-            environment = factory.reader_environment(native_claude.environment(), args.write)
+            environment = factory.worker_environment(native_claude.environment(), args.write, workdir)
             # A private file provides EOF without argv limits or pipe backpressure.
             with tempfile.TemporaryFile() as prompt:
                 prompt.write(instructions.encode("utf-8"))

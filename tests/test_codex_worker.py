@@ -296,7 +296,8 @@ class NativeResults(unittest.TestCase):
             async def spawn(*command, **options):
                 self.assertIsNot(options["env"], native)
                 # A reader also gets the read-only GitHub identity and refused pushes.
-                self.assertEqual(options["env"], factory.reader_environment({**native, "ZDOTDIR": options["env"]["ZDOTDIR"]}, self.args.write))
+                self.assertEqual(options["env"], factory.worker_environment({**native, "ZDOTDIR": options["env"]["ZDOTDIR"]},
+                                                                             self.args.write, options["cwd"]))
                 for name in ("HOME", "CODEX_HOME"):
                     self.assertEqual(options["env"][name], inherited[name])
                 for module in (native_antigravity, native_claude, native_grok):
