@@ -280,7 +280,12 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                         prompt.seek(0)
                         # No --strict-config: tessl writes its own `tessl` tables into .codex/config.toml, which
                         # Codex ignores with a warning and strict mode made fatal for every assignment.
-                        process = await spawn(str(binary), "--no-daemon", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                        # --ignore-user-config: no configured MCP server starts, as the Claude worker runs. A Tessl
+                        # server from a checkout's committed .codex/config.toml rewrote the tracked AGENTS.md, and the
+                        # factory commit took it with the writer's work (#153). Project config loads only for projects
+                        # the user config trusts, so this drops user and project servers both.
+                        process = await spawn(str(binary), "--no-daemon", "exec", "--ignore-user-config",
+                                          "--disable", "multi_agent", "--disable", "multi_agent_v2",
                                           "--json", "--color", "never",
                                           "--output-schema", str(schema), "--model", args.model,
                                           # Operator policy: agents run unconfined and never prompt; the factory

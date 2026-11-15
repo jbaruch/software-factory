@@ -119,6 +119,7 @@ class NativeResults(unittest.TestCase):
             "features": {"shell_snapshot": False},
             "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}})
         self.assertNotIn("--strict-config", command)  # tessl's `tessl` tables made it fatal on every launch.
+        self.assertIn("--ignore-user-config", command)  # No configured MCP server starts (#153).
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
         self.assertEqual(options["limit"], 64 * 1024 * 1024)  # One large command output no longer ends the run (#147).
         prompt = options["stdin"]
@@ -154,7 +155,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
         self.assertNotIn("--sandbox", self.spawns[0])
-        self.assertEqual(self.spawns[0][3:7], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
+        self.assertEqual(self.spawns[0][3:8], ("--ignore-user-config", "--disable", "multi_agent", "--disable", "multi_agent_v2"))
         # Readers work in a disposable checkout of the candidate, removed after the run (#53).
         checkout = self.spawns[0][self.spawns[0].index("--cd") + 1]
         self.assertTrue(checkout.endswith(".checkout"), checkout)
