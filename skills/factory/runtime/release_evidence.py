@@ -54,7 +54,8 @@ def executable(value, name, repository, *, runnable=True, checkouts=()):
         if (runnable or managed is None or path.resolve() != path
                 or any(part.is_symlink() for part in [path, *path.parents])
                 or relative is None
-                or factory.git_run(str(repo), "ls-files", "--", relative.parts[0]).stdout.strip()
+                # Only the install itself: an ACR project commits its shared hook host as .codex/config.toml (#171).
+                or factory.git_run(str(repo), "ls-files", "--", str(relative.parent)).stdout.strip()
                 or factory.git_run(str(repo), "check-ignore", "-q", "--", str(relative)).returncode):
             raise factory.FactoryError("Release helpers must be installed outside source or in an ignored, untracked ACR "
                                        "(.codex/skills) or Tessl (.tessl/plugins) installation")

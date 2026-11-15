@@ -115,7 +115,9 @@ executable mode. Explicit helper paths/hashes are frozen. The admitted root's ig
 untracked ACR (`.codex/skills/acr__jbaruch__coding-policy__release`) or Tessl
 (`.tessl/plugins/jbaruch/coding-policy/skills/release`) installation is allowed
 with owner-controlled directories and independent regular files; symlink, hard-link,
-tracked-source and writable replacements refuse. Other assignment checkouts,
+tracked-source and writable replacements refuse. Only the install directory must be
+untracked: a tracked sibling, such as the `.codex/config.toml` hook host an ACR project
+commits, can't change the helpers. Other assignment checkouts,
 sibling Git worktrees and the explicitly selected new cwd cannot supply commands,
 including during pre-review capture. Every process boundary rechecks these paths.
 Inherited exported Bash functions and shell startup overrides are removed before
