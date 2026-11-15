@@ -8,8 +8,8 @@
 - **1, stderr only:** refused, with `factory: REASON` (`ready-runner: REASON` from the runner) naming what to do next.
 - **1, JSON on stdout:** a non-success result from `tidy`, `integrate` or `ready_runner.py`, as the table says.
 - **1, JSON on stdout and `factory: REASON` on stderr:** `*-collect` saved the result but couldn't close the tab.
-- **2:** the command line doesn't parse.
-- **75:** the task's line is busy, because another launcher or runner holds its execution lock. Retry later.
+- **2:** the command line doesn't parse; argparse prints usage and the error on stderr.
+- **75:** the task's line is busy, because another launcher or runner holds its execution lock; stderr says so as `factory: REASON` (`ready-runner: REASON`). Retry later.
 
 A command that fails may already have written part of its effect. Check with `show` or `status` before running it again.
 
