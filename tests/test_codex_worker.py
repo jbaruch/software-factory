@@ -1961,7 +1961,7 @@ class NativeResults(unittest.TestCase):
         with patch.object(self.process, "readline", side_effect=ValueError("Separator is found, but chunk is longer than limit")):
             receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
-        self.assertIn("exceeded the 1 MiB line limit", receipt["error"])
+        self.assertIn(f"exceeded the {worker.NATIVE_LINE_LIMIT // (1024 * 1024)} MiB line limit", receipt["error"])
         self.assertIsNotNone(self.process.returncode)
         self.assertIsNone(receipt["report"])
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
