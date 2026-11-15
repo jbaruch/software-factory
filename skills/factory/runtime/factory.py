@@ -3334,7 +3334,8 @@ def main(argv=None):
         if action == "start":
             start.add_argument("command", nargs=argparse.REMAINDER)
         else:
-            start.add_argument("--delivery", help="Freeze an original confirmed integration for final release judgment")
+            start.add_argument("--delivery", help="Freeze an original confirmed integration, or the release judgment a "
+                               "delivered receipt names, for final release judgment")
             start.add_argument("--release-pr", help="Freeze complete canonical feedback for a native read-only judgment")
             start.add_argument("--gh", type=Path)
             start.add_argument("--release-scripts", type=Path, help="The release skill's ACR or Tessl installation")
@@ -3381,6 +3382,7 @@ def main(argv=None):
     confirm.add_argument("--after", action="append", required=True, help="Each other required approval")
     confirm.add_argument("--gh", type=Path, required=True)
     confirm.add_argument("--release-scripts", type=Path, required=True, help="The release skill's ACR or Tessl installation")
+    confirm.add_argument("--acceptance", help="Explicit final native release judgment of the delivered receipt")
     admission = sub.add_parser("admit", help="Record task scope and limits without launching")
     admission.add_argument("--task", required=True)
     admission.add_argument("--goal", required=True)
@@ -3491,8 +3493,10 @@ def main(argv=None):
             if record["admission"] is None:
                 raise FactoryError("Admit the task before confirming its delivery")
             transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
-            print(json.dumps(integration.delivered(path, pr=args.pr, review=args.review, required=args.after,
-                                                   transport=transport), indent=2))
+            receipt = integration.delivered(path, pr=args.pr, review=args.review, required=args.after, transport=transport)
+            if args.acceptance is not None:
+                receipt = {**receipt, "acceptance": integration.delivered_accepted(path, args.review, args.acceptance)}
+            print(json.dumps(receipt, indent=2))
             return 0
         prepared = None
         frozen_release = frozen_delivery = None
@@ -3509,13 +3513,16 @@ def main(argv=None):
             if args.delivery is not None:
                 if original is not None:
                     frozen_delivery = release_evidence.from_delivery_assignment(prepared, original)
-                    if frozen_delivery["assignment"] != args.delivery:
+                    if frozen_delivery.get("assignment", frozen_delivery.get("review")) != args.delivery:
                         raise FactoryError("Original delivery differs; use a new final review assignment")
                 else:
-                    delivered = release_evidence.delivery(prepared, args.delivery)
-                    intent = delivered["receipt"]["intent"]
-                    transport = release_evidence.GitHub(intent["gh"], intent["scripts"], prepared["admission"]["repository"])
-                    frozen_delivery = release_evidence.capture_delivery(prepared, args.delivery, transport, cwd=args.cwd)
+                    delivered = release_evidence.delivery_source(prepared, args.delivery)
+                    if delivered["schema_version"] == 3:
+                        frozen_delivery = delivered  # A `delivered` receipt; the judge observes the merge itself (#151).
+                    else:
+                        intent = delivered["receipt"]["intent"]
+                        transport = release_evidence.GitHub(intent["gh"], intent["scripts"], prepared["admission"]["repository"])
+                        frozen_delivery = release_evidence.capture_delivery(prepared, args.delivery, transport, cwd=args.cwd)
             elif original is not None:
                 frozen_release = release_evidence.from_assignment(prepared, original)
                 if frozen_release["pr"]["url"] != args.release_pr:

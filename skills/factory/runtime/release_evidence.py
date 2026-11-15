@@ -479,7 +479,9 @@ def check_brief(args, instructions):
                   brief_payload(instructions, "delivery", args.delivery_evidence_digest))
         if args.write or args.role != "release" or not instructions.endswith(render_delivery(frozen)):
             raise factory.FactoryError("Final acceptance needs its original frozen read-only release brief")
-        if frozen["receipt"]["intent"]["inputs"] != inputs:
+        # A `delivered` receipt (version 3) carries its inputs; an integration receipt, its intent's.
+        confirmed = frozen["receipt"]["inputs"] if frozen["schema_version"] == 3 else frozen["receipt"]["intent"]["inputs"]
+        if confirmed != inputs:
             raise factory.FactoryError("Final acceptance inputs differ from confirmed delivery")
         return True
     if args.release_evidence is not None or args.release_evidence_digest is not None:
@@ -567,8 +569,40 @@ def delivery(record, assignment_id) -> dict:
     return dict(schema_version=1, assignment=assignment_id, result=result, receipt=receipt, receipt_digest=digest(receipt))
 
 
+def delivered_receipt(record, review) -> dict:
+    """A `delivered` receipt as final acceptance evidence: the release skill's merge the factory confirmed (#151).
+
+    Version 3 freezes that receipt, keyed by the release judgment it confirmed. The final judge reads the
+    delivered state itself; the receipt's PR, head and merge commit bind what it judged.
+    """
+    assignment = record["assignments"].get(review)
+    if assignment is None:
+        raise factory.FactoryError("Unknown release judgment; name the one `delivered` confirmed")
+    path = Path(assignment["brief"]).parent / (record["task"] + "." + review + ".delivered.json")
+    try:
+        receipt = factory.decode_json(factory.read_record(path, private=True))
+    except (OSError, ValueError):
+        raise factory.FactoryError("No `delivered` receipt for release judgment " + review
+                                   + "; confirm the delivery with delivered first") from None
+    if (not isinstance(receipt, dict) or receipt.get("kind") != "release-skill-delivery"
+            or receipt.get("task") != record["task"] or receipt.get("review") != review
+            or receipt.get("inputs") != record["inputs"] or receipt.get("head") != record["inputs"]["candidate"]):
+        raise factory.FactoryError("The `delivered` receipt does not confirm the task's current delivery; "
+                                   "judge final acceptance before selecting other inputs")
+    return dict(schema_version=3, review=review, receipt=receipt, receipt_digest=digest(receipt))
+
+
+def delivery_source(record, source) -> dict:
+    """Final acceptance evidence for an integration assignment, or for the release judgment a `delivered` receipt names."""
+    import integration
+    assignment = record["assignments"].get(source)
+    if assignment is not None and integration.mechanical(assignment):
+        return delivery(record, source)
+    return delivered_receipt(record, source)
+
+
 def render_delivery(value):
-    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] not in (1, 2):
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] not in (1, 2, 3):
         raise factory.FactoryError("Unsupported frozen delivery version; preserve the original and update its owner")
     return (DELIVERY_MARKER + "Judge final acceptance against the original admission and confirmed delivery below. "
             "Mechanical delivery does not establish acceptance or publication. Use the ordinary native report.\n"
@@ -599,6 +633,11 @@ def same_delivery(current, prior, *, rerun=False):
 
 def validate_delivery(value, record):
     render_delivery(value)  # Version check; old frozen briefs remain read-only.
+    if value["schema_version"] == 3:
+        if set(value) != {"schema_version", "review", "receipt", "receipt_digest"} or not isinstance(value["review"], str) \
+                or value != delivered_receipt(record, value["review"]):
+            raise factory.FactoryError("Final release evidence differs from the recorded `delivered` receipt")
+        return value
     keys = {"schema_version", "assignment", "result", "receipt", "receipt_digest"}
     if value["schema_version"] == 2:
         keys.add("observation")

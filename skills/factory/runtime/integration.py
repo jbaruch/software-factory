@@ -678,6 +678,30 @@ def delivered(path, *, pr, review, required, transport) -> dict:
     return dict(receipt, receipt_path=str(receipt_path))
 
 
+def delivered_accepted(path, review, acceptance_id) -> dict:
+    """Generated view: the recorded `delivered` receipt plus the final native judgment that assessed it (#151)."""
+    record = read_owner(path)
+    if record["hold"] is not None:
+        raise factory.FactoryError("Acceptance held: " + record["hold"])
+    original = evidence.delivered_receipt(record, review)
+    assignment = record["assignments"].get(acceptance_id)
+    if assignment is None:
+        raise factory.FactoryError("Unknown selected final native acceptance judgment")
+    args, receipt, native = collected_native(acceptance_id, record, assignment)
+    if args.role != "release" or args.write or native["report"]["outcome"] != "approved":
+        raise factory.FactoryError("Final acceptance requires an approved current native release judgment")
+    if evidence.from_delivery_assignment(record, assignment) != original:
+        raise factory.FactoryError("Final acceptance assessed a different delivery; judge the recorded `delivered` receipt")
+    judge = native_context(factory.native_harness(assignment["request"]["command"]), receipt)
+    for key, item in record["assignments"].items():
+        if "--write" in item["request"]["command"] and judge == contributor_context(key, record, item):
+            raise factory.FactoryError("A contributor cannot judge final acceptance")
+    if read_owner(path) != record:
+        raise factory.FactoryError("Task changed during final acceptance observation; reload current controls/inputs")
+    return dict(outcome="approved", assignment=acceptance_id, review=review, native_receipt=str(args.receipt),
+                delivery_receipt_digest=original["receipt_digest"])
+
+
 def main(argv=None):
     """Original pane entrypoint; a retained execution receipt permits only observation."""
     parser = argparse.ArgumentParser(description=__doc__)

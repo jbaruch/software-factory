@@ -39,6 +39,8 @@ If the branch conflicts with a moved base before step 1 or during review, run `p
 
 4. After the merge, remove the task's provisioned worktree with `python3 -B "$SKILL_DIR/runtime/factory.py" release-worktree --task TASK`. It refuses while the worktree is dirty or an assignment there may still run, and keeps the branch: deleting branches belongs to the repository's release policy, so run the release skill's worktree prune afterwards, which removes a merged branch only after checking it has no unmerged commits.
 
+5. After the merge and any deploy, run the final acceptance judgment before selecting other inputs: a new read-only `release` assignment, as in step 2 but with `--delivery ID` in place of `--release-pr`, collected the same way. `ID` is the integration's ID after `integrate`, or the release judgment's ID that `delivered` confirmed. Its brief freezes that delivery, and it judges the admitted acceptance against the merged and deployed result, including what the verifiers listed as not yet verifiable. Confirm it by repeating the step 3 command with `--acceptance FINAL_ID` added, which prints the receipt with an `acceptance` object and refuses a judgment that isn't approved, assessed a different delivery, or comes from a writer's session. Findings become new work for the task.
+
 ## Prerequisites
 
 `integrate` holds with an operator prerequisite, and never changes repository settings, unless all of these hold:

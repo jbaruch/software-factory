@@ -195,6 +195,12 @@ command with `--acceptance FINAL_RELEASE_ASSIGNMENT` to generate an acceptance
 view: it requires that approved native exact-delivery judgment, current inputs,
 independence, no hold and fresh read-only delivery/CI confirmation. Delivery alone
 reports `pending_native_judgment`. The view creates no acceptance ledger.
+A repository delivered through its release skill gets the same final judgment: launch it with
+`--delivery RELEASE_REVIEW`, the release judgment `delivered` confirmed, and its brief freezes
+that `TASK.RELEASE_REVIEW.delivered.json` receipt (delivery evidence version 3) with no fresh
+observation; the judge reads the merged and deployed state itself. Repeat the `delivered`
+command with `--acceptance FINAL_RELEASE_ASSIGNMENT` for the same view, bound to the receipt's
+digest; it refuses once the task selects other inputs (#151).
 After a successful CI rerun, capture a new final native assignment; old judgments
 remain bound to their original attempt. Crash-before-collection recovery may
 confirm a later successful attempt of the same native run, then collect the
