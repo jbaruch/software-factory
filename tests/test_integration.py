@@ -1633,6 +1633,12 @@ class CommandAuthority(unittest.TestCase):
                 transport.binding()
             target.unlink()
             target.write_text("installed helper")
+            # A tracked sibling, such as the shared hook host an ACR project commits as .codex/config.toml, can't
+            # change the installed helpers (#171).
+            host = repo / install.parts[0] / "config.toml"
+            host.write_text("[hooks]\n")
+            self.assertEqual(factory.git_run(str(repo), "add", "-f", str(host.relative_to(repo))).returncode, 0)
+            self.assertIn(str(scripts / "watch-pr-reviews.sh"), transport.binding())
             factory.git_run(str(repo), "add", "-f", install.parts[0])
             with self.assertRaisesRegex(factory.FactoryError, "ignored, untracked"):
                 transport.binding()
