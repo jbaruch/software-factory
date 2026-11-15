@@ -62,6 +62,28 @@ class FakeProcess:
         self.signals.append(signal)
 
 
+def effective_mcp_servers(command, configured, *, runtime_plugins=("hosted-connector",)):
+    """The MCP servers Codex 0.166 `exec` would start for this argv with ChatGPT authentication, independent of the
+    worker: configured servers unless `-c mcp_servers."NAME".enabled=false`, the Codex Apps server unless the apps
+    feature is off, and runtime plugin contributions unless the plugins feature is off (codex-rs/core/src/mcp.rs,
+    codex-rs/ext/mcp at rust-v0.166.0)."""
+    off = {arg for previous, arg in zip(command, command[1:]) if previous == "--disable"}
+    # Codex splits a `-c` key on every dot and keeps quotes literally (`codex -c 'mcp_servers."tessl".enabled=false'`
+    # fails to load the configuration), so only a bare-name path turns a configured server off.
+    paths = [arg.partition("=") for previous, arg in zip(command, command[1:]) if previous == "-c"]
+    disabled = {key.split(".")[1] for key, _, value in paths if len(key.split(".")) == 3
+                and key.split(".")[0] == "mcp_servers" and key.split(".")[2] == "enabled" and value == "false"}
+    unknown = {key.split(".")[1] for key, _, _ in paths if key.startswith("mcp_servers.")} - set(configured)
+    if unknown:
+        raise ValueError(f"Codex refuses to load an override for an undefined server: {sorted(unknown)}")
+    servers = set(configured) - disabled
+    if "apps" not in off:
+        servers.add("codex_apps")
+    if "plugins" not in off:
+        servers.update(runtime_plugins)
+    return servers
+
+
 class NativeResults(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -126,9 +148,8 @@ class NativeResults(unittest.TestCase):
             "features": {"shell_snapshot": False},
             "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}, "mcp_servers": {"tessl": {"enabled": False}, "docker-mcp-toolbox": {"enabled": False}}})
         self.assertNotIn("--strict-config", command)  # tessl's `tessl` tables made it fatal on every launch.
-        # Every configured MCP server is turned off for the run (#153).
-        disabled = {arg for previous, arg in zip(command, command[1:]) if previous == "-c" and arg.startswith("mcp_servers.")}
-        self.assertEqual(disabled, {'mcp_servers."tessl".enabled=false', 'mcp_servers."docker-mcp-toolbox".enabled=false'})
+        # No MCP server can start: configured, Codex Apps or plugin-contributed (#153, review of #159).
+        self.assertEqual(effective_mcp_servers(command, ["tessl", "docker-mcp-toolbox"]), set())
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
         self.assertEqual(options["limit"], 64 * 1024 * 1024)  # One large command output no longer ends the run (#147).
         prompt = options["stdin"]
@@ -157,7 +178,21 @@ class NativeResults(unittest.TestCase):
             binary.write_text("#!/bin/sh\n" + script + "\n")
             with self.subTest(script=script), self.assertRaisesRegex(factory.FactoryError, "refuses to launch"):
                 REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
-        self.assertEqual(worker.mcp_overrides(['a"b']), ["-c", 'mcp_servers."a\\"b".enabled=false'])
+        self.assertEqual(worker.mcp_overrides(["port-eu", "a@b/c:d"]),
+                         ["-c", "mcp_servers.port-eu.enabled=false", "-c", "mcp_servers.a@b/c:d.enabled=false"])
+        binary.write_text("#!/bin/sh\nprintf '[{\"name\": \"a.b\"}]'\n")
+        with self.assertRaisesRegex(factory.FactoryError, "cannot be turned off"):
+            REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
+        # Plugin-backed servers leave the list with plugins off: overriding one would fail Codex's configuration load.
+        binary.write_text("#!/bin/sh\ncase \" $* \" in *' --disable plugins '*) printf '[]';; *) printf '[{\"name\": \"code-review\"}]';; esac\n")
+        self.assertEqual(REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ)), [])
+
+    def test_the_runtime_fixture_sees_every_server_codex_would_start(self):
+        # Control for effective_mcp_servers(): a launch without the overrides would start them all.
+        self.assertEqual(effective_mcp_servers(["codex", "exec", "-"], ["tessl"]), {"tessl", "codex_apps", "hosted-connector"})
+        # The quoted key #159 first generated defines a new, invalid server instead of turning tessl off.
+        with self.assertRaisesRegex(ValueError, "undefined server"):
+            effective_mcp_servers(["codex", "exec", "-c", 'mcp_servers."tessl".enabled=false', "-"], ["tessl"])
 
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
@@ -1967,7 +2002,7 @@ class NativeResults(unittest.TestCase):
         payload = "\n".join(json.dumps(event) for event in payload_events)
         binary.write_text("#!/bin/bash\nset -euo pipefail\n"
                           # Answers the worker's MCP listing as real Codex would, then plays the run (#153).
-                          "if [ \"${1:-}\" = mcp ]; then printf '[]\\n'; exit 0; fi\n"
+                          "case \" $* \" in *' mcp list '*) printf '[]\\n'; exit 0;; esac\n"
                           "printf '%s\\n' " + shlex.quote(payload) + "\n")
         binary.chmod(0o700)
         self.launch_assignment(codex=str(binary), execute=False)
