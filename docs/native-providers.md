@@ -552,11 +552,12 @@ override. The [configuration reference](https://learn.chatgpt.com/docs/config-fi
 defines the controls: omitted login uses nonlogin execution, explicit login
 requests are rejected, and shell snapshots/profile loading are disabled. Native
 HOME/CODEX_HOME, authentication, sandbox, model, effort and deadlines are preserved.
-Children pass `--ignore-user-config`, so no configured MCP server starts, as the Claude
+Children turn off every MCP server Codex would start in the checkout, as the Claude
 worker runs without MCP: a Tessl server from a checkout's committed `.codex/config.toml`
 rewrote the tracked `AGENTS.md`, and the factory commit took it with the writer's work.
-Project configuration loads only for projects the user configuration trusts, so this
-drops both. Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
+The worker lists the effective servers with `codex mcp list --json`, across every
+configuration layer, passes `-c mcp_servers."NAME".enabled=false` for each, and
+refuses to launch when the list is unavailable. Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
 into each checkout's `.codex/config.toml`, which Codex ignores with a warning
 and strict mode turned into a startup failure for every assignment.
 Shared environment consumers, other providers and factory Git helper environments

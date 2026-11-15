@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -172,10 +173,33 @@ async def stop_child(process):
         await process.wait()
 
 
+def configured_mcp_servers(binary, cwd, environment):
+    """Every MCP server Codex would start in this checkout, across all its configuration layers."""
+    try:
+        listed = subprocess.run([str(binary), "mcp", "list", "--json"], cwd=str(cwd), env=environment,
+                                capture_output=True, text=True, timeout=60, check=False)
+        servers = json.loads(listed.stdout) if listed.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise factory.FactoryError(f"Cannot list the MCP servers Codex would start here ({type(exc).__name__}); "
+                                   "the worker refuses to launch with servers it cannot turn off") from None
+    if not isinstance(servers, list) or any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in servers):
+        raise factory.FactoryError("Codex returned no readable MCP server list; the worker refuses to launch with servers "
+                                   "it cannot turn off: " + (listed.stderr.strip()[:300] or "inspect `codex mcp list --json`"))
+    return [item["name"] for item in servers]
+
+
+def mcp_overrides(names):
+    """Turn off every configured MCP server for this run, as the Claude worker runs without MCP. A Tessl server
+    from a checkout's committed .codex/config.toml rewrote the tracked AGENTS.md, and the factory commit took it
+    with the writer's work (#153)."""
+    return [part for name in names for part in ("-c", "mcp_servers." + json.dumps(name) + ".enabled=false")]
+
+
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
-                  git_scope=None, scan=None):
+                  git_scope=None, scan=None, mcp_servers=None):
     git_scope = git_scope or factory_commit.isolated_git
     scan = scan or factory_commit.scan_staged
+    mcp_servers = mcp_servers or configured_mcp_servers
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Native attempt already has artifacts; collect or inspect it, never relaunch it blindly")
     try:
@@ -280,11 +304,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                         prompt.seek(0)
                         # No --strict-config: tessl writes its own `tessl` tables into .codex/config.toml, which
                         # Codex ignores with a warning and strict mode made fatal for every assignment.
-                        # --ignore-user-config: no configured MCP server starts, as the Claude worker runs. A Tessl
-                        # server from a checkout's committed .codex/config.toml rewrote the tracked AGENTS.md, and the
-                        # factory commit took it with the writer's work (#153). Project config loads only for projects
-                        # the user config trusts, so this drops user and project servers both.
-                        process = await spawn(str(binary), "--no-daemon", "exec", "--ignore-user-config",
+                        process = await spawn(str(binary), "--no-daemon", "exec",
                                           "--disable", "multi_agent", "--disable", "multi_agent_v2",
                                           "--json", "--color", "never",
                                           "--output-schema", str(schema), "--model", args.model,
@@ -296,6 +316,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           "-c", "features.shell_snapshot=false",
                                           "-c", "shell_environment_policy.experimental_use_profile=false",
                                           "-c", "shell_environment_policy.set.ZDOTDIR=" + shell_path,
+                                          *mcp_overrides(mcp_servers(binary, workdir, environment)),
                                           "--cd", workdir, "-",
                                           cwd=workdir, env=environment,
                                           limit=NATIVE_LINE_LIMIT,

@@ -39,6 +39,9 @@ class PlanRex(FakeRex):
 
 class ReadyRunner(unittest.TestCase):
     def setUp(self):
+        servers = patch.object(codex_worker, "configured_mcp_servers", return_value=[])  # No real `codex mcp list` (#153).
+        servers.start()
+        self.addCleanup(servers.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name).resolve()

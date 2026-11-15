@@ -37,6 +37,9 @@ def events(outcome="approved"):
             dict(type="turn.completed", usage=dict(input_tokens=100, output_tokens=30))]
 
 
+REAL_CONFIGURED_MCP_SERVERS = worker.configured_mcp_servers
+
+
 class FakeProcess:
     def __init__(self, payload, exit_code=0, timeout=False):
         self.lines = iter([json.dumps(event).encode() + b"\n" for event in payload])
@@ -63,6 +66,10 @@ class NativeResults(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        # The checkout's effective MCP servers, as `codex mcp list --json` would report them (#153).
+        servers = patch.object(worker, "configured_mcp_servers", return_value=["tessl", "docker-mcp-toolbox"])
+        servers.start()
+        self.addCleanup(servers.stop)
         self.root = Path(directory.name)
         self.repo = self.root / "repo"
         subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
@@ -117,9 +124,11 @@ class NativeResults(unittest.TestCase):
             "model_reasoning_effort": self.args.effort,
             "allow_login_shell": False,
             "features": {"shell_snapshot": False},
-            "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}})
+            "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}, "mcp_servers": {"tessl": {"enabled": False}, "docker-mcp-toolbox": {"enabled": False}}})
         self.assertNotIn("--strict-config", command)  # tessl's `tessl` tables made it fatal on every launch.
-        self.assertIn("--ignore-user-config", command)  # No configured MCP server starts (#153).
+        # Every configured MCP server is turned off for the run (#153).
+        disabled = {arg for previous, arg in zip(command, command[1:]) if previous == "-c" and arg.startswith("mcp_servers.")}
+        self.assertEqual(disabled, {'mcp_servers."tessl".enabled=false', 'mcp_servers."docker-mcp-toolbox".enabled=false'})
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
         self.assertEqual(options["limit"], 64 * 1024 * 1024)  # One large command output no longer ends the run (#147).
         prompt = options["stdin"]
@@ -134,6 +143,21 @@ class NativeResults(unittest.TestCase):
             return asyncio.run(worker.execute(self.args, spawn=self.spawn,
                                                clock=lambda: 1000.0, timer=lambda: 10.0,
                                                git_scope=self.git_scope, scan=self.scan))
+
+    def test_mcp_servers_come_from_codex_and_an_unreadable_list_refuses(self):
+        # A provider-free fixture standing in for `codex mcp list --json` (#153).
+        binary = self.root / "codex-fixture"
+        for payload, expected in (('[{"name": "tessl", "enabled": true}, {"name": "port-eu", "enabled": false}]', ["tessl", "port-eu"]),
+                                  ("[]", [])):
+            binary.write_text("#!/bin/sh\nprintf '%s' " + shlex.quote(payload) + "\n")
+            binary.chmod(0o700)
+            with self.subTest(payload=payload):
+                self.assertEqual(REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ)), expected)
+        for script in ("printf 'not json'", "echo boom >&2; exit 3", "printf '[{\"enabled\": true}]'"):
+            binary.write_text("#!/bin/sh\n" + script + "\n")
+            with self.subTest(script=script), self.assertRaisesRegex(factory.FactoryError, "refuses to launch"):
+                REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
+        self.assertEqual(worker.mcp_overrides(['a"b']), ["-c", 'mcp_servers."a\\"b".enabled=false'])
 
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
@@ -155,7 +179,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(self.args.receipt.stat().st_mode & 0o777, 0o600)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawns[0])
         self.assertNotIn("--sandbox", self.spawns[0])
-        self.assertEqual(self.spawns[0][3:8], ("--ignore-user-config", "--disable", "multi_agent", "--disable", "multi_agent_v2"))
+        self.assertEqual(self.spawns[0][3:7], ("--disable", "multi_agent", "--disable", "multi_agent_v2"))
         # Readers work in a disposable checkout of the candidate, removed after the run (#53).
         checkout = self.spawns[0][self.spawns[0].index("--cd") + 1]
         self.assertTrue(checkout.endswith(".checkout"), checkout)
