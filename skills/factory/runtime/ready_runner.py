@@ -560,13 +560,19 @@ class Runner:
 
 
 def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep, harnesses=False) -> dict:
-    """Run the plan under the line's lock; the CLI also asks for the harness report, taken before the lock is released."""
+    """Run the plan, holding the line's lock for each tick and never while polling; the CLI also asks for the
+    harness report.
+
+    Ten runners held one line's lock through every slice, polls included, so admit, inputs and provision waited
+    minutes. Between ticks the line's other controllers and commands run, as they did between slices. The first
+    tick refuses a busy line; a later one another holder has is skipped, so a long hold never stretches the budget.
+    """
     started = timer()
 
     def finish(value, elapsed, **changes):
         value.update(changes)
         if harnesses:
-            # Probed inside the lock, then measured, so the probes count as coordination overhead.
+            # Measured after the probes, so they count as coordination overhead.
             value["harnesses"] = runner.harnesses()
             value.update(metrics=dict(runner.metrics), capacity=runner.capacity, capacity_error=runner.capacity_error)
             elapsed = timer() - started
@@ -575,17 +581,20 @@ def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep, 
 
     with factory.execution_lock(runner.directory, runner.line):
         runner.select_writer_candidate()
-        while True:
-            result = runner.tick()
-            elapsed = timer() - started
-            if result["result"] != "pending" or once:
-                return finish(result, elapsed)
-            if elapsed >= seconds:
-                return finish(result, elapsed, result="pending_at_budget")
-            sleep(min(POLL_SECONDS, seconds - elapsed))
-            elapsed = timer() - started
-            if elapsed >= seconds:
-                return finish(result, elapsed, result="pending_at_budget")
+        result = runner.tick()
+    while True:
+        elapsed = timer() - started
+        if result["result"] != "pending" or once:
+            return finish(result, elapsed)
+        if elapsed >= seconds:
+            return finish(result, elapsed, result="pending_at_budget")
+        sleep(min(POLL_SECONDS, seconds - elapsed))
+        elapsed = timer() - started
+        if elapsed >= seconds:
+            return finish(result, elapsed, result="pending_at_budget")
+        with factory.try_execution_lock(runner.directory, runner.line) as held:
+            if held:
+                result = runner.tick()
 
 
 def main(argv=None):

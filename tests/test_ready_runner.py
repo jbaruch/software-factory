@@ -1,5 +1,6 @@
 """Controller contracts use fake Rex and native processes, never providers."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
+import contextlib
 import asyncio
 import copy
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -1320,6 +1321,30 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(pending["result"], "pending_at_budget")
         self.assertEqual(pending["jobs"][0]["state"], "running")
         self.assertEqual(pending["active_workers"], 1)
+
+    def test_the_line_lock_is_free_while_polling_and_a_held_tick_is_skipped(self):
+        # The nanoclaw line ran about ten plans on one line; each slice held the lock through its polls, and admit,
+        # inputs and provision waited 5+ minutes. The lock covers each tick only.
+        controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
+        now, free, other = [0.0], [], contextlib.ExitStack()
+        def sleep(seconds):
+            now[0] += seconds
+            free.append(None)
+            if len(free) == 1:
+                with factory.try_execution_lock(self.directory) as held:
+                    free[0] = held
+                self.finish("task", "first")
+                other.enter_context(factory.execution_lock(self.directory))  # Another controller's tick.
+            elif len(free) == 2:
+                # The runner skipped the tick the other controller held, and launched nothing.
+                self.assertEqual(list(factory.load_task(self.directory / "task.json")["assignments"]), ["first"])
+                other.close()
+            else:
+                self.finish("task", "second")
+        result = runner.run(controller, seconds=60, timer=lambda: now[0], sleep=sleep)
+        self.assertEqual(free[0], True)
+        self.assertEqual(result["result"], "complete")
+        self.assertEqual(result["metrics"]["launched"], 2)
 
     def test_budget_expiry_never_dispatches_a_newly_ready_dependency(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
