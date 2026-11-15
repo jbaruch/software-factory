@@ -381,8 +381,18 @@ class Integration(unittest.TestCase):
         with patch.object(release_evidence, "GitHub", return_value=self.transport), redirect_stdout(output):
             self.assertEqual(factory.main(command), 0)
         self.assertEqual(json.loads(output.getvalue())["acceptance"], verdict)
-        # A receipt changed after the judgment no longer matches what the judge assessed.
+        # A damaged or unsupported receipt is no evidence for a new judgment.
         path = Path(receipt["receipt_path"])
+        saved = path.read_text()
+        for damage in (lambda value: value.pop("merge_commit"), lambda value: value.update(schema_version=2),
+                       lambda value: value.update(extra=True), lambda value: value.update(required=[])):
+            value = json.loads(saved)
+            damage(value)
+            path.write_text(json.dumps(value))
+            with self.subTest(damage=value), self.assertRaisesRegex(factory.FactoryError, "Unsupported or damaged"):
+                release_evidence.delivered_receipt(factory.load_task(self.path), "release")
+        path.write_text(saved)
+        # A receipt changed after the judgment no longer matches what the judge assessed.
         changed = json.loads(path.read_text())
         changed["merge_commit"] = "e" * 40
         path.write_text(json.dumps(changed))

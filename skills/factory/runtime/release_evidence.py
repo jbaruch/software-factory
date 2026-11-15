@@ -13,6 +13,8 @@ import factory
 
 MARKER = "\n## Factory release evidence\n\n"
 SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+# integration.delivered's version-1 receipt, frozen by version-3 delivery evidence.
+DELIVERED_FIELDS = {"schema_version", "kind", "task", "inputs", "pr", "head", "merge_commit", "review", "required", "approvals"}
 # coding-policy's release skill, as ACR or Tessl installs it into a repository.
 RELEASE_INSTALLS = (Path(".codex/skills/acr__jbaruch__coding-policy__release"),
                     Path(".tessl/plugins/jbaruch/coding-policy/skills/release"))
@@ -584,9 +586,21 @@ def delivered_receipt(record, review) -> dict:
     except (OSError, ValueError):
         raise factory.FactoryError("No `delivered` receipt for release judgment " + review
                                    + "; confirm the delivery with delivered first") from None
-    if (not isinstance(receipt, dict) or receipt.get("kind") != "release-skill-delivery"
-            or receipt.get("task") != record["task"] or receipt.get("review") != review
-            or receipt.get("inputs") != record["inputs"] or receipt.get("head") != record["inputs"]["candidate"]):
+    # integration.delivered writes version 1 of this receipt; anything else is unavailable evidence.
+    if (not isinstance(receipt, dict) or set(receipt) != DELIVERED_FIELDS
+            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1
+            or receipt["kind"] != "release-skill-delivery"
+            or not isinstance(receipt["pr"], str) or not isinstance(receipt["head"], str)
+            or not isinstance(receipt["merge_commit"], str) or re.fullmatch(SHA, receipt["merge_commit"]) is None
+            or not isinstance(receipt["required"], list) or not receipt["required"]
+            or any(not isinstance(item, str) for item in receipt["required"])
+            or not isinstance(receipt["approvals"], dict)
+            or set(receipt["approvals"]) != {review, *receipt["required"]}):
+        raise factory.FactoryError("Unsupported or damaged `delivered` receipt for release judgment " + review
+                                   + "; restore the original or confirm the delivery again")
+    pr_url(receipt["pr"])
+    if (receipt["task"] != record["task"] or receipt["review"] != review
+            or receipt["inputs"] != record["inputs"] or receipt["head"] != record["inputs"]["candidate"]):
         raise factory.FactoryError("The `delivered` receipt does not confirm the task's current delivery; "
                                    "judge final acceptance before selecting other inputs")
     return dict(schema_version=3, review=review, receipt=receipt, receipt_digest=digest(receipt))

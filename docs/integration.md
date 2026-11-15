@@ -225,7 +225,17 @@ captures use version 2; no migration, mutable refresh store or replacement of ol
 briefs/receipts/results occurs. Both versions require the exact original mechanical
 result and receipt; version 2 also requires a successful observation of the same
 source and native run at an equal or later attempt.
-Neither payload grants approval by itself.
+Version 3 (`review`, `receipt`, `receipt_digest`) freezes a repository's release-skill
+delivery instead: `delivered_receipt` reads the version-1 `TASK.REVIEW.delivered.json`
+that `integration.delivered` writes (`schema_version`, `kind: release-skill-delivery`,
+`task`, `inputs`, `pr`, `head`, `merge_commit`, `review`, `required`, `approvals`),
+refusing missing, extra or ill-typed fields, another version, or a receipt that no
+longer confirms the task's current inputs and head. It carries no fresh observation:
+those repositories lack the `checks.yml` push CI version 2 observes, and the final
+judge reads the merged state itself. Native launch and brief validation,
+`validate_delivery`/`from_delivery_assignment` and `delivered_accepted` read it, the
+last against the receipt on disk.
+No payload grants approval by itself.
 
 `integration.py` owns the version-1 immutable command intent (`schema_version`, task,
 assignment, absolute state directory, admission/inputs, PR identity, selected review
