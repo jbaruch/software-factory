@@ -476,7 +476,10 @@ class Runner:
                               "Admit this task before executing its plan")
                 phases[key] = dict(state="waiting", reason=reason)
                 continue
-            if record["inputs"] != dict(candidate=job["candidate"], requirements=job["requirements"]):
+            planned, saved = dict(candidate=job["candidate"], requirements=job["requirements"]), record["assignments"].get(job["id"])
+            # A job whose own result became the selection, a writer's commit, is current, not stale (#139).
+            if record["inputs"] != planned and not (saved is not None and saved["request"].get("inputs") == planned
+                                                    and factory.result_current(record, saved["result"])):
                 phases[key] = dict(state="stale", reason="Selected task inputs differ from the plan; replan explicitly")
                 continue
             if key in self.launch_errors:

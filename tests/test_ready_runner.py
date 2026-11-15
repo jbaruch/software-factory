@@ -191,6 +191,17 @@ class ReadyRunner(unittest.TestCase):
         for path, content in originals.items():
             self.assertEqual(path.read_bytes(), content)
 
+    def test_a_writer_whose_commit_is_the_selection_reports_its_result(self):
+        # The canary's writer committed, its commit became the selection, and its plan still said stale (#139).
+        self.completed_writer()
+        self.assertEqual(self.handoff()["metrics"]["launched"], 1)
+        self.finish("task", "verify")
+        writer = self.job("implement", write=True, commit_message="feat(fixture): Deliver candidate")
+        self.assertEqual(self.states(self.tick(self.controller(self.plan([writer]))))[("task", "implement")], "completed")
+        # The verifier's result is current too, but this plan names the original pair it never ran on.
+        result = self.tick(self.controller(self.verification_plan()))
+        self.assertEqual(result["jobs"][0]["state"], "stale")
+
     def second_writer(self, task):
         """A completed writer for another task, in its own worktree of the fixture repository."""
         checkout = self.root / (task + "-worktree")

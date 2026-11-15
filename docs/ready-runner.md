@@ -42,7 +42,8 @@ The job fields, an example plan and the per-harness rules ship with the skill in
 coordinator can read them. A writer plan reports `complete` once the writer's commit
 is collected; the commit is not yet the task's selection. Explicitly select that
 produced candidate and submit a verification phase, or use the opt-in handoff below.
-The original writer plan then reports stale.
+Run again, the original writer plan reports the writer by its result, since its commit
+is now the selection; any other job in that plan reports stale.
 
 ## Opt-in writer candidate handoff
 
