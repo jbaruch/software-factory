@@ -3360,7 +3360,11 @@ def tidy_tasks(directory, task=None, binary=None, server=None):
 
 
 def main(argv=None):
-    relocate("factory.py", sys.argv[1:] if argv is None else argv)
+    try:
+        relocate("factory.py", sys.argv[1:] if argv is None else argv)
+    except (FactoryError, OSError) as exc:  # A runtime that can't install refuses like any other command.
+        print("factory: " + str(exc), file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")

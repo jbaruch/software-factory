@@ -5,7 +5,8 @@
 ## Exit codes
 
 - **0:** success; stdout is one JSON document.
-- **1:** refused; stderr has `factory: REASON` (`ready-runner: REASON` from the runner), naming what to do next. The commands the table marks also print their JSON on stdout with exit 1.
+- **1, stderr only:** refused, with `factory: REASON` (`ready-runner: REASON` from the runner) naming what to do next.
+- **1, JSON on stdout:** a non-success result from the commands the table marks: `*-collect`, `tidy`, `integrate` and `ready_runner.py`.
 - **2:** the command line doesn't parse.
 - **75:** the task's line is busy, because another launcher or runner holds its execution lock. Retry later.
 
@@ -29,7 +30,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `status` | Reconciles a pending launch | Status object | `status()` |
 | `capture` | None | `{task, id, text}`, the pane's output | `captured()` |
 | `codex-collect`, `claude-collect`, `grok-collect`, `antigravity-collect` | Records the result from the worker's receipt and closes its tab | Task view; exit 1 with it when the tab didn't close (run `tidy`) | `collector()` |
-| `tidy` | Saves each finished tab's output and closes it | `{TASK: {closed, running, session_closed}}`, or `{TASK: {error}}`; exit 1 when any task failed | `tidy_tasks()` |
+| `tidy` | Saves each finished tab's output, when it has any (a lost attempt has none), and closes it | `{TASK: {closed, running, session_closed}}`, or `{TASK: {error}}`; exit 1 when any task failed | `tidy_tasks()` |
 | `cancel` | Sends Ctrl-C to the pane; the worker records the attempt failed | `{cancelled, interrupted, next}` | `cancel_assignment()` |
 | `abandon` | Marks a launch that never made a pane abandoned | Task view | `abandon_launch()` |
 | `reset` | Saves a failed writer's leftover edits as a patch and restores its checkout | `{task, assignment, checkout, candidate, patch, next}` | `reset_writer()` |
