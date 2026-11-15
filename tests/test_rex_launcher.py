@@ -591,7 +591,7 @@ class NativeLauncher(unittest.TestCase):
         output = StringIO()
         with redirect_stdout(output):
             self.assertEqual(factory.main(["--state-dir", str(self.root), "capture", "--task", "task", "--id", "qa"]), 0)
-        self.assertEqual(output.getvalue(), "output of block-1\n")
+        self.assertEqual(json.loads(output.getvalue()), dict(task="task", id="qa", text="output of block-1\n"))
 
     def test_empty_session_omits_its_window_list(self):
         record, qa = self.start()
