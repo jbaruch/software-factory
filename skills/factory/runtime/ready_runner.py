@@ -423,8 +423,8 @@ class Runner:
                     dict(pool=group["group"], remaining_percent=group["percent_remaining"], resets_at=group["resets_at"])
                     for group in groups])
             except (native_antigravity.UsageError, OSError, subprocess.TimeoutExpired) as exc:
-                # An unreadable usage report doesn't stop Antigravity's worker, so it stays unverified, not unavailable.
-                report["antigravity"] = dict(available=None, reason=str(exc), windows=[])
+                # The Antigravity worker runs this same probe before its model turn and fails on it, so it can't take work.
+                report["antigravity"] = dict(available=False, reason=str(exc), windows=[])
         # Neither has a live usage probe, and a past run's numbers can't vouch for today's account.
         if self.claude is not None:
             report["claude"] = dict(available=None, reason="Claude reports its limits only inside a run; a launch is the test", windows=[])
@@ -556,32 +556,33 @@ class Runner:
                     capacity=self.capacity, capacity_error=self.capacity_error)
 
 
-def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) -> dict:
+def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep, harnesses=False) -> dict:
+    """Run the plan under the line's lock; the CLI also asks for the harness report, taken before the lock is released."""
     started = timer()
+
+    def finish(value, elapsed, **changes):
+        value.update(changes)
+        if harnesses:
+            # Probed inside the lock, then measured, so the probes count as coordination overhead.
+            value["harnesses"] = runner.harnesses()
+            value.update(metrics=dict(runner.metrics), capacity=runner.capacity, capacity_error=runner.capacity_error)
+            elapsed = timer() - started
+        value["elapsed_seconds"] = elapsed
+        return value
+
     with factory.execution_lock(runner.directory, runner.line):
         runner.select_writer_candidate()
         while True:
             result = runner.tick()
             elapsed = timer() - started
-            result["elapsed_seconds"] = elapsed
             if result["result"] != "pending" or once:
-                return result
+                return finish(result, elapsed)
             if elapsed >= seconds:
-                result["result"] = "pending_at_budget"
-                return result
+                return finish(result, elapsed, result="pending_at_budget")
             sleep(min(POLL_SECONDS, seconds - elapsed))
             elapsed = timer() - started
             if elapsed >= seconds:
-                result.update(result="pending_at_budget", elapsed_seconds=elapsed)
-                return result
-
-
-def report(runner, result, started):
-    """The CLI result: the harness report's probes run before its measured fields are taken, so they count."""
-    result["harnesses"] = runner.harnesses()
-    result.update(metrics=dict(runner.metrics), capacity=runner.capacity, capacity_error=runner.capacity_error,
-                  elapsed_seconds=time.monotonic() - started)
-    return result
+                return finish(result, elapsed, result="pending_at_budget")
 
 
 def main(argv=None):
@@ -605,8 +606,7 @@ def main(argv=None):
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
         runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, antigravity=args.antigravity, rex=args.rex, server=args.server,
                         from_writer=args.from_writer)
-        started = time.monotonic()
-        result = report(runner, run(runner, seconds=args.seconds, once=args.once), started)
+        result = run(runner, seconds=args.seconds, once=args.once, harnesses=True)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0 if result["result"] == "complete" else 1
     except (factory.FactoryError, native_codex.CodexProbeError, OSError, ValueError, TimeoutError) as exc:
