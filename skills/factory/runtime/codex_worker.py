@@ -185,8 +185,9 @@ def codex_says(binary, cwd, environment, arguments):
         answer = subprocess.run([str(binary), *arguments], cwd=str(cwd), env=environment,
                                 capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise factory.FactoryError(f"Cannot ask Codex `{' '.join(arguments[-3:])}` here ({type(exc).__name__}); "
-                                   "the worker refuses to launch with MCP servers it cannot turn off") from None
+        raise factory.FactoryError(f"Cannot ask Codex `{' '.join(arguments[-3:])}` here ({type(exc).__name__}); the "
+                                   f"worker refuses to launch with MCP servers it cannot turn off. Check that {binary} "
+                                   "still runs and `codex mcp list` answers in the checkout, then launch again") from None
     if answer.returncode != 0:
         # Codex's stderr can quote a malformed configuration line, token and all, so it never reaches the error
         # the receipt keeps (review of #159).
@@ -225,7 +226,8 @@ def configured_mcp_servers(binary, cwd, environment):
     still_on += [f"the {feature} feature" for feature in ("apps", "plugins") if states.get(feature) != "false"]
     if still_on:
         raise factory.FactoryError(f"Codex keeps {', '.join(still_on)} on despite the worker's overrides, as managed "
-                                   "configuration can; the worker refuses to launch with MCP")
+                                   "configuration can; the worker refuses to launch with MCP. Have whoever manages this "
+                                   "Mac's Codex configuration turn it off, or launch on another harness")
     return names
 
 

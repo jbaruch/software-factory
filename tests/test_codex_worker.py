@@ -169,7 +169,7 @@ class NativeResults(unittest.TestCase):
         """A provider-free `codex` answering the worker's configuration questions: the configured servers, what
         stays on under the worker's overrides, and the effective feature states."""
         binary = self.root / "codex-fixture"
-        binary.write_text("#!/bin/sh\n" + (failing + "\n" if failing else "") + "case \" $* \" in\n"
+        binary.write_text("#!/bin/bash\nset -euo pipefail\n" + (failing + "\n" if failing else "") + "case \" $* \" in\n"
                           f"  *' features list '*) printf '%s\\n' {shlex.quote(features)};;\n"
                           f"  *' -c '*) printf '%s' {shlex.quote(verified)};;\n"
                           f"  *) printf '%s' {shlex.quote(listed)};;\nesac\n")
@@ -209,7 +209,7 @@ class NativeResults(unittest.TestCase):
     def test_plugin_servers_leave_the_list_before_any_override(self):
         # Overriding a plugin-backed server, which no configuration file defines, fails Codex's configuration load.
         binary = self.root / "codex-fixture"
-        binary.write_text("#!/bin/sh\ncase \" $* \" in *' features list '*) printf 'apps stable false\\nplugins stable false\\n';;"
+        binary.write_text("#!/bin/bash\nset -euo pipefail\ncase \" $* \" in *' features list '*) printf 'apps stable false\\nplugins stable false\\n';;"
                           " *' --disable plugins mcp '*) printf '[]';; *) printf '[{\"name\": \"code-review\"}]';; esac\n")
         binary.chmod(0o700)
         self.assertEqual(REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ)), [])
