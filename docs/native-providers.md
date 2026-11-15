@@ -535,7 +535,8 @@ software-factory-github-read -a "$USER" -w`; a fine-grained token with read-only
 Contents, Issues, Pull requests and Metadata). Where there is no Keychain, such as
 Linux, the factory reads `SOFTWARE_FACTORY_GITHUB_READ_TOKEN` once when it loads and
 removes it from its own environment, so no child process, agent, generic command or
-Git, inherits it. Only the factory reads it, and it never enters an agent's
+Git, inherits it; only an ACR-realized copy hands it to the installed runtime it
+re-executes, which removes it again. Only the factory reads it, and it never enters an agent's
 environment, brief or the task record. Capture fails
 closed: without the token, or with an unreadable issue, `inputs` refuses. This stops a misbriefed agent, not a hostile one: an unconfined agent can
 still reach the operator's credentials on disk. Writers keep the operator's

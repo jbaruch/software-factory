@@ -254,6 +254,10 @@ def relocate(entry, argv, *, root=None, home=None, execv=os.execv):
         raise FactoryError(f"Cannot install the per-user factory runtime in {home}; restore access/space and retry") from None
     finally:
         os.close(lock)
+    # Loading this module took the Linux token out of the environment; the installed runtime is the process that
+    # reads it, and takes it out again as it loads (review of #152).
+    if ENVIRONMENT_TOKEN:
+        os.environ[TOKEN_VARIABLE] = ENVIRONMENT_TOKEN
     execv(sys.executable, [sys.executable, "-B", str(installed / "runtime" / entry), *argv])
 
 
@@ -1556,7 +1560,8 @@ ACCEPTANCE_ISSUE = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(?:issue
 
 
 # Where macOS has no Keychain to ask: Linux reads the token from this variable. The factory takes it out of its
-# own environment when it loads, so no child process of any kind, agent, generic command or Git, inherits it.
+# own environment when it loads, so no child process of any kind, agent, generic command or Git, inherits it;
+# only relocate() hands it on, to the installed runtime it replaces itself with.
 TOKEN_VARIABLE = "SOFTWARE_FACTORY_GITHUB_READ_TOKEN"
 ENVIRONMENT_TOKEN = os.environ.pop(TOKEN_VARIABLE, "").strip()
 
