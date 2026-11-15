@@ -523,14 +523,17 @@ checkout, and a release judgment's GitHub evidence is captured before launch, so
 neither needs GitHub; a reader can't look up private issues or pull requests on
 its own. The factory reads its acceptance issues for it. `factory.py inputs`, before
 taking any lock, fetches each `https://github.com/OWNER/REPO/issues/N` acceptance
-reference and stores the text in the task record with the requirements revision, in
+reference through GitHub's GraphQL API and stores the text in the task record with the requirements revision, in
 the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
 Every agent's brief, writers and generic `start` assignments included, renders it as
 untrusted data while the revision is current; only the mechanical integrate command
 gets none, and launches never touch the network. A task migrated from schema 10 has
 no capture, so a new launch refuses until `inputs` selects the revision again. When the requirements revision names
 the issue (`owner/repo#N@T`, owner and repository compared without case, surrounding
-whitespace ignored), its `updated_at` must still be `T`. The read-only token
+whitespace ignored), its title and body must not have changed after `T`: its creation,
+its last body edit (`lastEditedAt`) and its last title rename must all be at or before
+`T`. Closing it, labels and comments move `updatedAt` but not the acceptance, so the
+task's own merge closing its issue keeps the revision current (#167). The read-only token
 lives in the macOS Keychain, one entry per Mac (`security add-generic-password -s
 software-factory-github-read -a "$USER" -w`; a fine-grained token with read-only
 Contents, Issues, Pull requests and Metadata). Where there is no Keychain, such as
