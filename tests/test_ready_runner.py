@@ -514,18 +514,24 @@ class ReadyRunner(unittest.TestCase):
     def test_harnesses_report_each_passed_harness_capacity(self):
         # Antigravity reset and neither line noticed for hours; the operator had to relay it by hand.
         import native_antigravity
-        groups = [dict(group="Gemini", window="weekly", percent_remaining=100.0, resets_at="2026-11-20T00:00:00Z")]
+        groups = [dict(group="Gemini", window="weekly", percent_remaining=100.0, resets_at="2026-11-01T00:00:00Z")]
         controller = self.controller(self.plan([self.job()]), claude=sys.executable, grok=sys.executable,
                                      antigravity=sys.executable)
         with patch.object(native_antigravity, "probe", return_value=dict(groups=groups)):
             report = controller.harnesses()
-        self.assertEqual(report["codex"], dict(error=None, windows=[dict(pool="codex", remaining_percent=80, resets_at=None)]))
+        self.assertEqual(report["codex"], dict(available=True, reason=None, windows=[dict(pool="codex", remaining_percent=80, resets_at=None)]))
         self.assertEqual(report["antigravity"]["windows"],
-                         [dict(pool="Gemini", remaining_percent=100.0, resets_at="2026-11-20T00:00:00Z")])
-        self.assertIn("only inside a run", report["claude"]["error"])
-        self.assertIn("no usage", report["grok"]["error"])
+                         [dict(pool="Gemini", remaining_percent=100.0, resets_at="2026-11-01T00:00:00Z")])
+        self.assertIsNone(report["antigravity"]["available"])
+        self.assertIn("unverified", report["antigravity"]["reason"])
+        self.assertEqual((report["claude"]["available"], report["grok"]["available"]), (None, None))
         with patch.object(native_antigravity, "probe", side_effect=native_antigravity.UsageError("signed out")):
-            self.assertEqual(controller.harnesses()["antigravity"], dict(error="signed out", windows=[]))
+            self.assertEqual(controller.harnesses()["antigravity"], dict(available=False, reason="signed out", windows=[]))
+        # Quota shown but ordinary use refused: the launch gate says no, so does the report (review of #154).
+        self.capacity["ordinaryUsageAllowed"] = False
+        blocked = self.controller(self.plan([self.job()])).harnesses()["codex"]
+        self.assertEqual((blocked["available"], blocked["windows"][0]["remaining_percent"]), (False, 80))
+        self.assertIn("ordinary-usage", blocked["reason"])
         self.assertEqual(set(self.controller(self.plan([self.job()])).harnesses()), {"codex"})
 
     def test_readonly_verifier_cannot_request_writer_mode(self):
