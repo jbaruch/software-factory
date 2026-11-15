@@ -1208,7 +1208,11 @@ class NativeResults(unittest.TestCase):
                         self.assertFalse(Path(socket).is_relative_to(self.repo))
                         self.assertEqual(load.call_args.kwargs["env"]["SSH_AUTH_SOCK"], socket)
                 self.assertIn("", observed["command"])
-                self.assertIn("300", observed["command"])
+                # The key outlives the longest factory Git step that can sign (#175).
+                lifetime = str(factory_commit.SIGNING_SECONDS)
+                self.assertGreater(factory_commit.SIGNING_SECONDS, factory.GIT_SECONDS)
+                self.assertEqual(observed["command"][observed["command"].index("-t") + 1], lifetime)
+                self.assertEqual(load.call_args.args[0][load.call_args.args[0].index("-t") + 1], lifetime)
                 self.assertTrue(observed["pipe"].closed)
                 self.assertTrue(observed["waited"])
                 self.assertFalse(observed["socket"].exists())

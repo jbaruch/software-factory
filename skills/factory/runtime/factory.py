@@ -1249,12 +1249,17 @@ def command_values(record, request, brief):
     return values
 
 
+# The writer receipt version each worker writes; recommit reads only these.
+WRITER_RECEIPT_VERSIONS = dict(codex=5, claude=2, grok=3, antigravity=2)
+
+
 def recommit_writer(path, *, assignment_id, git_scope=None, scan=None):
     """Run the factory commit again for a finished writer whose commit step failed, without a new correction.
 
     Three writers reported completed with green gates, then lost the commit to a Git timeout under load; reset
     would turn their finished work into a patch for a new correction (#175). The same factory commit (scan, hooks,
-    signature) runs on the edits they left, and records its own receipt beside the failed one, which stays failed.
+    signature) runs on the edits they left, and records its own version-1 receipt beside the failed one, which
+    stays failed. A recommit that fails keeps its receipt as evidence; reset is the fallback.
     Caller holds the owner's execution and task locks.
     """
     import argparse
@@ -1264,42 +1269,51 @@ def recommit_writer(path, *, assignment_id, git_scope=None, scan=None):
     assignment = record["assignments"].get(assignment_id)
     if record["admission"] is None or assignment is None:
         raise FactoryError("Recommit needs an admitted task and an existing writer assignment")
-    command = assignment["request"]["command"]
-    values = command_values(record, assignment["request"], assignment["brief"])
+    command, request = assignment["request"]["command"], assignment["request"]
+    values = command_values(record, request, assignment["brief"])
     args = native_arguments([values.get(part, part) for part in command], "Only a native writer's lost commit can be recommitted")
-    if not args.write or args.commit_message is None:
+    harness = native_harness(command)
+    if not args.write or args.commit_message is None or harness is None:
         raise FactoryError("Only a native writer with a frozen commit message can be recommitted")
     try:
         saved = decode_json(read_record(args.receipt, private=True))
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Cannot read the writer's original receipt; restore it before recommitting") from None
-    commit, inputs = saved.get("commit") if isinstance(saved, dict) else None, assignment["request"].get("inputs")
+    identity, inputs = record["admission"]["repository_identity"], request.get("inputs")
+    frozen = dict(schema_version=WRITER_RECEIPT_VERSIONS[harness], kind=harness + "-execution", job=args.job, inputs=inputs,
+                  repository_identity=identity, worktree_git_dir=str(args.worktree_git_dir),
+                  brief_sha256=args.brief_sha256, writer=True)
+    if not isinstance(saved, dict) or any(saved.get(key) != value for key, value in frozen.items()):
+        raise FactoryError("The writer's receipt differs from its frozen assignment; restore the original before recommitting")
+    commit = saved.get("commit")
     # Commit intent is saved only after a completed report, so it proves the writer finished; a commit that never
     # reached `created` is the one the step lost.
-    if (not isinstance(saved, dict) or saved.get("state") != "failed" or not isinstance(saved.get("report"), dict)
+    if (saved.get("state") != "failed" or not isinstance(saved.get("report"), dict)
             or saved["report"].get("outcome") != "completed" or not isinstance(commit, dict)
             or commit.get("state") not in {"preparing", "committing"} or not isinstance(inputs, dict)
             or commit.get("parent") != inputs.get("candidate") or commit.get("message") != args.commit_message):
         raise FactoryError("Recommit only a writer that reported completed and failed before its factory commit was "
                            "created; reset any other failed writer")
-    if status(connect(record), record, assignment)["state"] not in TERMINAL_STATES:
+    # A tidied tab keeps its final observation, so a closed attempt needs no Rex.
+    observed = status(None if assignment.get("closed") else connect(record), record, assignment)
+    if observed["state"] not in TERMINAL_STATES:
         raise FactoryError("The writer's process has not stopped; let it finish, or cancel it, before recommitting")
     recommitted = args.receipt.with_name(args.receipt.name.removesuffix(".json") + ".recommit.json")
     if os.path.lexists(recommitted):
-        try:
-            earlier = decode_json(read_record(recommitted, private=True))
-        except (OSError, ValueError, UnicodeError):
-            raise FactoryError(f"Cannot read the earlier recommit receipt {recommitted}; inspect it before another attempt") from None
-        # A recommit that failed before its commit (another timeout, a hook) left only intent: retry it.
-        if not isinstance(earlier, dict) or earlier.get("candidate") is not None:
-            raise FactoryError(f"This writer was already recommitted; inspect {recommitted}")
-    identity = record["admission"]["repository_identity"]
+        raise FactoryError(f"This writer was already recommitted, or its recommit failed; inspect {recommitted}. "
+                           "After a failed recommit, save the edits with factory.py reset and plan a correction")
     check_repository(record["admission"])
-    cwd = assignment["request"]["cwd"]
+    cwd = request["cwd"]
     if (repository_identity(cwd) != identity or git_dir(cwd) != args.worktree_git_dir
             or git_commit(cwd, "HEAD") != inputs["candidate"]):
         raise FactoryError("Writer checkout moved off its input candidate; inspect it by hand before recommitting")
-    sandbox = (args.codex if native_harness(command) == "codex" else args.sandbox).resolve(strict=True)
+    binary = args.codex if harness == "codex" else getattr(args, "sandbox", None)
+    try:
+        sandbox = Path(binary).resolve(strict=True) if isinstance(binary, (str, Path)) else None
+    except OSError:
+        sandbox = None
+    if sandbox is None or not sandbox.is_file() or not os.access(sandbox, os.X_OK):
+        raise FactoryError(f"Restore the writer's frozen Codex commit sandbox ({binary}) before recommitting")
     receipt = dict(schema_version=1, kind="factory-recommit", job=args.job, writer_receipt=str(args.receipt),
                    inputs=dict(inputs), repository_identity=identity, report=dict(outcome="completed"),
                    commit=None, candidate=None, created_at=time.time())

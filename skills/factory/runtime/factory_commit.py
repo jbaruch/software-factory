@@ -71,6 +71,10 @@ os.execve(sys.argv[4], sys.argv[4:], environment)
 
 
 
+# The signing key outlives the longest factory Git step that can sign (#175).
+SIGNING_SECONDS = 2 * factory.GIT_SECONDS
+
+
 @contextmanager
 def private_signer(key, python):
     """Own one short-lived signing agent; never change the user's agent."""
@@ -85,7 +89,7 @@ def private_signer(key, python):
         # Command mode ties agent lifetime to this pipe, including owner crashes.
         # No PKCS#11/FIDO libraries may be loaded through the callback socket.
         try:
-            process = subprocess.Popen([agent, "-a", socket, "-P", "", "-t", "300", python,
+            process = subprocess.Popen([agent, "-a", socket, "-P", "", "-t", str(SIGNING_SECONDS), python,
                 "-I", "-S", "-c", "import sys; sys.stdin.buffer.read()"], cwd=directory,
                 env=environment, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
@@ -97,7 +101,7 @@ def private_signer(key, python):
             if not Path(socket).exists() or process.poll() is not None:
                 raise factory.FactoryError("Private SSH signing agent did not start; restore local OpenSSH/socket access before another attempt")
             try:
-                loaded = subprocess.run([add, "-q", "-k", "-t", "300", str(key)], env=environment,
+                loaded = subprocess.run([add, "-q", "-k", "-t", str(SIGNING_SECONDS), str(key)], env=environment,
                     stdin=subprocess.DEVNULL, capture_output=True, timeout=factory.GIT_SECONDS, check=False, start_new_session=True)
             except (OSError, subprocess.TimeoutExpired):
                 raise factory.FactoryError("Private SSH key loading failed or timed out; restore noninteractive local signing access before another attempt") from None

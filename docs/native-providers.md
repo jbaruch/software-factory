@@ -33,13 +33,22 @@ boundary is structural instead:
   the same way and reruns under a new ID;
 - a writer that reported `completed` but failed before its factory commit was
   created (its receipt holds `preparing` or `committing` commit intent, such as a
-  Git timeout under load, #175) keeps its finished edits: once its process has
-  stopped, `factory.py recommit --task TASK --id ID` runs the same factory commit
-  (scan, hooks, signature) on them and records `TASK.ID.HARNESS.recommit.json`
-  (`kind: factory-recommit`, its `commit` and `candidate`) beside the failed receipt,
-  which stays failed. No correction is spent; the coordinator selects the commit
-  with `inputs` and verifies it with a plain plan. Factory Git calls wait up to
-  600 seconds, since a `git rev-parse` passed 60 at load 300 on 16 cores;
+  Git timeout under load, #175) keeps its finished edits. Once its process has
+  stopped (Rex, or a tidied tab's saved observation), `factory.py recommit --task
+  TASK --id ID` checks the failed receipt against the frozen assignment (its
+  writer schema version and `kind`, `job`, `inputs`, `repository_identity`,
+  `worktree_git_dir`, `brief_sha256` and `writer`) and runs the same factory commit
+  (scan, hooks, signature) on the edits. It records `TASK.ID.HARNESS.recommit.json`
+  beside the failed receipt, which stays failed: `schema_version` 1, `kind`
+  `factory-recommit`, `job`, `writer_receipt` (the failed receipt's path), `inputs`,
+  `repository_identity`, `report` (`outcome: completed`), `commit` (the same
+  evidence as a writer receipt's, `discarded` included), `candidate` and
+  `created_at`. A recommit that fails keeps its receipt as evidence and is not
+  retried; reset its edits instead. No correction is spent; the coordinator
+  selects the commit with `inputs` and verifies it with a plain plan. Factory Git
+  calls, the secret scan and the signing steps wait up to 600 seconds, and the
+  signing key lives twice that, since a `git rev-parse` passed 60 seconds at load
+  300 on 16 cores;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
   secrets, runs hooks and signs, and integration stays with the runtime;
 - only a structured report counts as a result. Text, tool telemetry and
