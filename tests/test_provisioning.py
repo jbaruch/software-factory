@@ -140,13 +140,33 @@ class WorktreeProvisioning(unittest.TestCase):
         running["assignments"]["reader"] = dict(state="launched", request=dict(
             cwd=str(self.destination), command=[sys.executable, "worker.py", "--receipt", str(receipt)]))
         with patch.object(factory, "load_task", return_value=running), factory.execution_lock(self.state), \
+                patch.object(factory, "connect", return_value="rex"), \
+                patch.object(factory, "status", return_value=dict(state="running")) as observed, \
                 factory.task_lock(self.state, "fixture"), self.assertRaisesRegex(factory.FactoryError, "still running"):
             factory.release_worktree(self.path)
+        self.assertEqual(observed.call_args.args[2], running["assignments"]["reader"])
         self.assertTrue(self.destination.exists())
         # A reset attempt stopped for good, though a reboot left its receipt unfinished (#133).
         factory.reset_patch(receipt).write_text("")
         with patch.object(factory, "load_task", return_value=running), factory.execution_lock(self.state), \
                 factory.task_lock(self.state, "fixture"):
+            factory.release_worktree(self.path)
+        self.assertFalse(self.destination.exists())
+
+    def test_release_takes_a_worktree_whose_unfinished_writer_rex_reports_lost(self):
+        # #162: a Grok correction lost to a host reboot keeps a `starting` receipt and no reset patch, and reset
+        # refuses once the checkout moved on to the merged head; its closed, lost pane proves it stopped.
+        self.provision()
+        receipt = self.state / "fixture.correction-1.grok.json"
+        receipt.write_text(json.dumps(dict(state="starting")))
+        receipt.chmod(0o600)
+        lost = copy.deepcopy(factory.load_task(self.path))
+        lost["assignments"]["correction-1"] = dict(state="launched", window_id="w", block_id="b", request=dict(
+            role="implementation", cwd=str(self.destination), command=[sys.executable, "worker.py", "--receipt", str(receipt)]),
+            closed=dict(state="lost", exit=None, session_id="s", capture=None, at=0.0,
+                        reason="Rex server restarted after launch; the original process ended without an observable exit status"))
+        with patch.object(factory, "load_task", return_value=lost), patch.object(factory, "connect", return_value="rex"), \
+                factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
             factory.release_worktree(self.path)
         self.assertFalse(self.destination.exists())
 
