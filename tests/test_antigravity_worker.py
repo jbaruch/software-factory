@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import antigravity_worker
 import factory
+import factory_commit
 import integration
 import native_antigravity
 from codex_worker import outcome_schema
@@ -280,6 +281,44 @@ class AntigravityWorker(unittest.TestCase):
         self.assertIn("+leftover", Path(result["patch"]).read_text())
         factory.check_checkout(str(self.base), str(self.repo), committed)
         self.assertEqual(self.git("-C", str(self.repo), "show", "HEAD:NOTES.md", directory=self.repo).stdout, "Notes\n")
+
+    def test_recommit_commits_a_finished_writers_edits_its_commit_step_lost(self):
+        # #175: three writers reported completed with green gates, then lost the commit to a Git timeout at load
+        # 265-346; reset would have turned the work into a patch that needs a new correction.
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        timeout = factory.FactoryError("Git did not finish within 60 seconds (git rev-parse); inspect machine load")
+        with patch.object(factory_commit, "commit_changes", side_effect=timeout):
+            failed = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True, exit_code=0)
+        self.assertEqual((failed["state"], failed["commit"]["state"]), ("failed", "preparing"), failed["error"])
+        original = args.receipt.read_bytes()
+        seams = dict(git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None)
+        for identity, message in (("inspect", "frozen commit message"), ("missing", "existing writer assignment")):
+            with self.subTest(identity=identity), self.assertRaisesRegex(factory.FactoryError, message):
+                factory.recommit_writer(self.path, assignment_id=identity, **seams)
+        block = factory.load_task(self.path)["assignments"]["implement"]["block_id"]
+        self.addCleanup(FakeRex.exits.pop, block, None)
+        with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "has not stopped"):
+            factory.recommit_writer(self.path, assignment_id="implement", **seams)
+        FakeRex.exits[block] = 1
+        with patch.object(factory, "Rex", FakeRex):
+            result = factory.recommit_writer(self.path, assignment_id="implement", **seams)
+        self.assertNotEqual(result["candidate"], self.candidate)
+        self.assertIn("plain plan", result["next"])
+        factory.check_checkout(str(self.base), str(self.repo), result["candidate"])
+        self.assertEqual(self.git("-C", str(self.repo), "show", "HEAD:NOTES.md", directory=self.repo).stdout, "Notes\n")
+        recommitted = json.loads(Path(result["receipt"]).read_text())
+        self.assertEqual((recommitted["kind"], recommitted["commit"]["state"], recommitted["candidate"]),
+                         ("factory-recommit", "created", result["candidate"]))
+        self.assertEqual(args.receipt.read_bytes(), original)  # The failed receipt stays failed.
+        with patch.object(factory, "Rex", FakeRex), self.assertRaisesRegex(factory.FactoryError, "already recommitted"):
+            factory.recommit_writer(self.path, assignment_id="implement", **seams)
+
+    def test_recommit_refuses_a_writer_that_did_not_finish_or_already_committed(self):
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        failed = self.execute(args, edit=True, exit_code=3)  # Failed before reporting: no commit intent.
+        self.assertIsNone(failed["commit"])
+        with self.assertRaisesRegex(factory.FactoryError, "reported completed and failed before"):
+            factory.recommit_writer(self.path, assignment_id="implement")
 
     def test_reset_recovers_a_writer_lost_with_its_host(self):
         # Observed (#133): a reboot killed six writers mid-run; their receipts stayed "starting",

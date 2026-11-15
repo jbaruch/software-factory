@@ -666,7 +666,8 @@ def git_execution(prefix, environment):
 
 # A hang guard, not a performance bound: under a loaded machine a plain rev-parse took over 10 seconds,
 # and starting the Codex sandbox alone took 1.9 to 6.3.
-GIT_SECONDS = 60
+# Three finished writers lost their commits to `git rev-parse` passing 60 seconds at load 265-346 on 16 cores (#175).
+GIT_SECONDS = 600
 
 
 def git_run(repository, *args, environment=None):
@@ -1235,6 +1236,80 @@ def reset_writer(path, *, assignment_id):
                      "then re-runs the gate; after stays empty")
     return dict(task=record["task"], assignment=assignment_id, checkout=cwd, candidate=candidate, patch=str(patch),
                 next=following)
+
+
+def command_values(record, request, brief):
+    """What the launcher puts in a frozen command's placeholders."""
+    values = {"{brief}": str(brief), "{brief_sha256}": request["instructions_sha256"], "{cwd}": request["cwd"]}
+    if record["admission"] is not None:
+        values.update({"{candidate}": request["inputs"]["candidate"], "{requirements}": request["inputs"]["requirements"],
+                       "{repository}": record["admission"]["repository"],
+                       "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)})
+    return values
+
+
+def recommit_writer(path, *, assignment_id, git_scope=None, scan=None):
+    """Run the factory commit again for a finished writer whose commit step failed, without a new correction.
+
+    Three writers reported completed with green gates, then lost the commit to a Git timeout under load; reset
+    would turn their finished work into a patch for a new correction (#175). The same factory commit (scan, hooks,
+    signature) runs on the edits they left, and records its own receipt beside the failed one, which stays failed.
+    Caller holds the owner's execution and task locks.
+    """
+    import argparse
+    import contextlib
+    import factory_commit
+    record = load_task(path)
+    assignment = record["assignments"].get(assignment_id)
+    if record["admission"] is None or assignment is None:
+        raise FactoryError("Recommit needs an admitted task and an existing writer assignment")
+    command = assignment["request"]["command"]
+    values = command_values(record, assignment["request"], assignment["brief"])
+    args = native_arguments([values.get(part, part) for part in command], "Only a native writer's lost commit can be recommitted")
+    if not args.write or args.commit_message is None:
+        raise FactoryError("Only a native writer with a frozen commit message can be recommitted")
+    try:
+        saved = decode_json(read_record(args.receipt, private=True))
+    except (OSError, ValueError, UnicodeError):
+        raise FactoryError("Cannot read the writer's original receipt; restore it before recommitting") from None
+    commit, inputs = saved.get("commit") if isinstance(saved, dict) else None, assignment["request"].get("inputs")
+    # Commit intent is saved only after a completed report, so it proves the writer finished; a commit that never
+    # reached `created` is the one the step lost.
+    if (not isinstance(saved, dict) or saved.get("state") != "failed" or not isinstance(saved.get("report"), dict)
+            or saved["report"].get("outcome") != "completed" or not isinstance(commit, dict)
+            or commit.get("state") not in {"preparing", "committing"} or not isinstance(inputs, dict)
+            or commit.get("parent") != inputs.get("candidate") or commit.get("message") != args.commit_message):
+        raise FactoryError("Recommit only a writer that reported completed and failed before its factory commit was "
+                           "created; reset any other failed writer")
+    if status(connect(record), record, assignment)["state"] not in TERMINAL_STATES:
+        raise FactoryError("The writer's process has not stopped; let it finish, or cancel it, before recommitting")
+    recommitted = args.receipt.with_name(args.receipt.name.removesuffix(".json") + ".recommit.json")
+    if os.path.lexists(recommitted):
+        raise FactoryError(f"This writer was already recommitted; inspect {recommitted}")
+    identity = record["admission"]["repository_identity"]
+    check_repository(record["admission"])
+    cwd = assignment["request"]["cwd"]
+    if (repository_identity(cwd) != identity or git_dir(cwd) != args.worktree_git_dir
+            or git_commit(cwd, "HEAD") != inputs["candidate"]):
+        raise FactoryError("Writer checkout moved off its input candidate; inspect it by hand before recommitting")
+    sandbox = (args.codex if native_harness(command) == "codex" else args.sandbox).resolve(strict=True)
+    receipt = dict(schema_version=1, kind="factory-recommit", job=args.job, writer_receipt=str(args.receipt),
+                   inputs=dict(inputs), repository_identity=identity, report=dict(outcome="completed"),
+                   commit=None, candidate=None, created_at=time.time())
+    args = argparse.Namespace(**{**vars(args), "receipt": recommitted})
+    with contextlib.chdir(cwd):
+        factory_commit.prepare_writer(args, sandbox, (
+            Path(git_worktree(".")), git_common_dir("."), args.worktree_git_dir))
+        scan = scan or factory_commit.scan_staged
+        factory_commit.prepare_commit(args, scan=scan)
+        save(recommitted, receipt)
+        receipt["candidate"] = factory_commit.commit_completed(args, receipt, identity, scan=scan,
+                                                               git_scope=git_scope or factory_commit.isolated_git)
+        factory_commit.check_commit_receipt(receipt, args, record["admission"]["repository"])
+        save(recommitted, receipt)
+    return dict(task=record["task"], assignment=assignment_id, candidate=receipt["candidate"], receipt=str(recommitted),
+                next=(f"Select it with factory.py inputs --task {record['task']} --candidate {receipt['candidate']} "
+                      f"--requirements {inputs['requirements']} and verify it with a plain plan (no --from-writer)"))
 
 
 def owned_quiet_worktree(record):
@@ -2158,13 +2233,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             record["session_id"] = shared[0]
     brief_path = path.parent / (task + "." + assignment_id + ".md")
     save(brief_path, instructions)
-    replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
-                    "{brief_sha256}": request["instructions_sha256"], "{cwd}": cwd}
-    if record["admission"] is not None:
-        replacements.update({"{candidate}": request["inputs"]["candidate"],
-                             "{requirements}": request["inputs"]["requirements"],
-                             "{repository}": record["admission"]["repository"],
-                             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)})
+    replacements = {**command_values(record, request, brief_path), "{instructions}": instructions}
     argv = [replacements.get(part, part) for part in command]
     if record["admission"] is not None:
         argv = [sys.executable, "-E", "-s", str(ROOT / "checkout_exec.py"), "--identity",
@@ -3409,6 +3478,9 @@ def main(argv=None):
     reset = sub.add_parser("reset", help="Save a failed writer's leftover edits as a patch and restore its checkout")
     reset.add_argument("--task", required=True)
     reset.add_argument("--id", required=True, help="The failed writer assignment")
+    recommit = sub.add_parser("recommit", help="Commit a finished writer's edits its failed commit step left behind")
+    recommit.add_argument("--task", required=True)
+    recommit.add_argument("--id", required=True, help="The writer that reported completed, then failed to commit")
     provision = sub.add_parser("provision", help="Provision or reconcile one explicitly named writer worktree")
     provision.add_argument("--task", required=True)
     provision.add_argument("--id", required=True, help="Stable worktree name; branch is factory/TASK/ID")
@@ -3530,7 +3602,7 @@ def main(argv=None):
             if prepared["admission"] is None:
                 raise FactoryError("Admit a task and supply a nonempty requirements revision first")
             acceptance = inputs_acceptance(prepared, args.requirements)  # Network, before any lock.
-        locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
+        locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset", "recommit",
                                  "release-worktree", "rebase-worktree", "line"}
         line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE
         with (execution_lock(args.state_dir.resolve(), line) if locked else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
@@ -3547,6 +3619,9 @@ def main(argv=None):
                 return 0
             if args.action == "reset":
                 print(json.dumps(reset_writer(path, assignment_id=args.id), indent=2))
+                return 0
+            if args.action == "recommit":
+                print(json.dumps(recommit_writer(path, assignment_id=args.id), indent=2))
                 return 0
             if prepared is not None and load_task(path) != prepared:
                 raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")

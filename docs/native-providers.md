@@ -31,6 +31,15 @@ boundary is structural instead:
   leftovers, and the coordinator selects the commit with `inputs` and verifies it
   with a plain plan. A failed reader that left files in a shared checkout resets
   the same way and reruns under a new ID;
+- a writer that reported `completed` but failed before its factory commit was
+  created (its receipt holds `preparing` or `committing` commit intent, such as a
+  Git timeout under load, #175) keeps its finished edits: once its process has
+  stopped, `factory.py recommit --task TASK --id ID` runs the same factory commit
+  (scan, hooks, signature) on them and records `TASK.ID.HARNESS.recommit.json`
+  (`kind: factory-recommit`, its `commit` and `candidate`) beside the failed receipt,
+  which stays failed. No correction is spent; the coordinator selects the commit
+  with `inputs` and verifies it with a plain plan. Factory Git calls wait up to
+  600 seconds, since a `git rev-parse` passed 60 at load 300 on 16 cores;
 - agents never stage, commit, push or merge. `factory_commit.py` stages, scans for
   secrets, runs hooks and signs, and integration stays with the runtime;
 - only a structured report counts as a result. Text, tool telemetry and
