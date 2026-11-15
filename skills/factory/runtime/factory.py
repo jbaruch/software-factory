@@ -1609,8 +1609,8 @@ def brief(role_id, goal, *, designs=False):
             + "\nYour structured report is the only output the factory collects: put each finding, or each verified"
             + " point behind an approval, in its artifacts as a self-contained string with path:line."
             + " Don't put a report in a file instead: a reader's checkout is deleted after the run."
-            + "\nKeep each command's output small: page or filter large output (head, rg -l, --max-count), because one"
-            + " event of tens of megabytes ends the run.\nUse original evidence; do not create a separate handover or status ledger.\n"
+            + "\nKeep each command's output small: page or filter large output (head, rg -l, --max-count), because"
+            + " oversized output ends the run.\nUse original evidence; do not create a separate handover or status ledger.\n"
             + "Existing repository policy and user authorization remain binding.\n")
 
 

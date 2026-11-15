@@ -321,7 +321,8 @@ reviewer receipts, which reviewed in place, still collect. A completed run copie
 that is a file in agy's per-conversation brain directory into a private
 `TASK.ID.antigravity.artifacts/` beside its receipt, because agy does not keep
 that directory; the receipt and report stay unchanged. Events are
-version-1 `antigravity-event-line` envelopes holding each original line.
+version-1 `antigravity-event-line` envelopes holding each original line; native
+lines are limited to 64 MiB, and a longer one stops the child with a failed receipt.
 Integration counts collected `qa`, `security` and `code-review` approvals under
 their conversation ID and treats writers as contributors; a writer that failed
 before `init` is identified by its assignment.
