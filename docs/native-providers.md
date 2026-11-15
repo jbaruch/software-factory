@@ -524,13 +524,15 @@ when `git worktree remove` does. Each worktree otherwise wrote its own copy of e
 into the shared cache, which Go keeps five days, and filled the disk (#183). On macOS the
 directory gets Time Machine's sticky exclusion, the attribute `tmutil addexclusion` sets, as
 `~/Library/Caches` has by default. The main checkout keeps the user's cache.
-Read-only assignments (verifiers and judgments) get no GitHub identity, after a
-release judgment merged a PR and deployed it with the operator's: `GH_CONFIG_DIR`
-points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN` are removed, and
-pushes to GitHub are rewritten to an invalid host. Readers work on a local
-checkout, and a release judgment's GitHub evidence is captured before launch, so
-neither needs GitHub; a reader can't look up private issues or pull requests on
-its own. The factory reads its acceptance issues for it. `factory.py inputs`, before
+No native worker gets a GitHub identity. Readers lost it after a release judgment
+merged a PR and deployed it with the operator's, and writers need none: the factory
+commits their work and the line's foreman pushes it, so a writer misled by text it
+read (a message in a log, a comment on a public PR) can't act on GitHub as the
+operator. `GH_CONFIG_DIR` points at an empty factory directory, `GH_TOKEN`/`GITHUB_TOKEN`
+are removed, and pushes to GitHub are rewritten to an invalid host. Readers work on a
+local checkout, and a release judgment's GitHub evidence is captured before launch, so
+no worker needs GitHub; a worker can't look up private issues or pull requests on its
+own. The factory reads its acceptance issues for it. `factory.py inputs`, before
 taking any lock, fetches each `https://github.com/OWNER/REPO/issues/N` acceptance
 reference through GitHub's GraphQL API and stores the text in the task record with the requirements revision, in
 the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
@@ -552,8 +554,8 @@ Git, inherits it; only an ACR-realized copy hands it to the installed runtime it
 re-executes, which removes it again. Only the factory reads it, and it never enters an agent's
 environment, brief or the task record. Capture fails
 closed: without the token, or with an unreadable issue, `inputs` refuses. This stops a misbriefed agent, not a hostile one: an unconfined agent can
-still reach the operator's credentials on disk. Writers keep the operator's
-identity: the factory owns their commits and nothing pushes.
+still reach the operator's credentials on disk; only running workers as another
+user would stop that.
 
 New Codex model children additionally use per-run
 `allow_login_shell=false`, `features.shell_snapshot=false` and

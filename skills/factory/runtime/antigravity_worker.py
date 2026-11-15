@@ -161,7 +161,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
             with tempfile.TemporaryFile() as prompt:
                 prompt.write(message(prompt_text).encode("utf-8"))
                 prompt.seek(0)
-                environment = factory.worker_environment(native_environment(), args.write, workdir)
+                environment = factory.worker_environment(native_environment(), workdir)
                 process = await spawn(*command(binary, args.model, args.effort), cwd=str(workdir), env=environment,
                                       limit=NATIVE_LINE_LIMIT, stdin=prompt, stdout=asyncio.subprocess.PIPE)
             async def consume():
