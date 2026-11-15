@@ -13,6 +13,8 @@ import factory
 
 MARKER = "\n## Factory release evidence\n\n"
 SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+# integration.delivered's version-1 receipt, frozen by version-3 delivery evidence.
+DELIVERED_FIELDS = {"schema_version", "kind", "task", "inputs", "pr", "head", "merge_commit", "review", "required", "approvals"}
 # coding-policy's release skill, as ACR or Tessl installs it into a repository.
 RELEASE_INSTALLS = (Path(".codex/skills/acr__jbaruch__coding-policy__release"),
                     Path(".tessl/plugins/jbaruch/coding-policy/skills/release"))
@@ -479,7 +481,9 @@ def check_brief(args, instructions):
                   brief_payload(instructions, "delivery", args.delivery_evidence_digest))
         if args.write or args.role != "release" or not instructions.endswith(render_delivery(frozen)):
             raise factory.FactoryError("Final acceptance needs its original frozen read-only release brief")
-        if frozen["receipt"]["intent"]["inputs"] != inputs:
+        # A `delivered` receipt (version 3) carries its inputs; an integration receipt, its intent's.
+        confirmed = frozen["receipt"]["inputs"] if frozen["schema_version"] == 3 else frozen["receipt"]["intent"]["inputs"]
+        if confirmed != inputs:
             raise factory.FactoryError("Final acceptance inputs differ from confirmed delivery")
         return True
     if args.release_evidence is not None or args.release_evidence_digest is not None:
@@ -567,8 +571,65 @@ def delivery(record, assignment_id) -> dict:
     return dict(schema_version=1, assignment=assignment_id, result=result, receipt=receipt, receipt_digest=digest(receipt))
 
 
+def delivered_receipt(record, review) -> dict:
+    """A `delivered` receipt as final acceptance evidence: the release skill's merge the factory confirmed (#151).
+
+    Version 3 freezes that receipt, keyed by the release judgment it confirmed. The final judge reads the
+    delivered state itself; the receipt's PR, head and merge commit bind what it judged.
+    """
+    assignment = record["assignments"].get(review)
+    if assignment is None:
+        raise factory.FactoryError("Unknown release judgment; name the one `delivered` confirmed")
+    path = Path(assignment["brief"]).parent / (record["task"] + "." + review + ".delivered.json")
+    try:
+        receipt = factory.decode_json(factory.read_record(path, private=True))
+    except (OSError, ValueError):
+        raise factory.FactoryError("No `delivered` receipt for release judgment " + review
+                                   + "; confirm the delivery with delivered first") from None
+    # integration.delivered writes version 1 of this receipt; anything else is unavailable evidence.
+    if (not isinstance(receipt, dict) or set(receipt) != DELIVERED_FIELDS
+            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1
+            or receipt["kind"] != "release-skill-delivery"
+            or not isinstance(receipt["pr"], str) or not isinstance(receipt["head"], str)
+            or not isinstance(receipt["merge_commit"], str) or re.fullmatch(SHA, receipt["merge_commit"]) is None
+            or not isinstance(receipt["required"], list) or not receipt["required"]
+            or any(not isinstance(item, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item) for item in receipt["required"])
+            or len(set(receipt["required"])) != len(receipt["required"]) or review in receipt["required"]
+            or not isinstance(receipt["approvals"], dict)
+            or set(receipt["approvals"]) != {review, *receipt["required"]}
+            # Each approval as integration.approvals selected it: its native context and two digests.
+            or any(not isinstance(item, dict) or set(item) != {"context", "receipt", "result"}
+                   or not isinstance(item["context"], str) or not item["context"]
+                   or any(not isinstance(item[key], str) or re.fullmatch(r"[0-9a-f]{64}", item[key]) is None
+                          for key in ("receipt", "result"))
+                   for item in receipt["approvals"].values())):
+        raise factory.FactoryError("Unsupported or damaged `delivered` receipt for release judgment " + review
+                                   + "; restore the original or confirm the delivery again")
+    pr_url(receipt["pr"])
+    if (receipt["task"] != record["task"] or receipt["review"] != review
+            or receipt["inputs"] != record["inputs"] or receipt["head"] != record["inputs"]["candidate"]):
+        raise factory.FactoryError("The `delivered` receipt does not confirm the task's current delivery; "
+                                   "judge final acceptance before selecting other inputs")
+    # The recorded approvals are a hint: they must equal what the collected assignments give now.
+    import integration
+    live = integration.approvals(record, review, receipt["required"])
+    if {key: {k: v for k, v in item.items() if k != "evidence"} for key, item in live.items()} != receipt["approvals"]:
+        raise factory.FactoryError("The `delivered` receipt's approvals differ from the task's collected approvals; "
+                                   "restore the original receipt or confirm the delivery again")
+    return dict(schema_version=3, review=review, receipt=receipt, receipt_digest=digest(receipt))
+
+
+def delivery_source(record, source) -> dict:
+    """Final acceptance evidence for an integration assignment, or for the release judgment a `delivered` receipt names."""
+    import integration
+    assignment = record["assignments"].get(source)
+    if assignment is not None and integration.mechanical(assignment):
+        return delivery(record, source)
+    return delivered_receipt(record, source)
+
+
 def render_delivery(value):
-    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] not in (1, 2):
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value["schema_version"] not in (1, 2, 3):
         raise factory.FactoryError("Unsupported frozen delivery version; preserve the original and update its owner")
     return (DELIVERY_MARKER + "Judge final acceptance against the original admission and confirmed delivery below. "
             "Mechanical delivery does not establish acceptance or publication. Use the ordinary native report.\n"
@@ -599,6 +660,11 @@ def same_delivery(current, prior, *, rerun=False):
 
 def validate_delivery(value, record):
     render_delivery(value)  # Version check; old frozen briefs remain read-only.
+    if value["schema_version"] == 3:
+        if set(value) != {"schema_version", "review", "receipt", "receipt_digest"} or not isinstance(value["review"], str) \
+                or value != delivered_receipt(record, value["review"]):
+            raise factory.FactoryError("Final release evidence differs from the recorded `delivered` receipt")
+        return value
     keys = {"schema_version", "assignment", "result", "receipt", "receipt_digest"}
     if value["schema_version"] == 2:
         keys.add("observation")

@@ -199,7 +199,12 @@ class Integration(unittest.TestCase):
     def review(self, key, role, *, context=None, frozen=True, outcome="approved", writer=False, delivery=None, purpose="work", failed=False, change=None, legacy=False, cwd=None, collect=True):
         cwd = self.repo if cwd is None else cwd
         frozen_release = self.frozen if frozen and delivery is None else None
-        frozen_delivery = release_evidence.capture_delivery(factory.load_task(self.path), delivery, self.transport) if delivery else None
+        frozen_delivery = None
+        if delivery:
+            # An integration ID freezes a fresh observation; a release judgment ID, its `delivered` receipt (#151).
+            source = release_evidence.delivery_source(factory.load_task(self.path), delivery)
+            frozen_delivery = source if source["schema_version"] == 3 else release_evidence.capture_delivery(
+                factory.load_task(self.path), delivery, self.transport)
         command = factory.codex_command(self.path, task="deliver", assignment_id=key, codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(cwd), role=role, write=writer,
             commit_message="fix(fixture): Apply correction\n\nExercise sequential writer provenance." if change else None,
@@ -208,7 +213,7 @@ class Integration(unittest.TestCase):
             kind, payload = ("delivery", frozen_delivery) if delivery else ("release", frozen_release)
             index = command.index("--" + kind + "-evidence-digest")
             command[index:index + 2] = ["--" + kind + "-evidence", json.dumps(payload, sort_keys=True)]
-        with patch.object(factory, "Rex", FakeRex):
+        with patch.object(factory, "Rex", EvidenceRex):
             record, assignment = factory.launch(self.path, task="deliver", assignment_id=key, role=role,
                 goal="Judge the original complete evidence", cwd=str(cwd), command=command, purpose=purpose,
                 binary=sys.executable, server="unix:///fixture.sock",
@@ -347,6 +352,57 @@ class Integration(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "target ancestry"):
             self.confirm()
         self.assertFalse((self.tasks / "deliver.release.delivered.json").exists())
+
+    def test_final_acceptance_judges_the_recorded_delivered_receipt(self):
+        # Only integrate had an evidence-bound final acceptance; the release skill's deliveries had none (#151).
+        self.release_skill_merges()
+        with self.assertRaisesRegex(factory.FactoryError, "No `delivered` receipt"):
+            self.review("early", "release", delivery="release")
+        receipt = self.confirm()
+        self.review("accept", "release", delivery="release")
+        record = factory.load_task(self.path)
+        frozen = release_evidence.from_delivery_assignment(record, record["assignments"]["accept"])
+        self.assertEqual((frozen["schema_version"], frozen["review"]), (3, "release"))
+        self.assertEqual(frozen["receipt"], {key: value for key, value in receipt.items() if key != "receipt_path"})
+        original = self.path.read_bytes()
+        verdict = integration.delivered_accepted(self.path, "release", "accept")
+        self.assertEqual((verdict["outcome"], verdict["review"], verdict["delivery_receipt_digest"]),
+                         ("approved", "release", frozen["receipt_digest"]))
+        self.assertEqual(self.path.read_bytes(), original)
+        with self.assertRaisesRegex(factory.FactoryError, "approved current native release judgment"):
+            integration.delivered_accepted(self.path, "release", "qa")
+        self.review("reject", "release", delivery="release", outcome="findings")
+        with self.assertRaisesRegex(factory.FactoryError, "approved current native release judgment"):
+            integration.delivered_accepted(self.path, "release", "reject")
+        command = ["--state-dir", str(self.tasks), "delivered", "--task", "deliver", "--pr", self.transport.identity["url"],
+            "--review", "release", "--after", "qa", "--gh", "/installed/gh", "--acceptance", "accept",
+            "--release-scripts", "/installed/.tessl/plugins/jbaruch/coding-policy/skills/release"]
+        output = StringIO()
+        with patch.object(release_evidence, "GitHub", return_value=self.transport), redirect_stdout(output):
+            self.assertEqual(factory.main(command), 0)
+        self.assertEqual(json.loads(output.getvalue())["acceptance"], verdict)
+        # A damaged or unsupported receipt is no evidence for a new judgment.
+        path = Path(receipt["receipt_path"])
+        saved = path.read_text()
+        for damage in (lambda value: value.pop("merge_commit"), lambda value: value.update(schema_version=2),
+                       lambda value: value.update(extra=True), lambda value: value.update(required=[]),
+                       lambda value: value["approvals"].update(qa=None),
+                       lambda value: value["approvals"]["qa"].update(receipt="not-a-digest"),
+                       lambda value: value["approvals"]["release"].pop("context"),
+                       lambda value: value.update(required=["qa", "qa"]),
+                       lambda value: value["approvals"]["qa"].update(receipt="0" * 64)):
+            value = json.loads(saved)
+            damage(value)
+            path.write_text(json.dumps(value))
+            with self.subTest(damage=value), self.assertRaisesRegex(factory.FactoryError, "Unsupported or damaged|differ from the task's collected"):
+                release_evidence.delivered_receipt(factory.load_task(self.path), "release")
+        path.write_text(saved)
+        # A receipt changed after the judgment no longer matches what the judge assessed.
+        changed = json.loads(path.read_text())
+        changed["merge_commit"] = "e" * 40
+        path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(factory.FactoryError, "differs from the recorded `delivered` receipt"):
+            integration.delivered_accepted(self.path, "release", "accept")
 
     def test_delivered_cli_prints_the_receipt(self):
         self.release_skill_merges()

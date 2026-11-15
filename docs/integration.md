@@ -195,6 +195,12 @@ command with `--acceptance FINAL_RELEASE_ASSIGNMENT` to generate an acceptance
 view: it requires that approved native exact-delivery judgment, current inputs,
 independence, no hold and fresh read-only delivery/CI confirmation. Delivery alone
 reports `pending_native_judgment`. The view creates no acceptance ledger.
+A repository delivered through its release skill gets the same final judgment: launch it with
+`--delivery RELEASE_REVIEW`, the release judgment `delivered` confirmed, and its brief freezes
+that `TASK.RELEASE_REVIEW.delivered.json` receipt (delivery evidence version 3) with no fresh
+observation; the judge reads the merged and deployed state itself. Repeat the `delivered`
+command with `--acceptance FINAL_RELEASE_ASSIGNMENT` for the same view, bound to the receipt's
+digest; it refuses once the task selects other inputs (#151).
 After a successful CI rerun, capture a new final native assignment; old judgments
 remain bound to their original attempt. Crash-before-collection recovery may
 confirm a later successful attempt of the same native run, then collect the
@@ -207,9 +213,14 @@ terminal hold before an effect requires reassessment before another intent.
 
 ## Frozen payload and receipt contracts
 
-`release_evidence.py` owns version-1 frozen review payloads (`schema_version: 1`,
-`inputs`, `admission`, `pr`, `snapshot`, `issues`, `review_digest`). `capture` writes;
-`validate`/`from_assignment`, native launch/brief validation and integration read.
+`release_evidence.py` owns the frozen review payloads. Version 1 has `schema_version`,
+`inputs`, `admission`, `pr`, `snapshot`, `issues` and `review_digest`. Version 2 adds
+`specialists`, the task's roster: one `{id, role, purpose, outcome, current}` row per
+assignment, so the judge can see which effects were reviewed. Version 3 adds each row's
+`candidate`, the commit its result judged (null without a result), so an approval can
+cover code a later change left alone. `capture` writes version 3;
+`validate`/`from_assignment`, native launch/brief validation and integration read all
+three, and `render` adds the roster's coverage instructions for versions 2 and 3.
 These preserve complete canonical bodies and digest their feedback. The same owner
 writes version-2 frozen delivery payloads (`assignment`, `result`, `receipt`,
 `receipt_digest`, `observation`); native release briefs and
@@ -219,7 +230,20 @@ captures use version 2; no migration, mutable refresh store or replacement of ol
 briefs/receipts/results occurs. Both versions require the exact original mechanical
 result and receipt; version 2 also requires a successful observation of the same
 source and native run at an equal or later attempt.
-Neither payload grants approval by itself.
+Version 3 (`review`, `receipt`, `receipt_digest`) freezes a repository's release-skill
+delivery instead: `delivered_receipt` reads the version-1 `TASK.REVIEW.delivered.json`
+that `integration.delivered` writes (`schema_version`, `kind: release-skill-delivery`,
+`task`, `inputs`, `pr`, `head`, `merge_commit`, `review`, `required`, `approvals`).
+`required` lists distinct slug IDs other than `review`; `approvals` has one entry per
+`review` and `required` ID, each exactly `{context, receipt, result}`: the approval's
+native context and the SHA-256 digests of its receipt and result. It refuses missing,
+extra or ill-typed fields, another version, or a receipt that no longer confirms the
+task's current inputs and head. It carries no fresh observation:
+those repositories lack the `checks.yml` push CI version 2 observes, and the final
+judge reads the merged state itself. Native launch and brief validation,
+`validate_delivery`/`from_delivery_assignment` and `delivered_accepted` read it, the
+last against the receipt on disk.
+No payload grants approval by itself.
 
 `integration.py` owns the version-1 immutable command intent (`schema_version`, task,
 assignment, absolute state directory, admission/inputs, PR identity, selected review
