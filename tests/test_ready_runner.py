@@ -166,7 +166,7 @@ class ReadyRunner(unittest.TestCase):
         before = self.completed_writer()
         target = before["assignments"]["implement"]["result"]["candidate"]
         plan = self.plan([self.job(role=role, identity=role, after=["implement"])
-                          for role in ("qa", "code-review", "test-automation")], workers=3, reserve=0)
+                          for role in ("qa", "security", "test-automation")], workers=3, reserve=0)
         supplied = copy.deepcopy(plan)
         plan_file = self.root / "verification-plan.json"
         plan_file.write_text(json.dumps(plan))
@@ -181,7 +181,7 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(selected["assignments"]["implement"], before["assignments"]["implement"])
         self.assertEqual(selected["admission"], before["admission"])
         self.assertEqual(plan, supplied)
-        for identity in ("qa", "code-review", "test-automation"):
+        for identity in ("qa", "security", "test-automation"):
             request = selected["assignments"][identity]["request"]
             self.assertEqual(request["inputs"], selected["inputs"])
             self.assertEqual(request["dependencies"], ["implement"])
@@ -588,6 +588,13 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(empty["available"], False)
         self.assertIn("no model with a supported effort", empty["reason"])
         self.assertEqual(set(self.controller(self.plan([self.job()])).harnesses()), {"codex"})
+
+    def test_codex_refuses_a_code_review_it_cannot_scope(self):
+        # Codex takes no --base, so a Codex code review saw the whole tree and guessed what changed.
+        result = self.tick(self.controller(self.plan([self.job("review", role="code-review")])))
+        self.assertEqual(result["jobs"][0]["state"], "blocked")
+        self.assertIn("run code reviews on Claude, Grok or Antigravity with --base", result["jobs"][0]["reason"])
+        self.assertEqual(result["metrics"]["launched"], 0)
 
     def test_readonly_verifier_cannot_request_writer_mode(self):
         before = (self.directory / "task.json").read_bytes()

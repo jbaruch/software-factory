@@ -59,7 +59,7 @@ The first launch on a task also needs `--rex "$(command -v rex)" --server ENDPOI
 - Antigravity: `factory.py antigravity-start` with `--agy /absolute/agy`. Omit `--effort` for a model that refuses it, such as `claude-opus-4-6-thinking`.
 - Codex: `factory.py codex-start` with `--codex /absolute/codex`.
 
-Writers add `--write --commit-message MESSAGE`, plus `--sandbox /absolute/codex` outside Codex. A code review judges a range, so it runs on Claude, Grok or Antigravity with `--base COMMIT`; Codex takes no `--base`. Check it with `factory.py status --task TASK --id ID`, collect it with the matching `*-collect` command, and close finished tabs with `factory.py tidy`; [the command reference](references/commands.md) gives each one's output. Finish here.
+Writers add `--write --commit-message MESSAGE`, plus `--sandbox /absolute/codex` outside Codex. A code review judges a range, so it runs on Claude, Grok or Antigravity with `--base COMMIT`; Codex takes no `--base` and refuses `--role code-review`. Check it with `factory.py status --task TASK --id ID`, collect it with the matching `*-collect` command, and close finished tabs with `factory.py tidy`; [the command reference](references/commands.md) gives each one's output. Finish here.
 
 ## Step 3 — Inspect current state
 
