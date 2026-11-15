@@ -331,15 +331,16 @@
     {
       "id": "release",
       "write_allowed": false,
-      "purpose": "Judge whether a pull request is ready for the repository's release policy.",
+      "purpose": "Judge whether a pull request is ready for the repository's release policy, and whether a confirmed delivery meets the admitted acceptance.",
       "activate_when": "A pull request awaits its release judgment or final acceptance.",
       "capabilities": [
         "repository release policy",
         "CI evidence",
-        "review feedback"
+        "review feedback",
+        "delivery evidence"
       ],
-      "decision_authority": "Release readiness judgment only; the repository's release skill merges, publishes and deploys after it.",
-      "result": "A readiness judgment with blocking findings or approval, citing the evidence read.",
+      "decision_authority": "Release readiness and final acceptance judgments only; the repository's release skill merges, publishes and deploys.",
+      "result": "A readiness or final acceptance judgment with blocking findings or approval, citing the evidence read.",
       "model_binding": "per_assignment",
       "instructions": [
         "Judge only. Never merge, publish, deploy, push, comment on or change the pull request, and never change the checkout.",

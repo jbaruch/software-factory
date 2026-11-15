@@ -213,9 +213,14 @@ terminal hold before an effect requires reassessment before another intent.
 
 ## Frozen payload and receipt contracts
 
-`release_evidence.py` owns version-1 frozen review payloads (`schema_version: 1`,
-`inputs`, `admission`, `pr`, `snapshot`, `issues`, `review_digest`). `capture` writes;
-`validate`/`from_assignment`, native launch/brief validation and integration read.
+`release_evidence.py` owns the frozen review payloads. Version 1 has `schema_version`,
+`inputs`, `admission`, `pr`, `snapshot`, `issues` and `review_digest`. Version 2 adds
+`specialists`, the task's roster: one `{id, role, purpose, outcome, current}` row per
+assignment, so the judge can see which effects were reviewed. Version 3 adds each row's
+`candidate`, the commit its result judged (null without a result), so an approval can
+cover code a later change left alone. `capture` writes version 3;
+`validate`/`from_assignment`, native launch/brief validation and integration read all
+three, and `render` adds the roster's coverage instructions for versions 2 and 3.
 These preserve complete canonical bodies and digest their feedback. The same owner
 writes version-2 frozen delivery payloads (`assignment`, `result`, `receipt`,
 `receipt_digest`, `observation`); native release briefs and
