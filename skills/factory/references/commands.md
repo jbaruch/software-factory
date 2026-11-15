@@ -6,7 +6,8 @@
 
 - **0:** success; stdout is one JSON document, except for `--help`, which prints usage text.
 - **1, stderr only:** refused, with `factory: REASON` (`ready-runner: REASON` from the runner) naming what to do next.
-- **1, JSON on stdout:** a non-success result from the commands the table marks: `*-collect`, `tidy`, `integrate` and `ready_runner.py`.
+- **1, JSON on stdout:** a non-success result from `tidy`, `integrate` or `ready_runner.py`, as the table says.
+- **1, JSON on stdout and `factory: REASON` on stderr:** `*-collect` saved the result but couldn't close the tab.
 - **2:** the command line doesn't parse.
 - **75:** the task's line is busy, because another launcher or runner holds its execution lock. Retry later.
 
