@@ -153,6 +153,9 @@ class EvidenceRex(FakeRex):
 
 class Integration(unittest.TestCase):
     def setUp(self):
+        servers = patch.object(codex_worker, "configured_mcp_servers", return_value=[])  # No real `codex mcp list` (#153).
+        servers.start()
+        self.addCleanup(servers.stop)
         self.native = fixtures.NativeResults()
         self.native.setUp()
         self.addCleanup(self.native.doCleanups)

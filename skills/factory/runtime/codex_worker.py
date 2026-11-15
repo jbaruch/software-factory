@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -172,10 +174,75 @@ async def stop_child(process):
         await process.wait()
 
 
+# Codex 0.166 adds MCP servers at runtime that `mcp list` never shows: the Codex Apps server behind `apps`, plugin
+# servers and hosted connectors behind `plugins` (review of #159). Listing and launch both run with them off.
+RUNTIME_MCP_OFF = ("--disable", "apps", "--disable", "plugins")
+
+
+def codex_says(binary, cwd, environment, arguments):
+    """Ask Codex about its effective configuration in this checkout; an answer it cannot give refuses the launch."""
+    try:
+        answer = subprocess.run([str(binary), *arguments], cwd=str(cwd), env=environment,
+                                capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise factory.FactoryError(f"Cannot ask Codex `{' '.join(arguments[-3:])}` here ({type(exc).__name__}); the "
+                                   f"worker refuses to launch with MCP servers it cannot turn off. Check that {binary} "
+                                   "still runs and `codex mcp list` answers in the checkout, then launch again") from None
+    if answer.returncode != 0:
+        # Codex's stderr can quote a malformed configuration line, token and all, so it never reaches the error
+        # the receipt keeps (review of #159).
+        raise factory.FactoryError(f"Codex `{' '.join(arguments[-3:])}` exited {answer.returncode}; the worker refuses to "
+                                   "launch with MCP servers it cannot turn off. Run `codex mcp list` in the checkout to see why")
+    return answer.stdout
+
+
+def mcp_listing(binary, cwd, environment, arguments):
+    try:
+        servers = json.loads(codex_says(binary, cwd, environment, [*arguments, "mcp", "list", "--json"]))
+    except ValueError:
+        servers = None
+    if not isinstance(servers, list) or any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in servers):
+        raise factory.FactoryError("Codex returned no readable MCP server list; the worker refuses to launch with servers "
+                                   "it cannot turn off: inspect `codex mcp list --json`")
+    return servers
+
+
+def configured_mcp_servers(binary, cwd, environment):
+    """Every MCP server the checkout's Codex configuration files define, across all layers, once Codex confirms
+    the worker's overrides leave none of them, and no runtime contribution, on. With plugins off, the list holds
+    only names a `-c` override can address."""
+    names = [item["name"] for item in mcp_listing(binary, cwd, environment, RUNTIME_MCP_OFF)]
+    # Codex splits a `-c` key on every dot and keeps quotes literally, so `mcp_servers."a.b".enabled` would define a
+    # new, invalid server and fail the launch; a name it cannot address refuses instead.
+    unaddressable = [name for name in names if not re.fullmatch(r"[A-Za-z0-9_:@/-]+", name)]
+    if unaddressable:
+        raise factory.FactoryError(f"Codex MCP server {unaddressable[0]!r} cannot be turned off with a `-c` override; "
+                                   "rename it without dots or remove it, then launch again")
+    # Managed configuration outranks command-line flags (review of #159), so Codex itself reports what stays on.
+    overrides = [*RUNTIME_MCP_OFF, *mcp_overrides(names)]
+    still_on = [item["name"] for item in mcp_listing(binary, cwd, environment, overrides) if item.get("enabled") is not False]
+    states = {fields[0]: fields[-1] for fields in map(str.split, codex_says(binary, cwd, environment, [*overrides, "features", "list"]).splitlines())
+              if len(fields) >= 3}
+    still_on += [f"the {feature} feature" for feature in ("apps", "plugins") if states.get(feature) != "false"]
+    if still_on:
+        raise factory.FactoryError(f"Codex keeps {', '.join(still_on)} on despite the worker's overrides, as managed "
+                                   "configuration can; the worker refuses to launch with MCP. Have whoever manages this "
+                                   "Mac's Codex configuration turn it off, or launch on another harness")
+    return names
+
+
+def mcp_overrides(names):
+    """Turn off every configured MCP server for this run, as the Claude worker runs without MCP. A Tessl server
+    from a checkout's committed .codex/config.toml rewrote the tracked AGENTS.md, and the factory commit took it
+    with the writer's work (#153)."""
+    return [part for name in names for part in ("-c", f"mcp_servers.{name}.enabled=false")]
+
+
 async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time, timer=time.monotonic,
-                  git_scope=None, scan=None):
+                  git_scope=None, scan=None, mcp_servers=None):
     git_scope = git_scope or factory_commit.isolated_git
     scan = scan or factory_commit.scan_staged
+    mcp_servers = mcp_servers or configured_mcp_servers
     if args.receipt.exists() or args.events.exists():
         raise factory.FactoryError("Native attempt already has artifacts; collect or inspect it, never relaunch it blindly")
     try:
@@ -280,7 +347,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                         prompt.seek(0)
                         # No --strict-config: tessl writes its own `tessl` tables into .codex/config.toml, which
                         # Codex ignores with a warning and strict mode made fatal for every assignment.
-                        process = await spawn(str(binary), "--no-daemon", "exec", "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                        configured = await asyncio.to_thread(mcp_servers, binary, workdir, environment)
+                        process = await spawn(str(binary), "--no-daemon", "exec",
+                                          "--disable", "multi_agent", "--disable", "multi_agent_v2",
+                                          *RUNTIME_MCP_OFF,
                                           "--json", "--color", "never",
                                           "--output-schema", str(schema), "--model", args.model,
                                           # Operator policy: agents run unconfined and never prompt; the factory
@@ -291,6 +361,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           "-c", "features.shell_snapshot=false",
                                           "-c", "shell_environment_policy.experimental_use_profile=false",
                                           "-c", "shell_environment_policy.set.ZDOTDIR=" + shell_path,
+                                          *mcp_overrides(configured),
                                           "--cd", workdir, "-",
                                           cwd=workdir, env=environment,
                                           limit=NATIVE_LINE_LIMIT,

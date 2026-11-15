@@ -37,6 +37,9 @@ def events(outcome="approved"):
             dict(type="turn.completed", usage=dict(input_tokens=100, output_tokens=30))]
 
 
+REAL_CONFIGURED_MCP_SERVERS = worker.configured_mcp_servers
+
+
 class FakeProcess:
     def __init__(self, payload, exit_code=0, timeout=False):
         self.lines = iter([json.dumps(event).encode() + b"\n" for event in payload])
@@ -59,10 +62,36 @@ class FakeProcess:
         self.signals.append(signal)
 
 
+def effective_mcp_servers(command, configured, *, runtime_plugins=("hosted-connector",)):
+    """The MCP servers Codex 0.166 `exec` would start for this argv with ChatGPT authentication, independent of the
+    worker: configured servers unless `-c mcp_servers."NAME".enabled=false`, the Codex Apps server unless the apps
+    feature is off, and runtime plugin contributions unless the plugins feature is off (codex-rs/core/src/mcp.rs,
+    codex-rs/ext/mcp at rust-v0.166.0)."""
+    off = {arg for previous, arg in zip(command, command[1:]) if previous == "--disable"}
+    # Codex splits a `-c` key on every dot and keeps quotes literally (`codex -c 'mcp_servers."tessl".enabled=false'`
+    # fails to load the configuration), so only a bare-name path turns a configured server off.
+    paths = [arg.partition("=") for previous, arg in zip(command, command[1:]) if previous == "-c"]
+    disabled = {key.split(".")[1] for key, _, value in paths if len(key.split(".")) == 3
+                and key.split(".")[0] == "mcp_servers" and key.split(".")[2] == "enabled" and value == "false"}
+    unknown = {key.split(".")[1] for key, _, _ in paths if key.startswith("mcp_servers.")} - set(configured)
+    if unknown:
+        raise ValueError(f"Codex refuses to load an override for an undefined server: {sorted(unknown)}")
+    servers = set(configured) - disabled
+    if "apps" not in off:
+        servers.add("codex_apps")
+    if "plugins" not in off:
+        servers.update(runtime_plugins)
+    return servers
+
+
 class NativeResults(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        # The checkout's effective MCP servers, as `codex mcp list --json` would report them (#153).
+        servers = patch.object(worker, "configured_mcp_servers", return_value=["tessl", "docker-mcp-toolbox"])
+        servers.start()
+        self.addCleanup(servers.stop)
         self.root = Path(directory.name)
         self.repo = self.root / "repo"
         subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(self.repo)], check=True)
@@ -117,8 +146,10 @@ class NativeResults(unittest.TestCase):
             "model_reasoning_effort": self.args.effort,
             "allow_login_shell": False,
             "features": {"shell_snapshot": False},
-            "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}})
+            "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}, "mcp_servers": {"tessl": {"enabled": False}, "docker-mcp-toolbox": {"enabled": False}}})
         self.assertNotIn("--strict-config", command)  # tessl's `tessl` tables made it fatal on every launch.
+        # No MCP server can start: configured, Codex Apps or plugin-contributed (#153, review of #159).
+        self.assertEqual(effective_mcp_servers(command, ["tessl", "docker-mcp-toolbox"]), set())
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
         self.assertEqual(options["limit"], 64 * 1024 * 1024)  # One large command output no longer ends the run (#147).
         prompt = options["stdin"]
@@ -133,6 +164,70 @@ class NativeResults(unittest.TestCase):
             return asyncio.run(worker.execute(self.args, spawn=self.spawn,
                                                clock=lambda: 1000.0, timer=lambda: 10.0,
                                                git_scope=self.git_scope, scan=self.scan))
+
+    def codex_fixture(self, listed, *, verified="[]", features="apps stable false\nplugins stable false", failing=None):
+        """A provider-free `codex` answering the worker's configuration questions: the configured servers, what
+        stays on under the worker's overrides, and the effective feature states."""
+        binary = self.root / "codex-fixture"
+        binary.write_text("#!/bin/bash\nset -euo pipefail\n" + (failing + "\n" if failing else "") + "case \" $* \" in\n"
+                          f"  *' features list '*) printf '%s\\n' {shlex.quote(features)};;\n"
+                          f"  *' -c '*) printf '%s' {shlex.quote(verified)};;\n"
+                          f"  *) printf '%s' {shlex.quote(listed)};;\nesac\n")
+        binary.chmod(0o700)
+        return REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ))
+
+    def test_mcp_servers_come_from_codex_and_an_unreadable_list_refuses(self):
+        # A provider-free fixture standing in for `codex mcp list --json` (#153).
+        self.assertEqual(self.codex_fixture('[{"name": "tessl", "enabled": true}, {"name": "port-eu", "enabled": false}]',
+                                            verified='[{"name": "tessl", "enabled": false}, {"name": "port-eu", "enabled": false}]'),
+                         ["tessl", "port-eu"])
+        self.assertEqual(self.codex_fixture("[]"), [])
+        for listed, failing in (("not json", None), ("[]", "echo boom >&2; exit 3"), ('[{"enabled": true}]', None)):
+            with self.subTest(listed=listed, failing=failing), self.assertRaisesRegex(factory.FactoryError, "refuses to launch"):
+                self.codex_fixture(listed, failing=failing)
+        self.assertEqual(worker.mcp_overrides(["port-eu", "a@b/c:d"]),
+                         ["-c", "mcp_servers.port-eu.enabled=false", "-c", "mcp_servers.a@b/c:d.enabled=false"])
+        with self.assertRaisesRegex(factory.FactoryError, "cannot be turned off"):
+            self.codex_fixture('[{"name": "a.b"}]')
+
+    def test_codex_diagnostics_never_reach_the_error_or_the_receipt(self):
+        # Review of #159: a config-load failure can quote the offending line, credentials included.
+        marker = "github_pat_SECRETMARKER"
+        diagnostic = f"echo 'Error loading config.toml: bad header Authorization = \"Bearer {marker}\"' >&2; exit 3"
+        with self.assertRaises(factory.FactoryError) as raised:
+            self.codex_fixture("[]", failing=diagnostic)
+        self.assertNotIn(marker, str(raised.exception))
+        self.assertIn("exited 3", str(raised.exception))
+        binary = self.root / "codex-fixture"
+        self.args.codex = binary
+        with patch.object(worker, "configured_mcp_servers", REAL_CONFIGURED_MCP_SERVERS):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("exited 3", receipt["error"])
+        self.assertNotIn(marker, self.args.receipt.read_text())
+
+    def test_plugin_servers_leave_the_list_before_any_override(self):
+        # Overriding a plugin-backed server, which no configuration file defines, fails Codex's configuration load.
+        binary = self.root / "codex-fixture"
+        binary.write_text("#!/bin/bash\nset -euo pipefail\ncase \" $* \" in *' features list '*) printf 'apps stable false\\nplugins stable false\\n';;"
+                          " *' --disable plugins mcp '*) printf '[]';; *) printf '[{\"name\": \"code-review\"}]';; esac\n")
+        binary.chmod(0o700)
+        self.assertEqual(REAL_CONFIGURED_MCP_SERVERS(binary, self.repo, dict(os.environ)), [])
+
+    def test_whatever_codex_keeps_on_under_the_overrides_refuses(self):
+        # Review of #159: managed configuration outranks the worker's flags; Codex's own answer decides.
+        for verified, features, kept in (('[{"name": "tessl", "enabled": true}]', "apps stable false\nplugins stable false", "tessl"),
+                                         ('[{"name": "tessl", "enabled": false}]', "apps stable true\nplugins stable false", "apps feature"),
+                                         ('[{"name": "tessl", "enabled": false}]', "apps stable false", "plugins feature")):
+            with self.subTest(kept=kept), self.assertRaisesRegex(factory.FactoryError, f"keeps .*{kept}.* on"):
+                self.codex_fixture('[{"name": "tessl", "enabled": true}]', verified=verified, features=features)
+
+    def test_the_runtime_fixture_sees_every_server_codex_would_start(self):
+        # Control for effective_mcp_servers(): a launch without the overrides would start them all.
+        self.assertEqual(effective_mcp_servers(["codex", "exec", "-"], ["tessl"]), {"tessl", "codex_apps", "hosted-connector"})
+        # The quoted key #159 first generated defines a new, invalid server instead of turning tessl off.
+        with self.assertRaisesRegex(ValueError, "undefined server"):
+            effective_mcp_servers(["codex", "exec", "-c", 'mcp_servers."tessl".enabled=false', "-"], ["tessl"])
 
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
         receipt = self.execute()
@@ -1940,7 +2035,11 @@ class NativeResults(unittest.TestCase):
         payload_events = events()
         payload_events.insert(2, dict(type="item.completed", item=dict(type="command_execution", aggregated_output="x" * 100000)))
         payload = "\n".join(json.dumps(event) for event in payload_events)
-        binary.write_text("#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' " + shlex.quote(payload) + "\n")
+        binary.write_text("#!/bin/bash\nset -euo pipefail\n"
+                          # Answers the worker's MCP listing as real Codex would, then plays the run (#153).
+                          "case \" $* \" in *' mcp list '*) printf '[]\\n'; exit 0;;"
+                          " *' features list '*) printf 'apps stable false\\nplugins stable false\\n'; exit 0;; esac\n"
+                          "printf '%s\\n' " + shlex.quote(payload) + "\n")
         binary.chmod(0o700)
         self.launch_assignment(codex=str(binary), execute=False)
         engine = self.root / "engine"

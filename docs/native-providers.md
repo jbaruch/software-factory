@@ -552,7 +552,21 @@ override. The [configuration reference](https://learn.chatgpt.com/docs/config-fi
 defines the controls: omitted login uses nonlogin execution, explicit login
 requests are rejected, and shell snapshots/profile loading are disabled. Native
 HOME/CODEX_HOME, authentication, sandbox, model, effort and deadlines are preserved.
-Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
+Children turn off every MCP server Codex would start in the checkout, as the Claude
+worker runs without MCP: a Tessl server from a checkout's committed `.codex/config.toml`
+rewrote the tracked `AGENTS.md`, and the factory commit took it with the writer's work.
+Codex adds servers at runtime that `codex mcp list` never shows, so children pass
+`--disable apps` (the Codex Apps server) and `--disable plugins` (plugin servers and
+hosted connectors), the two features that gate every runtime contribution in Codex
+0.166. With both off, the worker lists the servers the configuration files define
+with `codex mcp list --json`, across every layer, and passes
+`-c mcp_servers.NAME.enabled=false` for each. Codex splits a `-c` key on every dot
+and keeps quotes literally, so the name stays bare; a listed name with a dot, or an
+unavailable list, refuses the launch. Overriding a name no configuration file
+defines, such as a plugin-backed server, would fail Codex's configuration load.
+Managed configuration outranks command-line flags, so before launching, the worker
+asks Codex with the same overrides (`mcp list --json`, `features list`) and refuses
+when any server, `apps` or `plugins` stays on. Children no longer pass `--strict-config`: tessl writes its own `tessl` tables
 into each checkout's `.codex/config.toml`, which Codex ignores with a warning
 and strict mode turned into a startup failure for every assignment.
 Shared environment consumers, other providers and factory Git helper environments
