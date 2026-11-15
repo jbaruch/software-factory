@@ -58,20 +58,23 @@ class AcceptanceEvidence(unittest.TestCase):
         self.reader = [factory.sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py"), "--role", "qa"]
         self.fetches = []
 
-    def respond(self, updated_at="2026-11-13T03:37:26Z"):
+    def respond(self, updated_at="2026-11-13T03:37:26Z", *, edited_at=None, renamed_at=None, answer=None):
+        """GitHub's GraphQL answer for the acceptance issue, created 2026-11-12 and changed as the arguments say."""
         class Response(io.BytesIO):
             def __enter__(self):
                 return self
             def __exit__(self, *exc):
                 return False
         def urlopen(request, timeout):
-            self.fetches.append((request.full_url, request.get_header("Authorization")))
-            return Response(json.dumps(dict(title="Cap context at 200K", updated_at=updated_at,
-                                            body="Acceptance: first call under 200K tokens.")).encode())
+            self.fetches.append((request.full_url, request.get_header("Authorization"), json.loads(request.data)["variables"]))
+            issue = dict(title="Cap context at 200K", body="Acceptance: first call under 200K tokens.",
+                         createdAt="2026-11-12T06:07:07Z", updatedAt=updated_at, lastEditedAt=edited_at,
+                         timelineItems=dict(nodes=[dict(createdAt=renamed_at)] if renamed_at else []))
+            return Response(json.dumps(answer or dict(data=dict(repository=dict(issueOrPullRequest=issue)))).encode())
         return patch("urllib.request.OpenerDirector.open", side_effect=lambda request, timeout: urlopen(request, timeout))
 
-    def capture(self, token: str | None = "github_pat_keychainonly", updated_at="2026-11-13T03:37:26Z"):
-        with patch.object(factory, "read_token", return_value=token), self.respond(updated_at):
+    def capture(self, token: str | None = "github_pat_keychainonly", updated_at="2026-11-13T03:37:26Z", **changes):
+        with patch.object(factory, "read_token", return_value=token), self.respond(updated_at, **changes):
             return factory.capture_acceptance(self.admission, self.requirements)
 
     def record(self, acceptance, requirements=None):
@@ -82,7 +85,8 @@ class AcceptanceEvidence(unittest.TestCase):
     def test_inputs_capture_renders_for_its_revision_without_the_token(self):
         acceptance = self.capture()
         assert acceptance is not None
-        self.assertEqual(self.fetches, [("https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", "Bearer github_pat_keychainonly")])
+        self.assertEqual(self.fetches, [("https://api.github.com/graphql", "Bearer github_pat_keychainonly",
+                                         dict(owner="jbaruch", name="nanoclaw", number=1368))])
         with patch.object(factory, "native_harness", return_value="codex"):
             brief = factory.rendered_acceptance(self.record(acceptance), self.reader, "qa")
             with self.assertRaisesRegex(factory.FactoryError, "none were captured for this requirements revision: select the inputs again"):
@@ -171,13 +175,32 @@ class AcceptanceEvidence(unittest.TestCase):
     def test_capture_fails_closed_without_a_token_or_on_drift(self):
         with self.assertRaisesRegex(factory.FactoryError, "no read-only token"):
             self.capture(token=None)
-        with self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
-            self.capture(updated_at="2026-11-14T09:00:00Z")
+        for changes in (dict(edited_at="2026-11-14T09:00:00Z"), dict(renamed_at="2026-11-14T09:00:00Z")):
+            with self.subTest(**changes), self.assertRaisesRegex(factory.FactoryError,
+                    "changed since the task's requirements revision .*title or body changed at 2026-11-14T09:00:00"):
+                self.capture(updated_at="2026-11-14T09:00:00Z", **changes)
         self.assertIsNone(factory.capture_acceptance(dict(acceptance=["fixture/notes.md"]), self.requirements))
 
+    def test_the_tasks_own_merge_closing_its_issue_is_not_changed_acceptance(self):
+        # #167: the PR's merge closed the issue at 04:55:03Z and moved updatedAt; its title and body never changed,
+        # and an edit before the revision is part of it.
+        acceptance = self.capture(updated_at="2026-11-15T04:55:03Z", edited_at="2026-11-13T00:00:00Z")
+        assert acceptance is not None
+        self.assertIn("Cap context at 200K", acceptance)
+
+    def test_an_unreadable_issue_or_revision_time_refuses(self):
+        missing = dict(data=dict(repository=dict(issueOrPullRequest=None)),
+                       errors=[dict(type="NOT_FOUND", message="Could not resolve to an issue or pull request with the number of 1368.")])
+        with self.assertRaisesRegex(factory.FactoryError, "returned no issue .*Could not resolve"):
+            self.capture(answer=missing)
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond(), \
+                self.assertRaisesRegex(factory.FactoryError, "is not a time"):
+            factory.capture_acceptance(self.admission, "jbaruch/nanoclaw#1368@yesterday")
+
     def test_whitespace_or_case_never_dodges_the_revision_guard(self):
-        # Review of #152: ' Owner/Repo#N@T' must still be checked against the issue's updated_at.
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond("2026-11-14T09:00:00Z"):
+        # Review of #152: ' Owner/Repo#N@T' must still be checked against the issue's last title or body change.
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
+                self.respond("2026-11-14T09:00:00Z", edited_at="2026-11-14T09:00:00Z"):
             for requirements in ("  jbaruch/nanoclaw#1368@2026-11-13T03:37:26Z ", "JBaruch/NanoClaw#1368@2026-11-13T03:37:26Z"):
                 with self.subTest(requirements=requirements), \
                         self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
