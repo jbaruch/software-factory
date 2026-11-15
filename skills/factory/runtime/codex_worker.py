@@ -337,7 +337,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                     raise factory.FactoryError("Cannot allocate the private native shell directory; restore temporary storage access/space and reconcile this attempt before another launch") from None
                 # Off the event loop: it runs Git, and xattr on macOS.
                 environment = await asyncio.to_thread(factory.worker_environment,
-                    {**native_environment(), "ZDOTDIR": str(directory)}, args.write, workdir)
+                    {**native_environment(), "ZDOTDIR": str(directory)}, workdir)
                 # JSON basic-string escapes also fit TOML, except raw DEL;
                 # keep non-BMP Unicode literal rather than JSON surrogate pairs.
                 shell_path = json.dumps(str(directory), ensure_ascii=False).replace("\x7f", "\\u007f")
