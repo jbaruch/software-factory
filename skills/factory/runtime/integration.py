@@ -70,13 +70,25 @@ def native_context(harness, receipt):
     return receipt.get(key) if isinstance(receipt, dict) else None
 
 
+# Every field a Claude or Grok writer leaves null until its run ends, as each worker writes its starting receipt.
+UNFINISHED_FIELDS = {"claude": ("finished_at", "elapsed_seconds", "exit_code", "report", "usage", "model_usage", "turns",
+                                "rate_limits", "candidate", "error", "commit"),
+                     "grok": ("finished_at", "elapsed_seconds", "exit_code", "report", "request_id", "usage", "model_usage",
+                              "turns", "candidate", "error", "commit")}
+
+
 def unfinished_writer(harness, receipt, args, assignment):
     """A Claude or Grok writer receipt exactly as its worker wrote it at start: bound to this assignment, never finished."""
-    return (receipt.get("kind") == harness + "-execution" and receipt.get("schema_version") == (2 if harness == "claude" else 3)
-            and receipt.get("state") == "starting" and receipt.get("writer") is True and receipt.get("commit") is None
-            and receipt.get("job") == args.job and receipt.get("inputs") == assignment["request"].get("inputs")
-            and receipt.get("brief_sha256") == assignment["request"].get("instructions_sha256")
-            and all(receipt.get(field) is None for field in ("finished_at", "exit_code", "report", "candidate", "error")))
+    request = assignment["request"]
+    return (isinstance(receipt, dict) and receipt.get("kind") == harness + "-execution"
+            and receipt.get("schema_version") == (2 if harness == "claude" else 3)
+            and receipt.get("state") == "starting" and receipt.get("writer") is True
+            and receipt.get("job") == args.job and receipt.get("inputs") == request.get("inputs")
+            and receipt.get("brief_sha256") == request.get("instructions_sha256")
+            and receipt.get("role") == args.role and receipt.get("cwd") == request.get("cwd")
+            and receipt.get("worktree_git_dir") == str(args.worktree_git_dir)
+            and receipt.get("seconds") == args.seconds and receipt.get("max_turns") == args.turns
+            and all(field in receipt and receipt[field] is None for field in UNFINISHED_FIELDS[harness]))
 
 
 def contributor_context(key, record, assignment):

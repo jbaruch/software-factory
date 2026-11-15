@@ -677,6 +677,26 @@ class GrokApprovals(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "read-only approved"):
                 integration.approvals(record, "release", ["grok-writer"])
 
+    def test_grok_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):
+        # Observed (#156): a Grok correction lost to the 2026-11-12 reboot kept a starting receipt and blocked delivery.
+        writer_session = "00000000-0000-0000-0000-00000000000c"
+        record, assignment, receipt = self.run_grok("grok-lost", "backend", writer_session, write=True)
+        command = assignment["request"]["command"]
+        receipt_path = Path(command[command.index("--receipt") + 1])
+        starting = {**receipt, "state": "starting", "commit": None, "finished_at": None, "elapsed_seconds": None,
+                    "exit_code": None, "report": None, "request_id": None, "usage": None, "model_usage": None,
+                    "turns": None, "candidate": None, "error": None}
+        receipt_path.write_text(json.dumps(starting))
+        with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="lost")):
+            self.assertEqual(integration.contributor_context("grok-lost", record, assignment), writer_session)
+            for damaged in ({**starting, "request_id": "fixture-request"},
+                            {key: value for key, value in starting.items() if key != "request_id"},
+                            {**starting, "kind": "claude-execution"}):
+                with self.subTest(damaged={key: damaged.get(key) for key in ("request_id", "kind")}):
+                    receipt_path.write_text(json.dumps(damaged))
+                    with self.assertRaises(factory.FactoryError):
+                        integration.contributor_context("grok-lost", record, assignment)
+
     def test_manual_or_stale_grok_approval_refused(self):
         record = copy.deepcopy(self.record)
         record["assignments"]["grok-qa"]["native_collected"] = False

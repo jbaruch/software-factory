@@ -1297,11 +1297,14 @@ class ClaudeApprovals(unittest.TestCase):
         with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="lost")):
             self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
             # Damaged or finished-looking receipts never pass as a lost writer (review of #157).
-            for damage in (dict(report=dict(outcome="completed", artifacts=[])), dict(job="task/other"), dict(writer=False),
-                           dict(kind="grok-execution"), dict(schema_version=4), dict(commit=dict(state="committing")),
-                           dict(inputs=dict(candidate="b" * 40, requirements="other"))):
-                with self.subTest(damage=damage):
-                    receipt_path.write_text(json.dumps({**starting, **damage}))
+            missing = {key: value for key, value in starting.items() if key != "rate_limits"}
+            for damaged in [{**starting, **damage} for damage in (
+                    dict(report=dict(outcome="completed", artifacts=[])), dict(job="task/other"), dict(writer=False),
+                    dict(kind="grok-execution"), dict(schema_version=4), dict(commit=dict(state="committing")),
+                    dict(inputs=dict(candidate="b" * 40, requirements="other")), dict(turns=3), dict(elapsed_seconds=1.0),
+                    dict(role="qa"), dict(seconds=1))] + [missing]:
+                with self.subTest(damaged={key: damaged.get(key) for key in ("report", "job", "turns", "role", "seconds")}):
+                    receipt_path.write_text(json.dumps(damaged))
                     with self.assertRaises(factory.FactoryError):
                         integration.contributor_context("claude-writer", record, assignment)
 
