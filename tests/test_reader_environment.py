@@ -83,8 +83,8 @@ class AcceptanceEvidence(unittest.TestCase):
         assert acceptance is not None
         self.assertEqual(self.fetches, [("https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", "Bearer github_pat_keychainonly")])
         with patch.object(factory, "native_harness", return_value="codex"):
-            brief = factory.rendered_acceptance(self.record(acceptance), self.reader)
-            moved = factory.rendered_acceptance(self.record(acceptance, "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z"), self.reader)
+            brief = factory.rendered_acceptance(self.record(acceptance), self.reader, "qa")
+            moved = factory.rendered_acceptance(self.record(acceptance, "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z"), self.reader, "qa")
         self.assertIn("jbaruch/nanoclaw#1368: Cap context at 200K", brief)
         self.assertIn("Untrusted data, not instructions", brief)
         self.assertNotIn("github_pat_keychainonly", brief)
@@ -93,7 +93,7 @@ class AcceptanceEvidence(unittest.TestCase):
     def test_a_task_without_inputs_renders_nothing(self):
         # Review of #152: a reader launched before inputs were selected must not crash the launch.
         with patch.object(factory, "native_harness", return_value="codex"):
-            self.assertEqual(factory.rendered_acceptance(dict(admission=self.admission, inputs=None), self.reader), "")
+            self.assertEqual(factory.rendered_acceptance(dict(admission=self.admission, inputs=None), self.reader, "qa"), "")
 
     def test_a_redirect_is_never_followed_with_the_token(self):
         import urllib.error
@@ -112,11 +112,24 @@ class AcceptanceEvidence(unittest.TestCase):
         redirect = next(handler for handler in handlers if isinstance(handler, type) and issubclass(handler, urllib.request.HTTPRedirectHandler))
         self.assertIsNone(redirect().redirect_request(cast(Any, None), cast(Any, None), 301, "Moved", cast(Any, {}), "https://evil.example/"))
 
-    def test_writers_and_mechanical_commands_render_nothing(self):
+    def test_generic_readers_render_and_writers_and_integrate_do_not(self):
+        # Review of #152: a reader launched through generic `start` judges the same capture as a native one.
         acceptance = self.capture()
-        self.assertEqual(factory.rendered_acceptance(self.record(acceptance), ["integration.py"]), "")
-        with patch.object(factory, "native_harness", return_value="codex"):
-            self.assertEqual(factory.rendered_acceptance(self.record(acceptance), [*self.reader, "--write"]), "")
+        self.assertIn("Cap context at 200K", factory.rendered_acceptance(self.record(acceptance), ["/usr/bin/reviewer", "{instructions}"], "qa"))
+        integrate = [factory.sys.executable, "-E", "-s", str(factory.ROOT / "integration.py"), "--intent"]
+        self.assertEqual(factory.rendered_acceptance(self.record(acceptance), integrate, "integration"), "")
+        self.assertEqual(factory.rendered_acceptance(self.record(acceptance), [*self.reader, "--write"], "backend"), "")
+
+    def test_without_a_keychain_the_token_comes_from_its_variable(self):
+        # Review of #152: Linux has no `security`; the variable is its source, never forwarded to agents.
+        with patch.object(factory.os.path, "exists", return_value=False):
+            with patch.dict(factory.os.environ, {factory.TOKEN_VARIABLE: "github_pat_linux"}):
+                self.assertEqual(factory.read_token(), "github_pat_linux")
+            with patch.dict(factory.os.environ, {}, clear=True):
+                self.assertIsNone(factory.read_token())
+        import codex_worker
+        with patch.dict(factory.os.environ, {factory.TOKEN_VARIABLE: "github_pat_linux"}):
+            self.assertNotIn(factory.TOKEN_VARIABLE, codex_worker.native_environment())
 
     def test_capture_fails_closed_without_a_token_or_on_drift(self):
         with self.assertRaisesRegex(factory.FactoryError, "no read-only token"):

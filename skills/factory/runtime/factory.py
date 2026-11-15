@@ -1555,10 +1555,18 @@ SECURITY = "/usr/bin/security"
 ACCEPTANCE_ISSUE = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(?:issues|pull)/(\d+)")
 
 
+# Where macOS has no Keychain to ask: Linux reads the token from this variable, which native_environment()'s
+# allowlist already keeps away from every agent.
+TOKEN_VARIABLE = "SOFTWARE_FACTORY_GITHUB_READ_TOKEN"
+
+
 def read_token():
-    """The read-only GitHub token from the macOS Keychain, or None when this Mac has none."""
+    """The read-only GitHub token: the macOS Keychain, or the environment variable where there is no Keychain."""
     if not os.path.exists(SECURITY):
-        return None
+        token = os.environ.get(TOKEN_VARIABLE, "").strip()
+        if token and any(character.isspace() for character in token):
+            raise FactoryError(f"{TOKEN_VARIABLE} must hold one read-only GitHub token")
+        return token or None
     try:
         found = subprocess.run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
                                capture_output=True, text=True, timeout=30, check=False)
@@ -1590,9 +1598,9 @@ def capture_acceptance(admission, requirements):
         return None
     token = read_token()
     if token is None:
-        raise FactoryError(f"The acceptance references are GitHub issues, and this Mac has no read-only token for the "
-                           f"factory to capture them for readers: store it with `security add-generic-password -s "
-                           f"{KEYCHAIN_SERVICE} -a \"$USER\" -w`, then select the inputs again")
+        raise FactoryError(f"The acceptance references are GitHub issues, and this machine has no read-only token for the "
+                           f"factory to capture them for readers: on macOS store it with `security add-generic-password -s "
+                           f"{KEYCHAIN_SERVICE} -a \"$USER\" -w`, elsewhere export {TOKEN_VARIABLE}; then select the inputs again")
     return acceptance_evidence(admission, requirements, token)
 
 
@@ -1603,9 +1611,11 @@ def inputs_acceptance(record, requirements):
     return capture_acceptance(record["admission"], requirements)
 
 
-def rendered_acceptance(record, command):
-    """The stored acceptance text a semantic reader's brief carries; rendering never touches the network."""
-    if record["admission"] is None or record["inputs"] is None or "--write" in command or native_harness(command) is None:
+def rendered_acceptance(record, command, role):
+    """The stored acceptance text every reader's brief carries, generic starts included; writers and the
+    mechanical integrate command carry none. Rendering never touches the network."""
+    if (record["admission"] is None or record["inputs"] is None or "--write" in command
+            or integration_request(dict(role=role, command=command))):
         return ""
     stored = record.get("acceptance", {}).get(record["inputs"]["requirements"])
     if stored is not None:
@@ -1931,7 +1941,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
         check_role_write(role)
-    instructions = "" if existing else brief(role, goal, designs="--write" in command) + rendered_acceptance(record, command)
+    instructions = "" if existing else brief(role, goal, designs="--write" in command) + rendered_acceptance(record, command, role)
     request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
