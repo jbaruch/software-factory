@@ -757,6 +757,13 @@ def commit_completed(args, receipt, identity, *, git_scope=isolated_git, scan=sc
     with git_scope(args, identity) if args.commit_message is not None else nullcontext():
         if committing:
             commit_changes(args, receipt, git_scope=git_scope, scan=scan)
+            if receipt["commit"]["state"] == "unchanged":
+                # A writer removed two tracked files and reported completed, but they were back on disk when the
+                # factory staged, so a verification round re-checked the old candidate (#166).
+                raise Refusal("The writer reported completed, but its checkout ends identical to the candidate, so "
+                              "there is nothing to commit or verify. If it changed files, something outside it restored "
+                              "them; inspect its report and the worktree. A writer with nothing to change reports "
+                              "blocked with its reasons")
         candidate = factory.git_commit(".", "HEAD")
         try:
             factory.check_checkout(".", ".", candidate, expected_identity=identity,

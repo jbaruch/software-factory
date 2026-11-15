@@ -1752,6 +1752,9 @@ def brief(role_id, goal, *, designs=False):
     return (f"# Assignment: {role_id}\n\n{goal}\n\n"
             + "\n".join("- " + item for item in role["instructions"])
             + ("\n- " + SIMPLICITY if designs or role_id == "architecture" else "")
+            # A completed writer whose checkout ends unchanged fails: nothing to commit or verify (#166).
+            + ("\n- Report completed only with your changes left in the checkout, which the factory commits; with "
+               "nothing to change, report blocked and say why." if designs else "")
             + "\n\nAuthority: " + role["decision_authority"]
             + "\nReturn: " + role["result"]
             # Read-only specialists cannot write files, so the report is their only collected output.

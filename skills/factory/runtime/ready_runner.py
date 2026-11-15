@@ -296,6 +296,10 @@ class Runner:
             observe=lambda: factory.status(rex, record, source), collected=selected)
         if not args.write or args.commit_message is None or receipt.get("commit") is None:
             raise factory.FactoryError("--from-writer needs an explicit validated factory commit")
+        if receipt["commit"]["state"] == "unchanged":
+            # An earlier runtime collected such a writer as completed; its candidate is the one already verified (#166).
+            raise factory.FactoryError("--from-writer: the writer committed nothing, so its candidate is the one already "
+                                       "verified; plan a new writer instead of verifying it again")
         expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],
             artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
         if source["result"] != expected:

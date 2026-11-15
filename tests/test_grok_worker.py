@@ -168,10 +168,13 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
         self.assertTrue(collected["assignments"]["implement"]["native_collected"])
 
-    def test_writer_without_edits_records_an_unchanged_commit(self):
+    def test_a_completed_writer_without_edits_fails_and_commits_nothing(self):
+        # #166: a completed writer whose checkout ends unchanged has nothing to commit or verify.
         receipt = self.execute_writer(self.launch_writer(), edit=False)
-        self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["commit"]["state"], receipt["candidate"]), ("unchanged", self.candidate))
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("nothing to commit or verify", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "unchanged")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
 
     def test_writer_mode_requires_a_writing_role_commit_message_and_sandbox(self):
         for changes, message in ((dict(role="qa"), "does not permit writer"),
@@ -654,6 +657,8 @@ class GrokApprovals(unittest.TestCase):
                        cwd=str(f.repo), num_turns=1, usage=None, modelUsage=None,
                        structuredOutput=dict(outcome="completed" if write else "approved", artifacts=["fixture"]))]
         async def spawn(*command, **options):
+            if write:
+                (f.repo / "NOTES.md").write_text("Notes\n")  # A completed writer commits its change (#166).
             return echo_cwd(FakeProcess(events), options)
         probe, configuration = fake_grok_discovery(f.repo, f.root, efforts)
         with redirect_stdout(StringIO()):
@@ -674,7 +679,8 @@ class GrokApprovals(unittest.TestCase):
             self.assertEqual(integration.contributor_context("grok-writer", record, record["assignments"]["grok-writer"]),
                              writer_session)
             self.assertEqual(integration.approvals(record, "release", ["grok-qa"])["grok-qa"]["context"], self.REVIEW_SESSION)
-            with self.assertRaisesRegex(factory.FactoryError, "read-only approved"):
+            # Its commit moved past the task's inputs, so it is refused before its role is even weighed.
+            with self.assertRaisesRegex(factory.FactoryError, "read-only approved|current original native result"):
                 integration.approvals(record, "release", ["grok-writer"])
 
     def test_grok_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):
