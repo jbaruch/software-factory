@@ -623,8 +623,7 @@ def git_binary():
 
 
 def command_environment():
-    # The Linux read-only token never reaches a child command, generic readers included (review of #152).
-    environment = {key: value for key, value in os.environ.items() if key not in GIT_ROUTING_VARIABLES and key != TOKEN_VARIABLE}
+    environment = {key: value for key, value in os.environ.items() if key not in GIT_ROUTING_VARIABLES}
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     if any(key.startswith("GIT_CONFIG") for key in environment):
         try:
@@ -1556,18 +1555,18 @@ SECURITY = "/usr/bin/security"
 ACCEPTANCE_ISSUE = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(?:issues|pull)/(\d+)")
 
 
-# Where macOS has no Keychain to ask: Linux reads the token from this variable, which native_environment()'s
-# allowlist already keeps away from every agent.
+# Where macOS has no Keychain to ask: Linux reads the token from this variable. The factory takes it out of its
+# own environment when it loads, so no child process of any kind, agent, generic command or Git, inherits it.
 TOKEN_VARIABLE = "SOFTWARE_FACTORY_GITHUB_READ_TOKEN"
+ENVIRONMENT_TOKEN = os.environ.pop(TOKEN_VARIABLE, "").strip()
 
 
 def read_token():
     """The read-only GitHub token: the macOS Keychain, or the environment variable where there is no Keychain."""
     if not os.path.exists(SECURITY):
-        token = os.environ.get(TOKEN_VARIABLE, "").strip()
-        if token and any(character.isspace() for character in token):
+        if ENVIRONMENT_TOKEN and any(character.isspace() for character in ENVIRONMENT_TOKEN):
             raise FactoryError(f"{TOKEN_VARIABLE} must hold one read-only GitHub token")
-        return token or None
+        return ENVIRONMENT_TOKEN or None
     try:
         found = subprocess.run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
                                capture_output=True, text=True, timeout=30, check=False)
@@ -1664,7 +1663,8 @@ def acceptance_evidence(admission, requirements, token):
                                f"{getattr(exc, 'reason', exc)}); restore GitHub access or the read-only token, then run factory.py inputs again") from None
         if not isinstance(issue, dict):
             raise FactoryError(f"GitHub returned no issue for {owner}/{repo}#{number}; inspect the acceptance reference")
-        pinned = re.fullmatch(re.escape(f"{owner}/{repo}#{number}@") + r"(.+)", requirements)
+        # GitHub owner and repository names are case-insensitive; stray whitespace must not dodge the guard (review of #152).
+        pinned = re.fullmatch(re.escape(f"{owner}/{repo}#{number}@") + r"(.+)", requirements.strip(), re.IGNORECASE)
         if pinned and pinned.group(1) != issue.get("updated_at"):
             raise FactoryError(f"Acceptance {owner}/{repo}#{number} changed since the task's requirements revision "
                                f"({pinned.group(1)}, now {issue.get('updated_at')}); select inputs at the current revision "

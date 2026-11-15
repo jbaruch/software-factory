@@ -528,13 +528,15 @@ the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
 Every reader's brief, generic `start` readers included, renders it as untrusted data
 while the revision is current; writers and the mechanical integrate command get none,
 and launches never touch the network. When the requirements revision names
-the issue (`owner/repo#N@T`), its `updated_at` must still be `T`. The read-only token
+the issue (`owner/repo#N@T`, owner and repository compared without case, surrounding
+whitespace ignored), its `updated_at` must still be `T`. The read-only token
 lives in the macOS Keychain, one entry per Mac (`security add-generic-password -s
 software-factory-github-read -a "$USER" -w`; a fine-grained token with read-only
 Contents, Issues, Pull requests and Metadata). Where there is no Keychain, such as
-Linux, the factory reads `SOFTWARE_FACTORY_GITHUB_READ_TOKEN`, which the native
-environment allowlist never forwards to an agent. Only the factory reads it, and it
-never enters an agent's environment, brief or the task record. Capture fails
+Linux, the factory reads `SOFTWARE_FACTORY_GITHUB_READ_TOKEN` once when it loads and
+removes it from its own environment, so no child process, agent, generic command or
+Git, inherits it. Only the factory reads it, and it never enters an agent's
+environment, brief or the task record. Capture fails
 closed: without the token, or with an unreadable issue, `inputs` refuses. This stops a misbriefed agent, not a hostile one: an unconfined agent can
 still reach the operator's credentials on disk. Writers keep the operator's
 identity: the factory owns their commits and nothing pushes.

@@ -120,18 +120,21 @@ class AcceptanceEvidence(unittest.TestCase):
         self.assertEqual(factory.rendered_acceptance(self.record(acceptance), integrate, "integration"), "")
         self.assertEqual(factory.rendered_acceptance(self.record(acceptance), [*self.reader, "--write"], "backend"), "")
 
-    def test_without_a_keychain_the_token_comes_from_its_variable(self):
-        # Review of #152: Linux has no `security`; the variable is its source, never forwarded to agents.
+    def test_without_a_keychain_the_token_comes_from_its_variable_and_no_child_inherits_it(self):
+        # Review of #152: Linux has no `security`; the factory reads the variable once and removes it from its own
+        # environment, so no child process of any kind inherits it.
+        script = ("import os, subprocess, sys; os.environ['SOFTWARE_FACTORY_GITHUB_READ_TOKEN'] = 'github_pat_linux'; "
+                  "sys.path.insert(0, sys.argv[1]); import factory; "
+                  "print(factory.ENVIRONMENT_TOKEN); "
+                  "print(subprocess.run([sys.executable, '-c', 'import os; print(os.environ.get(\\'SOFTWARE_FACTORY_GITHUB_READ_TOKEN\\'))'], "
+                  "capture_output=True, text=True).stdout.strip())")
+        result = subprocess.run([factory.sys.executable, "-B", "-c", script, str(factory.ROOT)], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.split(), ["github_pat_linux", "None"])
         with patch.object(factory.os.path, "exists", return_value=False):
-            with patch.dict(factory.os.environ, {factory.TOKEN_VARIABLE: "github_pat_linux"}):
+            with patch.object(factory, "ENVIRONMENT_TOKEN", "github_pat_linux"):
                 self.assertEqual(factory.read_token(), "github_pat_linux")
-            with patch.dict(factory.os.environ, {}, clear=True):
+            with patch.object(factory, "ENVIRONMENT_TOKEN", ""):
                 self.assertIsNone(factory.read_token())
-        import codex_worker
-        with patch.dict(factory.os.environ, {factory.TOKEN_VARIABLE: "github_pat_linux"}):
-            self.assertNotIn(factory.TOKEN_VARIABLE, codex_worker.native_environment())
-            # Generic `start` commands and the factory's own Git children run with command_environment().
-            self.assertNotIn(factory.TOKEN_VARIABLE, factory.command_environment())
 
     def test_capture_fails_closed_without_a_token_or_on_drift(self):
         with self.assertRaisesRegex(factory.FactoryError, "no read-only token"):
@@ -139,6 +142,14 @@ class AcceptanceEvidence(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
             self.capture(updated_at="2026-11-14T09:00:00Z")
         self.assertIsNone(factory.capture_acceptance(dict(acceptance=["fixture/notes.md"]), self.requirements))
+
+    def test_whitespace_or_case_never_dodges_the_revision_guard(self):
+        # Review of #152: ' Owner/Repo#N@T' must still be checked against the issue's updated_at.
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond("2026-11-14T09:00:00Z"):
+            for requirements in ("  jbaruch/nanoclaw#1368@2026-11-13T03:37:26Z ", "JBaruch/NanoClaw#1368@2026-11-13T03:37:26Z"):
+                with self.subTest(requirements=requirements), \
+                        self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
+                    factory.capture_acceptance(self.admission, requirements)
 
     def test_repeated_inputs_keep_the_first_capture_of_a_revision(self):
         # Review of #152: re-running inputs after an issue edit must not replace what earlier readers judged.
