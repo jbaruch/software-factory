@@ -70,6 +70,42 @@ def native_context(harness, receipt):
     return receipt.get(key) if isinstance(receipt, dict) else None
 
 
+# A Claude or Grok writer's starting receipt, field for field, as its worker writes it before the native run.
+STARTING_FIELDS = {
+    "claude": {"schema_version", "kind", "state", "job", "inputs", "repository_identity", "worktree_git_dir", "cwd",
+               "brief_sha256", "role", "binary", "requested_model", "requested_effort", "discovery", "native_session",
+               "seconds", "max_turns", "created_at", "finished_at", "elapsed_seconds", "exit_code", "report", "usage",
+               "model_usage", "turns", "rate_limits", "candidate", "events", "error", "writer", "sandbox", "commit"},
+    "grok": {"schema_version", "kind", "state", "job", "inputs", "repository_identity", "worktree_git_dir", "cwd",
+             "brief_sha256", "role", "binary", "requested_model", "requested_effort", "discovery", "configuration",
+             "native_session", "seconds", "max_turns", "created_at", "finished_at", "elapsed_seconds", "exit_code",
+             "report", "request_id", "usage", "model_usage", "turns", "candidate", "events", "error", "writer",
+             "sandbox", "commit"}}
+UNFINISHED_FIELDS = ("finished_at", "elapsed_seconds", "exit_code", "report", "usage", "model_usage", "turns",
+                     "candidate", "error", "commit")
+
+
+def unfinished_writer(harness, receipt, args, assignment, record):
+    """A Claude or Grok writer receipt exactly as its worker wrote it at start: bound to this assignment, never finished."""
+    request = assignment["request"]
+    late = UNFINISHED_FIELDS + (("rate_limits",) if harness == "claude" else ("request_id",))
+    return (isinstance(receipt, dict) and set(receipt) == STARTING_FIELDS[harness]
+            and receipt["kind"] == harness + "-execution" and receipt["schema_version"] == (2 if harness == "claude" else 3)
+            and receipt["state"] == "starting" and receipt["writer"] is True
+            and receipt["job"] == args.job and receipt["inputs"] == request.get("inputs")
+            and receipt["brief_sha256"] == request.get("instructions_sha256")
+            and receipt["repository_identity"] == record["admission"]["repository_identity"]
+            and receipt["role"] == args.role and receipt["cwd"] == request.get("cwd")
+            and receipt["worktree_git_dir"] == str(args.worktree_git_dir)
+            and receipt["requested_model"] == args.model and receipt["requested_effort"] == args.effort
+            and receipt["seconds"] == args.seconds and receipt["max_turns"] == args.turns
+            and receipt["sandbox"] == str(args.sandbox) and receipt["events"] == str(args.events)
+            and isinstance(receipt["binary"], str) and isinstance(receipt["discovery"], dict)
+            and (harness == "claude" or isinstance(receipt["configuration"], dict))
+            and type(receipt["created_at"]) in (int, float)
+            and all(receipt[field] is None for field in late))
+
+
 def contributor_context(key, record, assignment):
     # A failed writer remains a contributor; never require or invent a success.
     import claude_worker
@@ -92,6 +128,11 @@ def contributor_context(key, record, assignment):
         # a failed writer keeps the identity its receipt and events must carry.
         if not isinstance(receipt, dict) or receipt.get("native_session") != args.native_session:
             raise factory.FactoryError("Contributor receipt differs from its frozen native session")
+        if unfinished_writer(harness, receipt, args, assignment, record) and assignment["result"] is None and \
+                factory.status(factory.connect(record), record, assignment)["state"] == "lost":
+            # A writer lost with its host never finished its receipt or produced a result a reviewer could
+            # share; like a failed writer, its frozen session is its identity (#156).
+            return args.native_session
         if receipt.get("state") != "failed":
             collected_native(key, record, assignment, current=False)
         return args.native_session

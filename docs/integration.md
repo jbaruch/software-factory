@@ -72,6 +72,10 @@ Generic successful dependencies or manual report registration supply no approval
 Failed writers remain contributors. Supported native execution receipts (versions
 4–6) and original version-1 event lines supply their thread identity, with matching
 job, repository, worktree, input and brief bindings and a terminal Rex observation.
+A Claude or Grok writer lost with its host also remains a contributor: when its receipt
+never left `starting`, its assignment has no result and Rex reports it `lost`, its
+frozen native session supplies contributor identity only, never successful evidence
+or an approval. One Rex still reports running is refused.
 A unique original `thread.started` event must agree with any recorded thread ID.
 A failure, partial report or blocked owner result never becomes successful evidence;
 unknown/ambiguous contributor identity refuses. Original artifacts stay unchanged.

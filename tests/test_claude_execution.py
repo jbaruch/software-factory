@@ -1280,6 +1280,42 @@ class ClaudeApprovals(unittest.TestCase):
         self.assertEqual(receipt["state"], "failed")
         self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
 
+    def test_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):
+        # Observed (#156): a writer lost to the 2026-11-12 reboot kept a starting receipt and blocked delivery for good.
+        writer_session = "00000000-0000-0000-0000-000000000004"
+        record, assignment, _ = self.run_claude_writer(writer_session, exit_code=1)
+        request = assignment["request"]
+        args = claude_worker.parser().parse_args(request["command"][4:])
+        receipt_path = Path(request["command"][request["command"].index("--receipt") + 1])
+        # Field for field what the Claude worker writes before its native run: an independent fixture.
+        starting = dict(schema_version=2, kind="claude-execution", state="starting", job=args.job, inputs=request["inputs"],
+                        repository_identity=record["admission"]["repository_identity"], worktree_git_dir=str(args.worktree_git_dir),
+                        cwd=request["cwd"], brief_sha256=request["instructions_sha256"], role=args.role, binary="/fixture/claude",
+                        requested_model=args.model, requested_effort=args.effort, discovery={}, native_session=writer_session,
+                        seconds=args.seconds, max_turns=args.turns, created_at=1000.0, finished_at=None, elapsed_seconds=None,
+                        exit_code=None, report=None, usage=None, model_usage=None, turns=None, rate_limits=None, candidate=None,
+                        events=str(args.events), error=None, writer=True, sandbox=str(args.sandbox), commit=None)
+        receipt_path.write_text(json.dumps(starting))
+        with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="running")), \
+                self.assertRaises(factory.FactoryError):
+            integration.contributor_context("claude-writer", record, assignment)  # Not lost: it may still produce work.
+        with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="lost")):
+            self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+            # Every missing field and every changed binding or finishing field refuses (review of #157).
+            damaged = [{k: v for k, v in starting.items() if k != field} for field in starting if field != "native_session"]
+            damaged += [{**starting, field: value} for field, value in (
+                ("report", dict(outcome="completed", artifacts=[])), ("job", "task/other"), ("writer", False),
+                ("kind", "grok-execution"), ("schema_version", 4), ("commit", dict(state="committing")),
+                ("inputs", dict(candidate="b" * 40, requirements="other")), ("turns", 3), ("elapsed_seconds", 1.0),
+                ("rate_limits", []), ("role", "qa"), ("seconds", 1), ("requested_model", "other"),
+                ("repository_identity", dict(other=True)), ("events", "/elsewhere"), ("sandbox", "/elsewhere"),
+                ("extra", 1))]
+            for receipt in damaged:
+                with self.subTest(fields=sorted(set(starting) ^ set(receipt)) or [k for k in receipt if receipt[k] != starting.get(k)]):
+                    receipt_path.write_text(json.dumps(receipt))
+                    with self.assertRaises(factory.FactoryError):
+                        integration.contributor_context("claude-writer", record, assignment)
+
     def test_claude_writer_cannot_approve_its_own_work(self):
         record, assignment, _ = self.run_claude_writer(SESSION)
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):

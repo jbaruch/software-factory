@@ -677,6 +677,35 @@ class GrokApprovals(unittest.TestCase):
             with self.assertRaisesRegex(factory.FactoryError, "read-only approved"):
                 integration.approvals(record, "release", ["grok-writer"])
 
+    def test_grok_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):
+        # Observed (#156): a Grok correction lost to the 2026-11-12 reboot kept a starting receipt and blocked delivery.
+        writer_session = "00000000-0000-0000-0000-00000000000c"
+        record, assignment, _ = self.run_grok("grok-lost", "backend", writer_session, write=True)
+        request = assignment["request"]
+        args = grok_worker.parser().parse_args(request["command"][4:])
+        receipt_path = Path(request["command"][request["command"].index("--receipt") + 1])
+        # Field for field what the Grok worker writes before its native run: an independent fixture.
+        starting = dict(schema_version=3, kind="grok-execution", state="starting", job=args.job, inputs=request["inputs"],
+                        repository_identity=record["admission"]["repository_identity"], worktree_git_dir=str(args.worktree_git_dir),
+                        cwd=request["cwd"], brief_sha256=request["instructions_sha256"], role=args.role, binary="/fixture/grok",
+                        requested_model=args.model, requested_effort=args.effort, discovery={}, configuration={},
+                        native_session=writer_session, seconds=args.seconds, max_turns=args.turns, created_at=1000.0,
+                        finished_at=None, elapsed_seconds=None, exit_code=None, report=None, request_id=None, usage=None,
+                        model_usage=None, turns=None, candidate=None, events=str(args.events), error=None, writer=True,
+                        sandbox=str(args.sandbox), commit=None)
+        receipt_path.write_text(json.dumps(starting))
+        with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="lost")):
+            self.assertEqual(integration.contributor_context("grok-lost", record, assignment), writer_session)
+            damaged = [{k: v for k, v in starting.items() if k != field} for field in starting if field != "native_session"]
+            damaged += [{**starting, field: value} for field, value in (
+                ("request_id", "fixture-request"), ("kind", "claude-execution"), ("configuration", None),
+                ("requested_effort", "other"), ("created_at", "yesterday"), ("extra", 1))]
+            for receipt in damaged:
+                with self.subTest(fields=sorted(set(starting) ^ set(receipt)) or [k for k in receipt if receipt[k] != starting.get(k)]):
+                    receipt_path.write_text(json.dumps(receipt))
+                    with self.assertRaises(factory.FactoryError):
+                        integration.contributor_context("grok-lost", record, assignment)
+
     def test_manual_or_stale_grok_approval_refused(self):
         record = copy.deepcopy(self.record)
         record["assignments"]["grok-qa"]["native_collected"] = False

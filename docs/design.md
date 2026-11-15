@@ -87,7 +87,9 @@ Bind review evidence to the inputs it assessed, including candidate commit and r
 The release judgment alone consumes the complete frozen external-review packet;
 ordinary exact-input specialist approvals remain valid when only review prose changes.
 Failed native writers retain their original contributor identity for independence,
-without promoting failed execution or blocked results into successful evidence.
+without promoting failed execution or blocked results into successful evidence. A Claude or Grok
+writer lost with its host, its receipt unfinished and its result null, keeps its
+frozen native session as that identity in the same way.
 Collected successful writers also retain their original provenance when a later
 correction advances or cleanup removes the checkout. Collected evidence validates
 against the admitted repository identity and retained candidate/parent/tree objects;
