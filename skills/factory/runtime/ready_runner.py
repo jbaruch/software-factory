@@ -6,10 +6,12 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import time
+from typing import Any
 
 import codex_capacity
 import factory
@@ -153,6 +155,17 @@ def reserved(request):
 
 def capacity_reason(snapshot, binary, now, minimum, job):
     """Gate selected requests; metadata never selects a model or accepts work."""
+    reason = pool_reason(snapshot, binary, now, minimum)
+    if reason is not None:
+        return reason
+    models = snapshot.get("models") or []
+    if not any(model["model"] == job["model"] and job["effort"] in (model.get("effort_ids") or []) for model in models):
+        return "Selected model/effort is not in the fresh native catalog; repair the explicit plan"
+    return None
+
+
+def pool_reason(snapshot, binary, now, minimum):
+    """Why the Codex route can't take work now, or None: the gates every Codex launch passes."""
     if (type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] != 1 or snapshot.get("binary") != str(binary)
             or snapshot.get("route") != "codex-native"
             or snapshot.get("account", {}).get("type") != "chatgpt"
@@ -173,9 +186,6 @@ def capacity_reason(snapshot, binary, now, minimum, job):
         for window in (primary, pool.get("secondary")):
             if window is not None and (window.get("remaining_percent") is None or window["remaining_percent"] <= minimum):
                 return "Observed quota is at the configured reserve; wait for fresh recovered capacity"
-    models = snapshot.get("models") or []
-    if not any(model["model"] == job["model"] and job["effort"] in (model.get("effort_ids") or []) for model in models):
-        return "Selected model/effort is not in the fresh native catalog; repair the explicit plan"
     return None
 
 
@@ -389,6 +399,42 @@ class Runner:
             if self.probe_failures == self.probe_limit:
                 self.capacity_error += "; metadata retry allowance exhausted: restore the service before restarting this controller"
 
+    def harnesses(self):
+        """Each passed harness's routing availability, so a coordinator uses a harness the moment its quota
+        resets instead of waiting for the operator to say so. `available` is decided here, by the same gates
+        a launch applies; `windows` are observations only."""
+        self.refresh_capacity()
+        snapshot: dict[str, Any] = self.capacity if isinstance(self.capacity, dict) else {}
+        pools: list[Any] = snapshot.get("pools") or []
+        reason = self.capacity_error or (pool_reason(snapshot, self.binary, self.clock(), self.plan["limits"]["minimum_remaining_percent"])
+                                         if self.capacity is not None else "Capacity is unavailable")
+        if reason is None and not any(model.get("effort_ids") for model in snapshot.get("models") or []):
+            # Healthy pools with no launchable model/effort would still refuse every Codex job.
+            reason = "The fresh native catalog has no model with a supported effort; refresh it before planning Codex work"
+        report: dict[str, Any] = dict(codex=dict(available=reason is None, reason=reason, windows=[
+            dict(pool=pool.get("limit_id"), remaining_percent=window.get("remaining_percent"), resets_at=window.get("resets_at"))
+            for pool in pools for window in (pool.get("primary"), pool.get("secondary")) if window]))
+        if self.antigravity is not None:
+            import native_antigravity
+            self.metrics["quota_probes"] += 1
+            try:
+                usage: dict[str, Any] = native_antigravity.probe(str(self.antigravity), str(self.directory))
+                groups: list[Any] = usage["groups"]
+                # Quota groups only: the probe can't verify account eligibility or which model draws on which group.
+                report["antigravity"] = dict(available=None, reason="Quota groups observed; eligibility and model-to-group "
+                    "binding are unverified, so a launch is the test", windows=[
+                    dict(pool=group["group"], remaining_percent=group["percent_remaining"], resets_at=group["resets_at"])
+                    for group in groups])
+            except (native_antigravity.UsageError, OSError, subprocess.TimeoutExpired) as exc:
+                # The Antigravity worker runs this same probe before its model turn and fails on it, so it can't take work.
+                report["antigravity"] = dict(available=False, reason=str(exc), windows=[])
+        # Neither has a live usage probe, and a past run's numbers can't vouch for today's account.
+        if self.claude is not None:
+            report["claude"] = dict(available=None, reason="Claude reports its limits only inside a run; a launch is the test", windows=[])
+        if self.grok is not None:
+            report["grok"] = dict(available=None, reason="Grok reports no usage; a launch is the test", windows=[])
+        return report
+
     def tick(self) -> dict:
         self.metrics["polls"] += 1
         records, phases, active, issues = self.observe()
@@ -513,24 +559,33 @@ class Runner:
                     capacity=self.capacity, capacity_error=self.capacity_error)
 
 
-def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep) -> dict:
+def run(runner, *, seconds, once=False, timer=time.monotonic, sleep=time.sleep, harnesses=False) -> dict:
+    """Run the plan under the line's lock; the CLI also asks for the harness report, taken before the lock is released."""
     started = timer()
+
+    def finish(value, elapsed, **changes):
+        value.update(changes)
+        if harnesses:
+            # Probed inside the lock, then measured, so the probes count as coordination overhead.
+            value["harnesses"] = runner.harnesses()
+            value.update(metrics=dict(runner.metrics), capacity=runner.capacity, capacity_error=runner.capacity_error)
+            elapsed = timer() - started
+        value["elapsed_seconds"] = elapsed
+        return value
+
     with factory.execution_lock(runner.directory, runner.line):
         runner.select_writer_candidate()
         while True:
             result = runner.tick()
             elapsed = timer() - started
-            result["elapsed_seconds"] = elapsed
             if result["result"] != "pending" or once:
-                return result
+                return finish(result, elapsed)
             if elapsed >= seconds:
-                result["result"] = "pending_at_budget"
-                return result
+                return finish(result, elapsed, result="pending_at_budget")
             sleep(min(POLL_SECONDS, seconds - elapsed))
             elapsed = timer() - started
             if elapsed >= seconds:
-                result.update(result="pending_at_budget", elapsed_seconds=elapsed)
-                return result
+                return finish(result, elapsed, result="pending_at_budget")
 
 
 def main(argv=None):
@@ -554,7 +609,7 @@ def main(argv=None):
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
         runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, antigravity=args.antigravity, rex=args.rex, server=args.server,
                         from_writer=args.from_writer)
-        result = run(runner, seconds=args.seconds, once=args.once)
+        result = run(runner, seconds=args.seconds, once=args.once, harnesses=True)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0 if result["result"] == "complete" else 1
     except (factory.FactoryError, native_codex.CodexProbeError, OSError, ValueError, TimeoutError) as exc:

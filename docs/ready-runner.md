@@ -98,6 +98,17 @@ report and successful process observation. It is not task acceptance. Other
 results are `needs_action`, `pending` for a one-cycle observation, and
 `pending_at_budget`. The CLI returns zero only for `complete`.
 
+The CLI result also carries `harnesses`, one entry per harness binary passed, so a
+coordinator routes new work to a harness the moment its quota resets. Each entry is
+`{available, reason, windows}`. `available` is decided by the runner: `true` means the
+harness passes the same gates a launch applies, `false` means it can't take work now
+(`reason` says why), and `null` means its availability is unverified and only a launch
+can test it. `windows` lists observed `{pool, remaining_percent, resets_at}` and never
+decides anything. Codex is `true` or `false` from its live quota snapshot and pool
+gates, with the plan's reserve. Antigravity is `null`, with its live weekly quota
+groups as windows: the probe can't verify account eligibility or which model draws on
+which group. Claude and Grok are `null`: neither has a live usage probe.
+
 ## Limits and reservations
 
 Worker slots and active task slots are reserved from observed processes, including

@@ -48,7 +48,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 
 ## Runner flags
 
-`--codex` is always required because it also sandboxes every writer's factory commit. `--claude`, `--grok` and `--antigravity` are required when the plan has jobs for them. The Codex quota gate applies only to Codex jobs. Assignments outside the plan count toward `workers` while their process runs; the result's `active_workers` includes them. Collection and `--from-writer` evidence follow each assignment's harness.
+`--codex` is always required because it also sandboxes every writer's factory commit. Pass every installed harness binary, even one the plan doesn't use: the result's `harnesses` then says whether each one can take work, in the shape [docs/ready-runner.md](https://github.com/jbaruch/software-factory/blob/main/docs/ready-runner.md) defines. `--claude`, `--grok` and `--antigravity` are required when the plan has jobs for them. The Codex quota gate applies only to Codex jobs. Assignments outside the plan count toward `workers` while their process runs; the result's `active_workers` includes them. Collection and `--from-writer` evidence follow each assignment's harness.
 
 ## Verifying a writer's commit
 
