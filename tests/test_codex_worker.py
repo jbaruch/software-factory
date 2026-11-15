@@ -120,7 +120,7 @@ class NativeResults(unittest.TestCase):
             "shell_environment_policy": {"experimental_use_profile": False, "set": {"ZDOTDIR": str(directory)}}})
         self.assertNotIn("--strict-config", command)  # tessl's `tessl` tables made it fatal on every launch.
         self.assertEqual(command[command.index("--model") + 1], self.args.model)
-        self.assertEqual(options["limit"], worker.NATIVE_LINE_LIMIT)
+        self.assertEqual(options["limit"], 64 * 1024 * 1024)  # One large command output no longer ends the run (#147).
         prompt = options["stdin"]
         self.prompt_inputs.append(prompt.read())
         self.assertEqual(prompt.read(), b"")
