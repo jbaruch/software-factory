@@ -27,15 +27,7 @@ Delivery starts after independent verifiers approve the task's current candidate
 
    `codex-start`, `grok-start` and `antigravity-start` take the same `--release-pr`, `--gh` and `--release-scripts` flags.
 
-3. Merge, naming every required approval with `--after`. Where the repository meets the [prerequisites](#prerequisites), integrate:
-
-   ```sh
-   python3 -B "$SKILL_DIR/runtime/factory.py" integrate --task TASK --id integration \
-     --pr 'https://github.com/OWNER/REPO/pull/NUMBER' --review release --after QA_ID --after REVIEW_ID \
-     --gh /absolute/gh --release-scripts /absolute/repo/RELEASE-SKILL
-   ```
-
-   Otherwise, from the task's worktree, merge with `Skill(skill: "release", args: "existing-pr PR_URL")`, then confirm that it merged what the release judgment approved:
+3. From the task's worktree, merge with `Skill(skill: "release", args: "existing-pr PR_URL")`. The factory keeps that worktree locked, so the release skill leaves it and its branch to step 5 (coding-policy 0.10.12 and later; an earlier release skill reports its `git worktree remove` failing after the merge, which is expected). Then confirm that it merged what the release judgment approved, naming every required approval with `--after`:
 
    ```sh
    python3 -B "$SKILL_DIR/runtime/factory.py" delivered --task TASK \
@@ -43,21 +35,11 @@ Delivery starts after independent verifiers approve the task's current candidate
      --gh /absolute/gh --release-scripts /absolute/repo/RELEASE-SKILL
    ```
 
-   `delivered` re-checks the approvals as `integrate` does, refuses until the PR is merged, and refuses a merged head the release judgment never saw, which goes to the operator. It records `TASK.RELEASE_ID.delivered.json` beside the task. This is the factory's delivery step for those repositories, not a hand step.
+   `delivered` refuses until the PR is merged, and refuses a merged head the release judgment never saw, which goes to the operator. Every `--after` approval must be `approved`, current for the task's exact candidate and requirements, read-only and collected from its original native evidence; approval contexts are distinct and independent of every writer that contributed. `RELEASE-SKILL` must be ignored and untracked. `delivered` records `TASK.RELEASE_ID.delivered.json` beside the task. This is the factory's delivery step, not a hand step.
 
 If the branch conflicts with a moved base before step 1 or during review, run `python3 -B "$SKILL_DIR/runtime/factory.py" rebase-worktree --task TASK --onto BASE-COMMIT`, then a writer (`purpose: work`) whose goal applies the printed patch with `git apply --3way`, resolves the conflicts and re-runs the gate, and verify the produced commit with `--from-writer`: `integration`, the approvals you will name with `--after`, and each effect specialist whose code the resolution changed, then move the open PR to it (step 1). Writers cannot make merge commits, so the factory refreshes by replaying.
 
-4. After the merge and any deploy, run the final acceptance judgment, before cleanup and before selecting other inputs: a new read-only `release` assignment, as in step 2 but with `--delivery ID` in place of `--release-pr`, collected the same way; its `--cwd` is the task's worktree, still at the candidate. `ID` is the integration's ID after `integrate`, or the release judgment's ID that `delivered` confirmed. Its brief freezes that delivery, and it judges the admitted acceptance against the merged and deployed result, including what the verifiers listed as not yet verifiable. Confirm it by repeating the step 3 command with `--acceptance FINAL_ID` added, which prints the receipt with an `acceptance` object and refuses a judgment that isn't approved, assessed a different delivery, or comes from a writer's session. Findings become new work for the task.
+4. After the merge and any deploy, run the final acceptance judgment, before cleanup and before selecting other inputs: a new read-only `release` assignment, as in step 2 but with `--delivery ID` in place of `--release-pr`, collected the same way; its `--cwd` is the task's worktree, still at the candidate. `ID` is the release judgment's ID that `delivered` confirmed. Its brief freezes that delivery, and it judges the admitted acceptance against the merged and deployed result, including what the verifiers listed as not yet verifiable. Confirm it by repeating the step 3 `delivered` command with `--acceptance FINAL_ID` added, which prints the receipt with an `acceptance` object and refuses a judgment that isn't approved, assessed a different delivery, or comes from a writer's session. Findings become new work for the task.
 
-5. Then remove the task's provisioned worktree with `python3 -B "$SKILL_DIR/runtime/factory.py" release-worktree --task TASK`. It refuses while the worktree is dirty or an assignment there may still run, and keeps the branch: deleting branches belongs to the repository's release policy, so run the release skill's worktree prune afterwards, which removes a merged branch only after checking it has no unmerged commits.
+5. Then remove the task's provisioned worktree with `python3 -B "$SKILL_DIR/runtime/factory.py" release-worktree --task TASK`. It refuses while the worktree is dirty or an assignment there may still run, and keeps the branch. Delete the merged branch with `git branch -D factory/TASK/ID`; `delivered` already proved its head merged, and a squash merge leaves `git branch -d` unable to tell. Otherwise the release policy's session-start leftover hook deletes it once origin holds its tip.
 
-## Prerequisites
-
-`integrate` holds with an operator prerequisite, and never changes repository settings, unless all of these hold:
-
-- Every `--after` approval is `approved`, current for the task's exact candidate and requirements, read-only and collected from its original native evidence. Approval contexts are distinct and independent of every writer that contributed.
-- The release skill is installed, ignored and untracked, at the admitted repository's ACR (`.codex/skills/acr__jbaruch__coding-policy__release`) or Tessl (`.tessl/plugins/jbaruch/coding-policy/skills/release`) location.
-- The repository's `checks.yml` defines the required `verify` job, and the canonical review watcher reports the PR ready, including its Claude review.
-- The target branch has classic branch protection: strict required status checks, administrator enforcement, no force pushes or deletion, no bypass allowances, and required `verify` bound to the GitHub Actions app (ID 15368).
-
-A repository that doesn't meet them merges with `Skill(skill: "release", args: "existing-pr PR_URL")` and confirms with `delivered` (step 3).

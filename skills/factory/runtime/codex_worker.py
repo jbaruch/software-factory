@@ -356,7 +356,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           "--json", "--color", "never",
                                           "--output-schema", str(schema), "--model", args.model,
                                           # Operator policy: agents run unconfined and never prompt; the factory
-                                          # keeps isolated worktrees, owned commits and integration authority.
+                                          # keeps isolated worktrees and owned commits; merges stay with the release skill.
                                           "--dangerously-bypass-approvals-and-sandbox",
                                           "-c", "model_reasoning_effort=" + json.dumps(args.effort),
                                           "-c", "allow_login_shell=false",

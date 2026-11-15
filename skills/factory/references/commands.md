@@ -6,7 +6,7 @@
 
 - **0:** success; stdout is one JSON document, except for `--help`, which prints usage text.
 - **1, stderr only:** refused, with `factory: REASON` (`ready-runner: REASON` from the runner) naming what to do next.
-- **1, JSON on stdout:** a non-success result from `tidy`, `integrate` or `ready_runner.py`, as the table says.
+- **1, JSON on stdout:** a non-success result from `tidy` or `ready_runner.py`, as the table says.
 - **1, JSON on stdout and `factory: REASON` on stderr:** `*-collect` saved the result but couldn't close the tab.
 - **2:** the command line doesn't parse; argparse prints usage and the error on stderr.
 - **75:** the task's line is busy, because another launcher or runner holds its execution lock; stderr says so as `factory: REASON` (`ready-runner: REASON`). Retry later.
@@ -37,7 +37,6 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `reset` | Saves a failed writer's leftover edits as a patch and restores its checkout | `{task, assignment, checkout, candidate, patch, next}` | `reset_writer()` |
 | `rebase-worktree` | Saves the change as a patch, moves the worktree onto a new base and selects it | `{task, worktree, previous, candidate, patch, next}` | `rebase_worktree()` |
 | `release-worktree` | Removes the provisioned worktree; the branch stays | `{task, worktree, branch, head}` | `release_worktree()` |
-| `integrate` | Launches, or reconnects to, the integration that merges the PR | `{state: "launched", …}`, or the integration receipt; exit 1 unless the state is `launched` or `delivered`; `--acceptance` adds `acceptance` | `skills/factory/runtime/integration.py` `integrate()` |
 | `delivered` | Confirms the release skill merged the head the release judgment approved, and records its receipt | The receipt; `--acceptance` adds `acceptance` | `skills/factory/runtime/integration.py` `delivered()` |
 | `ready_runner.py` | Launches, collects and tidies a plan's jobs on its line | `{schema_version, result, jobs, …}`; exit 1 unless `result` is `complete` | `skills/factory/runtime/ready_runner.py` `run()` |
 

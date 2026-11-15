@@ -180,7 +180,7 @@ class AcceptanceEvidence(unittest.TestCase):
         redirect = next(handler for handler in handlers if isinstance(handler, type) and issubclass(handler, urllib.request.HTTPRedirectHandler))
         self.assertIsNone(redirect().redirect_request(cast(Any, None), cast(Any, None), 301, "Moved", cast(Any, {}), "https://evil.example/"))
 
-    def test_every_agent_renders_the_capture_and_integrate_does_not(self):
+    def test_every_agent_renders_the_capture(self):
         # Review of #152: generic `start` readers and writers judge the same capture as native ones; writers, who
         # keep the operator's identity and could read the issues anyway, need no separate detection.
         acceptance = self.capture()
@@ -188,8 +188,6 @@ class AcceptanceEvidence(unittest.TestCase):
                               ([*self.reader, "--write"], "backend")):
             with self.subTest(command=command):
                 self.assertIn("Cap context at 200K", factory.rendered_acceptance(self.record(acceptance), command, role))
-        integrate = [factory.sys.executable, "-E", "-s", str(factory.ROOT / "integration.py"), "--intent"]
-        self.assertEqual(factory.rendered_acceptance(self.record(acceptance), integrate, "integration"), "")
 
     def test_a_migrated_task_without_a_capture_refuses_new_launches_until_inputs(self):
         # Review of #152: a schema-10 task migrates with no capture; a reader without GitHub must not judge blind.

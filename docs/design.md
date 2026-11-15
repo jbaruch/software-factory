@@ -24,16 +24,16 @@ One repository contains the application and its ACR package. The application shi
 
 The application will own scheduling, provider adapters, Rex integration, durable task state, measurement and the dashboard. Worker hooks will emit bounded lifecycle events after their native harness semantics are verified. Native Claude Code and Codex ACR realization does not establish Grok or Antigravity compatibility. Those harnesses need explicit instruction delivery and lifecycle conformance tests. ACR is not the process supervisor or model broker.
 
-The plugin ships one always-on rule, `rules/factory-process.md`, and no unimplemented hook stubs. It started with no global rules. That failed on 2026-11-09 (#46): asked to take over a nanoclaw backlog, a coordinator matched the request to the single-writer recipe, never opened the ready runner or integration, and hand-committed, hand-rebased and hand-opened PRs with no factory verification. The rule tells every agent in an installing project that the factory is the delivery process and points it at the skill's coordinator step; specialists the factory launches ignore it. Skills describe a discipline's work. Coordination algorithms live in code and versioned Jev questions, not a growing prose choreography interpreted on every turn.
+The plugin ships one always-on rule, `rules/factory-process.md`, and no unimplemented hook stubs. It started with no global rules. That failed on 2026-11-09 (#46): asked to take over a nanoclaw backlog, a coordinator matched the request to the single-writer recipe, never opened the ready runner or the delivery steps, and hand-committed, hand-rebased and hand-opened PRs with no factory verification. The rule tells every agent in an installing project that the factory is the delivery process and points it at the skill's coordinator step; specialists the factory launches ignore it. Skills describe a discipline's work. Coordination algorithms live in code and versioned Jev questions, not a growing prose choreography interpreted on every turn.
 
 ## Admission and normal delivery
 
 1. Establish the authorized goal, acceptance evidence, priority, affected repository, effects and budget. Clarify only information necessary to proceed.
 2. Decompose useful independent deliverables and select roles. A known task recipe can execute directly; unfamiliar decomposition remains model work. Jev can select a recipe or identify missing coverage, not invent an arbitrary project plan from a closed choice.
 3. Create isolated writer worktrees and explicit interface/dependency ownership. Review and testing get the exact candidate commit and relevant requirements. Concurrent writers never share one checkout.
-4. Start eligible ready assignments within work-in-progress, provider and integration capacity. Reserve resources for verification, urgent work and recovery. Idle capacity without ready useful work stays idle.
+4. Start eligible ready assignments within work-in-progress and provider capacity. Reserve resources for verification, urgent work and recovery. Idle capacity without ready useful work stays idle.
 5. Route specialist findings to implementation directly. Within-scope routine corrections consume the task's cumulative allowance; changing worker identity does not reset it. Verify the changed candidate independently.
-6. Integrate through a merge queue, or a verified server-enforced strict up-to-date required-CI guard where a native queue is unavailable, and satisfy the project's actual review, test, publication and acceptance requirements. The guard must apply to administrators without bypass. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
+6. After the release judgment, merge through the repository's own release skill, confirm the merge against what the judgment approved, and satisfy the project's actual review, test, publication and acceptance requirements. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
 
 No foreman turn is required to recognize that a dependency completed or to launch an already authorized next assignment. Dynamic scope decisions and unresolved technical conflicts still require reasoning.
 
@@ -111,16 +111,12 @@ authority. The [owner contract](task-state.md#writer-worktree-provisioning) defi
 the supported tree/configuration inputs and conservative reconciliation.
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
-Mechanical integration uses the same schema-9 `factory.launch` lifecycle and real
-window/block identities. Its original worker owns a versioned execution receipt;
-repeats and cold recovery reconcile existing effects read-only. A repository-scoped
-mutex serializes integration without occupying unrelated ready-work capacity. Task
-locks never span canonical watcher/network waits; controls and selected inputs are
-reloaded immediately before effects and current owner state before result collection.
-Release and delivery capture also run outside execution/task locks and revalidate
-the owner before submission. Successful reruns of the same delivery CI run can be
-recollected read-only. Fresh delivery observations freeze in a new final native
-brief, preserving original receipts/results and requiring a new semantic judgment.
+The factory makes no merge call. The repository's release skill merges; `delivered`
+confirms read-only that it merged the head the release judgment approved and records
+one receipt per release judgment. Release capture runs outside execution/task locks
+and revalidates the owner before submission. Final acceptance freezes the recorded
+receipt in a new native brief, preserving original receipts/results and requiring a
+new semantic judgment.
 
 ## Measurement and self-improvement
 
