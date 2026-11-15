@@ -70,6 +70,15 @@ def native_context(harness, receipt):
     return receipt.get(key) if isinstance(receipt, dict) else None
 
 
+def unfinished_writer(harness, receipt, args, assignment):
+    """A Claude or Grok writer receipt exactly as its worker wrote it at start: bound to this assignment, never finished."""
+    return (receipt.get("kind") == harness + "-execution" and receipt.get("schema_version") == (2 if harness == "claude" else 3)
+            and receipt.get("state") == "starting" and receipt.get("writer") is True and receipt.get("commit") is None
+            and receipt.get("job") == args.job and receipt.get("inputs") == assignment["request"].get("inputs")
+            and receipt.get("brief_sha256") == assignment["request"].get("instructions_sha256")
+            and all(receipt.get(field) is None for field in ("finished_at", "exit_code", "report", "candidate", "error")))
+
+
 def contributor_context(key, record, assignment):
     # A failed writer remains a contributor; never require or invent a success.
     import claude_worker
@@ -92,7 +101,7 @@ def contributor_context(key, record, assignment):
         # a failed writer keeps the identity its receipt and events must carry.
         if not isinstance(receipt, dict) or receipt.get("native_session") != args.native_session:
             raise factory.FactoryError("Contributor receipt differs from its frozen native session")
-        if receipt.get("state") == "starting" and assignment["result"] is None and \
+        if unfinished_writer(harness, receipt, args, assignment) and assignment["result"] is None and \
                 factory.status(factory.connect(record), record, assignment)["state"] == "lost":
             # A writer lost with its host never finished its receipt or produced a result a reviewer could
             # share; like a failed writer, its frozen session is its identity (#156).

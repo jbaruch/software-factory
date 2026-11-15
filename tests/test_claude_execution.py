@@ -1286,12 +1286,24 @@ class ClaudeApprovals(unittest.TestCase):
         record, assignment, receipt = self.run_claude_writer(writer_session, exit_code=1)
         command = assignment["request"]["command"]
         receipt_path = Path(command[command.index("--receipt") + 1])
-        receipt_path.write_text(json.dumps({**receipt, "state": "starting"}))  # The worker died before finishing it.
+        # The receipt exactly as the worker writes it at start: the host died before anything finished.
+        starting = {**receipt, "state": "starting", "commit": None, "finished_at": None, "elapsed_seconds": None,
+                    "exit_code": None, "report": None, "usage": None, "model_usage": None, "turns": None,
+                    "rate_limits": None, "candidate": None, "error": None}
+        receipt_path.write_text(json.dumps(starting))
         with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="running")), \
                 self.assertRaises(factory.FactoryError):
             integration.contributor_context("claude-writer", record, assignment)  # Not lost: it may still produce work.
         with patch.object(factory, "connect"), patch.object(factory, "status", return_value=dict(state="lost")):
             self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+            # Damaged or finished-looking receipts never pass as a lost writer (review of #157).
+            for damage in (dict(report=dict(outcome="completed", artifacts=[])), dict(job="task/other"), dict(writer=False),
+                           dict(kind="grok-execution"), dict(schema_version=4), dict(commit=dict(state="committing")),
+                           dict(inputs=dict(candidate="b" * 40, requirements="other"))):
+                with self.subTest(damage=damage):
+                    receipt_path.write_text(json.dumps({**starting, **damage}))
+                    with self.assertRaises(factory.FactoryError):
+                        integration.contributor_context("claude-writer", record, assignment)
 
     def test_claude_writer_cannot_approve_its_own_work(self):
         record, assignment, _ = self.run_claude_writer(SESSION)
