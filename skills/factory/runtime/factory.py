@@ -1440,7 +1440,9 @@ def set_inputs(path, *, candidate, requirements, acceptance=None):
                                                    record["admission"]["repository_identity"]),
                             requirements=requirements)
     if acceptance is not None:
-        record["acceptance"] = {**record.get("acceptance", {}), requirements: acceptance}
+        # The first capture of a revision wins under the task lock: two overlapping `inputs` runs that fetched
+        # either side of an issue edit must not replace what earlier readers judged (review of #152).
+        record["acceptance"] = {requirements: acceptance, **record.get("acceptance", {})}
     save(path, record)
     return record
 
