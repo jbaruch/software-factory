@@ -190,6 +190,22 @@ class NativeResults(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "cannot be turned off"):
             self.codex_fixture('[{"name": "a.b"}]')
 
+    def test_codex_diagnostics_never_reach_the_error_or_the_receipt(self):
+        # Review of #159: a config-load failure can quote the offending line, credentials included.
+        marker = "github_pat_SECRETMARKER"
+        diagnostic = f"echo 'Error loading config.toml: bad header Authorization = \"Bearer {marker}\"' >&2; exit 3"
+        with self.assertRaises(factory.FactoryError) as raised:
+            self.codex_fixture("[]", failing=diagnostic)
+        self.assertNotIn(marker, str(raised.exception))
+        self.assertIn("exited 3", str(raised.exception))
+        binary = self.root / "codex-fixture"
+        self.args.codex = binary
+        with patch.object(worker, "configured_mcp_servers", REAL_CONFIGURED_MCP_SERVERS):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("exited 3", receipt["error"])
+        self.assertNotIn(marker, self.args.receipt.read_text())
+
     def test_plugin_servers_leave_the_list_before_any_override(self):
         # Overriding a plugin-backed server, which no configuration file defines, fails Codex's configuration load.
         binary = self.root / "codex-fixture"

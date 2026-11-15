@@ -188,8 +188,10 @@ def codex_says(binary, cwd, environment, arguments):
         raise factory.FactoryError(f"Cannot ask Codex `{' '.join(arguments[-3:])}` here ({type(exc).__name__}); "
                                    "the worker refuses to launch with MCP servers it cannot turn off") from None
     if answer.returncode != 0:
-        raise factory.FactoryError(f"Codex `{' '.join(arguments[-3:])}` failed; the worker refuses to launch with MCP "
-                                   "servers it cannot turn off: " + (answer.stderr.strip()[:300] or f"exit {answer.returncode}"))
+        # Codex's stderr can quote a malformed configuration line, token and all, so it never reaches the error
+        # the receipt keeps (review of #159).
+        raise factory.FactoryError(f"Codex `{' '.join(arguments[-3:])}` exited {answer.returncode}; the worker refuses to "
+                                   "launch with MCP servers it cannot turn off. Run `codex mcp list` in the checkout to see why")
     return answer.stdout
 
 
