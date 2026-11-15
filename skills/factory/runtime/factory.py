@@ -1741,6 +1741,52 @@ def reader_environment(environment, write):
     return result
 
 
+# The sticky Time Machine exclusion `tmutil addexclusion` sets: this attribute, holding a binary plist of the string
+# "com.apple.backupd". Written directly, as Cargo does for target/, since tmutil took 11 seconds a call here.
+TIME_MACHINE_EXCLUSION = ("com.apple.metadata:com_apple_backup_excludeItem",
+                          "62706C69737430305F1011636F6D2E6170706C652E6261636B757064080000000000000101"
+                          "00000000000000010000000000000000000000000000001C")
+
+
+def worker_environment(environment, write, cwd):
+    """A native worker's environment: a reader's restrictions, plus a linked worktree's own Go build cache.
+
+    Without -trimpath Go keys every compiled package on its directory, so each factory worktree wrote its own
+    copy of every cache entry into the shared cache, and every reader checkout is new; Go evicts entries only
+    after five days, and the cache filled the disk at 133 GB (#183). Kept in the worktree's Git admin
+    directory, the cache goes when `git worktree remove` does. -trimpath would share entries across worktrees,
+    but it breaks tests that find their files through runtime.Caller.
+    """
+    environment = reader_environment(environment, write)
+    directory = git_dir(cwd)
+    if directory == git_common_dir(cwd):
+        return environment  # The main checkout keeps the user's own cache.
+    cache = directory / "go-build"
+    if sys.platform == "darwin":
+        # Time Machine skips ~/Library/Caches, not a repository's Git directory; hourly backups of -race
+        # caches would reach the NAS. The sticky exclusion is an attribute of the directory and needs no root.
+        cache.mkdir(mode=0o700, exist_ok=True)
+        exclude_from_time_machine(cache)
+    return {**environment, "GOCACHE": str(cache)}
+
+
+def exclude_from_time_machine(directory):
+    """Set the sticky exclusion directly, falling back to tmutil, which sets the same attribute slowly."""
+    failures = []
+    for command in (["/usr/bin/xattr", "-wx", *TIME_MACHINE_EXCLUSION, str(directory)],
+                    ["/usr/bin/tmutil", "addexclusion", str(directory)]):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{Path(command[0]).name}: {exc}")
+            continue
+        if result.returncode == 0:
+            return
+        failures.append(f"{Path(command[0]).name}: {result.stderr.strip() or 'exit ' + str(result.returncode)}")
+    raise FactoryError(f"Cannot exclude {directory} from Time Machine ({'; '.join(failures)}). Move the repository to a "
+                       "volume with extended attributes, or exclude the directory in Time Machine settings, then launch again")
+
+
 # macOS's time.monotonic, and asyncio's loop clock with it, stops while the Mac sleeps: a 7200-second Grok writer
 # measured 6055 seconds across 53815 wall-clock seconds of maintenance sleep and kept running (#137). The
 # budget counts sleep: CLOCK_MONOTONIC does on macOS, Linux needs CLOCK_BOOTTIME.
