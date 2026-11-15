@@ -1693,12 +1693,13 @@ def acceptance_evidence(admission, requirements, token):
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, UnicodeError) as exc:
             raise FactoryError(f"Cannot capture acceptance {owner}/{repo}#{number} for the reader ({type(exc).__name__}: "
                                f"{getattr(exc, 'reason', exc)}); restore GitHub access or the read-only token, then run factory.py inputs again") from None
+        # GraphQL can answer partial data beside errors, a nulled body or edit time included: any error refuses.
+        errors = answer.get("errors") if isinstance(answer, dict) else None
         issue = ((answer.get("data") or {}).get("repository") or {}).get("issueOrPullRequest") if isinstance(answer, dict) else None
         changed = github_time(issue.get("createdAt")) if isinstance(issue, dict) else None
-        if not isinstance(issue, dict) or changed is None or not isinstance(issue.get("timelineItems"), dict):
-            errors = answer.get("errors") if isinstance(answer, dict) else None
+        if errors or not isinstance(issue, dict) or changed is None or not isinstance(issue.get("timelineItems"), dict):
             reason = errors[0].get("message") if isinstance(errors, list) and errors and isinstance(errors[0], dict) else None
-            raise FactoryError(f"GitHub returned no issue for {owner}/{repo}#{number} ({str(reason or 'no data')[:200]}); "
+            raise FactoryError(f"GitHub returned no complete issue for {owner}/{repo}#{number} ({str(reason or 'no data')[:200]}); "
                                "inspect the acceptance reference and the read-only token's access")
         edits = [issue.get("lastEditedAt"), *(node.get("createdAt") for node in issue["timelineItems"].get("nodes") or []
                                               if isinstance(node, dict))]

@@ -191,8 +191,15 @@ class AcceptanceEvidence(unittest.TestCase):
     def test_an_unreadable_issue_or_revision_time_refuses(self):
         missing = dict(data=dict(repository=dict(issueOrPullRequest=None)),
                        errors=[dict(type="NOT_FOUND", message="Could not resolve to an issue or pull request with the number of 1368.")])
-        with self.assertRaisesRegex(factory.FactoryError, "returned no issue .*Could not resolve"):
+        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*Could not resolve"):
             self.capture(answer=missing)
+        # Review of #173: partial data beside an error, its body and edit time nulled, refuses too.
+        partial = dict(data=dict(repository=dict(issueOrPullRequest=dict(
+            title="Cap context at 200K", body=None, createdAt="2026-11-12T06:07:07Z", updatedAt="2026-11-13T03:37:26Z",
+            lastEditedAt=None, timelineItems=dict(nodes=[])))),
+            errors=[dict(type="FORBIDDEN", path=["repository", "issueOrPullRequest", "body"], message="Resource not accessible")])
+        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*Resource not accessible"):
+            self.capture(answer=partial)
         for revision in ("yesterday", "2026-11-13T03:37:26", "2026-11-13"):  # A zoneless time can't be compared.
             with self.subTest(revision=revision), patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
                     self.respond(), self.assertRaisesRegex(factory.FactoryError, "is not a time"):
