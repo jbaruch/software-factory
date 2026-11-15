@@ -202,6 +202,19 @@ class ReadyRunner(unittest.TestCase):
         result = self.tick(self.controller(self.verification_plan()))
         self.assertEqual(result["jobs"][0]["state"], "stale")
 
+    def test_a_reader_with_a_recorded_result_for_the_selection_still_reports_stale(self):
+        # Review of #180: a read-only job assessed its planned pair; a result recorded for another candidate
+        # through `factory.py result` must not make that plan current once the other candidate is selected.
+        reader = self.plan([self.job("reader")])
+        self.assertEqual(self.tick(self.controller(reader))["metrics"]["launched"], 1)
+        other = subprocess.check_output([factory.git_binary(), "-C", str(self.repo), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit-tree", self.candidate + "^{tree}", "-p", self.candidate,
+            "-m", "Another candidate"], text=True).strip()
+        factory.record_result(self.directory / "task.json", assignment_id="reader", candidate=other,
+                              requirements="requirements-1", outcome="completed", artifacts=["report.md"])
+        factory.set_inputs(self.directory / "task.json", candidate=other, requirements="requirements-1")
+        self.assertEqual(self.tick(self.controller(reader))["jobs"][0]["state"], "stale")
+
     def second_writer(self, task):
         """A completed writer for another task, in its own worktree of the fixture repository."""
         checkout = self.root / (task + "-worktree")

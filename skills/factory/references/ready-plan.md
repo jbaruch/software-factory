@@ -36,7 +36,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 
 ## Fields
 
-- `candidate`/`requirements` must equal the task's currently selected inputs (`factory.py show --task TASK`). One plan uses one pair per task; a job planned against other inputs reports `stale`.
+- `candidate`/`requirements` must equal the task's currently selected inputs (`factory.py show --task TASK`). One plan uses one pair per task; a job planned against other inputs reports `stale`, except a writer whose own commit became the selection, which reports its result.
 - `harness` is optional: `codex` (the default when omitted), `claude`, `grok` or `antigravity`. Model and effort belong to the job. Claude and Antigravity jobs take an effort from `low` to `max`. An Antigravity job may set `effort` to null for a model that refuses `--effort`, such as `claude-opus-4-6-thinking`. Grok jobs take one of the model's discovered efforts.
 - `turns` is optional: a Claude or Grok job's turn budget, from 1 to 1000. Without it the job gets the worker's default of 30, so set it for long writers. Codex and Antigravity jobs refuse it.
 - `base` is optional: the full commit ID a Claude, Grok or Antigravity read-only job sees the change from. Its evidence then carries the changed paths and the full diff, which a Claude reader, limited to reading files, cannot get otherwise; set it on QA too. Code reviews require it, writers refuse it and Codex jobs take none.

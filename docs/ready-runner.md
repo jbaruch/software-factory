@@ -43,7 +43,7 @@ coordinator can read them. A writer plan reports `complete` once the writer's co
 is collected; the commit is not yet the task's selection. Explicitly select that
 produced candidate and submit a verification phase, or use the opt-in handoff below.
 Run again, the original writer plan reports the writer by its result, since its commit
-is now the selection; any other job in that plan reports stale.
+is now the selection; any other job in that plan, read-only jobs included, reports stale.
 
 ## Opt-in writer candidate handoff
 
