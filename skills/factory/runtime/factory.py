@@ -2964,6 +2964,41 @@ def pane_text(value):
     return text if len(text) <= PANE_WIDTH else text[:PANE_WIDTH - 1] + "…"
 
 
+PANE_COMMAND_WIDTH = 100
+RED, DIM, RESET = "\033[31m", "\033[2m", "\033[0m"
+# Codex runs every command as `/bin/zsh -c '...'`; the wrapper repeats on every line and says nothing.
+SHELL_WRAPPER = re.compile(r"/bin/(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1", re.DOTALL)
+
+
+def pane_paragraph(value, prefix):
+    """An agent's own note, sanitized like pane_text but wrapped in full: it is the story of the run."""
+    import textwrap
+    text = "".join(character if character.isprintable() else "?" for character in " ".join(str(value).split()))
+    return "\n".join(textwrap.wrap(text, PANE_WIDTH, initial_indent=prefix, subsequent_indent=" " * len(prefix))) or prefix.rstrip()
+
+
+def pane_command(command):
+    """A shell command as one short line, without the shell wrapper Codex adds."""
+    command = str(command)
+    unwrapped = SHELL_WRAPPER.fullmatch(command.strip())
+    text = pane_text(unwrapped.group(2) if unwrapped else command)
+    return text if len(text) <= PANE_COMMAND_WIDTH else text[:PANE_COMMAND_WIDTH - 1] + "…"
+
+
+def pane_path(path):
+    """An edited file by its last two path components, not the whole worktree path."""
+    return "/".join(Path(str(path)).parts[-2:])
+
+
+def pane_style(line):
+    """Failures in red and tool calls dimmed, so the agent's notes stand out; added after sanitizing."""
+    if line.startswith("✗"):
+        return RED + line + RESET
+    if line.startswith("→"):
+        return DIM + line + RESET
+    return line
+
+
 def pane_object(value):
     """A nested event field as a dict, so an unexpected shape displays as missing instead of failing the run."""
     return value if isinstance(value, dict) else {}
@@ -2977,11 +3012,17 @@ def pane_outcome(report, turns, status):
 
 
 def pane_argument(arguments):
-    """The argument that says what a tool call is doing, such as the path it reads or the command it runs."""
+    """The argument that says what a tool call is doing, shortened the same way for every harness: a path to its
+    last two components, a command to one short line."""
     if not isinstance(arguments, dict):
         return ""
     lowered = {str(key).lower(): value for key, value in arguments.items()}
-    return next((str(lowered[key]) for key in PANE_KEYS if key in lowered), "")
+    key = next((key for key in PANE_KEYS if key in lowered), None)
+    if key in ("file_path", "path", "target_file"):
+        return pane_path(lowered[key])
+    if key in ("command", "commandline"):
+        return pane_command(lowered[key])
+    return "" if key is None else str(lowered[key])
 
 
 def pane_line(harness, event):
@@ -3009,7 +3050,7 @@ def pane_line(harness, event):
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "text" and block.get("text"):
-                    lines.append("▸ " + pane_text(block["text"]))
+                    lines.append(pane_paragraph(block["text"], "▸ "))
                 elif block.get("type") == "tool_use":
                     lines.append(pane_text(f"→ {block.get('name')} {pane_argument(block.get('input'))}"))
                 elif block.get("type") == "tool_result" and block.get("is_error"):
@@ -3038,20 +3079,20 @@ def pane_line(harness, event):
     elif harness == "codex":
         kind, item = event.get("type"), pane_object(event.get("item"))
         if kind == "item.started" and item.get("type") == "command_execution":
-            lines.append(pane_text("→ $ " + str(item.get("command"))))
+            lines.append("→ $ " + pane_command(item.get("command")))
         elif kind == "item.completed" and item.get("type") == "command_execution" and item.get("exit_code") not in (0, None):
-            lines.append(pane_text(f"✗ exit {item.get('exit_code')}: {item.get('command')}"))
+            lines.append(f"✗ exit {item.get('exit_code')}: " + pane_command(item.get("command")))
         elif kind == "item.completed" and item.get("type") == "agent_message":
-            lines.append("▸ " + pane_text(item.get("text")))
+            lines.append(pane_paragraph(item.get("text"), "▸ "))
         elif kind == "item.completed" and item.get("type") == "file_change":
             changes = item.get("changes")
-            paths = [str(change.get("path")) for change in changes if isinstance(change, dict)] if isinstance(changes, list) else []
+            paths = [pane_path(change.get("path")) for change in changes if isinstance(change, dict)] if isinstance(changes, list) else []
             lines.append(pane_text("→ edit " + " ".join(paths)))
         elif kind == "item.completed" and item.get("type") == "error":
             lines.append("✗ " + pane_text(item.get("message")))
         elif kind in ("turn.completed", "turn.failed"):
             lines.append("= " + str(kind).removeprefix("turn."))
-    return "\n".join(lines) or None
+    return "\n".join(pane_style(line) for line in "\n".join(lines).split("\n") if line) or None
 
 
 def evidence_reader(harness):
