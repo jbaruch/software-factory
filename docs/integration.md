@@ -113,8 +113,7 @@ New effects run the unchanged installed `watch-pr-reviews.sh` and require its
 `ready` result, the current-head `checks.yml` successful native attempt, unchanged
 review/source/base/issue inputs, actual repository merge requirements and no hold.
 The watcher owns waiting and native quality readiness. A missing/failed Claude
-review stays held; the existing operator waiver is available only through the
-already authorized release procedure. There is no automatic waiver here.
+review stays held; there is no waiver here.
 
 Canonical shell helpers run through installed `bash`, without requiring helper
 executable mode. Explicit helper paths/hashes are frozen. The admitted root's ignored,
