@@ -37,6 +37,9 @@ class ReaderEnvironment(unittest.TestCase):
         git("commit", "--quiet", "-m", "Fixture")
         git("worktree", "add", "--quiet", "--detach", str(linked))
         self.assertNotIn("GOCACHE", factory.worker_environment(self.base, str(repo)))
+        self.assertNotIn("GIT_CONFIG_COUNT", factory.worker_environment(self.base, str(repo)))  # No GitHub origin.
+        git("remote", "add", "origin", "git@github.com:jbaruch/fixture.git")
+        self.assertEqual(factory.worker_environment(self.base, str(repo))["GIT_CONFIG_VALUE_0"], "git@github.com:jbaruch/fixture")
         cache = Path(factory.worker_environment(self.base, str(linked))["GOCACHE"])
         self.assertEqual(cache, factory.git_dir(str(linked)) / "go-build")
         self.assertEqual(cache.parent.parent, factory.git_common_dir(str(repo)) / "worktrees")
@@ -79,7 +82,7 @@ class ReaderEnvironment(unittest.TestCase):
     def test_workers_get_no_operator_identity_and_pushes_refused(self):
         # Readers lost it after a release judgment merged and deployed; writers need none, since the factory commits
         # their work and the foreman pushes it.
-        environment = factory.no_github_identity(self.base)
+        environment = factory.no_github_identity(self.base, "jbaruch/nanoclaw")
         self.assertNotIn("GH_TOKEN", environment)
         self.assertEqual(environment["GH_CONFIG_DIR"], str(self.root / "gh-reader"))
         self.assertEqual(list((self.root / "gh-reader").iterdir()), [])
@@ -90,8 +93,14 @@ class ReaderEnvironment(unittest.TestCase):
                                 env=environment, capture_output=True, text=True, check=True)
         fetched = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
                                  env=environment, capture_output=True, text=True, check=True)
-        self.assertEqual(pushed.stdout.strip(), factory.PUSH_REFUSED + "jbaruch/nanoclaw.git")
+        self.assertEqual(pushed.stdout.strip(), factory.PUSH_REFUSED + ".git")
         self.assertEqual(fetched.stdout.strip(), "git@github.com:jbaruch/nanoclaw.git")
+        # A test fixture's remote on another GitHub repository resolves as it does in CI (#188).
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "fixture", "https://github.com/acme/widgets.git"], check=True)
+        fixture = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "--push", "fixture"],
+                                 env=environment, capture_output=True, text=True, check=True)
+        self.assertEqual(fixture.stdout.strip(), "https://github.com/acme/widgets.git")
+        self.assertNotIn("GIT_CONFIG_COUNT", factory.no_github_identity(self.base))
 
     def test_a_credential_an_earlier_version_left_is_removed(self):
         # 0.39.3 drafts wrote a read-only token into the reader's gh config; workers now hold none.
