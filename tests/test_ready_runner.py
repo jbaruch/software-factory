@@ -1272,8 +1272,29 @@ class ReadyRunner(unittest.TestCase):
                                     r"^Job other/second: .*at most 72 characters \(this subject has 82\)$"):
             self.controller(value)
         value = self.plan([self.job(), self.job("second", task="other", seconds=0)])
-        with self.assertRaisesRegex(factory.FactoryError, "^Job other/second: Repair job identity"):
+        with self.assertRaisesRegex(factory.FactoryError, "^Job other/second: seconds 0 must be a whole number from 1 to 86400$"):
             self.controller(value)
+
+    def test_a_job_refusal_names_the_one_field_that_is_wrong(self):
+        # The canary got a seven-field list for one bad purpose and checked each field by hand (#126).
+        cases = (
+            (dict(purpose="work", role="investigator"),
+             r"purpose 'work' is not valid for role investigator \(expected \"investigation\"\)$"),
+            (dict(purpose="investigation"), r"purpose \"investigation\" goes only with role investigator, not '\S+'$"),
+            (dict(purpose="fix"), r"purpose 'fix' must be work, correction or investigation$"),
+            (dict(role="intern"), r"role 'intern' is not in roles.json$"),
+            (dict(cwd="relative/dir"), r"cwd 'relative/dir' must be an absolute path$"),
+            (dict(candidate="abc123"), r"candidate 'abc123' must be a full lowercase commit id$"),
+            (dict(write="yes"), r"write 'yes' must be true or false$"),
+            (dict(id="Second"), r"id 'Second' must be a lowercase slug"),
+        )
+        for changes, message in cases:
+            with self.subTest(changes=changes):
+                job = {**self.job("second"), **changes}
+                with self.assertRaisesRegex(factory.FactoryError, "^Job task/(second|Second): " + message):
+                    self.controller(self.plan([job]))
+        with self.assertRaisesRegex(factory.FactoryError, "^Job task/first: this task and id appear earlier in the plan"):
+            self.controller(self.plan([self.job(), self.job()]))
 
     def test_a_runner_serves_its_own_line_only(self):
         # Two coordinators share one state directory; one line's agents and broken records must not stall the other.

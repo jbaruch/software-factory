@@ -78,15 +78,29 @@ def check_job(job, *, roles, planned, seen, inputs):
            for k in JOB_FIELDS - {"seconds", "write", "commit_message", "after"} - optional):
         raise factory.FactoryError("Supply nonempty assignment strings; credentials never belong in a plan")
     key = (job["task"], job["id"])
-    if (not re.fullmatch(SLUG, job["task"]) or not re.fullmatch(SLUG, job["id"])
-            or key in seen or job["role"] not in roles
-            or not Path(job["cwd"]).is_absolute()
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", job["candidate"])
-            or type(job["seconds"]) is not int or not 1 <= job["seconds"] <= factory.MAX_NATIVE_SECONDS
-            or type(job["write"]) is not bool
-            or job["purpose"] not in {"work", "correction", "investigation"}
-            or (job["role"] == "investigator") != (job["purpose"] == "investigation")):
-        raise factory.FactoryError("Repair job identity, role, candidate, absolute cwd, purpose, writer flag or execution allowance")
+    for field in ("task", "id"):
+        if not re.fullmatch(SLUG, job[field]):
+            raise factory.FactoryError(f"{field} {job[field]!r} must be a lowercase slug: a letter or digit, "
+                                       "then up to 63 letters, digits or hyphens")
+    if key in seen:
+        raise factory.FactoryError("this task and id appear earlier in the plan; give each job its own id")
+    if job["role"] not in roles:
+        raise factory.FactoryError(f"role {job['role']!r} is not in roles.json")
+    if not Path(job["cwd"]).is_absolute():
+        raise factory.FactoryError(f"cwd {job['cwd']!r} must be an absolute path")
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", job["candidate"]):
+        raise factory.FactoryError(f"candidate {job['candidate']!r} must be a full lowercase commit id")
+    if type(job["seconds"]) is not int or not 1 <= job["seconds"] <= factory.MAX_NATIVE_SECONDS:
+        raise factory.FactoryError(f"seconds {job['seconds']!r} must be a whole number from 1 to {factory.MAX_NATIVE_SECONDS}")
+    if type(job["write"]) is not bool:
+        raise factory.FactoryError(f"write {job['write']!r} must be true or false")
+    if job["purpose"] not in {"work", "correction", "investigation"}:
+        raise factory.FactoryError(f"purpose {job['purpose']!r} must be work, correction or investigation")
+    if job["role"] == "investigator" and job["purpose"] != "investigation":
+        raise factory.FactoryError(f"purpose {job['purpose']!r} is not valid for role investigator "
+                                   "(expected \"investigation\")")
+    if job["role"] != "investigator" and job["purpose"] == "investigation":
+        raise factory.FactoryError(f"purpose \"investigation\" goes only with role investigator, not {job['role']!r}")
     factory.check_commit_message(job["commit_message"], write=job["write"])
     if job.get("harness") == "claude":
         import native_claude
