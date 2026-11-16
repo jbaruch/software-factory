@@ -1846,6 +1846,9 @@ def brief(role_id, goal, *, designs=False):
                "nothing to change, report blocked and say why." if designs else "")
             + "\n\nAuthority: " + role["decision_authority"]
             + "\nReturn: " + role["result"]
+            # Grok readers and a writer answered on the spot with their plan as the verdict, and were rejected (#134).
+            + "\nDo the work with your tools first and report last: a report given without a single tool call is"
+            + " rejected, and your first message is never your report."
             # Read-only specialists cannot write files, so the report is their only collected output.
             + "\nYour structured report is the only output the factory collects: put each finding, or each verified"
             + " point behind an approval, in its artifacts as a self-contained string with path:line."
