@@ -169,6 +169,13 @@ class AntigravityWorker(unittest.TestCase):
 
     def test_failed_process_or_foreign_stream_cannot_supply_a_result(self):
         self.assertEqual(self.execute(self.args, exit_code=3)["state"], "failed")
+        # The failure names Antigravity's own reason: a review ended on quota and only the events said so.
+        quota = [*stream(self.repo)[:-1], dict(event="result", result=dict(
+            conversation_id=CONVERSATION, status="ERROR", response="", num_turns=1,
+            error="Individual quota reached. Resets in 118h38m0s."))]
+        failed = self.execute(self.launch("quota", role="qa"), events=quota, exit_code=3)
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("exited unsuccessfully: Individual quota reached. Resets in 118h38m0s.", failed["error"])
         args = self.launch("other", role="qa")
         receipt = self.execute(args, events=stream(self.repo, model="claude-opus-4-6-thinking"))
         self.assertEqual(receipt["state"], "failed")

@@ -48,6 +48,20 @@ def command(binary, model, effort):
             *(() if effort is None else ("--effort", effort)), "--dangerously-skip-permissions"]
 
 
+def failure_reason(lines):
+    """Antigravity's own error from its final result, such as an exhausted quota and when it resets, or nothing."""
+    for text in reversed(lines):
+        try:
+            event = json.loads(text)
+        except ValueError:
+            continue
+        result = event.get("result") if isinstance(event, dict) and event.get("event") == "result" else None
+        if isinstance(result, dict) and result.get("status") == "ERROR" and isinstance(result.get("error"), str):
+            return ": " + result["error"].strip()[:300]
+        return ""
+    return ""
+
+
 def retain_artifacts(artifacts, conversation, receipt):
     """Copy report files from agy's private brain directory beside the receipt.
 
@@ -187,7 +201,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
             receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
-            raise factory.FactoryError("Native Antigravity exited unsuccessfully; inspect its retained events and original Rex pane")
+            raise factory.FactoryError("Native Antigravity exited unsuccessfully" + failure_reason(lines)
+                                       + "; inspect its retained events and original Rex pane")
         native = native_antigravity.parse_execution(lines, expected_model=args.model,
                                                     expected_cwd=str(args.cwd) if args.write else receipt["checkout"],
                                                     expected_schema=outcome_schema())
