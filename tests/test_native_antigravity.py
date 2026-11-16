@@ -21,6 +21,18 @@ class NativeAntigravity(unittest.TestCase):
         clean = patch.dict(os.environ, environment, clear=True)
         clean.start()
         self.addCleanup(clean.stop)
+        online = patch.object(native.socket, "getaddrinfo", return_value=[])  # Tests never touch real DNS.
+        online.start()
+        self.addCleanup(online.stop)
+
+    def test_no_network_skips_agy_so_it_cannot_open_a_browser_sign_in(self):
+        # During a sleeping Mac's dark wakes agy's token refresh found no DNS and opened browser sign-ins (55 in a night).
+        run = Mock()
+        offline = Mock(side_effect=native.socket.gaierror(8, "nodename nor servname provided"))
+        with self.assertRaisesRegex(native.UsageError, "No network: oauth2.googleapis.com doesn't resolve"):
+            native.probe(sys.executable, Path.cwd(), run=run, resolve=offline)
+        run.assert_not_called()
+        offline.assert_called_once_with("oauth2.googleapis.com", 443)
 
     def test_native_groups_percentages_and_resets_are_preserved(self):
         groups = native.parse_usage(USAGE)

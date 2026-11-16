@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
 
@@ -218,7 +219,12 @@ def parse_usage(output):
     return groups
 
 
-def probe(binary, cwd, *, run=subprocess.run, clock=time.time, timer=time.monotonic):
+# agy refreshes its sign-in through this host; with no DNS, as in a sleeping Mac's dark wakes, its silent refresh
+# fails and it opens a browser sign-in that a headless run can never finish (55 tabs in one night).
+SIGN_IN_HOST = "oauth2.googleapis.com"
+
+
+def probe(binary, cwd, *, run=subprocess.run, clock=time.time, timer=time.monotonic, resolve=None):
     if any(name in os.environ for name in API_ENVIRONMENT):
         raise UsageError("Unset Gemini API/ADC environment overrides before observing the native subscription route")
     if not Path(binary).is_absolute():
@@ -229,6 +235,11 @@ def probe(binary, cwd, *, run=subprocess.run, clock=time.time, timer=time.monoto
         raise UsageError("Restore the selected native Antigravity executable and working directory before refreshing quota") from None
     if not binary.is_file() or not os.access(binary, os.X_OK) or not cwd.is_dir():
         raise UsageError("Supply an executable native Antigravity file and existing working directory")
+    try:
+        (resolve or socket.getaddrinfo)(SIGN_IN_HOST, 443)
+    except OSError:
+        raise UsageError(f"No network: {SIGN_IN_HOST} doesn't resolve, and agy would open a browser sign-in nobody "
+                         "can finish; observe Antigravity again once the Mac is online") from None
     started, outputs = timer(), {}
     for command in (("--version",), ("--print", "/usage")):
         try:
