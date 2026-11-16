@@ -338,6 +338,11 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
             if any(type(event.get(key)) is not int or event[key] < 0
                    for key in ("estimated_tokens", "estimated_tokens_delta")):
                 refuse()
+        elif kind == "system" and event.get("subtype") == "vcs_state_changed":
+            # Claude Code noticing a git operation in some directory, observed when a reviewer's test pushed to a
+            # local bare repository. A notification with no report, usage or permission authority.
+            if not text(event.get("kind")) or not text(event.get("cwd")):
+                refuse()
         elif kind == "system" and event.get("subtype") == "api_retry":
             # The CLI retries transient API failures on its own; the final result stays authoritative.
             if any(type(event.get(key)) is not int or event[key] < 0
