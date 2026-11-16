@@ -157,6 +157,22 @@ class Decoder(unittest.TestCase):
         data[2].update(estimated_tokens=0, estimated_tokens_delta=999)
         self.assertEqual(self.parse(data), expected)
 
+    def test_a_vcs_state_notification_carries_no_authority(self):
+        # A Claude review whose test pushed to a local bare repository completed and approved, and its collection
+        # refused the CLI's vcs_state_changed notification as an unsupported lifecycle (coding-policy-831 review4).
+        data = events("/fixture")
+        expected = self.parse(data)
+        notice = dict(type="system", subtype="vcs_state_changed", kind="push", cwd="/tmp/fixture/hook/shared",
+                      uuid="00000000-0000-0000-0000-000000000001", session_id=SESSION)
+        data.insert(2, notice)
+        self.assertEqual(self.parse(data), expected)
+        for changes in ({"kind": None}, {"cwd": ""}, {"session_id": "foreign"}):
+            with self.subTest(changes=changes):
+                broken = events("/fixture")
+                broken.insert(2, {**notice, **changes})
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    self.parse(broken)
+
     def test_thinking_estimate_counters_refuse_malformed_values(self):
         for key in ("estimated_tokens", "estimated_tokens_delta"):
             for value in (None, True, False, -1, 1.0, "50", [], {}):
