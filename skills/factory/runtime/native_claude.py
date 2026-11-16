@@ -420,14 +420,14 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
         except factory.FactoryError:
             refuse()
     usage, model_usage = final.get("usage"), final.get("modelUsage")
+    # The two tallies can disagree after API retries or a resumed response (acr-216 release: 74896 against 76527
+    # output tokens after 10 retries), so each is checked on its own and both are kept as reported.
     if (not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens"))
             or not isinstance(model_usage, dict) or set(model_usage) != {model}
             or not isinstance(model_usage[model], dict) or model_usage[model].get("provider") != "firstParty"
             or model_usage[model].get("canonicalModel") != model
             or any(type(model_usage[model].get(k)) is not int or model_usage[model][k] < 0
-                   for k in ("inputTokens", "outputTokens"))
-            or model_usage[model]["inputTokens"] != usage["input_tokens"]
-            or model_usage[model]["outputTokens"] != usage["output_tokens"]):
+                   for k in ("inputTokens", "outputTokens"))):
         refuse()
     return dict(report=report, usage=usage, model_usage=model_usage, turns=final["num_turns"], rate_limits=rates)
 

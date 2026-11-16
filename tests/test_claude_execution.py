@@ -471,8 +471,16 @@ class Decoder(unittest.TestCase):
         for index, key, value in [(4, "subagent_stats", []), (4, "usage", dict(input_tokens=True, output_tokens=20))]:
             data = events("/fixture"); data[index][key] = value
             with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
-        data = events("/fixture"); data[-1]["modelUsage"][MODEL]["outputTokens"] = 21
+        data = events("/fixture"); data[-1]["modelUsage"][MODEL]["outputTokens"] = -1
         with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
+
+    def test_usage_tallies_may_disagree_after_retries(self):
+        # acr-216's release judgment completed after 10 API retries with usage at 74896 output tokens and
+        # modelUsage at 76527; both are kept as reported.
+        data = events("/fixture")
+        data[-1]["modelUsage"][MODEL].update(inputTokens=3, outputTokens=21)
+        parsed = self.parse(data)
+        self.assertEqual((parsed["usage"]["output_tokens"], parsed["model_usage"][MODEL]["outputTokens"]), (20, 21))
 
     def test_owner_read_preserves_event_envelope_and_line_checks(self):
         with tempfile.TemporaryDirectory() as temporary:
