@@ -250,6 +250,16 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
                     or event.get("additional_directories") != []):
                 refuse()
             initialized = True
+        elif kind == "assistant" and event.get("is_api_error_message") is True:
+            # Claude Code's note that the API dropped a response mid-stream (observed on 2.1.326); the CLI retries
+            # on its own. Text only, so it answers no tool call and carries no report; the final result stays authoritative.
+            message = event.get("message")
+            if (not isinstance(message, dict) or message.get("model") != "<synthetic>"
+                    or event.get("parent_tool_use_id") is not None
+                    or not isinstance(message.get("content"), list) or not message["content"]
+                    or any(not isinstance(block, dict) or block.get("type") != "text" or not text(block.get("text"))
+                           for block in message["content"])):
+                refuse()
         elif kind == "assistant":
             message = event.get("message")
             if (not isinstance(message, dict) or message.get("model") != model
@@ -420,14 +430,14 @@ def parse_execution(events, *, session_id, cwd, model, max_turns, writer=False, 
         except factory.FactoryError:
             refuse()
     usage, model_usage = final.get("usage"), final.get("modelUsage")
+    # The two tallies can disagree after API retries or a dropped response (acr-216 release: 74896 against 76527
+    # output tokens after 10 retries), so each is checked on its own and both are kept as reported.
     if (not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("input_tokens", "output_tokens"))
             or not isinstance(model_usage, dict) or set(model_usage) != {model}
             or not isinstance(model_usage[model], dict) or model_usage[model].get("provider") != "firstParty"
             or model_usage[model].get("canonicalModel") != model
             or any(type(model_usage[model].get(k)) is not int or model_usage[model][k] < 0
-                   for k in ("inputTokens", "outputTokens"))
-            or model_usage[model]["inputTokens"] != usage["input_tokens"]
-            or model_usage[model]["outputTokens"] != usage["output_tokens"]):
+                   for k in ("inputTokens", "outputTokens"))):
         refuse()
     return dict(report=report, usage=usage, model_usage=model_usage, turns=final["num_turns"], rate_limits=rates)
 

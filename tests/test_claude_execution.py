@@ -209,8 +209,7 @@ class Decoder(unittest.TestCase):
             data[-1].update(structured_output=report, result=json.dumps(report))
             data[1:1] = thinking_events()
             self.assertEqual(self.parse(data)["report"], report)
-        for changes in (dict(usage=None), dict(usage=dict(input_tokens=2, output_tokens=234)),
-                        dict(modelUsage={}), dict(structured_output=None),
+        for changes in (dict(usage=None), dict(modelUsage={}), dict(structured_output=None),
                         dict(subtype="error_max_turns"), dict(permission_denials=[{}])):
             with self.subTest(changes=changes):
                 data = events("/fixture")
@@ -381,6 +380,26 @@ class Decoder(unittest.TestCase):
                 with self.assertRaises(native_claude.ClaudeProbeError):
                     self.parse(data)
 
+    def test_claude_codes_dropped_response_note_decodes(self):
+        # Observed on 2.1.326: acr-206's code review approved after the API dropped a response, and its collection
+        # refused this synthetic note as a conflicting lifecycle.
+        message = dict(model="<synthetic>", role="assistant", content=[
+            dict(type="text", text="API Error: Connection lost mid-response. The response above may be incomplete.")])
+        note = dict(type="assistant", session_id=SESSION, parent_tool_use_id=None, error="server_error",
+                    api_error="connection_failed", is_api_error_message=True, message=message)
+        data = events("/fixture")
+        data[1:1] = [note]
+        self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
+        for change in (dict(parent_tool_use_id="output-1"), dict(message={**message, "model": MODEL}),
+                       dict(message={**message, "content": []}),
+                       dict(message={**message, "content": [
+                           dict(type="tool_use", id="smuggled", name="StructuredOutput", input={})]})):
+            with self.subTest(change=change):
+                data = events("/fixture")
+                data[1:1] = [{**note, **change}]
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    self.parse(data)
+
     def test_unparsed_tool_input_answered_by_an_error_decodes(self):
         # Observed on 2.1.322: a Read with a stray "\\n," in its JSON arguments; the CLI returned an input error.
         def call(name, identity):
@@ -471,8 +490,16 @@ class Decoder(unittest.TestCase):
         for index, key, value in [(4, "subagent_stats", []), (4, "usage", dict(input_tokens=True, output_tokens=20))]:
             data = events("/fixture"); data[index][key] = value
             with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
-        data = events("/fixture"); data[-1]["modelUsage"][MODEL]["outputTokens"] = 21
+        data = events("/fixture"); data[-1]["modelUsage"][MODEL]["outputTokens"] = -1
         with self.assertRaises(native_claude.ClaudeProbeError):self.parse(data)
+
+    def test_usage_tallies_may_disagree_after_retries(self):
+        # acr-216's release judgment completed after 10 API retries with usage at 74896 output tokens and
+        # modelUsage at 76527; both are kept as reported.
+        data = events("/fixture")
+        data[-1]["modelUsage"][MODEL].update(inputTokens=3, outputTokens=21)
+        parsed = self.parse(data)
+        self.assertEqual((parsed["usage"]["output_tokens"], parsed["model_usage"][MODEL]["outputTokens"]), (20, 21))
 
     def test_owner_read_preserves_event_envelope_and_line_checks(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -75,6 +75,11 @@ def parse_events(events, coordination=None) -> dict:
             if phase != "before-turn":
                 raise WorkerError("Native lifecycle is out of order; reconcile the existing attempt")
             phase = "active"
+        elif (kind == "error" and phase == "active" and isinstance(event.get("message"), str)
+                and event["message"].startswith("Reconnecting... ")):
+            # Codex lost its stream mid-turn and is reconnecting; acr-216's writer recovered and completed. A turn
+            # that never recovers still ends in turn.failed or without turn.completed.
+            continue
         elif kind in {"turn.failed", "error"}:
             raise WorkerError("Native worker failed; inspect its original events before another attempt")
         elif isinstance(kind, str) and kind.startswith("item."):
