@@ -383,16 +383,16 @@ class Decoder(unittest.TestCase):
     def test_claude_codes_dropped_response_note_decodes(self):
         # Observed on 2.1.326: acr-206's code review approved after the API dropped a response, and its collection
         # refused this synthetic note as a conflicting lifecycle.
+        message = dict(model="<synthetic>", role="assistant", content=[
+            dict(type="text", text="API Error: Connection lost mid-response. The response above may be incomplete.")])
         note = dict(type="assistant", session_id=SESSION, parent_tool_use_id=None, error="server_error",
-                    api_error="connection_failed", is_api_error_message=True,
-                    message=dict(model="<synthetic>", role="assistant", content=[
-                        dict(type="text", text="API Error: Connection lost mid-response. The response above may be incomplete.")]))
+                    api_error="connection_failed", is_api_error_message=True, message=message)
         data = events("/fixture")
         data[1:1] = [note]
         self.assertEqual(self.parse(data)["report"]["outcome"], "approved")
-        for change in (dict(parent_tool_use_id="output-1"), dict(message={**note["message"], "model": MODEL}),
-                       dict(message={**note["message"], "content": []}),
-                       dict(message={**note["message"], "content": [
+        for change in (dict(parent_tool_use_id="output-1"), dict(message={**message, "model": MODEL}),
+                       dict(message={**message, "content": []}),
+                       dict(message={**message, "content": [
                            dict(type="tool_use", id="smuggled", name="StructuredOutput", input={})]})):
             with self.subTest(change=change):
                 data = events("/fixture")
