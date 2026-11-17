@@ -478,6 +478,8 @@ class Integration(unittest.TestCase):
         release_evidence.validate({**historical, "schema_version": 1}, record)
         self.assertNotIn("ui-design", release_evidence.render({**historical, "schema_version": 1}))
         self.assertIn("ui-design", release_evidence.render(self.frozen))
+        # A coverage-only gap is blocked, not findings, so it never reads as a defect round (nanoclaw, four judgments).
+        self.assertIn("When missing specialists are the only gap, return blocked", release_evidence.render(self.frozen))
         identity, item = next(iter(record["assignments"].items()))
         row = dict(id=identity, role=item["request"]["role"], purpose=item["request"].get("purpose"), outcome=None, current=False)
         # Version 3 names the candidate each specialist judged, so the judge can carry an approval over

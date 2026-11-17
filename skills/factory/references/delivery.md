@@ -23,7 +23,7 @@ Delivery starts after independent verifiers approve the task's current candidate
    python3 -B "$SKILL_DIR/runtime/factory.py" claude-collect --task TASK --id release
    ```
 
-   The judgment sees the task's specialist roster, with the candidate each specialist judged, and returns `findings` naming any specialist the change's effects call for that never approved code still in the change. An approval of an earlier candidate covers an effect whose code later replays and corrections left as it was. Run each named specialist, then judge again under a new ID; a missing specialist is not an escalation.
+   The judgment sees the task's specialist roster, with the candidate each specialist judged, and returns `blocked` when the only gap is a specialist the change's effects call for that never approved code still in the change, naming those roles first by their catalog IDs; `findings` are for defects. An approval of an earlier candidate covers an effect whose code later replays and corrections left as it was. Run each named specialist, then judge again under a new ID; a missing specialist is not an escalation.
 
    `codex-start`, `grok-start` and `antigravity-start` take the same `--release-pr`, `--gh` and `--release-scripts` flags.
 
