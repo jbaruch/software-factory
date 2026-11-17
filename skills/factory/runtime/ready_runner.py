@@ -20,6 +20,8 @@ import native_codex
 POLL_SECONDS = 5
 CAPACITY_MAX_AGE = 60
 PROBE_TIMEOUT = 30
+# A coordinator's show or status holds a task lock briefly; a busy scan waits that out instead of idling the line (#203).
+LOCK_PATIENCE = 30
 RESERVED_ROLES = {"qa", "code-review", "investigator", "judge", "standby-reasoner"}
 JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
@@ -343,7 +345,7 @@ class Runner:
             if line is not None and line != self.line:
                 continue  # Another line's task: its own runner observes, collects and tidies it.
             try:
-                with factory.task_lock(self.directory, source.stem) as path:
+                with factory.task_lock(self.directory, source.stem, patience=LOCK_PATIENCE) as path:
                     record = factory.load_task(path)
                     records[source.stem] = record
                     if not record["assignments"]:
@@ -543,7 +545,7 @@ class Runner:
                 phases[key] = dict(state="waiting", reason=reason)
                 continue
             try:
-                with factory.task_lock(self.directory, job["task"]) as path:
+                with factory.task_lock(self.directory, job["task"], patience=LOCK_PATIENCE) as path:
                     current = factory.load_task(path)
                     if current["inputs"] != record["inputs"] or current["hold"] is not None:
                         raise factory.FactoryError("Task inputs/hold changed before launch; inspect current state before resuming")
