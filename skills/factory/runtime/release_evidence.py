@@ -350,6 +350,13 @@ def render(value):
             + "Use the ordinary native report.\n" + json.dumps(value, ensure_ascii=True) + "\n")
 
 
+def carries(instructions, value, marker):
+    """The brief ends with this exact payload under its marker. The prose between is the wording of the release that
+    rendered it, pinned by the brief's digest and never re-rendered: rewording the brief in 0.39.18 left every earlier
+    release judgment unable to freeze its final acceptance (nanoclaw, eight delivered tasks)."""
+    return marker in instructions and instructions.endswith("\n" + json.dumps(value, ensure_ascii=True) + "\n")
+
+
 def check_brief(args, instructions):
     """A worker re-reads its frozen payload from the saved brief before launching; True when it has one."""
     inputs = dict(candidate=args.candidate, requirements=args.requirements)
@@ -358,7 +365,7 @@ def check_brief(args, instructions):
             raise factory.FactoryError("Select one original release or delivery payload before launching")
         frozen = (factory.decode_json(args.delivery_evidence) if args.delivery_evidence is not None else
                   brief_payload(instructions, "delivery", args.delivery_evidence_digest))
-        if args.write or args.role != "release" or not instructions.endswith(render_delivery(frozen)):
+        if args.write or args.role != "release" or not carries(instructions, frozen, DELIVERY_MARKER):
             raise factory.FactoryError("Final acceptance needs its original frozen read-only release brief")
         if frozen["receipt"]["inputs"] != inputs:
             raise factory.FactoryError("Final acceptance inputs differ from confirmed delivery")
@@ -366,7 +373,7 @@ def check_brief(args, instructions):
     if args.release_evidence is not None or args.release_evidence_digest is not None:
         frozen = (factory.decode_json(args.release_evidence) if args.release_evidence is not None else
                   brief_payload(instructions, "release", args.release_evidence_digest))
-        if args.write or not instructions.endswith(render(frozen)):
+        if args.write or not carries(instructions, frozen, MARKER):
             raise factory.FactoryError("Original release evidence differs from the frozen read-only brief")
         if frozen.get("inputs") != inputs:
             raise factory.FactoryError("Release evidence inputs differ from native assignment")
@@ -389,8 +396,9 @@ def from_assignment(record, assignment):
     try:
         instructions = Path(assignment["brief"]).read_text()
         value = assignment_payload(command, instructions, "release")
+        check_version(value)
         if (digest_text(instructions) != assignment["request"]["instructions_sha256"]
-                or not instructions.endswith(render(value))):
+                or not carries(instructions, value, MARKER)):
             raise ValueError()
     except (ValueError, IndexError, OSError, UnicodeError):
         raise factory.FactoryError("Missing/damaged original frozen release brief and command") from None
@@ -405,8 +413,11 @@ def brief_payload(instructions, kind, expected_digest):
     """The existing frozen brief is the sole payload store for new commands."""
     try:
         value = factory.decode_json(instructions.splitlines()[-1])
-        rendered = render(value) if kind == "release" else render_delivery(value)
-        if digest(value) != expected_digest or not instructions.endswith(rendered):
+        if kind == "release":
+            check_version(value)
+        else:
+            render_delivery(value)  # Version check.
+        if digest(value) != expected_digest or not carries(instructions, value, MARKER if kind == "release" else DELIVERY_MARKER):
             raise ValueError()
     except (ValueError, IndexError, TypeError):
         raise factory.FactoryError("Frozen evidence differs from its saved brief/digest; restore the original assignment") from None
@@ -485,8 +496,9 @@ def from_delivery_assignment(record, assignment):
     try:
         instructions = Path(assignment["brief"]).read_text()
         value = assignment_payload(command, instructions, "delivery")
+        render_delivery(value)  # Version check.
         if (digest_text(instructions) != assignment["request"]["instructions_sha256"]
-                or not instructions.endswith(render_delivery(value))):
+                or not carries(instructions, value, DELIVERY_MARKER)):
             raise ValueError()
     except (ValueError, IndexError, KeyError, OSError, UnicodeError):
         raise factory.FactoryError("Final native acceptance lacks the exact original frozen delivery evidence") from None
