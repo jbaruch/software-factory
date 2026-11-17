@@ -1329,6 +1329,18 @@ class ReadyRunner(unittest.TestCase):
         with self.assertRaisesRegex(factory.FactoryError, "^Job task/first: this task and id appear earlier in the plan"):
             self.controller(self.plan([self.job(), self.job()]))
 
+    def test_a_failed_job_names_its_next_step(self):
+        # Eight nanoclaw tasks idled for hours: failed assignments read as launched with no result.
+        plan = self.plan([self.job()], workers=1, reserve=0)
+        self.tick(self.controller(plan))
+        record = factory.load_task(self.directory / "task.json")
+        PlanRex.processes[(record["session_id"], record["assignments"]["first"]["block_id"])] = "failed"
+        result = self.tick(self.controller(plan))
+        self.assertEqual(result["result"], "needs_action")
+        self.assertEqual(result["jobs"], [dict(task="task", id="first", state="failed", reason=runner.FAILED_NEXT)])
+        self.assertIn("new ID", runner.FAILED_NEXT)
+        self.assertEqual(factory.load_task(self.directory / "task.json")["assignments"]["first"]["closed"]["state"], "failed")
+
     def test_a_briefly_held_task_lock_does_not_idle_the_line(self):
         # A coordinator polling show/status every 10 s collided with the scan and two cycles launched nothing (#203).
         held, release = threading.Event(), threading.Event()

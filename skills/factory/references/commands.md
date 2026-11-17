@@ -24,7 +24,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `inputs` | Selects the task's candidate and requirements revision, capturing its GitHub acceptance issues | Task view | `set_inputs()` |
 | `extend-allowance` | Raises a correction or investigation allowance with the operator's approval, or adds the one correction round a current `completed` judge ruling grants (`--judge ID`, three per task) | Task view | `extend_allowance()` |
 | `pause`, `resume` | Holds or releases new launches | Task view | `hold_task()` |
-| `show` | None | Task view | `task_view()` |
+| `show` | None; an assignment's `state` is its launch, and `closed.state` how its process ended (`failed` with no result: relaunch under a new ID) | Task view | `task_view()` |
 | `provision` | Creates the task's locked worktree on branch `factory/TASK/ID` | Task view | `provision_worktree()` |
 | `result` | Records a non-native assignment's result | Task view | `record_result()` |
 | `start`, `codex-start`, `claude-start`, `grok-start`, `antigravity-start` | Writes the brief, records the assignment and opens its Rex tab; an existing ID reconnects | Status object | `launch()` |
