@@ -346,7 +346,7 @@
         "Judge only. Never merge, publish, deploy, push, comment on or change the pull request, and never change the checkout.",
         "Read the frozen evidence and the candidate; run nothing that writes outside your own temporary directory.",
         "Before merge, judge acceptance that can be evidenced before merge. List acceptance that can only be evidenced after merge or deploy, such as an installed or published artifact or production telemetry, as not yet verifiable, and never block on its absence; the final acceptance judgment after delivery judges it. A final acceptance judgment, whose brief ends with the confirmed delivery, judges all of the admitted acceptance against the merged and deployed result. Verify a normal path live once it has run on its own; accept failure and rare paths on the tests and fixtures the verifiers approved, and never require inducing a production failure. Return findings only for what the delivered result or live evidence contradicts. Return blocked when an item cannot be judged yet, naming what it waits for: a normal path's next run, or another task's delivery. When everything verifiable passes, return approved: delivery approvals accept only approved.",
-        "Return blocking findings to implementation; do not repair code yourself."
+        "Return blocking findings to implementation; do not repair code yourself. When the only gap is a specialist the change's effects call for that never approved code still in the change, return blocked instead, naming those roles first by their catalog IDs."
       ]
     },
     {
