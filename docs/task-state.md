@@ -59,8 +59,14 @@ python3 -B skills/factory/runtime/factory.py extend-allowance --task example --p
   --reason 'Standing authorization: <original reference>; progress: <original evidence>; next: <specific correction>'
 ```
 
+A judge's ruling can add one correction round itself: pass `--purpose correction
+--additional 1 --judge JUDGE_ID`, citing a judge assignment whose `completed` result
+is on the task's current inputs. Each ruling grants one round, at most three per
+task; past that, or when the judge reports `blocked` for a scope or risk decision,
+the operator decides.
+
 The existing [`extend_allowance` owner API](../factory.py) records an authorized
-decision; it does not assess authorization or progress evidence. Replace the
+decision; without `--judge` it does not assess authorization or progress evidence. Replace the
 example references and use the current effective limit from `show` for
 `--expected-limit` (the example assumes `1`). It adds a positive number of
 correction or investigation attempts to that limit. The supplied expected limit

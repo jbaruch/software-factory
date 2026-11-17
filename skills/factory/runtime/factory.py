@@ -578,24 +578,32 @@ def valid_inputs(value):
         re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value["candidate"]))
 
 
+JUDGE_ROUNDS = 3  # Correction rounds judge rulings may add to one task; past them, the operator decides.
+
+
 def allowance_limits(record):
-    """Validate the operator's adjustment chain and derive effective limits."""
+    """Validate the adjustment chain, the operator's and the judges', and derive effective limits."""
     limits = None if record["admission"] is None else dict(record["admission"]["limits"])
     events = record.get("allowance_events")
     if not isinstance(events, list) or (limits is None and events):
         raise FactoryError("Invalid allowance history; restore the original task record before continuing")
-    seen = set()
+    seen, judges = set(), set()
     for event in events:
-        if (not isinstance(event, dict) or set(event) != {"id", "purpose", "previous_limit", "additional", "reason", "at"}
+        if (not isinstance(event, dict) or set(event) - {"judge"} != {"id", "purpose", "previous_limit", "additional", "reason", "at"}
                 or not isinstance(event["id"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", event["id"])
                 or event["id"] in seen or not isinstance(event["purpose"], str)
                 or limits is None or event["purpose"] not in limits
                 or type(event["previous_limit"]) is not int or event["previous_limit"] != limits[event["purpose"]]
                 or type(event["additional"]) is not int or event["additional"] <= 0
                 or not isinstance(event["reason"], str) or not event["reason"].strip()
-                or type(event["at"]) not in (int, float) or not 0 <= event["at"] <= 253402300799):
+                or type(event["at"]) not in (int, float) or not 0 <= event["at"] <= 253402300799
+                or "judge" in event and (not isinstance(event["judge"], str) or event["judge"] in judges
+                                         or event["purpose"] != "correction" or event["additional"] != 1
+                                         or len(judges) >= JUDGE_ROUNDS)):
             raise FactoryError("Invalid allowance history; restore its original ordered adjustments before continuing")
         seen.add(event["id"])
+        if "judge" in event:
+            judges.add(event["judge"])
         limits[event["purpose"]] += event["additional"]
     return limits
 
@@ -1502,25 +1510,45 @@ def hold_task(path, reason, *, request_id=None, expected_revision=None, clock=ti
     return record
 
 
-def extend_allowance(path, *, purpose, additional, expected_limit, request_id, reason, clock=time.time):
-    """Record one explicit operator addition without resetting past attempts."""
+def extend_allowance(path, *, purpose, additional, expected_limit, request_id, reason, judge=None, clock=time.time):
+    """Record one explicit addition without resetting past attempts.
+
+    Without `judge` it is the operator's decision. With it, a judge assignment's completed, current ruling grants
+    exactly one correction round, once per ruling and at most JUDGE_ROUNDS per task.
+    """
     if (not isinstance(purpose, str) or purpose not in {"correction", "investigation"} or type(additional) is not int or additional <= 0
             or type(expected_limit) is not int or expected_limit < 0
             or not isinstance(request_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", request_id)
-            or not isinstance(reason, str) or not reason.strip()):
+            or not isinstance(reason, str) or not reason.strip()
+            or judge is not None and (not isinstance(judge, str) or not judge)):
         raise FactoryError("Supply a correction/investigation purpose, positive --additional, nonnegative --expected-limit, request ID and approval reason")
     record = load_task(path)
     limits = allowance_limits(record)
     if limits is None:
         raise FactoryError("Admit the task before adjusting its allowance")
     previous = next((event for event in record["allowance_events"] if event["id"] == request_id), None)
-    request = dict(id=request_id, purpose=purpose, previous_limit=expected_limit, additional=additional, reason=reason)
+    request = dict(id=request_id, purpose=purpose, previous_limit=expected_limit, additional=additional, reason=reason,
+                   **({} if judge is None else dict(judge=judge)))
     if previous is not None:
-        if {key: previous[key] for key in request} != request:
+        if {key: value for key, value in previous.items() if key != "at"} != request:
             raise ControlConflict("Allowance request ID already has different inputs; inspect its original decision or use a new ID")
         return record
     if limits[purpose] != expected_limit:
         raise ControlConflict("Task allowance changed; refresh the task and obtain a decision for its current limit")
+    if judge is not None:
+        ruling = record["assignments"].get(judge)
+        if purpose != "correction" or additional != 1:
+            raise FactoryError("A judge's ruling grants exactly one correction round: --purpose correction --additional 1")
+        if (ruling is None or ruling["request"]["role"] != "judge" or ruling["result"] is None
+                or ruling["result"]["outcome"] != "completed" or not result_current(record, ruling["result"])):
+            raise FactoryError("Cite a judge assignment whose completed ruling is on the task's current inputs; "
+                               "a blocked judge names an operator decision instead")
+        granted = [event["judge"] for event in record["allowance_events"] if "judge" in event]
+        if judge in granted:
+            raise FactoryError("That ruling already granted its correction round; a further round needs a new ruling")
+        if len(granted) >= JUDGE_ROUNDS:
+            raise FactoryError(f"Judge rulings already added {JUDGE_ROUNDS} correction rounds to this task; "
+                               "another needs the operator's approval")
     occurred = clock()
     if type(occurred) not in (int, float) or not 0 <= occurred <= 253402300799:
         raise FactoryError("Cannot timestamp the allowance adjustment; restore the system clock before submitting")
@@ -3449,13 +3477,15 @@ def main(argv=None):
     moving = sub.add_parser("line", help="Move a task with nothing running to another factory line")
     moving.add_argument("--task", required=True)
     moving.add_argument("--line", required=True)
-    extension = sub.add_parser("extend-allowance", help="Record an operator-approved addition without resetting history")
+    extension = sub.add_parser("extend-allowance", help="Record an addition without resetting history: the operator's, "
+                               "or the one correction round a judge's completed ruling grants (--judge)")
     extension.add_argument("--task", required=True)
     extension.add_argument("--purpose", choices=("correction", "investigation"), required=True)
     extension.add_argument("--additional", type=int, required=True)
     extension.add_argument("--expected-limit", type=int, required=True)
     extension.add_argument("--request-id", required=True)
     extension.add_argument("--reason", required=True)
+    extension.add_argument("--judge", help="The judge assignment whose completed, current ruling grants this one correction round")
     inputs = sub.add_parser("inputs", help="Select the task's candidate and requirements revision")
     inputs.add_argument("--task", required=True)
     inputs.add_argument("--candidate", required=True)
@@ -3600,7 +3630,7 @@ def main(argv=None):
                     record = load_task(path)
                 elif args.action == "extend-allowance":
                     record = extend_allowance(path, purpose=args.purpose, additional=args.additional,
-                        expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason)
+                        expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason, judge=args.judge)
                 elif args.action == "inputs":
                     record = set_inputs(path, candidate=args.candidate, requirements=args.requirements, acceptance=acceptance)
                 elif args.action == "provision":

@@ -89,7 +89,8 @@ hold and five most recent control requests, with original IDs and timestamps.
 Full history remains in the task record/source facts.
 
 Allowance values include explicit additions recorded by the operator's
-[`extend-allowance` CLI command](task-state.md). Task detail shows original admission
+[`extend-allowance` CLI command](task-state.md), and the single correction rounds
+judge rulings grant (at most three per task), each naming its judge. Task detail shows original admission
 limits/references and the full original allowance-decision history. **Approve one
 additional correction/investigation attempt** requires an explicit human approval
 reason (nonempty, at most 512 characters). It adds exactly one attempt through

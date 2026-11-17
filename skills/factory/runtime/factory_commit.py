@@ -675,8 +675,11 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     try:
         with git_scope(args, receipt["repository_identity"], signing=True):
             committed = git("commit", "--message", args.commit_message, environment=environment)
-    except factory.FactoryError:
-        raise factory.FactoryError("Writer commit outcome is uncertain; inspect the retained commit intent, Git HEAD and hooks before another action. No commit was retried") from None
+    except factory.FactoryError as exc:
+        # The cause is kept: nanoclaw's bug-reminder-precheck correction-7 lost it and was blamed on husky hooks,
+        # which this commit never runs.
+        raise factory.FactoryError(f"Writer commit outcome is uncertain ({exc}); inspect the retained commit intent, "
+                                   "Git HEAD and hooks before another action. No commit was retried") from None
     if committed.returncode:
         raise factory.FactoryError("Writer commit failed" + git_said(committed) + "; inspect the retained commit intent, "
                                    "Git HEAD and configured hooks/signing before authorizing a correction. No commit was retried")

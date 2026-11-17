@@ -22,7 +22,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `admit` | Records the task's goal, acceptance, allowances and line, and selects the repository's HEAD as its first inputs | Task view | `admit()` |
 | `line` | Moves a task with nothing open to another line | Task view | `move_line()` |
 | `inputs` | Selects the task's candidate and requirements revision, capturing its GitHub acceptance issues | Task view | `set_inputs()` |
-| `extend-allowance` | Raises a correction or investigation allowance; run only with the operator's approval | Task view | `extend_allowance()` |
+| `extend-allowance` | Raises a correction or investigation allowance with the operator's approval, or adds the one correction round a current `completed` judge ruling grants (`--judge ID`, three per task) | Task view | `extend_allowance()` |
 | `pause`, `resume` | Holds or releases new launches | Task view | `hold_task()` |
 | `show` | None | Task view | `task_view()` |
 | `provision` | Creates the task's locked worktree on branch `factory/TASK/ID` | Task view | `provision_worktree()` |
