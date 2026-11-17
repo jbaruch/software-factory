@@ -1424,7 +1424,7 @@ class NativeResults(unittest.TestCase):
         with patch.object(factory, "git_run", side_effect=lost_reply):
             receipt = self.execute()
         self.assertEqual(receipt["state"], "failed")
-        self.assertIn("outcome is uncertain", receipt["error"])
+        self.assertIn("outcome is uncertain (fixture lost response)", receipt["error"])  # The cause survives.
         self.assertEqual(receipt["commit"]["state"], "committing")
         candidate = factory.git_commit(".", "HEAD")
         self.assertNotEqual(candidate, self.candidate)

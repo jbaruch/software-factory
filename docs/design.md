@@ -63,7 +63,7 @@ The investigator gathers the minimum evidence that could settle the issue: repro
 
 Jev asks whether the investigation resolves the exact outstanding question. A resolved outcome routes the evidence and supported resolution to the affected specialists. A remaining substantive objection prevents closure. `unresolved` or `uncertain` after investigation goes to the judge, rather than through an indefinite standby/investigation cycle. Stale or incomplete evidence is repaired before adjudication.
 
-The judge runs on a highly capable eligible model at maximum supported thinking effort. It is expensive and reserved for genuinely unresolved cases. It issues a bounded decision with actionable consequences and any remaining missing authority. It does not diagnose provider outages, retry routine commands or waive independent verification. A ruling cannot grant effects outside user authority or silently restart exhausted budgets.
+The judge runs on a highly capable eligible model at maximum supported thinking effort. It is expensive and reserved for genuinely unresolved cases. It issues a bounded decision with actionable consequences and reports `completed`, or reports `blocked` when the operator must decide scope or risk. It does not diagnose provider outages, retry routine commands or waive independent verification. A completed ruling may add one recorded correction round, at most three per task; it cannot grant effects outside user authority or silently restart exhausted budgets.
 
 ## Exceptions and finite loops
 

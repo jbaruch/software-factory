@@ -566,7 +566,8 @@ def allowance_text(allowances):
 def allowance_controls(task, csrf_token):
     history = ''.join(
         f'<li>{text(event["purpose"])}: +{text(event["additional"])} from {text(event["previous_limit"])}. '
-        f'{text(event["reason"])} <time>{text(when(event["at"]))}</time><small>Request {text(event["id"])}</small></li>'
+        f'{text(event["reason"])} ' + (f'Granted by judge {text(event["judge"])}. ' if "judge" in event else '')
+        + f'<time>{text(when(event["at"]))}</time><small>Request {text(event["id"])}</small></li>'
         for event in task.get("allowance_events", []))
     result = ('<details class="control-history"><summary>Original allowance decisions</summary><ol>'
               + history + '</ol></details>' if history else '')

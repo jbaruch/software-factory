@@ -399,13 +399,13 @@
         "requirements",
         "decision authority"
       ],
-      "decision_authority": "Adjudication within granted authority, and the only role that escalates to the operator; cannot erase substantive evidence, required verification or exhausted budgets.",
+      "decision_authority": "Adjudication within granted authority, including one more correction round per ruling (three per task), and the only role that escalates to the operator; cannot erase substantive evidence or required verification.",
       "result": "Ruling, evidence basis, consequences and any remaining authority request.",
       "model_binding": "per_assignment",
       "instructions": [
         "Use the configured highly capable model with maximum supported thinking effort.",
         "Assess the exact remaining dispute and evidence; do not repeat investigation already completed.",
-        "Issue an actionable bounded ruling or identify the concrete operator decision still needed."
+        "Report completed with an actionable bounded ruling the line carries out without the operator, naming the final writer steps when it needs another correction round. Report blocked only when the operator must decide scope (amend the issue or cut an acceptance item) or risk (ship with a real defect the change introduced), naming which first. Declining a wrong finding, or deferring a tracked pre-existing one, is a ruling, not an operator decision."
       ]
     },
     {

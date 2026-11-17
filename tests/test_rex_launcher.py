@@ -845,6 +845,64 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(factory.task_view(factory.load_task(self.path))["allowances"]["correction"],
                          dict(limit=2, used=2, remaining=0))
 
+    def test_a_completed_current_judge_ruling_grants_one_correction_round(self):
+        # nanoclaw asked the operator nine times in a day for +1 rounds a judge had already specified.
+        self.admit()
+        def ruling(identity, outcome="completed"):
+            self.start(assignment_id=identity, role="judge")
+            self.report(assignment_id=identity, outcome=outcome)
+        ruling("judge-1")
+        granted = self.extend(request_id="judge-1-round", reason="Judge ruled a six-line docstring fix", judge="judge-1")
+        self.assertEqual(granted["allowance_events"][-1]["judge"], "judge-1")
+        self.assertEqual(factory.task_view(granted)["allowances"]["correction"]["limit"], 2)
+        self.assertEqual(self.extend(request_id="judge-1-round", reason="Judge ruled a six-line docstring fix",
+                                     judge="judge-1"), granted)
+        ruling("judge-blocked", "blocked")
+        self.start()
+        self.report()
+        before = self.path.read_bytes()
+        for change, message in ((dict(judge="judge-1"), "already granted"), (dict(judge="judge-blocked"), "completed ruling"),
+                                (dict(judge="qa"), "completed ruling"), (dict(judge="absent"), "completed ruling"),
+                                (dict(judge="judge-1", additional=2), "exactly one"),
+                                (dict(judge="judge-1", purpose="investigation", expected_limit=1), "exactly one")):
+            with self.subTest(change=change), self.assertRaisesRegex(factory.FactoryError, message):
+                self.extend(**{**dict(request_id="refused", expected_limit=2), **change})
+            self.assertEqual(self.path.read_bytes(), before)
+        with self.assertRaisesRegex(factory.ControlConflict, "different inputs"):
+            self.extend(request_id="judge-1-round", reason="Judge ruled a six-line docstring fix")
+        for number in (2, 3):
+            ruling(f"judge-{number}")
+            self.extend(request_id=f"judge-{number}-round", expected_limit=number, judge=f"judge-{number}")
+        ruling("judge-4")
+        with self.assertRaisesRegex(factory.FactoryError, "operator's approval"):
+            self.extend(request_id="judge-4-round", expected_limit=4, judge="judge-4")
+        record = self.extend(request_id="operator-round", expected_limit=4)  # The operator still can.
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"]["limit"], 5)
+        # Each damage leaves the limit chain intact, so only the judge rules refuse it.
+        damaged = []
+        for change in (dict(additional=2), dict(purpose="investigation", previous_limit=1), dict(judge=7)):
+            variant = copy.deepcopy(granted)
+            variant["allowance_events"][0].update(change)
+            damaged.append(variant)
+        for change in (dict(judge="judge-2"), dict(judge="judge-4")):  # A repeated ruling; a fourth judge round.
+            variant = copy.deepcopy(record)
+            variant["allowance_events"][-1].update(change)
+            damaged.append(variant)
+        for variant in damaged:
+            factory.save(self.path, variant)
+            with self.subTest(event=variant["allowance_events"]), self.assertRaises(factory.FactoryError):
+                factory.load_task(self.path)
+        factory.save(self.path, granted)
+        factory.load_task(self.path)
+
+    def test_a_stale_judge_ruling_grants_nothing(self):
+        record = self.admit()
+        self.start(assignment_id="judge", role="judge")
+        self.report(assignment_id="judge", outcome="completed")
+        factory.set_inputs(self.path, candidate=record["inputs"]["candidate"], requirements="requirements-2")
+        with self.assertRaisesRegex(factory.FactoryError, "current inputs"):
+            self.extend(judge="judge")
+
     def test_allowance_replay_after_lost_reply_and_later_decisions_never_adds_twice(self):
         self.admit()
         original_save = factory.save
