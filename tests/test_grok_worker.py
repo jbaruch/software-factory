@@ -313,7 +313,7 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual(evidence["base"], self.candidate)
         self.assertEqual(evidence["candidate"], self.candidate)
         self.assertEqual(evidence["changed_paths"], [])
-        self.assertEqual(evidence["diff"], "")
+        self.assertNotIn("diff", evidence)
         before, launches = self.path.read_bytes(), len(FakeRex.calls)
         with patch.object(factory, "Rex", FakeRex):
             factory.launch(self.path, task="task", assignment_id="review", role="code-review",
