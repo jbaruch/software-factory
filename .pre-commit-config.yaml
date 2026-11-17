@@ -1,4 +1,4 @@
-# Dependabot checks hook revisions weekly in .github/dependabot.yml.
+# Renovate checks hook revisions weekly (renovate.json).
 repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
