@@ -27,7 +27,7 @@ Delivery starts after independent verifiers approve the task's current candidate
 
    `codex-start`, `grok-start` and `antigravity-start` take the same `--release-pr`, `--gh` and `--release-scripts` flags.
 
-3. From the task's worktree, merge with `Skill(skill: "release", args: "existing-pr PR_URL")`. The factory keeps that worktree locked, so the release skill leaves it and its branch to step 5 (coding-policy 0.10.12 and later; an earlier release skill reports its `git worktree remove` failing after the merge, which is expected). Then confirm that it merged what the release judgment approved, naming every required approval with `--after`:
+3. Read the release judgment's `Pre-deploy:` artifact first. The release skill deploys right after it merges, so do each listed prerequisite outside the repository before merging, or have the operator do or confirm it when it needs authority the line lacks. Then, from the task's worktree, merge with `Skill(skill: "release", args: "existing-pr PR_URL")`. The factory keeps that worktree locked, so the release skill leaves it and its branch to step 5 (coding-policy 0.10.12 and later; an earlier release skill reports its `git worktree remove` failing after the merge, which is expected). Then confirm that it merged what the release judgment approved, naming every required approval with `--after`:
 
    ```sh
    python3 -B "$SKILL_DIR/runtime/factory.py" delivered --task TASK \
