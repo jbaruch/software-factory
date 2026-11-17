@@ -6,6 +6,14 @@
   "schedule": [
     "before 6am on monday"
   ],
+  "pip-compile": {
+    "managerFilePatterns": [
+      "/(^|/)requirements-dev\\.txt$/"
+    ]
+  },
+  "pip_requirements": {
+    "enabled": false
+  },
   "packageRules": [
     {
       "matchUpdateTypes": [
