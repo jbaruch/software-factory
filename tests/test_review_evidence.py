@@ -61,24 +61,30 @@ class RevisionEvidence(unittest.TestCase):
                          (self.base, self.candidate, "requirements-1"))
         self.assertEqual(value["paths"], ["README.md", "added.txt", "odd\tname.txt"])
         self.assertEqual(value["changed_paths"], ["README.md", "added.txt", "odd\tname.txt", "removed.txt"])
-        self.assertIn("-original\r\n+candidate\r\n", value["diff"])
-        self.assertIn("deleted file mode 100644", value["diff"])
+        self.assertNotIn("diff", value)  # The reader runs the range itself (version 2).
+        self.assertIn(f"`git diff --no-renames {self.base} {self.candidate}`", instructions)
         self.validate(instructions)
         (self.repo / "README.md").write_text("later unrelated edit\n")
         (self.repo / "untracked.txt").write_text("not in candidate\n")
         self.git("add", "README.md")
         self.git("commit", "-qm", "Later unrelated commit")
-        self.assertEqual(self.render(), instructions.partition(review_evidence.MARKER)[1] + instructions.partition(review_evidence.MARKER)[2])
+        self.assertTrue(instructions.endswith(self.render()))
 
     def test_inventory_only_does_not_invent_a_review_base(self):
         text = self.render(base=None, role="qa")
         value = json.loads(text[len(review_evidence.MARKER):])
         self.assertIsNone(value["base"])
-        self.assertIsNone(value["diff"])
+        self.assertNotIn("diff", value)
         self.assertIsNone(value["changed_paths"])
         self.assertEqual(value["paths"], ["README.md", "added.txt", "odd\tname.txt"])
         self.validate("# Assignment: qa\n" + text, base=None, role="qa")
         self.validate("Historical QA brief", base=None, role="qa")
+
+    def test_a_version_1_brief_with_its_embedded_diff_still_validates(self):
+        # Reviews launched before version 2 keep collecting.
+        value = json.loads(self.render().partition(review_evidence.MARKER)[2])
+        historical = {**value, "schema_version": 1, "diff": "-original\r\n+candidate\r\n"}
+        self.validate("# Assignment: code-review\n" + review_evidence.MARKER + json.dumps(historical))
 
     def test_missing_alias_and_unavailable_base_refuse(self):
         for base in (None, "HEAD", "HEAD~1", "--help", "a" * 40):
@@ -88,10 +94,10 @@ class RevisionEvidence(unittest.TestCase):
             self.validate("# Assignment: code-review\nMissing evidence")
 
     def test_damaged_or_revision_mismatched_evidence_refuses(self):
-        original = json.loads(self.render()[len(review_evidence.MARKER):])
-        for changed in (dict(schema_version=True), dict(schema_version=2), dict(candidate=self.base),
+        original = json.loads(self.render().partition(review_evidence.MARKER)[2])
+        for changed in (dict(schema_version=True), dict(schema_version=3), dict(candidate=self.base),
                         dict(base=self.candidate), dict(requirements="other"), dict(paths=[None]),
-                        dict(changed_paths=None), dict(diff=None)):
+                        dict(changed_paths=None), dict(diff="smuggled patch"), dict(schema_version=1)):
             damaged = {**copy.deepcopy(original), **changed}
             with self.subTest(changed=changed), self.assertRaises(factory.FactoryError):
                 self.validate("# Assignment: code-review\n" + review_evidence.MARKER + json.dumps(damaged))
@@ -106,6 +112,6 @@ class RevisionEvidence(unittest.TestCase):
         self.git("config", "diff.external", str(helper))
         self.git("config", "diff.fixture.textconv", str(helper))
         (self.repo / ".gitattributes").write_text("*.txt diff=fixture\n*.md diff=fixture\n")
-        value = json.loads(self.render()[len(review_evidence.MARKER):])
-        self.assertIn("+candidate\r\n", value["diff"])
+        value = json.loads(self.render().partition(review_evidence.MARKER)[2])
+        self.assertIn("README.md", value["changed_paths"])
         self.assertFalse(sentinel.exists())

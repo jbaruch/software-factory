@@ -7,6 +7,11 @@ import subprocess
 import factory
 
 MARKER = "\n## Factory revision evidence\n\n"
+# Version 1 embedded the range's whole diff. Grok readers then judged from the brief alone and returned verdicts
+# without a tool call: three in an hour on nanoclaw, more on ACR. Version 2 names the range for the reader to run.
+RANGE = ("\n## Review range\n\nThe change under review is `git diff --no-renames {base} {candidate}` in your checkout; "
+         "it is not included here. Run it, open each changed file at the lines it touches, and run the tests that cover "
+         "them before any verdict: a verdict without tool calls is refused.\n")
 
 
 def valid_base(base, role):
@@ -37,19 +42,19 @@ def render(cwd, *, candidate, requirements, base, role):
         raise factory.FactoryError("Select a full candidate commit ID and requirements revision before gathering native specialist evidence")
     try:
         paths = git_bytes(cwd, "ls-tree", "-rz", "--name-only", candidate, "--").decode("utf-8")
-        evidence: dict = dict(schema_version=1, candidate=candidate, requirements=requirements,
-                        base=base, paths=paths.split("\0")[:-1], changed_paths=None, diff=None)
+        evidence: dict = dict(schema_version=2, candidate=candidate, requirements=requirements,
+                        base=base, paths=paths.split("\0")[:-1], changed_paths=None)
         if base is not None:
             resolved = git_bytes(cwd, "rev-parse", "--verify", "--end-of-options", base + "^{commit}").decode("ascii").strip()
             if resolved != base:
                 raise factory.FactoryError("Native specialist review base is not the selected commit; supply its full commit ID before launching")
             options = ("diff", "--no-ext-diff", "--no-textconv", "--no-renames")
             changed = git_bytes(cwd, *options, "--name-only", "-z", base, candidate, "--").decode("utf-8")
-            evidence.update(changed_paths=changed.split("\0")[:-1],
-                            diff=git_bytes(cwd, *options, "--binary", "--full-index", base, candidate, "--").decode("utf-8"))
+            evidence.update(changed_paths=changed.split("\0")[:-1])
     except UnicodeError:
         raise factory.FactoryError("Native specialist revision evidence is not UTF-8; select a route that can inspect the original binary/filename encoding") from None
-    return MARKER + json.dumps(evidence, ensure_ascii=True, allow_nan=False) + "\n"
+    return ((RANGE.format(base=base, candidate=candidate) if base is not None else "")
+            + MARKER + json.dumps(evidence, ensure_ascii=True, allow_nan=False) + "\n")
 
 
 def validate(instructions, *, candidate, requirements, base, role):
@@ -62,12 +67,13 @@ def validate(instructions, *, candidate, requirements, base, role):
     except ValueError:
         raise factory.FactoryError("Native specialist revision evidence is damaged; restore the original frozen brief without relaunching") from None
     if (not head or not isinstance(value, dict) or type(value.get("schema_version")) is not int
-            or value["schema_version"] != 1 or value.get("candidate") != candidate
+            or value["schema_version"] not in (1, 2) or value.get("candidate") != candidate
             or value.get("requirements") != requirements or "base" not in value or value["base"] != base
             or not isinstance(value.get("paths"), list)
             or any(not isinstance(path, str) or not path for path in value["paths"])
             or (base is None and (value.get("changed_paths") is not None or value.get("diff") is not None))
             or (base is not None and (not isinstance(value.get("changed_paths"), list)
                 or any(not isinstance(path, str) or not path for path in value["changed_paths"])
-                or not isinstance(value.get("diff"), str)))):
+                or (value["schema_version"] == 1 and not isinstance(value.get("diff"), str))
+                or (value["schema_version"] == 2 and "diff" in value)))):
         raise factory.FactoryError("Native specialist revision evidence differs from the frozen review range; inspect the original brief and assignment")

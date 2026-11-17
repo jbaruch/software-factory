@@ -313,7 +313,7 @@ overrides refuse. Before the model turn the worker records a fresh
 the original lines; collection re-reads them, binds the receipt and requires the
 original successful Rex exit.
 
-Code review requires `--base`, whose evidence is embedded in the frozen brief.
+Code review requires `--base`, whose range the frozen brief names for the reader to run.
 `--write --commit-message MESSAGE --sandbox /absolute/path/to/codex` makes the
 assignment an implementation specialist for a writing role: the brief carries the
 task goal plus the shared writer contract, and `factory_commit.py` stages, scans,
@@ -406,10 +406,13 @@ python3 -B skills/factory/runtime/factory.py grok-collect --task example --id in
 
 For `--role code-review`, also supply `--base` with the full base commit ID.
 The factory never guesses a review range. Before a new launch, `review_evidence.py`
-adds a version-1 JSON section to the existing frozen brief: `candidate`,
+adds a version-2 JSON section to the existing frozen brief: `candidate`,
 `requirements`, nullable `base`, the candidate's tracked `paths`, and nullable
-`changed_paths`/`diff`. An explicit base produces both changed paths and the full
-binary-capable patch from that base to the selected candidate. Git external diff,
+`changed_paths`. An explicit base produces the changed paths and a "Review range"
+section naming `git diff --no-renames BASE CANDIDATE` for the reader to run, never
+the patch itself: with the whole diff in the brief, Grok readers judged from it
+without a tool call. Version-1 briefs, which embedded the patch as `diff`, still
+validate. Git external diff,
 text conversion, hooks and fsmonitor callbacks are disabled for this read. The
 brief's existing SHA-256 covers the evidence; no second task store is created.
 The worker validates its revision binding and passes the brief with native
