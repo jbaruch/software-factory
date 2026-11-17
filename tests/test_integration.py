@@ -183,6 +183,18 @@ class Integration(unittest.TestCase):
         self.assertIn("--release-evidence", original["request"]["command"])
         self.assertEqual(release_evidence.from_assignment(self.record, original), self.frozen)
 
+    def test_a_release_brief_reads_back_after_later_releases_reword_it(self):
+        # Rewording COVERAGE in 0.39.18 left eight nanoclaw deliveries unable to freeze their final acceptance.
+        assignment = self.review("worded-release", "release")
+        with patch.object(release_evidence, "COVERAGE", "Reworded coverage guidance. "):
+            self.assertEqual(release_evidence.from_assignment(self.record, assignment), self.frozen)
+            instructions = Path(assignment["brief"]).read_text()
+            self.assertEqual(release_evidence.brief_payload(instructions, "release", release_evidence.digest(self.frozen)),
+                             self.frozen)
+            for damaged in (instructions.replace(release_evidence.MARKER, "\n"), instructions.rstrip("\n")):
+                with self.subTest(damaged=damaged[-40:]), self.assertRaises(factory.FactoryError):
+                    release_evidence.brief_payload(damaged, "release", release_evidence.digest(self.frozen))
+
     def test_codex_release_judgment_runs_at_its_models_maximum_effort_from_the_fresh_catalog(self):
         with self.assertRaisesRegex(factory.FactoryError, "maximum effort: select high, not medium"):
             command = factory.codex_command(self.path, task="deliver", assignment_id="lazy-release", codex=sys.executable,
