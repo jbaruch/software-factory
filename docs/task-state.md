@@ -144,6 +144,11 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
 | `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker, returned pane IDs, the Rex server `rex_instance` each new launch ran on and, once its tab is tidied, `closed` |
 
+An assignment's own `state` records only its launch (`launching`, `launched` or
+`abandoned`), never whether its process is still alive. Read `closed` for that: a
+`launched` assignment with `closed.state` `failed` and a null `result` ended without
+a collectable receipt, and its job needs a new ID.
+
 A tidied assignment's `closed` object holds its final process `state` (`exited`,
 `failed` or `lost`), the observed `exit` (null when lost), the lost `reason` (null
 otherwise), the `session_id` the pane lived in, the absolute path of its retained
