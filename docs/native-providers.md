@@ -634,7 +634,7 @@ effective author/committer identities with native Gitleaks, then runs one
 local Git commit with the repository's supported hooks, signing and author settings.
 Install Gitleaks outside the checkout, Git metadata and temporary directories.
 Use the version pinned in `.pre-commit-config.yaml`; refresh the native tool when
-the weekly Dependabot hook update changes that pin.
+the weekly Renovate update changes that pin.
 Preflight verifies that version before launching the writer. Unstamped upstream
 Go builds require native Go to verify the embedded module/version metadata.
 The mandatory scan uses built-in rules through a generated configuration; source
