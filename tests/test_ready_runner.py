@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any, Callable
 import unittest
 from unittest.mock import patch
@@ -1327,6 +1328,26 @@ class ReadyRunner(unittest.TestCase):
                     self.controller(self.plan([job]))
         with self.assertRaisesRegex(factory.FactoryError, "^Job task/first: this task and id appear earlier in the plan"):
             self.controller(self.plan([self.job(), self.job()]))
+
+    def test_a_briefly_held_task_lock_does_not_idle_the_line(self):
+        # A coordinator polling show/status every 10 s collided with the scan and two cycles launched nothing (#203).
+        held, release = threading.Event(), threading.Event()
+        def reader():
+            with factory.task_lock(self.directory, "task"):
+                held.set()
+                release.wait(5)
+        holder = threading.Thread(target=reader)
+        holder.start()
+        held.wait(5)
+        threading.Timer(0.3, release.set).start()
+        result = self.tick(self.controller(self.plan([self.job()], workers=1, reserve=0)))
+        holder.join()
+        self.assertEqual((result["metrics"]["launched"], result["issues"]), (1, []))
+        # A lock that stays busy past the patience is still reported.
+        with factory.task_lock(self.directory, "task"), patch.object(runner, "LOCK_PATIENCE", 0.2):
+            result = self.tick(self.controller(self.plan([self.job("second")], workers=2, reserve=0)))
+        self.assertEqual([issue["task"] for issue in result["issues"]], ["task"])
+        self.assertEqual(result["metrics"]["launched"], 0)
 
     def test_a_runner_serves_its_own_line_only(self):
         # Two coordinators share one state directory; one line's agents and broken records must not stall the other.

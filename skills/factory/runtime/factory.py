@@ -186,16 +186,22 @@ def execution_lock(directory, line=DEFAULT_LINE):
 
 
 @contextmanager
-def task_lock(directory, task, *, wait=False):
+def task_lock(directory, task, *, wait=False, patience=0.0):
+    """Hold one task exclusively; a busy lock is retried for `patience` seconds before refusing."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", task):
         raise FactoryError("Task ID must be a lowercase slug, at most 64 characters")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(directory / (task + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError as exc:
-            raise FactoryError("Another command is working on this task; retry later") from exc
+        deadline = time.monotonic() + patience
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise FactoryError("Another command is working on this task; retry later") from exc
+                time.sleep(0.1)
         yield directory / (task + ".json")
     finally:
         os.close(fd)
