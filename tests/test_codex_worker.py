@@ -2240,6 +2240,19 @@ class NativeResults(unittest.TestCase):
         with self.assertRaises(worker.WorkerError):
             worker.parse_events([stream[0], diagnostic, stream[-1], stream[-2], stream[2]])
 
+    def test_a_recovered_mid_turn_reconnect_is_a_notice(self):
+        # acr-216's writer completed after this notice, and the worker refused the turn as failed.
+        notice = dict(type="error", message="Reconnecting... 2/5 (stream disconnected before completion: "
+                                            "idle timeout waiting for websocket)")
+        stream = events()
+        stream.insert(4, notice)
+        self.assertEqual(worker.parse_events(stream)["report"]["outcome"], "approved")
+        for broken in ([*events()[:2], notice, dict(type="turn.failed")], [events()[0], notice, *events()[1:]],
+                       [*events()[:4], dict(notice, message="stream disconnected"), *events()[4:]]):
+            with self.subTest(broken=broken):
+                with self.assertRaises(worker.WorkerError):
+                    worker.parse_events(broken)
+
     def test_legacy_command_reconnects_without_retrofitted_scope_but_refuses_collection(self):
         record, assignment = self.launch_assignment()
         command = assignment["request"]["command"]
