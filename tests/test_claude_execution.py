@@ -883,6 +883,16 @@ class ClaudeWorker(unittest.TestCase):
         with patch.object(factory,"status",return_value=dict(state="exited")):
             return factory.collect_claude(self.path,"inspect",self.rex,self.record,self.assignment)
 
+    def test_collection_writes_the_report_as_plain_text_lines(self):
+        # A judge's ruling cites its FINDING: and HEAD= lines from this file by path and digest (#218).
+        self.assertEqual(self.execute()["state"], "completed")
+        self.collect()
+        artifacts = json.loads(self.args.receipt.read_text())["report"]["artifacts"]
+        report = self.args.receipt.with_suffix(".report.txt")
+        self.assertEqual(report.read_text(), "\n".join(artifacts) + "\n")
+        self.assertEqual(report.read_text().splitlines(), artifacts)
+        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+
     def test_lost_pane_defers_to_the_completed_receipt(self):
         self.record=factory.load_task(self.path)
         self.assignment=self.record["assignments"]["inspect"]
