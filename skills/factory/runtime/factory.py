@@ -2627,6 +2627,14 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     return args, receipt, native
 
 
+def save_report(receipt, report):
+    """The collected report's artifacts as plain text beside its receipt, verbatim, one per line, so a ruling's
+    FINDING: and HEAD= lines can be cited by path and digest (#218). Only native collection writes it."""
+    target = Path(receipt).with_suffix(".report.txt")
+    save(target, "\n".join(report["artifacts"]) + "\n")
+    return target
+
+
 def collect_codex(path, assignment_id, rex, record, assignment):
     """Register a finished native report; this never accepts the whole task."""
     args, receipt, native = codex_evidence(assignment_id, record, assignment, observe=lambda: status(rex, record, assignment))
@@ -2636,6 +2644,7 @@ def collect_codex(path, assignment_id, rex, record, assignment):
                            outcome=native["report"]["outcome"], artifacts=artifacts)
     record["assignments"][assignment_id]["native_collected"] = True
     save(path, record)
+    save_report(args.receipt, native["report"])
     return record
 
 
@@ -2756,6 +2765,7 @@ def collect_claude(path, assignment_id, rex, record, assignment):
         artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
     record["assignments"][assignment_id]["native_collected"] = True
     save(path, record)
+    save_report(args.receipt, native["report"])
     return record
 
 
@@ -3043,6 +3053,7 @@ def collect_grok(path, assignment_id, rex, record, assignment):
         artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
     record["assignments"][assignment_id]["native_collected"] = True
     save(path, record)
+    save_report(args.receipt, native["report"])
     return record
 
 
@@ -3182,6 +3193,7 @@ def collect_antigravity(path, assignment_id, rex, record, assignment):
         artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
     record["assignments"][assignment_id]["native_collected"] = True
     save(path, record)
+    save_report(args.receipt, native["report"])
     return record
 
 
