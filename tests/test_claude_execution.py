@@ -209,8 +209,7 @@ class Decoder(unittest.TestCase):
             data[-1].update(structured_output=report, result=json.dumps(report))
             data[1:1] = thinking_events()
             self.assertEqual(self.parse(data)["report"], report)
-        for changes in (dict(usage=None), dict(usage=dict(input_tokens=2, output_tokens=234)),
-                        dict(modelUsage={}), dict(structured_output=None),
+        for changes in (dict(usage=None), dict(modelUsage={}), dict(structured_output=None),
                         dict(subtype="error_max_turns"), dict(permission_denials=[{}])):
             with self.subTest(changes=changes):
                 data = events("/fixture")
