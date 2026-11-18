@@ -1297,6 +1297,18 @@ def release_worktree(path):
     it. Caller holds the owner's execution and task locks.
     """
     record = load_task(path)
+    item, admission = record["provisioning"], record["admission"]
+    if (admission is not None and item is not None and item["state"] == "provisioned"
+            and not os.path.lexists(item["request"]["path"])):
+        # acr-226 under load: the removal succeeded but its reply was lost, and the retry called the missing
+        # worktree uncertain. Once Git no longer registers it either, the release is already done.
+        destination = item["request"]["path"]
+        listed = provisioning_git(admission["repository"], "worktree", "list", "--porcelain").splitlines()
+        if {"worktree " + destination, "worktree " + str(Path(destination).resolve())} & set(listed):
+            raise FactoryError(f"The worktree directory is gone but Git still registers it; run `git worktree unlock "
+                               f"{destination}` and `git worktree prune` in the repository, then release again")
+        return dict(task=record["task"], worktree=destination, branch=item["request"]["branch"], head=None,
+                    already_released=True)
     item, directory = owned_quiet_worktree(record)
     destination = Path(item["request"]["path"])
     head = git_commit(str(destination), "HEAD")
@@ -1306,7 +1318,8 @@ def release_worktree(path):
     # so a failed removal can be retried; it was verified clean above.
     provisioning_git(record["admission"]["repository"], "worktree", "remove", "--force", "--force",
                      str(destination), timeout=600)
-    return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=head)
+    return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=head,
+                already_released=False)
 
 
 def rebase_worktree(path, *, onto):

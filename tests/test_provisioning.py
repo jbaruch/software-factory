@@ -6,6 +6,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -85,9 +86,21 @@ class WorktreeProvisioning(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertNotIn(str(self.destination), self.git("worktree", "list", "--porcelain"))
         self.assertEqual(self.git("rev-parse", "factory/fixture/backend"), released["head"])
+        # A retry after a lost reply finds nothing left to remove (acr-226), and says so instead of refusing.
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+            again = factory.release_worktree(self.path)
+        self.assertEqual((again["already_released"], again["head"], again["worktree"]), (True, None, str(self.destination)))
+
+    def test_release_names_the_cleanup_when_git_still_registers_a_missing_worktree(self):
+        self.provision()
+        shutil.rmtree(self.destination)
         with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
-                self.assertRaises(factory.FactoryError):
+                self.assertRaisesRegex(factory.FactoryError, "git worktree prune"):
             factory.release_worktree(self.path)
+        self.git("worktree", "unlock", str(self.destination))
+        self.git("worktree", "prune")
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+            self.assertTrue(factory.release_worktree(self.path)["already_released"])
 
     def test_rebase_moves_the_worktree_onto_a_new_base_and_keeps_the_change_as_a_patch(self):
         # Owner decision: refresh a candidate whose base moved by replaying its change (patch rebase).
