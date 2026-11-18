@@ -1028,6 +1028,8 @@ class NativeResults(unittest.TestCase):
             profile = tomllib.loads(command[command.index("-c") + 1])["permissions"][name]
             self.assertIs(profile["network"]["enabled"], False)
             self.assertEqual(profile["filesystem"][":root"], "deny")
+            # The Git the factory runs, outside the minimal system paths with Command Line Tools (acr-230 writer-5).
+            self.assertEqual(profile["filesystem"][str(Path(factory.git_binary()).resolve().parents[1])], "read")
             self.assertEqual(profile["filesystem"][str(self.repo.resolve())], "write")
             self.assertEqual(profile["filesystem"][str(self.repo.resolve() / ".git")], "deny" if "GIT_INDEX_FILE" in environment else "write")
             if "GIT_INDEX_FILE" in environment:
