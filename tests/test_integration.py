@@ -494,6 +494,8 @@ class Integration(unittest.TestCase):
         self.assertIn("When missing specialists are the only gap, return blocked", release_evidence.render(self.frozen))
         # acr-232 named ui-design, then data-engineering a round later on the same head: name them all at once.
         self.assertIn("all in this one verdict", release_evidence.render(self.frozen))
+        # port-mail-eagain still split the gap into two pairs; one ruling line per effect forces all four.
+        self.assertIn("`ui-design: needed` or `ui-design: not needed`", release_evidence.render(self.frozen))
         identity, item = next(iter(record["assignments"].items()))
         row = dict(id=identity, role=item["request"]["role"], purpose=item["request"].get("purpose"), outcome=None, current=False)
         # Version 3 names the candidate each specialist judged, so the judge can carry an approval over
