@@ -331,8 +331,10 @@ def check_version(value):
 COVERAGE = ("Name the change's effects from its diff. Each of these needs an approved, current specialist in `specialists`: "
             "owner-facing UI such as messages, cards, buttons or wording needs ui-design; persisted state, a schema or a "
             "migration needs data-engineering; a trust boundary, credentials or actions on an account need security; deploy, "
-            "boot or runtime behavior needs sre. When missing specialists are the only gap, return blocked, naming each "
-            "missing specialist first by its catalog ID with the effect it covers; findings are for defects. ")
+            "boot or runtime behavior needs sre. Check all four against the whole diff before you answer. When missing "
+            "specialists are the only gap, return blocked, naming every missing specialist first by its catalog ID with "
+            "the effect it covers, all in this one verdict, since each further round costs a full judgment; findings "
+            "are for defects. ")
 # Every replay onto a moved base and every correction made the whole roster stale, so a one-line conflict
 # in a table row bought four specialists and another judgment (nanoclaw #878).
 CARRIED = ("An approval of an earlier `candidate` (`current` false) still covers its effect when that effect's code is "
