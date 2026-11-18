@@ -3,6 +3,7 @@ import argparse
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -627,10 +628,24 @@ def git_environment():
             if not key.startswith("GIT_") or key in GIT_IDENTITY_VARIABLES}
 
 
+@functools.cache
 def git_binary():
     binary = shutil.which("git", path=os.defpath)
     if binary is None:
         raise FactoryError("Cannot find trusted Git; install Git on the operating system's default executable path")
+    if sys.platform == "darwin" and binary == "/usr/bin/git":
+        # Apple's shim: every call runs xcrun to find the developer directory, and in the Codex sandbox, which can't
+        # reach xcrun's cache, each one spawned xcodebuild (nanoclaw's load hit 172 on 16 cores). Resolve it once.
+        try:
+            found = subprocess.run(["/usr/bin/xcrun", "--find", "git"], capture_output=True, text=True, timeout=60,
+                                   check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            found = None
+        real = Path(found.stdout.strip()) if found is not None and found.returncode == 0 else None
+        if real is None or not real.is_absolute() or not real.is_file() or not os.access(real, os.X_OK):
+            raise FactoryError("Cannot resolve the Git behind Apple's /usr/bin/git shim; run `xcrun --find git` and "
+                               "repair the developer tools (xcode-select) before retrying")
+        return str(real)
     return binary
 
 

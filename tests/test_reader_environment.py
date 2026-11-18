@@ -330,3 +330,38 @@ class AcceptanceEvidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppleGitShim(unittest.TestCase):
+    """Apple's /usr/bin/git runs xcrun on every call, and xcodebuild inside the Codex sandbox (nanoclaw, load 172)."""
+
+    def setUp(self):
+        factory.git_binary.cache_clear()
+        self.addCleanup(factory.git_binary.cache_clear)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.real = Path(directory.name) / "git"
+        self.real.write_text("#!/bin/sh\n")
+        self.real.chmod(0o755)
+
+    def resolve(self, found):
+        from unittest.mock import patch
+        with patch.object(factory.sys, "platform", "darwin"), \
+                patch.object(factory.shutil, "which", return_value="/usr/bin/git"), \
+                patch.object(factory.subprocess, "run", return_value=found) as run:
+            return factory.git_binary(), run
+
+    def test_the_shim_resolves_once_to_the_real_git(self):
+        binary, run = self.resolve(subprocess.CompletedProcess([], 0, stdout=str(self.real) + "\n", stderr=""))
+        self.assertEqual(binary, str(self.real))
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/xcrun", "--find", "git"])
+        self.assertEqual(factory.git_binary(), str(self.real))  # Cached: no second xcrun.
+        self.assertEqual(run.call_count, 1)
+
+    def test_an_unresolvable_shim_refuses(self):
+        for found in (subprocess.CompletedProcess([], 1, stdout="", stderr="xcrun: error"),
+                      subprocess.CompletedProcess([], 0, stdout="relative/git\n", stderr=""),
+                      subprocess.CompletedProcess([], 0, stdout=str(self.real) + ".missing\n", stderr="")):
+            factory.git_binary.cache_clear()
+            with self.subTest(found=found.stdout), self.assertRaisesRegex(factory.FactoryError, "xcrun --find git"):
+                self.resolve(found)
