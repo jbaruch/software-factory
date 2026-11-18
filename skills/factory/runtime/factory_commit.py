@@ -165,6 +165,9 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
     files.setdefault(str(base), "read")
     native = args.sandbox.resolve()
     files.setdefault(str(native), "read")
+    # The Git the factory runs, with its helpers and system config. Command Line Tools sit outside the minimal
+    # system paths, so once xcode-select named them every writer commit failed (acr-230 writer-5).
+    files.setdefault(str(Path(factory.git_binary()).resolve().parents[1]), "read")
     if getattr(args, "_gitleaks", None) is not None:
         files[str(args._gitleaks)] = "read"
     package = native.parent.parent / "package.json"
