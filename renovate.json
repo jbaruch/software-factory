@@ -22,6 +22,15 @@
         "digest"
       ],
       "groupName": "dev tooling"
+    },
+    {
+      "matchDepNames": [
+        "python"
+      ],
+      "allowedVersions": "/^3\\.11\\./"
     }
-  ]
+  ],
+  "pre-commit": {
+    "enabled": true
+  }
 }
