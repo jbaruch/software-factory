@@ -406,7 +406,8 @@
       "instructions": [
         "Use the configured highly capable model with maximum supported thinking effort.",
         "Assess the exact remaining dispute and evidence; do not repeat investigation already completed.",
-        "Report completed with an actionable bounded ruling the line carries out without the operator, naming the final writer steps when it needs another correction round. Report blocked only when the operator must decide scope (amend the issue or cut an acceptance item) or risk (ship with a real defect the change introduced), naming which first. Declining a wrong finding, or deferring a tracked pre-existing one, is a ruling, not an operator decision."
+        "Report completed with an actionable bounded ruling the line carries out without the operator, naming the final writer steps when it needs another correction round. Report blocked only when the operator must decide scope (amend the issue or cut an acceptance item) or risk (ship with a real defect the change introduced), naming which first. Declining a wrong finding, or deferring a tracked pre-existing one, is a ruling, not an operator decision.",
+        "When the ruling may dismiss a pull request review finding, make your artifacts the ruling exactly as the repository's release skill defines it in the header of its dismiss-ruled-review.sh, one line per artifact: the factory writes them verbatim to the report file the release cites."
       ]
     },
     {
