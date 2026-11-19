@@ -322,7 +322,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         os.close(fd)
         raise
     started, process = timer(), None
-    directory = None
+    directory = scratch = None
     cleanup_errors = []
     events = []
     # Readers run unconfined, so they work in a disposable checkout of the candidate.
@@ -341,8 +341,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 except OSError:
                     raise factory.FactoryError("Cannot allocate the private native shell directory; restore temporary storage access/space and reconcile this attempt before another launch") from None
                 # Off the event loop: it runs Git, and xattr on macOS.
+                scratch = factory.new_scratch()
                 environment = await asyncio.to_thread(factory.worker_environment,
-                    {**native_environment(), "ZDOTDIR": str(directory)}, workdir)
+                    {**native_environment(), "ZDOTDIR": str(directory)}, workdir, scratch=scratch)
                 # JSON basic-string escapes also fit TOML, except raw DEL;
                 # keep non-BMP Unicode literal rather than JSON surrogate pairs.
                 shell_path = json.dumps(str(directory), ensure_ascii=False).replace("\x7f", "\\u007f")
@@ -420,6 +421,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 except OSError:
                     cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
                 receipt["exit_code"] = process.returncode
+            if scratch is not None and (process is None or process.returncode is not None):
+                factory.remove_scratch(scratch)
             if directory is not None:
                 if process is not None and process.returncode is None:
                     cleanup_errors.append(f"Native termination is unconfirmed; retain shell directory {str(directory)!r} until owned-child reconciliation confirms exit")

@@ -1816,7 +1816,43 @@ TIME_MACHINE_EXCLUSION = ("com.apple.metadata:com_apple_backup_excludeItem",
                           "00000000000000010000000000000000000000000000001C")
 
 
-def worker_environment(environment, cwd):
+SCRATCH_ROOT = "/tmp" if os.path.isdir("/tmp") else None  # The test bootstrap points it at a per-run directory.
+
+
+def new_scratch():
+    """A private, short TMPDIR for one native attempt.
+
+    Agents' mktemp, `go test` and package managers wrote into the shared temp directories, and nothing removed
+    them: 62 GB in /private/tmp and 22 GB in $TMPDIR in five days (local-dev). /tmp keeps the path short, since
+    Go tests put Unix sockets under TMPDIR and macOS caps a socket path at 104 bytes.
+    """
+    return Path(tempfile.mkdtemp(prefix="sf-", dir=SCRATCH_ROOT or tempfile.gettempdir()))
+
+
+def remove_scratch(directory):
+    """Remove an attempt's scratch once its native process has stopped; leftovers are reported, never fatal."""
+    def writable(function, path, _):
+        # Go and package managers leave read-only files and directories; unlinking needs the parent writable.
+        os.chmod(os.path.dirname(path), 0o700)
+        if os.path.lexists(path) and not os.path.islink(path):
+            os.chmod(path, 0o700)
+        function(path)
+    try:
+        shutil.rmtree(directory, onerror=writable)
+    except OSError as exc:
+        print(f"factory: scratch {directory} was not fully removed ({exc}); remove it by hand", file=sys.stderr, flush=True)
+
+
+@contextmanager
+def scratch_directory():
+    directory = new_scratch()
+    try:
+        yield directory
+    finally:
+        remove_scratch(directory)
+
+
+def worker_environment(environment, cwd, *, scratch=None):
     """A native worker's environment: no GitHub identity, plus a linked worktree's own Go build cache.
 
     Without -trimpath Go keys every compiled package on its directory, so each factory worktree wrote its own
@@ -1826,6 +1862,8 @@ def worker_environment(environment, cwd):
     but it breaks tests that find their files through runtime.Caller.
     """
     environment = no_github_identity(environment, github_origin(cwd))
+    if scratch is not None:
+        environment = {**environment, "TMPDIR": str(scratch)}
     directory = git_dir(cwd)
     if directory == git_common_dir(cwd):
         return environment  # The main checkout keeps the user's own cache.
@@ -1911,6 +1949,8 @@ def brief(role_id, goal, *, designs=False):
             # Grok readers and a writer answered on the spot with their plan as the verdict, and were rejected (#134).
             + "\nDo the work with your tools first and report last: a report given without a single tool call is"
             + " rejected, and your first message is never your report."
+            + "\nKeep scratch files in $TMPDIR, which is yours alone and removed when you finish; never write them to"
+            + " /tmp directly."
             # Read-only specialists cannot write files, so the report is their only collected output.
             + "\nYour structured report is the only output the factory collects: put each finding, or each verified"
             + " point behind an approval, in its artifacts as a self-contained string with path:line."
