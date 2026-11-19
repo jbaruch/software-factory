@@ -2,6 +2,7 @@
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -365,3 +366,32 @@ class AppleGitShim(unittest.TestCase):
             factory.git_binary.cache_clear()
             with self.subTest(found=found.stdout), self.assertRaisesRegex(factory.FactoryError, "xcrun --find git"):
                 self.resolve(found)
+
+
+class ManagedScratch(unittest.TestCase):
+    """Each native attempt's TMPDIR is its own and goes when the attempt does (local-dev, 84 GB of temp)."""
+
+    def test_scratch_is_short_private_and_removed_with_read_only_leftovers(self):
+        with factory.scratch_directory() as scratch:
+            self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+            nested = scratch / "go-build123" / "pkg"
+            nested.mkdir(parents=True)
+            (nested / "a.o").write_text("object")
+            os.chmod(nested / "a.o", 0o400)
+            os.chmod(nested, 0o500)
+            with tempfile.TemporaryDirectory() as repository:
+                subprocess.run([factory.git_binary(), "init", "-q", repository], check=True)
+                environment = factory.worker_environment({"PATH": os.defpath}, repository, scratch=scratch)
+            self.assertEqual(environment["TMPDIR"], str(scratch))
+        self.assertFalse(scratch.exists())
+
+    def test_a_leftover_is_reported_not_fatal(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from unittest.mock import patch
+        scratch = factory.new_scratch()
+        self.addCleanup(lambda: scratch.exists() and __import__("shutil").rmtree(scratch))
+        errors = StringIO()
+        with patch.object(factory.shutil, "rmtree", side_effect=PermissionError("busy")), redirect_stderr(errors):
+            factory.remove_scratch(scratch)
+        self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())

@@ -883,6 +883,14 @@ class ClaudeWorker(unittest.TestCase):
         with patch.object(factory,"status",return_value=dict(state="exited")):
             return factory.collect_claude(self.path,"inspect",self.rex,self.record,self.assignment)
 
+    def test_the_agent_gets_a_private_tmpdir_removed_when_it_finishes(self):
+        # Agents' mktemp and go test filled /private/tmp and $TMPDIR with 84 GB in five days (local-dev).
+        self.assertEqual(self.execute()["state"], "completed")
+        scratch = Path(self.spawns[0][1]["env"]["TMPDIR"])
+        self.assertEqual(str(scratch.parent), factory.SCRATCH_ROOT)  # /tmp in production, a per-run root in tests.
+        self.assertLess(len(scratch.name), 12)  # Go tests put Unix sockets under TMPDIR; macOS caps them at 104 bytes.
+        self.assertFalse(scratch.exists())
+
     def test_collection_writes_the_report_as_plain_text_lines(self):
         # A judge's ruling cites its FINDING: and HEAD= lines from this file by path and digest (#218).
         self.assertEqual(self.execute()["state"], "completed")
