@@ -550,11 +550,24 @@ the issue (`owner/repo#N@T`, owner and repository compared without case, surroun
 whitespace ignored), its title and body must not have changed after `T`: its creation,
 its last body edit (`lastEditedAt`) and its last title rename must all be at or before
 `T`. Closing it, labels and comments move `updatedAt` but not the acceptance, so the
-task's own merge closing its issue keeps the revision current (#167). The read-only token
-lives in the macOS Keychain, one entry per Mac (`security add-generic-password -s
-software-factory-github-read -a "$USER" -w`; a fine-grained token with read-only
-Contents, Issues, Pull requests and Metadata). Where there is no Keychain, such as
-Linux, the factory reads `SOFTWARE_FACTORY_GITHUB_READ_TOKEN` once when it loads and
+task's own merge closing its issue keeps the revision current (#167).
+
+On macOS, open Keychain Access as the user who runs the factory. Select the `login`
+keychain and choose **File → New Password Item**. Use `software-factory-github-read`
+as the item name, your macOS username as the account name, and a fine-grained GitHub
+token with read-only Contents, Issues, Pull requests and Metadata as the password.
+If the current Keychain search misses the item, the factory checks the account's
+`Library/Keychains/login.keychain-db` directly when the user-domain Keychain list
+confirms that exact path. If it cannot confirm the path, check that the login
+keychain is available in Keychain Access as the same user and retry.
+If the read requires interaction, open native macOS Terminal as
+that same user. Rerun the same `factory.py inputs` command with the same state
+directory, task, candidate and requirements revision. Respond to the macOS
+authorization prompt. A denial stops capture. Once the capture is saved, subsequent
+runs reuse it for that revision, including in background sessions.
+
+On other platforms, such as Linux, the factory reads
+`SOFTWARE_FACTORY_GITHUB_READ_TOKEN` once when it loads and
 removes it from its own environment, so no child process, agent, generic command or
 Git, inherits it; only an ACR-realized copy hands it to the installed runtime it
 re-executes, which removes it again. Only the factory reads it, and it never enters an agent's
