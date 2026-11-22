@@ -6,6 +6,7 @@ import importlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -758,4 +759,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    controller_fd = sys._xoptions.get("factory-controller-fd")
+    if isinstance(controller_fd, str):
+        # Acknowledge entry and close before relocation or worker subprocesses.
+        with os.fdopen(int(controller_fd), "wb") as startup:
+            startup.write(b"1")
     sys.exit(main())

@@ -13,6 +13,96 @@
 
 A command that fails may already have written part of its effect. Check with `show` or `status` before running it again.
 
+## Controller terminals
+
+Run one attempt in the existing foreman terminal with `ready_controller.py`.
+
+```sh
+python3 -B "$SKILL_DIR/runtime/ready_controller.py" \
+  /absolute/task/logs/run-001.log /absolute/project /absolute/python3.11 -- \
+  --plan /absolute/plan.json --codex /absolute/codex \
+  --rex /absolute/rex --server 'unix:///explicit/socket' --seconds 600
+```
+
+Set `SKILL_DIR` to the absolute realized skill directory. Pass a fresh absolute
+log path in an existing private directory, the absolute working directory, and the
+absolute Python 3.11+ executable. Pass all runner flags after `--`. Include
+`--claude`, `--grok` and `--antigravity` for installed harnesses and
+`--from-writer` when selecting a writer. For retries and resumes,
+reuse the interpreter in the existing assignment's `request.command[0]` from
+`factory.py show --task TASK`. Frozen commands depend on that path.
+[Interpreter resume limitation](https://github.com/jbaruch/software-factory/issues/239)
+
+The command creates the private log before login-shell startup and captures both
+streams there unchanged, including early diagnostics and any runner JSON. When
+the direct child exits, the command records a standalone `controller_exit=N` line,
+prints `{"log": "...", "controller_exit": N}` on stdout, and exits with status
+`N`. Use the process exit status and stdout summary to determine the launcher
+outcome. Startup descendants can append to the log after the exit record.
+Invalid launcher arguments exit 2. Log open or write errors exit 1 with a
+diagnostic on stderr. A child that exits zero before the runner acknowledges
+startup yields launcher exit 1. Inspect the login shell and pinned interpreter
+if the log reports that acknowledgment is missing. For a completed plan, look
+for `"result": "complete"` in the runner's JSON. On exit 75, wait for the line
+lock to clear. Reconcile existing effects with `show` or `status` before retrying
+with a fresh log.
+
+For background work, append `&` to the same invocation in the existing terminal.
+Keep that shell until the command settles and collect its terminal result before
+handoff.
+
+## Rex helpers
+
+A direct `rex run` tab is owned by the foreman that opens it, outside factory
+worker collection. A visible command needs no `--keep-open` while it runs:
+
+```sh
+rex --autostart=false -S ENDPOINT run -s LINE --label preflight --shell=none -- /absolute/preflight
+```
+
+For optional visibility, reuse at most one log monitor per line. For example:
+
+```sh
+rex --autostart=false -S ENDPOINT run -s LINE --label controller-log --shell=none -- tail -F /absolute/task/logs/run-001.log
+```
+
+Save the endpoint used to open the helper and the full session, window and block
+IDs returned by Rex. Keep the monitor visible while monitoring is needed. When
+monitoring is done or switching logs, stop your owned monitor by its saved IDs.
+
+```sh
+rex --autostart=false -S ENDPOINT send-key -s SESSION_ID -b BLOCK_ID ctrl+c
+```
+
+If Rex retains the monitor, follow the finished-helper steps below. At handoff,
+either stop it or give the next foreman its endpoint, full IDs and log path with
+explicit ownership.
+Preserve active unrelated monitors. Helpers normally auto-close on exit; Rex
+can retain a quick failure for inspection even without `--keep-open`.
+
+1. Inspect your retained helpers before handoff or wrap-up. A populated
+   `last_exit` confirms the process finished.
+
+   ```sh
+   rex --autostart=false -S ENDPOINT block call -s SESSION_ID -b BLOCK_ID process
+   ```
+
+2. Capture needed output into existing task logs, receipts or plan results.
+
+   ```sh
+   rex --autostart=false -S ENDPOINT capture -s SESSION_ID -b BLOCK_ID --trim > /absolute/task/logs/helper.txt
+   ```
+
+3. Close the finished helper after any needed capture succeeds.
+
+   ```sh
+   rex --autostart=false -S ENDPOINT block close -s SESSION_ID BLOCK_ID
+   ```
+
+Deliberate `--keep-open` is an inspection exception with the same owner and closing
+condition. Close only your finished helper block, preserving any user split.
+Factory worker tabs retain [their own capture-before-close lifecycle](https://github.com/jbaruch/software-factory/blob/main/docs/native-rex.md#tab-tidying).
+
 ## Commands
 
 Sources are in `skills/factory/runtime/factory.py` unless the row names another file.
