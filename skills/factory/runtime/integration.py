@@ -136,20 +136,9 @@ def _all_contributors(record):
             raise factory.FactoryError("Cannot establish contributor independence for an unverified command adapter: " + key)
         if "--write" in command:
             contributors.add(contributor_context(key, record, assignment))
-    wo = record.get("writer_origin")
-    if wo is not None:
-        from pathlib import Path
-        import hashlib
-        archive_path = Path(wo["archive"])
-        try:
-            raw = archive_path.read_bytes()
-        except OSError:
-            raise factory.FactoryError("Writer origin archive is missing; restore it before approvals can proceed")
-        import hashlib as _hashlib
-        if _hashlib.sha256(raw).hexdigest() != wo["sha256"]:
-            raise factory.FactoryError("Writer origin archive has been altered; restore the original bundle before approvals can proceed")
-        for c in wo.get("contributors", []):
-            contributors.add(c["context"])
+    if record.get("schema_version") == 12 or "writer_origin" in record:
+        origin = writer_transfer.verified_origin(record)
+        contributors.update(c["context"] for c in origin["contributors"])
     return contributors
 
 

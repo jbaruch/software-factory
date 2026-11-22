@@ -91,7 +91,7 @@ omits HEAD occupancy; initial collection still requires the produced candidate a
 the original checkout HEAD. Original native requests, results, holds and consumed
 allowances remain; `delivered` adds no ledger, migration or mutable approval flag.
 
-An imported writer origin (schema 12, `writer_origin`) contributes its used attempts and judge rounds to the destination task's allowance accounting; local assignments add to those totals. The shared helper in `integration.py` combines local and origin contributors for both approval gates and `delivered_accepted`, re-reading the archive by digest and failing closed if the archive is missing or changed. An imported origin cannot satisfy `--from-writer` or native-collection dependencies; verification uses a plain read-only plan on the selected inputs with `after=[]`.
+An imported writer origin (schema 12, `writer_origin`) contributes its used attempts and judge rounds to the destination task's allowance accounting; local assignments add to those totals. Both `approvals` and `delivered_accepted` combine local contributors with the identities in the digest-verified private archive. Each gate refuses a missing or altered archive or a task origin that differs from its archived history. An imported origin cannot satisfy `--from-writer` or native-collection dependencies; verification uses a plain read-only plan on the selected inputs with `after=[]`.
 
 Canonical shell helpers run through installed `bash`, without requiring helper
 executable mode. The admitted root's ignored,

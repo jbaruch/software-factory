@@ -166,7 +166,15 @@ a revision again, even after others, reuses its first capture. Migrating version
 none, so a migrated task whose acceptance names issues refuses new launches until
 `inputs` selects the revision again and captures it.
 
-Schema version 12 is written exclusively by `import-writer` and requires `writer_origin`. It is never migrated up from 11; older runtimes refuse it. `writer_origin` holds: `schema` (1), `archive` (absolute path of the bundle file), `sha256` (bundle digest), `source` (`host`, `task`, `assignment`) and `destination` (`host`), `candidate`, `requirements`, `contributors` (sorted contexts from the source), `used` (purpose-keyed attempt counts from the source), and `judge_rounds` (count of judge-granted rounds from the source). A task with `writer_origin` at schema below 12 or a schema-12 task without it are both refused by `load_task`. A task still holding a session from before keeps its label, the `factory-<line>`
+Only `import-writer` writes schema 12. Its required `writer_origin` object has flat
+fields `schema` (1), `archive` (absolute path), `sha256`, `source_host`, `source_task`,
+`source_assignment`, `destination_host`, `candidate`, `requirements`, `contributors`
+(sorted source assignment IDs and their contexts), `used` (correction and investigation
+counts), and `judge_rounds`. Launch and approval check these values against the private
+archive at the operator-pinned digest. Ordinary tasks stay at schema 11. Loading a
+task with an invalid origin or an origin at an earlier schema fails.
+
+A task still holding a session from before keeps its label, the `factory-<line>`
 session lines first used or its own `factory-<task>-<8 hex>`, until that session
 closes; a task holding none joins its line's.
 

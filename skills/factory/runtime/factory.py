@@ -333,8 +333,9 @@ def load_task(path) -> dict:
     version = record.get("schema_version", 0)
     if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
-    if version == 12 and "writer_origin" not in record:
-        raise FactoryError("Schema 12 task is missing writer_origin; restore the original task record")
+    if version == 12:
+        import writer_transfer
+        writer_transfer.validate_origin(record.get("writer_origin"), path)
     if version < 12 and "writer_origin" in record:
         raise FactoryError("Task has writer_origin at schema below 12; restore the original task record")
     if (version < 6 or version == 7) and "provisioning" in record:
@@ -537,7 +538,6 @@ def load_task(path) -> dict:
         except OSError:
             raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
     # Schema 12 records have writer_origin and are written by import-writer; they are not migrated up from 11.
-    # Validation of writer_origin content is done by writer_transfer; load_task only checks its presence/absence.
     return record
 
 
@@ -943,12 +943,11 @@ def task_view(record):
     limits = allowance_limits(record)
     if limits is not None:
         allowances = {}
-        origin_used = record.get("writer_origin", {}).get("used") or {}
+        origin_used = record.get("writer_origin", {}).get("used", {})
         for purpose, limit in limits.items():
             local_used = sum(item["request"].get("purpose") == purpose
                              for item in record["assignments"].values())
-            origin_count = origin_used.get(purpose, 0) if isinstance(origin_used, dict) else 0
-            total_used = local_used + (origin_count if isinstance(origin_count, int) else 0)
+            total_used = local_used + origin_used.get(purpose, 0)
             allowances[purpose] = dict(limit=limit, used=total_used, remaining=limit - total_used)
     assignments = {key: {**item, "result_current": result_current(record, item["result"])}
                    for key, item in record["assignments"].items()}
@@ -1561,6 +1560,9 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
             or judge is not None and (not isinstance(judge, str) or not judge)):
         raise FactoryError("Supply a correction/investigation purpose, positive --additional, nonnegative --expected-limit, request ID and approval reason")
     record = load_task(path)
+    if record["schema_version"] == 12:
+        import writer_transfer
+        writer_transfer.verified_origin(record)
     limits = allowance_limits(record)
     if limits is None:
         raise FactoryError("Admit the task before adjusting its allowance")
@@ -2204,6 +2206,9 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if not Path(command[0]).is_absolute() or not os.access(command[0], os.X_OK):
         raise FactoryError("Command executable must be an absolute executable file")
     record = load_task(path) if os.path.lexists(path) else new_task(task)
+    if record["schema_version"] == 12:
+        import writer_transfer
+        writer_transfer.verified_origin(record)
     existing = record["assignments"].get(assignment_id)
     if existing is None and "--write" in command and (
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
@@ -3520,6 +3525,25 @@ def pane_line(harness, event):
     return "\n".join(pane_style(line) for line in "\n".join(lines).split("\n") if line) or None
 
 
+def settled_writer_target(record, source, args, receipt, native):
+    """Bind the selected pair and stored writer result to the verified native commit."""
+    original = source["request"]["inputs"]
+    if not args.write or args.commit_message is None or receipt.get("commit") is None:
+        raise FactoryError("--from-writer needs an explicit validated factory commit")
+    if receipt["commit"]["state"] == "unchanged":
+        # An earlier runtime collected such a writer as completed; its candidate is the one already verified (#166).
+        raise FactoryError("--from-writer: the writer committed nothing, so its candidate is the one already "
+                           "verified; plan a new writer instead of verifying it again")
+    expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],
+        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    if source["result"] != expected:
+        raise FactoryError("Collected writer result differs from its original native evidence")
+    target = dict(candidate=receipt["candidate"], requirements=original["requirements"])
+    if record["inputs"] not in (original, target):
+        raise FactoryError("Selected task inputs changed; refuse stale or third-party candidate/requirements")
+    return target
+
+
 def evidence_reader(harness):
     """Each harness's strict original-evidence reader, resolved at call time."""
     return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence, antigravity=antigravity_evidence)[harness]
@@ -3716,7 +3740,7 @@ def main(argv=None):
                 # whoami is not called; source host is read from the pinned record.
                 source_host, sha256 = writer_transfer.export_writer(
                     path, assignment_id=args.id, to_host=args.to_host, to_task=args.to_task,
-                    out_path=args.out, whoami_host_id=None)
+                    out_path=args.out)
             print(json.dumps(dict(source_host=source_host, sha256=sha256, out=args.out), indent=2))
             return 0
         if args.action == "import-writer":
@@ -3731,8 +3755,7 @@ def main(argv=None):
             with task_lock(state_dir, args.task) as path:
                 record = writer_transfer.import_writer(
                     path, file_path=args.file, from_host=args.from_host, sha256=args.sha256,
-                    whoami_host_id=whoami_host_id, state_dir=state_dir,
-                    repository=load_task(path)["admission"]["repository"] if os.path.lexists(path) else None)
+                    whoami_host_id=whoami_host_id)
             print(json.dumps(task_view(record), indent=2))
             return 0
         if args.action == "delivered":

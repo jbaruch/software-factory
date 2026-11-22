@@ -62,10 +62,17 @@ def _blob_digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _acceptance_digest(acceptance_text: str) -> str:
-    """Digest of the acceptance capture with 'Updated <timestamp>' lines normalised out."""
-    normalised = re.sub(r"(?m)^Updated [^\n]+\n", "Updated <normalised>\n", acceptance_text)
-    return hashlib.sha256(normalised.encode()).hexdigest()
+def _acceptance_digest(record, requirements):
+    capture = record.get("acceptance", {}).get(requirements)
+    if capture is None:
+        return None
+    for owner, repo, number in factory.acceptance_issues(record["admission"]):
+        issue = re.escape(f"{owner}/{repo}#{number}")
+        header = re.compile(rf"(?m)^(### {issue}: [^\n]*\n)Updated [^\n]+\n\n")
+        # A body can quote an issue header. Keep ambiguous text byte-exact.
+        if len(header.findall(capture)) == 1:
+            capture = header.sub(r"\1Updated <normalised>\n\n", capture)
+    return _blob_digest(capture.encode())
 
 
 def _git_object_type(repository, sha):
@@ -94,7 +101,7 @@ def _git_parent_sha(repository, sha):
 # Export
 # ---------------------------------------------------------------------------
 
-def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_host_id):
+def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_host_id=None):
     """Export a settled writer as source history.  Runs under the task lock; writes no task record.
 
     Returns (source_host_id, sha256_hex) of the written bundle.
@@ -113,17 +120,16 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
              "Export requires schema 11 source; load_task would migrate older records")
     _require("writer_origin" not in record_raw, "Source already has writer_origin; it cannot be re-exported")
 
-    # Now use load_task for full validation (it will return schema 11 record after migration check).
     record = factory.load_task(path)
-    _require(record["schema_version"] == 11, "Source record migrated unexpectedly")
-    _require("writer_origin" not in record, "Source already has writer_origin")
 
     _require(record["hold"] is not None,
              "Source task is not held; pause it before exporting")
     _require(record["admission"] is not None, "Source task must be admitted before export")
 
     source_host = record["rex"]["host_id"] if record["rex"] is not None else None
-    _require(source_host is not None, "Source task has no pinned Rex identity; it was never launched")
+    _require(isinstance(source_host, str) and SLUG_RE.fullmatch(source_host),
+             "Export requires a pinned source Rex host ID that import can verify")
+    _require(SLUG_RE.fullmatch(to_host) and SLUG_RE.fullmatch(to_task), "Supply a valid destination host and task")
     _require(source_host != to_host,
              "Source and destination host are the same; transfer requires a different host")
 
@@ -138,8 +144,6 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
         closed_state = assignment["closed"]["state"]
         _require(closed_state in factory.TERMINAL_STATES,
                  f"Assignment {key} is not terminal (state={closed_state})")
-        _require(assignment["state"] != "launching",
-                 f"Assignment {key} is still launching; wait for it to complete")
 
     # Find the selected writer assignment.
     writer_assignment = record["assignments"].get(assignment_id)
@@ -147,8 +151,8 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
     _require("--write" in writer_assignment["request"]["command"],
              f"Assignment {assignment_id} is not a writer (no --write flag)")
 
-    # Apply --from-writer checks (abbreviated; full validation is in ready_runner).
-    import integration as _integration
+    # Re-read the original native evidence under the source host binding.
+    import integration
     _require(writer_assignment["state"] == "launched",
              "Writer assignment must be in launched state")
     _require(writer_assignment["result"] is not None,
@@ -158,19 +162,17 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
     _require(writer_assignment.get("native_collected") is True,
              "Writer assignment native result is not collected")
 
-    harness = factory.native_harness(writer_assignment["request"]["command"])
-    _require(harness is not None, "Writer assignment is not an original native worker")
-    assert harness is not None  # narrowed above by _require
-
-    # Verify collected native (non-current OK for export).
-    _integration.collected_native(assignment_id, record, writer_assignment, current=False)
+    factory.check_repository(record["admission"])
+    args, receipt, native = integration.collected_native(assignment_id, record, writer_assignment, current=False)
+    target = factory.settled_writer_target(record, writer_assignment, args, receipt, native)
 
     # Compute contributor contexts for ALL --write assignments (failed and earlier included).
     contributors = []
     for key, assignment in record["assignments"].items():
         if "--write" not in assignment["request"]["command"]:
             continue
-        context = _integration.contributor_context(key, record, assignment)
+        context = integration.contributor_context(key, record, assignment)
+        _require(isinstance(context, str) and context.strip(), f"Unknown source contributor context: {key}")
         contributors.append({"id": key, "context": context})
     contributors.sort(key=lambda x: x["id"])
 
@@ -182,47 +184,18 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
             raise factory.FactoryError(f"Cannot read archival blob {path_str}") from None
         return content
 
-    # Receipt path from args.
-    writer_command = writer_assignment["request"]["command"]
-    harness_name = harness
-    if harness_name in ("claude", "grok"):
-        import importlib
-        worker = importlib.import_module(harness_name + "_worker")
-        args = worker.parser().parse_args(writer_command[4:])
-        receipt_path = str(args.receipt)
-        events_path = str(args.events)
-    elif harness_name == "codex":
-        import codex_worker
-        offset = 4 if writer_command[1:3] == ["-E", "-s"] else 2
-        args = codex_worker.parser().parse_args(writer_command[offset:])
-        receipt_path = str(args.receipt)
-        events_path = str(args.events)
-    elif harness_name == "antigravity":
-        import antigravity_worker
-        args = antigravity_worker.parser().parse_args(writer_command[4:])
-        receipt_path = str(args.receipt)
-        events_path = str(args.events)
-    else:
-        raise factory.FactoryError("Unsupported harness for export: " + harness_name)
-
+    receipt_path, events_path = str(args.receipt), str(args.events)
     receipt_bytes = _read_blob(receipt_path)
     events_bytes = _read_blob(events_path)
     brief_bytes = _read_blob(writer_assignment["brief"])
     assignment_json_bytes = json.dumps(writer_assignment, indent=2, sort_keys=True).encode()
 
-    # Acceptance digest.
-    acceptance_capture = record.get("acceptance")
-    acceptance_digest = _acceptance_digest(acceptance_capture) if isinstance(acceptance_capture, str) else None
-
+    _require(COMMIT_RE.fullmatch(target["requirements"]), "Transfer requires an exact requirements commit SHA")
     # Effective limits and judge rounds.
-    limits = factory.allowance_limits(record)
-    used = {}
-    judge_rounds = 0
-    if limits is not None:
-        for purpose in limits:
-            used[purpose] = sum(1 for a in record["assignments"].values()
-                                if a["request"].get("purpose") == purpose)
-        judge_rounds = sum(1 for ev in record.get("allowance_events", []) if "judge" in ev)
+    allowances = factory.task_view(record)["allowances"]
+    limits = {purpose: counts["limit"] for purpose, counts in allowances.items()}
+    used = {purpose: counts["used"] for purpose, counts in allowances.items()}
+    judge_rounds = sum("judge" in event for event in record["allowance_events"])
 
     # GitHub origin.
     repo = record["admission"]["repository"]
@@ -230,9 +203,7 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
     _require(gh_origin is not None, "Cannot determine GitHub OWNER/REPO from repository remote.origin.url")
 
     # Writer result for the bundle.
-    writer_result = writer_assignment["result"]
-    candidate = writer_result["candidate"]
-    original_inputs = writer_result["inputs"]
+    candidate = target["candidate"]
     # Parent and tree from the candidate commit.
     parent = _git_parent_sha(repo, candidate)
     tree = _git_commit_tree(repo, candidate)
@@ -260,8 +231,8 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
         "candidate": candidate,
         "parent": parent,
         "tree": tree,
-        "requirements": original_inputs["requirements"],
-        "acceptance_digest": acceptance_digest,
+        "requirements": target["requirements"],
+        "acceptance_digest": _acceptance_digest(record, target["requirements"]),
         "contributors": contributors,
         "limits": limits,
         "used": used,
@@ -290,15 +261,16 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
     }
 
     bundle_bytes = json.dumps(bundle, indent=2, sort_keys=True).encode("utf-8")
-    bundle_sha256 = hashlib.sha256(bundle_bytes).hexdigest()
+    _require(len(bundle_bytes) <= BUNDLE_MAX_BYTES, "Bundle exceeds the archive size limit")
+    bundle_sha256 = _blob_digest(bundle_bytes)
 
     out_path = Path(out_path)
-    _require(not str(out_path).startswith(str(factory.default_state_dir())),
+    _require(not out_path.resolve().is_relative_to(path.parent.resolve()),
              "Output file must be outside the state directory")
 
     if out_path.exists():
         # Idempotent replay: same bytes → same digest → return without error.
-        existing = out_path.read_bytes()
+        existing = _read_private_bounded(out_path)
         if hashlib.sha256(existing).hexdigest() == bundle_sha256:
             return source_host, bundle_sha256
         raise factory.FactoryError(
@@ -312,13 +284,13 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
 # Import
 # ---------------------------------------------------------------------------
 
-def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_dir, repository):
+def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_dir=None, repository=None):
     """Import a writer bundle on the destination host.
 
     Operator supplies --from-host and --sha256 from the source export output; never read from file.
     Returns the updated task record.
     """
-    _require(isinstance(from_host, str) and SLUG_RE.fullmatch(from_host.replace("-", "x")),
+    _require(isinstance(from_host, str) and SLUG_RE.fullmatch(from_host),
              "Supply a valid --from-host value from the export output")
     _require(isinstance(sha256, str) and SHA256_RE.fullmatch(sha256),
              "Supply a valid --sha256 value from the export output")
@@ -340,46 +312,45 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_d
     except (ValueError, UnicodeDecodeError):
         raise factory.FactoryError("Cannot decode bundle file; use the unmodified export output") from None
 
-    _require(isinstance(bundle, dict), "Invalid bundle format")
-    _require(bundle.get("schema") == BUNDLE_SCHEMA,
-             f"Unsupported bundle schema {bundle.get('schema')!r}; use a compatible export")
+    _require(isinstance(bundle, dict) and set(bundle) == {
+        "schema", "source", "destination", "candidate", "parent", "tree", "requirements", "acceptance_digest",
+        "contributors", "limits", "used", "judge_rounds", "blobs"}, "Invalid writer bundle fields")
+    source, dest, blobs = bundle["source"], bundle["destination"], bundle["blobs"]
+    _require(isinstance(source, dict) and set(source) == {
+        "host_id", "task", "assignment", "line", "hold", "control_revision", "github_origin"}
+        and isinstance(source["hold"], str) and source["hold"].strip()
+        and isinstance(source["line"], str) and factory.LINE.fullmatch(source["line"])
+        and type(source["control_revision"]) is int and source["control_revision"] >= 0,
+        "Invalid writer bundle source history")
+    _require(isinstance(dest, dict) and set(dest) == {"task", "host_id"}, "Invalid bundle destination")
 
-    # Strict field checks.
-    for section in ("source", "destination", "blobs"):
-        _require(isinstance(bundle.get(section), dict),
-                 f"Bundle missing or invalid {section!r} section")
-
-    source = bundle["source"]
-    dest = bundle["destination"]
-
-    _require(isinstance(source.get("host_id"), str) and source["host_id"],
-             "Bundle source host_id is missing or empty")
+    archive_path = path.absolute().with_suffix(".writer-origin.bundle")
+    writer_origin = _origin_fields(bundle, archive_path, sha256)
+    validate_origin(writer_origin, path)
+    _require(isinstance(blobs, dict) and set(blobs) == {"assignment", "receipt", "events", "brief"},
+             "Invalid bundle archival blobs")
+    for name, blob in blobs.items():
+        fields = {"content", "digest"} if name == "assignment" else {"content", "digest", "path"}
+        _require(isinstance(blob, dict) and set(blob) == fields and isinstance(blob["content"], str)
+                 and ("path" not in fields or isinstance(blob["path"], str))
+                 and _blob_digest(blob["content"].encode()) == blob["digest"], "Invalid archival blob: " + name)
+    _require(bundle["acceptance_digest"] is None or isinstance(bundle["acceptance_digest"], str)
+             and SHA256_RE.fullmatch(bundle["acceptance_digest"]), "Invalid acceptance digest")
     _require(source["host_id"] == from_host,
              "Bundle source host_id does not match --from-host; supply the exact value from the export output")
-    _require(isinstance(dest.get("host_id"), str) and dest["host_id"],
-             "Bundle destination host_id is missing or empty")
     _require(whoami_host_id == dest["host_id"],
              "Connected Rex host differs from the bundle's destination host_id")
-    _require(source["host_id"] != dest["host_id"],
-             "Source and destination host are the same; transfer requires a different host")
 
     task_name = path.stem
     _require(dest.get("task") == task_name,
              f"Bundle destination task {dest.get('task')!r} does not match --task {task_name!r}")
 
-    for key in ("candidate", "requirements", "parent", "tree"):
-        _require(isinstance(bundle.get(key), str) and bundle[key],
-                 f"Bundle missing or invalid {key!r}")
-    _require(COMMIT_RE.fullmatch(bundle["candidate"]), "Bundle candidate is not a valid commit SHA")
-    _require(COMMIT_RE.fullmatch(bundle["requirements"]), "Bundle requirements is not a valid commit SHA")
-    _require(COMMIT_RE.fullmatch(bundle["parent"]), "Bundle parent is not a valid commit SHA")
-    _require(COMMIT_RE.fullmatch(bundle["tree"]), "Bundle tree is not a valid tree SHA")
-
-    _require(isinstance(bundle.get("contributors"), list),
-             "Bundle contributors must be a list")
-    for c in bundle["contributors"]:
-        _require(isinstance(c, dict) and isinstance(c.get("id"), str) and isinstance(c.get("context"), str),
-                 "Bundle contributor entry must have string id and context")
+    for key in ("parent", "tree"):
+        _require(isinstance(bundle[key], str) and COMMIT_RE.fullmatch(bundle[key]), f"Invalid bundle {key}")
+    source_limits = bundle["limits"]
+    _require(isinstance(source_limits, dict) and set(source_limits) == set(writer_origin["used"])
+             and all(type(limit) is int and limit >= 0 for limit in source_limits.values()),
+             "Invalid bundle allowance limits")
 
     # Load the destination task.
     record = factory.load_task(path)
@@ -427,11 +398,7 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_d
 
     # Acceptance digest check (when the source captured one).
     if bundle.get("acceptance_digest") is not None:
-        dest_acceptance = record.get("acceptance")
-        _require(isinstance(dest_acceptance, str),
-                 "Destination task has no captured acceptance; select inputs to capture it, then import")
-        assert isinstance(dest_acceptance, str)  # narrowed above by _require
-        _require(_acceptance_digest(dest_acceptance) == bundle["acceptance_digest"],
+        _require(_acceptance_digest(record, bundle["requirements"]) == bundle["acceptance_digest"],
                  "Destination acceptance digest does not match the source; verify the same acceptance issues")
 
     # Local Git object checks with GIT_NO_LAZY_FETCH=1 (via provisioning_git).
@@ -451,38 +418,14 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_d
              "Candidate commit tree does not match bundle; use the exact candidate from the source export")
 
     # Each destination effective limit no higher than source's.
-    source_limits = bundle.get("limits")
-    if source_limits is not None and isinstance(source_limits, dict):
-        dest_limits = factory.allowance_limits(record)
-        if dest_limits is not None:
-            for purpose, src_lim in source_limits.items():
-                dest_lim = dest_limits.get(purpose, 0)
-                _require(dest_lim <= src_lim,
-                         f"Destination {purpose} limit ({dest_lim}) exceeds source ({src_lim}); "
-                         "lower the destination limit or raise the source before importing")
+    dest_limits = factory.allowance_limits(record)
+    assert dest_limits is not None  # The destination is admitted.
+    for purpose, limit in dest_limits.items():
+        _require(limit <= source_limits[purpose],
+                 f"Destination {purpose} limit ({limit}) exceeds source ({source_limits[purpose]}); "
+                 "lower the destination limit or raise the source before importing")
 
-    # Build writer_origin.
-    writer_origin = {
-        "schema": BUNDLE_SCHEMA,
-        "archive": None,  # Will be set after saving archive.
-        "sha256": sha256,
-        "source_host": source["host_id"],
-        "source_task": source["task"],
-        "source_assignment": source["assignment"],
-        "destination_host": dest["host_id"],
-        "candidate": bundle["candidate"],
-        "requirements": bundle["requirements"],
-        "contributors": bundle["contributors"],
-        "used": bundle.get("used"),
-        "judge_rounds": bundle.get("judge_rounds", 0),
-    }
-
-    # Save archive: TASK.writer-origin.bundle (not .json so state scanners skip it).
-    archive_name = task_name + ".writer-origin.bundle"
-    archive_path = path.parent / archive_name
-    _save_archive(archive_path, raw, sha256, record)
-
-    writer_origin["archive"] = str(archive_path)
+    _save_archive(archive_path, raw, sha256)
 
     # Apply hold if not already held.
     hold_reason = f"writer-origin: source task {source['task']!r} on host {source['host_id']!r} is held"
@@ -505,60 +448,74 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_d
     return record
 
 
-def _save_archive(archive_path, bundle_bytes: bytes, sha256: str, record):
-    """Save the bundle archive exclusively; replay reuses an identical orphan."""
-    if archive_path.exists():
-        existing = archive_path.read_bytes()
-        if hashlib.sha256(existing).hexdigest() == sha256:
-            return  # Identical orphan from an interrupted previous run.
-        raise factory.FactoryError(
-            f"Conflicting archive already exists at {archive_path}; remove it and retry if it is a stale orphan")
+def _save_archive(archive_path, bundle_bytes: bytes, sha256: str):
+    """Save the bundle archive exclusively; replay reuses an identical private orphan."""
     try:
-        fd = os.open(str(archive_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(bundle_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
-        directory = os.open(str(archive_path.parent), os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _write_exclusive_private(archive_path, bundle_bytes)
     except FileExistsError:
-        # Race: check identity.
-        existing = archive_path.read_bytes()
-        if hashlib.sha256(existing).hexdigest() != sha256:
-            raise factory.FactoryError("Conflicting archive written by a concurrent process") from None
-
-
-def all_contributors(record):
-    """Combined local --write contributor contexts plus any origin contributors.
-
-    Returns sorted list of context strings.  Raises FactoryError if the origin archive is altered.
-    """
-    local = set()
-    for assignment in record["assignments"].values():
-        if "--write" in assignment["request"]["command"]:
-            import integration as _integration
-            local.add(_integration.contributor_context(
-                list(record["assignments"].keys())[list(record["assignments"].values()).index(assignment)],
-                record, assignment))
-
-    origin_contexts = set()
-    wo = record.get("writer_origin")
-    if wo is not None:
-        # Re-read the archive by digest; fail closed if missing or changed.
-        archive_path = Path(wo["archive"])
-        try:
-            raw = archive_path.read_bytes()
-        except OSError:
+        if _blob_digest(_read_private_bounded(archive_path)) != sha256:
             raise factory.FactoryError(
-                "Writer origin archive is missing; restore it before approvals can proceed") from None
-        observed_sha256 = hashlib.sha256(raw).hexdigest()
-        if observed_sha256 != wo["sha256"]:
-            raise factory.FactoryError(
-                "Writer origin archive has been altered; restore the original bundle before approvals can proceed")
-        for c in wo.get("contributors", []):
-            origin_contexts.add(c["context"])
+                f"Conflicting archive at {archive_path}; inspect the orphan before retrying") from None
 
-    return local | origin_contexts
+
+def _origin_fields(bundle, archive_path, sha256) -> dict:
+    source = bundle["source"]
+    return dict(schema=bundle["schema"], archive=str(archive_path), sha256=sha256,
+                source_host=source["host_id"], source_task=source["task"], source_assignment=source["assignment"],
+                destination_host=bundle["destination"]["host_id"], candidate=bundle["candidate"],
+                requirements=bundle["requirements"], contributors=bundle["contributors"],
+                used=bundle["used"], judge_rounds=bundle["judge_rounds"])
+
+
+def validate_origin(origin, path):
+    """Validate the flat schema before task loading uses the inherited allowance counters."""
+    fields = {"schema", "archive", "sha256", "source_host", "source_task", "source_assignment",
+              "destination_host", "candidate", "requirements", "contributors", "used", "judge_rounds"}
+    if (not isinstance(origin, dict) or set(origin) != fields
+            or type(origin["schema"]) is not int or origin["schema"] != BUNDLE_SCHEMA
+            or origin["archive"] != str(path.absolute().with_suffix(".writer-origin.bundle"))
+            or not isinstance(origin["sha256"], str) or not SHA256_RE.fullmatch(origin["sha256"])
+            or any(not isinstance(origin[k], str) or not SLUG_RE.fullmatch(origin[k])
+                   for k in ("source_host", "destination_host", "source_task", "source_assignment"))
+            or origin["source_host"] == origin["destination_host"]
+            or any(not isinstance(origin[k], str) or not COMMIT_RE.fullmatch(origin[k])
+                   for k in ("candidate", "requirements"))
+            or not isinstance(origin["used"], dict) or set(origin["used"]) != {"correction", "investigation"}
+            or any(type(n) is not int or n < 0 for n in origin["used"].values())
+            or type(origin["judge_rounds"]) is not int or not 0 <= origin["judge_rounds"] <= factory.JUDGE_ROUNDS
+            or not isinstance(origin["contributors"], list)
+            or any(not isinstance(c, dict) or set(c) != {"id", "context"}
+                   or not isinstance(c["id"], str) or not SLUG_RE.fullmatch(c["id"])
+                   or not isinstance(c["context"], str) or not c["context"].strip() for c in origin["contributors"])):
+        raise factory.FactoryError("Invalid writer_origin; restore the original imported task record")
+    ids = [c["id"] for c in origin["contributors"]]
+    if ids != sorted(set(ids)) or origin["source_assignment"] not in ids:
+        raise factory.FactoryError("Invalid writer_origin contributor history; restore the original imported record")
+
+
+def verified_origin(record) -> dict:
+    """Recheck archived source history at a gate, including for an already loaded record."""
+    origin = record.get("writer_origin")
+    if record.get("schema_version") != 12 or not isinstance(origin, dict) or not isinstance(origin.get("archive"), str):
+        raise factory.FactoryError("Invalid writer_origin; restore the original imported record")
+    archive = Path(origin["archive"])
+    validate_origin(origin, archive.parent / (record["task"] + ".json"))
+    # Approval callers hold a record in memory. Its local assignment briefs name the task directory.
+    if any(Path(item["brief"]).parent != archive.parent for item in record["assignments"].values()):
+        raise factory.FactoryError("Writer origin archive is outside the task directory; restore the imported record")
+    try:
+        raw = _read_private_bounded(archive)
+    except OSError as exc:
+        raise factory.FactoryError(f"Cannot read writer origin archive; restore the original bundle: {exc}") from None
+    if _blob_digest(raw) != origin["sha256"]:
+        raise factory.FactoryError("Writer origin archive has been altered; restore the original bundle")
+    try:
+        bundle = factory.decode_json(raw)
+        expected = _origin_fields(bundle, archive, origin["sha256"])
+        destination_task = bundle["destination"]["task"]
+    except (ValueError, KeyError, TypeError):
+        raise factory.FactoryError("Malformed writer origin archive; restore the original bundle") from None
+    if (destination_task != record["task"] or origin != expected
+            or record["rex"] is not None and record["rex"]["host_id"] != expected["destination_host"]):
+        raise factory.FactoryError("Task writer_origin differs from its archive; restore the original imported record")
+    return expected

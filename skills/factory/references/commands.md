@@ -143,7 +143,7 @@ Transfer a settled writer's provenance from SOURCE_HOST (task `SRC`) to DEST_HOS
 
 ```sh
 # Export; prints source_host and sha256 — record both values.
-python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /src/state \
+python3 -B "$SKILL_DIR/runtime/factory.py" \
   export-writer --task SRC --id WRITER_ID \
   --to-host DEST_HOST_ID --to-task DST \
   --out /tmp/transfer.bundle
@@ -152,20 +152,20 @@ python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /src/state \
 
 Transfer the bundle to the destination host by any secure operator channel. Confirm the SHA-256 of the received file matches the printed value before proceeding.
 
-**On the destination host** (fresh admission, no assignments):
+On the destination host, fetch the exact candidate and requirements into local refs. Use a fresh admission with the original acceptance references.
 
 ```sh
 # 1. Admit the task (use the exact candidate C and requirements R from the source).
-python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /dst/state \
+python3 -B "$SKILL_DIR/runtime/factory.py" \
   admit --task DST --line DST --goal 'Imported writer provenance' \
-  --repo /dst/checkout
+  --repo /dst/checkout --acceptance "$ACCEPTANCE_REF"
 
 # 2. Select inputs (must match the source bundle's candidate and requirements).
-python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /dst/state \
+python3 -B "$SKILL_DIR/runtime/factory.py" \
   inputs --task DST --candidate C --requirements R
 
 # 3. Import; --from-host and --sha256 come from the export output, never from the bundle.
-python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /dst/state \
+python3 -B "$SKILL_DIR/runtime/factory.py" \
   --rex "$(command -v rex)" --server 'unix:///dst/rex.sock' \
   import-writer --task DST --file /path/to/transfer.bundle \
   --from-host src-host-id --sha256 aabbcc...
