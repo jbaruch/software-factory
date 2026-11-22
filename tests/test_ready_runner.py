@@ -328,6 +328,138 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.task_view(factory.load_task(path))["allowances"]["correction"],
                          dict(limit=1, used=1, remaining=0))
 
+    def test_interpreter_takeover_refuses_both_paths_and_reuses_original_work(self):
+        original_python = sys.executable
+        record = self.completed_writer()
+        plan = self.plan([self.job("approved", after=["implement"]),
+                          self.job("running", after=["implement"], purpose="correction")])
+        plan_file = self.root / "verification.json"
+        plan_file.write_text(json.dumps(plan))
+        original_plan = plan_file.read_bytes()
+        argv = ["--state-dir", str(self.directory), "--plan", str(plan_file), "--from-writer", "implement",
+                "--codex", original_python, "--rex", original_python, "--server", "unix:///test.sock", "--once"]
+        alternate = "/fixture/alternate/python3.11"
+
+        def assert_writer_refusal():
+            stderr = StringIO()
+            calls = list(PlanRex.calls)
+            with patch.object(sys, "executable", alternate), redirect_stderr(stderr):
+                self.assertEqual(runner.main(argv), 1)
+            message = stderr.getvalue()
+            self.assertIn("Python interpreter mismatch for 'task/implement'", message)
+            self.assertIn(ascii(original_python), message)
+            self.assertIn("retry the original plan with that exact interpreter", message)
+            self.assertEqual(PlanRex.calls, calls)
+
+        path = self.directory / "task.json"
+        before_selection, launches = path.read_bytes(), self.launches()
+        assert_writer_refusal()
+        self.assertEqual(path.read_bytes(), before_selection)
+        self.assertEqual(self.launches(), launches)
+
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 2)
+        self.finish("task", "approved")
+        self.assertEqual(self.handoff(plan)["metrics"]["collected"], 1)
+        saved = {item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}
+        sessions, launches = copy.deepcopy(PlanRex.sessions), self.launches()
+        assert_writer_refusal()
+
+        effective = {**plan, "jobs": [{**job, "candidate": record["assignments"]["implement"]["result"]["candidate"]}
+                                     for job in plan["jobs"]]}
+        replay = self.controller(effective)
+        with patch.object(sys, "executable", alternate):
+            refused = self.tick(replay)
+        self.assertEqual(refused["result"], "needs_action")
+        self.assertEqual(refused["metrics"]["launched"], 0)
+        for item in refused["jobs"]:
+            self.assertEqual(item["state"], "conflict")
+            self.assertIn(f"Python interpreter mismatch for 'task/{item['id']}'", item["reason"])
+            self.assertIn(ascii(original_python), item["reason"])
+            self.assertIn("retry the original plan with that exact interpreter", item["reason"])
+
+        changed = copy.deepcopy(effective)
+        changed["jobs"][0]["model"] = "changed-model"
+        changed["jobs"][1]["goal"] = "Changed goal"
+        changed_replay = self.controller(changed)
+        with patch.object(sys, "executable", alternate):
+            conflicts = self.tick(changed_replay)
+        for item in conflicts["jobs"]:
+            self.assertEqual(item["state"], "conflict")
+            self.assertIn("Plan differs from the saved immutable assignment", item["reason"])
+
+        self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
+        self.assertEqual(PlanRex.sessions, sessions)
+        self.assertEqual(self.launches(), launches)
+        retry = self.handoff(plan)
+        self.assertEqual(self.states(retry), {("task", "approved"): "approved", ("task", "running"): "running"})
+        self.assertEqual(retry["metrics"]["launched"], 0)
+        self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
+        self.assertEqual(plan_file.read_bytes(), original_plan)
+        self.assertEqual(PlanRex.sessions, sessions)
+        self.assertEqual(self.launches(), launches)
+        self.assertEqual(factory.task_view(factory.load_task(path))["allowances"]["correction"],
+                         dict(limit=1, used=1, remaining=0))
+
+    def test_from_writer_interpreter_hint_requires_unambiguous_collected_command(self):
+        record = self.completed_writer()
+        path = self.directory / "task.json"
+        command = record["assignments"]["implement"]["request"]["command"]
+        alternate = "/fixture/alternate/python3.11"
+        plausible = "/fixture/saved Python; $unused"
+        refused = "needs a collected, completed native writer"
+        calls = list(PlanRex.calls)
+        controller = self.controller(self.verification_plan(), from_writer="implement")
+        for label, saved_command, proven, message in (
+            ("relative", ["python3.11", *command[1:]], True, "Invalid assignment identity or request"),
+            ("other worker path", [*command[:3], "/fixture/codex_worker.py", *command[4:]], True, refused),
+            ("reordered flags", [command[0], "-s", "-E", *command[3:]], True, refused),
+            ("duplicated writer flag", [*command, "--write"], True, refused),
+            ("abbreviated flag", [token if token != "--model" else "--mod" for token in command], True, refused),
+            ("control character", ["/fixture/python\n3.11", *command[1:]], True, refused),
+            ("unproven collection", command, False, refused),
+            ("plausible path", [plausible, *command[1:]], True, ascii(plausible)),
+            ("historical Codex prefix", [command[0], *command[3:]], True, ascii(command[0])),
+        ):
+            altered = copy.deepcopy(record)
+            source = altered["assignments"]["implement"]
+            source["request"]["command"], source["native_collected"] = saved_command, proven
+            factory.save(path, altered)
+            before = path.read_bytes()
+            with self.subTest(label=label), patch.object(sys, "executable", alternate):
+                with self.assertRaises(factory.FactoryError) as caught:
+                    self.tick(controller)
+                self.assertIn(message, str(caught.exception))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(PlanRex.calls, calls)
+
+    def test_interpreter_replay_compares_all_worker_prefixes_and_frozen_arguments(self):
+        original_python = sys.executable
+        plan = self.plan([self.job(harness, harness=harness) for harness in factory.NATIVE_HARNESSES]
+                         + [self.job("historical")], workers=5, reserve=0)
+        binaries = dict(claude=original_python, grok=original_python, antigravity=original_python)
+        self.assertEqual(self.tick(self.controller(plan, **binaries))["metrics"]["launched"], 5)
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        del record["assignments"]["historical"]["request"]["command"][1:3]
+        factory.save(path, record)
+        saved, launches = path.read_bytes(), self.launches()
+        changed = copy.deepcopy(plan)
+        changed["jobs"][1]["seconds"] += 1
+        replay, changed_replay = self.controller(plan, **binaries), self.controller(changed, **binaries)
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+            refused = self.tick(replay)
+            other_conflict = self.tick(changed_replay)["jobs"][1]
+        self.assertEqual(refused["metrics"]["launched"], 0)
+        self.assertEqual(other_conflict["state"], "conflict")
+        self.assertNotIn("Python interpreter mismatch", other_conflict["reason"])
+        for item in refused["jobs"]:
+            self.assertEqual(item["state"], "conflict")
+            self.assertIn(ascii(original_python), item["reason"])
+        retry = self.tick(self.controller(plan, **binaries))
+        self.assertEqual([item["state"] for item in retry["jobs"]], ["running"] * 5)
+        self.assertEqual(path.read_bytes(), saved)
+        self.assertEqual(self.launches(), launches)
+
     def test_from_writer_restart_after_selection_before_dispatch(self):
         before = self.completed_writer()
         controller = self.controller(self.verification_plan(), from_writer="implement")

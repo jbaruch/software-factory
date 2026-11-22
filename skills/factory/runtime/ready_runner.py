@@ -2,6 +2,8 @@
 import argparse
 import asyncio
 import contextlib
+import importlib
+import io
 import json
 import math
 from pathlib import Path
@@ -153,6 +155,34 @@ def writer(request):
     return not native_request(request) or "--write" in request["command"]
 
 
+def alternate_worker(command):
+    """Recognize a saved prefix for diagnostics only, without checking or running its interpreter."""
+    interpreter = command[0]
+    if interpreter == sys.executable or not interpreter.isprintable() or not Path(interpreter).is_absolute():
+        return None
+    for harness in HARNESSES:
+        worker = str(factory.ROOT / (harness + "_worker.py"))
+        if command[1:4] == ["-E", "-s", worker]:
+            offset = 4
+        elif harness == "codex" and command[1:2] == [worker]:
+            offset = 2
+        else:
+            continue
+        arguments = command[offset:]
+        flags = [arg for arg in arguments if arg.startswith("--")]
+        if ("--help" in flags or "-h" in arguments or len(flags) != len(set(flags))
+                or any(not re.fullmatch(r"--[a-z][a-z0-9-]*", arg) for arg in flags)):
+            return None
+        return harness, offset
+    return None
+
+
+def interpreter_refusal(identity, interpreter):
+    return (f"Python interpreter mismatch for {identity!r}. The saved worker command records {ascii(interpreter)}. "
+            "Confirm the original installation, then retry the original plan with that exact interpreter and "
+            "the same installed runner and arguments. If you cannot confirm it, stop and reconcile the launcher provenance.")
+
+
 def settled_current(record, assignment):
     """Whether a collected result still answers the task's selected inputs.
 
@@ -251,28 +281,28 @@ class Runner:
         self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0, tabs_closed=0)
         self.tidy_issues = []
 
-    def command(self, path, job):
-        """The frozen worker command for a plan job on its harness."""
+    def command(self, path, job, *, compare_interpreter=None):
+        """Build the command. In diagnostics, compare the saved prefix without using it in argv."""
         # Absent turns keep each builder's default, so older plans freeze the same commands.
         optional = {key: job[key] for key in ("turns", "base") if key in job}
         if job["harness"] == "claude":
             return factory.claude_command(path, task=job["task"], assignment_id=job["id"], claude=str(self.claude),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
-                **optional)
+                compare_interpreter=compare_interpreter, **optional)
         if job["harness"] == "grok":
             return factory.grok_command(path, task=job["task"], assignment_id=job["id"], grok=str(self.grok),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
-                **optional)
+                compare_interpreter=compare_interpreter, **optional)
         if job["harness"] == "antigravity":
             return factory.antigravity_command(path, task=job["task"], assignment_id=job["id"], agy=str(self.antigravity),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
-                **optional)
+                compare_interpreter=compare_interpreter, **optional)
         return factory.codex_command(path, task=job["task"], assignment_id=job["id"], codex=str(self.binary),
             model=job["model"], effort=job["effort"], cwd=job["cwd"], write=job["write"], seconds=job["seconds"],
-            commit_message=job["commit_message"], role=job["role"])
+            commit_message=job["commit_message"], role=job["role"], compare_interpreter=compare_interpreter)
 
     def select_writer_candidate(self):
         """Called under the execution lock; derive each task's continuity from original evidence.
@@ -301,6 +331,26 @@ class Runner:
         if (source["state"] != "launched" or harness is None
                 or not writer(source["request"]) or source["result"] is None
                 or source["result"]["outcome"] != "completed"):
+            request = source["request"]
+            command = request["command"]
+            if (harness is None and source["state"] == "launched" and source["native_collected"] is True
+                    and source["result"]["outcome"] == "completed" and request.get("inputs") == original
+                    and source["result"]["inputs"] == original and "--write" in command
+                    and (prefix := alternate_worker(command)) is not None):
+                # Parse only the arguments of the installed worker for the hint. Evidence validation stays below.
+                worker, offset = prefix
+                parser = importlib.import_module(worker + "_worker").parser()
+                parser.allow_abbrev = False
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        saved_args = parser.parse_args(command[offset:])
+                except SystemExit:
+                    saved_args = None  # Malformed arguments retain the ordinary refusal.
+                identity = record["task"] + "/" + str(self.from_writer)
+                if (saved_args is not None and saved_args.write and saved_args.commit_message
+                        and saved_args.job == identity and saved_args.role in (None, request["role"])
+                        and (worker == "codex" or (saved_args.sandbox is not None and saved_args.sandbox.is_absolute()))):
+                    raise factory.FactoryError(interpreter_refusal(identity, command[0]))
             raise factory.FactoryError("--from-writer needs a collected, completed native writer")
         if source["request"].get("inputs") != original:
             raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
@@ -495,14 +545,27 @@ class Runner:
                 continue
             if phase is not None:
                 request = record["assignments"][job["id"]]["request"]
+                path = self.directory / (job["task"] + ".json")
+                fields_match = (request.get("inputs") == planned
+                                and all(request[k] == job[k] for k in ("role", "goal", "cwd", "purpose"))
+                                and request.get("dependencies", []) == sorted(job["after"]))
+                reason = "Plan differs from the saved immutable assignment; use a new explicit ID"
                 try:
-                    expected = self.command(self.directory / (job["task"] + ".json"), job)
-                    if (request.get("inputs") != dict(candidate=job["candidate"], requirements=job["requirements"])
-                            or any(request[k] != job[k] for k in ("role", "goal", "cwd", "purpose"))
-                            or request.get("dependencies", []) != sorted(job["after"]) or request["command"] != expected):
-                        phases[key] = dict(state="conflict", reason="Plan differs from the saved immutable assignment; use a new explicit ID")
+                    if self.command(path, job) == request["command"] and fields_match:
+                        continue
                 except (factory.FactoryError, OSError) as exc:
-                    phases[key] = dict(state="conflict", reason=str(exc))
+                    reason = str(exc)
+                saved_command = request["command"]
+                prefix = alternate_worker(saved_command) if fields_match else None
+                if prefix is not None and prefix[0] == job["harness"]:
+                    # Builders read the original frozen bindings for comparison. The command is never launched here.
+                    try:
+                        expected = self.command(path, job, compare_interpreter=saved_command[0])
+                    except (factory.FactoryError, OSError):
+                        expected = None  # Keep the original refusal when the diagnostic comparison cannot be made.
+                    if expected == [sys.executable, *saved_command[1:]]:
+                        reason = interpreter_refusal("/".join(key), saved_command[0])
+                phases[key] = dict(state="conflict", reason=reason)
                 continue
             reason = None
             if record["hold"] is not None:
