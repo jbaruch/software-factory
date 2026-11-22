@@ -112,16 +112,43 @@ report and successful process observation. It is not task acceptance. Other
 results are `needs_action`, `pending` for a one-cycle observation, and
 `pending_at_budget`. The CLI returns zero only for `complete`.
 
-The CLI result also carries `harnesses`, one entry per harness binary passed, so a
-coordinator routes new work to a harness the moment its quota resets. Each entry is
-`{available, reason, windows}`. `available` is decided by the runner: `true` means the
-harness passes the same gates a launch applies, `false` means it can't take work now
-(`reason` says why), and `null` means its availability is unverified and only a launch
-can test it. `windows` lists observed `{pool, remaining_percent, resets_at}` and never
-decides anything. Codex is `true` or `false` from its live quota snapshot and pool
-gates, with the plan's reserve. Antigravity is `null`, with its live weekly quota
-groups as windows: the probe can't verify account eligibility or which model draws on
-which group. Claude and Grok are `null`: neither has a live usage probe.
+`--seconds` sets the dispatch budget. The CLI observes native quotas after
+releasing the line execution lock. Native observation commands and PTY
+exchanges have their own timeouts, and PTY cleanup has a separate bounded
+grace and reap. Reporting can extend wall-clock time beyond `--seconds`.
+`elapsed_seconds` includes reporting.
+
+The CLI result carries `harnesses`, one entry per supplied binary, for planning
+new jobs. Each entry is `{available, reason, windows}`. `true` means the
+Codex pool and catalog gates pass. `false` gives an observation error or a
+capacity restriction. `null` means measured headroom is available for planning
+and model eligibility or model-to-pool binding still needs evidence. Each
+window contains `{pool, remaining_percent, resets_at}`. Claude and Grok keep
+their native reset labels. Reobserve after a reset before using the route.
+
+Claude opens its interactive `/usage` tab in safe mode with screen-reader output
+from the resolved system temporary root by default. If Claude asks for folder
+trust, select an absolute, existing, accessible directory with
+`--claude-usage-cwd`. Use a dedicated private folder outside repositories, free
+of project configuration, imports, and relevant inherited configuration. The
+owner must approve the folder in Claude Code's own UI under the intended native
+profile. The runner withholds input at the trust prompt. Its all-model and
+session windows, when reported, constrain the route. Optional model-specific
+windows are reported under their native names. The quota observation requires
+usage credits to be off. Grok reads the included weekly limit with `/usage show`
+from the dashboard before opening an agent session. Headroom comes from the
+included limit. [Grok usage limits](https://docs.x.ai/grok/faq)
+
+Both observers require a recognized interactive
+prompt and built-in command entry, use the normal native profile, and keep
+terminal output private. Sign in to the intended native subscriptions before
+refreshing. Antigravity reports its weekly groups and is unavailable
+when all observed groups are at or below reserve.
+
+The [route selection steps](../skills/factory/references/ready-plan.md#selecting-a-route)
+use the report for planning. Explicit plans retain their native worker and
+admission checks. The Codex launch gate uses its fresh capacity snapshot and
+the plan's reserve.
 
 ## Limits and reservations
 
@@ -165,7 +192,7 @@ capture, result collection, admission, input selection and pause/resume remain
 available under their task locks. After the controller exits, manual launches
 retain their explicit-launch behavior; a later runner counts them.
 
-Capacity is a separate admission gate. A ready launch needs a fresh native
+Codex capacity is a separate admission gate. A Codex launch needs a fresh native
 subscription observation, ordinary usage permission, the selected model/effort,
 known pool identity/primary headroom, clear spend-control status and headroom
 above the configured minimum in every reported window. Null secondary windows

@@ -19,9 +19,14 @@ from unittest.mock import patch
 
 import codex_worker
 import factory
+import native_antigravity
+import native_claude
 import native_codex
+import native_grok
 import ready_runner as runner
 from test_codex_worker import FakeProcess
+from test_native_claude import CLAUDE_USAGE
+from test_native_grok import GROK_USAGE
 from test_rex_launcher import FakeRex
 
 
@@ -63,7 +68,7 @@ class ReadyRunner(unittest.TestCase):
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
         self.now, self.probes = 1000.0, 0
-        self.capacity = dict(schema_version=1, observed_at=1000.0, binary=str(Path(sys.executable).resolve()),
+        self.capacity: dict[str, Any] = dict(schema_version=1, observed_at=1000.0, binary=str(Path(sys.executable).resolve()),
             route="codex-native", account=dict(type="chatgpt", plan="fixture"), ordinaryUsageAllowed=True,
             pools=[dict(limit_id="codex", primary=dict(remaining_percent=80), secondary=None,
                         rate_limit_reached_type=None, spend_control_reached=False)],
@@ -815,22 +820,211 @@ class ReadyRunner(unittest.TestCase):
             self.assertEqual(result["metrics"]["launched"], 0)
         self.assertEqual(factory.load_task(path)["inputs"]["candidate"], target)
 
+    def test_cli_refuses_relative_or_blank_optional_harness_paths(self):
+        plan_file = self.root / "harness-plan.json"
+        argv = ["--state-dir", str(self.directory), "--plan", str(plan_file),
+                "--codex", sys.executable, "--rex", sys.executable,
+                "--server", "unix:///test.sock", "--once"]
+        with (patch.object(factory, "relocate"),
+              patch.object(factory, "launch") as dispatch,
+              patch.object(runner.Runner, "refresh_capacity") as codex_probe,
+              patch.object(native_claude, "probe_usage", return_value=[]) as claude_probe,
+              patch.object(native_grok, "probe_usage", return_value=[]) as grok_probe,
+              patch.object(native_antigravity, "probe", return_value=dict(groups=[])) as antigravity_probe):
+            for jobs in ([], [self.job()]):
+                plan_file.write_text(json.dumps(self.plan(jobs)))
+                for flag in ("--claude", "--grok", "--antigravity"):
+                    for binary in ("relative/harness", "", " "):
+                        with self.subTest(jobs=len(jobs), flag=flag, binary=binary):
+                            output, error = StringIO(), StringIO()
+                            with redirect_stdout(output), redirect_stderr(error):
+                                code = runner.main([*argv, flag, binary])
+                            self.assertEqual(code, 1)
+                            self.assertEqual(output.getvalue(), "")
+                            self.assertIn(f"Supply an absolute path for {flag}", error.getvalue())
+            for boundary in (dispatch, codex_probe, claude_probe, grok_probe, antigravity_probe):
+                boundary.assert_not_called()
+        self.assertEqual(PlanRex.calls, [])
+
+    def test_host_markers_accepted_and_not_forwarded_to_harness_probe(self):
+        # Test 1 (ruling): host markers pass through probe and environment; values not forwarded.
+        host_markers = {
+            "CLAUDE_CODE_CHILD_SESSION": "fixture-private-session",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+            "CLAUDE_CODE_ENTRYPOINT": "fixture-private-entry",
+            "CLAUDE_CODE_EXECPATH": "/fixture/not-the-binary",
+            "CLAUDE_CODE_MESSAGING_SOCKET": "/fixture/private-socket",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "fixture-private-token",
+            "CLAUDE_CODE_SAFE_MODE": "1",
+            "CLAUDE_CODE_SESSION_ATTENDED": "0",
+            "CLAUDE_CODE_SESSION_ID": "fixture-private-session-id",
+            "CLAUDE_EFFORT": "high",
+            "CLAUDE_PID": "99999",
+            "CLAUDECODE": "1",
+        }
+        version_response = subprocess.CompletedProcess([], 0, "2.1.319 (Claude Code)\n", "")
+        auth_response = subprocess.CompletedProcess([], 0,
+            json.dumps({"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty"}), "")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_binary = Path(tmpdir) / "fake-claude"
+            fake_binary.write_text("#!/bin/sh\nexit 1\n")
+            fake_binary.chmod(0o755)
+            config_dir = Path(tmpdir) / "config"
+            config_dir.mkdir()
+
+            controller = self.controller(self.plan([]), claude=str(fake_binary))
+
+            cases = [
+                {},  # clean
+                host_markers,  # all 13 with synthetic values
+                {k: "" for k in host_markers},  # all 13 empty
+                {**host_markers, native_claude.CONFIG_DIRECTORY: str(config_dir)},  # + CLAUDE_CONFIG_DIR
+            ]
+
+            clean_windows = None
+            real_probe_usage = native_claude.probe_usage
+
+            for case_index, extra_env in enumerate(cases):
+                stage_runs = []
+                stage_interactives = []
+
+                def make_run(stages):
+                    def recording_run(cmd, **kwargs):
+                        stages.append(kwargs.get("env", {}))
+                        return version_response if "--version" in cmd else auth_response
+                    return recording_run
+
+                # Quota above reserve: 0% used → 100% remaining, above the plan's 15% minimum.
+                above_reserve_usage = CLAUDE_USAGE.replace("100% 100% used", "0% 0% used")
+
+                def make_interactive(stages, usage=above_reserve_usage):
+                    def recording_interactive(command, cwd, env, **kwargs):
+                        stages.append(env)
+                        return usage
+                    return recording_interactive
+
+                _run = make_run(stage_runs)
+                _interactive = make_interactive(stage_interactives)
+
+                def injected_probe_usage(binary, cwd, _r=_run, _i=_interactive,
+                                         _real=real_probe_usage):
+                    return _real(binary, cwd,
+                        auth_probe=lambda b, c: native_claude.probe(b, c, run=_r),
+                        interactive=_i)
+
+                with (patch.dict(os.environ, extra_env),
+                      patch.object(native_claude, "probe_usage", side_effect=injected_probe_usage)):
+                    result = controller.harnesses()
+
+                # Available is null (above reserve) for all four cases.
+                self.assertIsNone(result["claude"]["available"], f"case {case_index}: {result['claude']}")
+                # Exactly three child stages per case: two from probe(), one from interactive.
+                self.assertEqual(len(stage_runs), 2, f"case {case_index}: unexpected subprocess stage count")
+                self.assertEqual(len(stage_interactives), 1, f"case {case_index}: unexpected interactive stage count")
+                # Same weekly window in all cases.
+                windows = result["claude"]["windows"]
+                if clean_windows is None:
+                    clean_windows = windows
+                else:
+                    self.assertEqual(windows, clean_windows, f"case {case_index}: window differs from clean")
+
+                for env in stage_runs + stage_interactives:
+                    # Synthetic marker values must be absent from child environments.
+                    for key, value in host_markers.items():
+                        if value and value not in ("0", "1"):
+                            self.assertNotIn(value, env.values(), f"case {case_index}: {key} value leaked to child")
+                    # EXECPATH marker must never replace the supplied executable.
+                    self.assertNotEqual(env.get("CLAUDE_CODE_EXECPATH"), "/fixture/not-the-binary",
+                                        f"case {case_index}: EXECPATH leaked to child")
+
+                # Case 4 (index 3): config dir is forwarded in all three stages.
+                if case_index == 3:
+                    for env in stage_runs + stage_interactives:
+                        self.assertEqual(env.get(native_claude.CONFIG_DIRECTORY), str(config_dir),
+                                         f"case {case_index}: config dir not forwarded to child")
+
+    def test_harness_probe_refuses_override_markers_even_with_host_markers(self):
+        # Test 2 (ruling): override markers refuse before any child starts, even with all host markers present.
+        host_markers = {
+            "CLAUDE_CODE_CHILD_SESSION": "fixture-private-session",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+            "CLAUDE_CODE_ENTRYPOINT": "fixture-private-entry",
+            "CLAUDE_CODE_EXECPATH": "/fixture/not-the-binary",
+            "CLAUDE_CODE_MESSAGING_SOCKET": "/fixture/private-socket",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "fixture-private-token",
+            "CLAUDE_CODE_SAFE_MODE": "1",
+            "CLAUDE_CODE_SESSION_ATTENDED": "0",
+            "CLAUDE_CODE_SESSION_ID": "fixture-private-session-id",
+            "CLAUDE_EFFORT": "high",
+            "CLAUDE_PID": "99999",
+            "CLAUDECODE": "1",
+        }
+        # Each existing explicit cloud or routing selector refuses before spawn.
+        override_cases = [
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_SUBAGENT_MODEL",  # synthetic unobserved CLAUDE_CODE_* marker
+            "CLAUDE_EFFORT_LEVEL",  # suffixed lookalike of exempt CLAUDE_EFFORT
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_binary = Path(tmpdir) / "fake-claude"
+            fake_binary.write_text("#!/bin/sh\nexit 1\n")
+            fake_binary.chmod(0o755)
+
+            controller = self.controller(self.plan([]), claude=str(fake_binary))
+
+            for override_name in override_cases:
+                with self.subTest(override=override_name):
+                    run_calls = []
+
+                    def intercepted_probe_usage(binary, cwd, _calls=run_calls):
+                        def recording_run(cmd, **kwargs):
+                            _calls.append(cmd)
+                            raise AssertionError("child started unexpectedly")
+                        native_claude.probe(binary, cwd, run=recording_run)
+                        raise AssertionError("probe should have refused")
+
+                    env = {**host_markers, override_name: ""}
+                    with (patch.dict(os.environ, env),
+                          patch.object(native_claude, "probe_usage", side_effect=intercepted_probe_usage)):
+                        result = controller.harnesses()
+
+                    self.assertFalse(result["claude"]["available"], override_name)
+                    self.assertEqual(result["claude"]["windows"], [], override_name)
+                    self.assertEqual(run_calls, [], f"{override_name}: child started before refusal")
+
     def test_harnesses_report_each_passed_harness_capacity(self):
         # Antigravity reset and neither line noticed for hours; the operator had to relay it by hand.
-        import native_antigravity
         groups = [dict(group="Gemini", window="weekly", percent_remaining=100.0, resets_at="2026-11-01T00:00:00Z")]
         controller = self.controller(self.plan([self.job()]), claude=sys.executable, grok=sys.executable,
                                      antigravity=sys.executable)
-        with patch.object(native_antigravity, "probe", return_value=dict(groups=groups)):
+        claude = [dict(pool="Current week (all models)", remaining_percent=0, resets_at="Nov 21 at 2pm"),
+                  dict(pool="Current week (Fable)", remaining_percent=100, resets_at="Nov 21 at 2pm")]
+        grok = [dict(pool="SuperGrok", remaining_percent=80, resets_at="November 15, 08:40")]
+        with (patch.object(native_antigravity, "probe", return_value=dict(groups=groups)),
+              patch.object(native_claude, "probe_usage", return_value=claude),
+              patch.object(native_grok, "probe_usage", return_value=grok)):
             report = controller.harnesses()
         self.assertEqual(report["codex"], dict(available=True, reason=None, windows=[dict(pool="codex", remaining_percent=80, resets_at=None)]))
         self.assertEqual(report["antigravity"]["windows"],
                          [dict(pool="Gemini", remaining_percent=100.0, resets_at="2026-11-01T00:00:00Z")])
         self.assertIsNone(report["antigravity"]["available"])
         self.assertIn("unverified", report["antigravity"]["reason"])
-        self.assertEqual((report["claude"]["available"], report["grok"]["available"]), (None, None))
-        with patch.object(native_antigravity, "probe", side_effect=native_antigravity.UsageError("signed out")):
-            self.assertEqual(controller.harnesses()["antigravity"], dict(available=False, reason="signed out", windows=[]))
+        self.assertEqual((report["claude"]["available"], report["grok"]["available"]), (False, None))
+        self.assertEqual((report["claude"]["windows"], report["grok"]["windows"]), (claude, grok))
+        self.assertIn("Nov 21 at 2pm", report["claude"]["reason"])
+        self.assertIn("Verify model eligibility", report["grok"]["reason"])
+        with (patch.object(native_antigravity, "probe", side_effect=native_antigravity.UsageError("signed out")),
+              patch.object(native_claude, "probe_usage", side_effect=native_claude.ClaudeProbeError("missing panel")),
+              patch.object(native_grok, "probe_usage", side_effect=native_grok.GrokProbeError("unrecognized output"))):
+            failed = controller.harnesses()
+        for route, reason in (("claude", "missing panel"), ("grok", "unrecognized output"), ("antigravity", "signed out")):
+            self.assertEqual(failed[route], dict(available=False, reason=reason, windows=[]))
         # The CLI result carries the report, and its metrics count the probes behind it (review of #154).
         fresh = self.controller(self.plan([self.job()]), antigravity=sys.executable)
         with patch.object(native_antigravity, "probe", return_value=dict(groups=groups)):
@@ -847,6 +1041,98 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(empty["available"], False)
         self.assertIn("no model with a supported effort", empty["reason"])
         self.assertEqual(set(self.controller(self.plan([self.job()])).harnesses()), {"codex"})
+
+    def test_cli_uses_resolved_claude_probe_folder_or_system_tmp(self):
+        folder = self.root / "quota"
+        folder.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(folder, target_is_directory=True)
+        plan_file = self.root / "empty-plan.json"
+        plan_file.write_text(json.dumps(self.plan([])))
+        argv = ["--state-dir", str(self.directory), "--plan", str(plan_file), "--codex", sys.executable,
+                "--claude", sys.executable, "--rex", sys.executable, "--server", "unix:///test.sock", "--once"]
+        for flags, expected in (([], Path("/tmp").resolve()), (["--claude-usage-cwd", str(alias)], folder)):
+            with (self.subTest(flags=flags), patch.object(factory, "relocate"),
+                  patch.object(runner.Runner, "refresh_capacity"), redirect_stdout(StringIO()),
+                  patch.object(native_claude, "probe_usage", return_value=[]) as observe):
+                self.assertEqual(runner.main([*argv, *flags]), 0)
+                observe.assert_called_once_with(Path(sys.executable).resolve(), expected)
+
+    def test_cli_refuses_invalid_claude_probe_folder_before_dispatch_or_probes(self):
+        plan_file = self.root / "harness-plan.json"
+        plan_file.write_text(json.dumps(self.plan([self.job()])))
+        denied = self.root / "denied"
+        denied.mkdir()
+        access = os.access
+        argv = ["--state-dir", str(self.directory), "--plan", str(plan_file), "--codex", sys.executable,
+                "--claude", sys.executable, "--rex", sys.executable, "--server", "unix:///test.sock", "--once"]
+        with (patch.object(factory, "relocate"), patch.object(runner, "run") as dispatch,
+              patch.object(runner.Runner, "harnesses") as probes,
+              patch.object(native_claude.os, "access", side_effect=lambda path, mode: path != denied and access(path, mode))):
+            for cwd in ("", "relative", str(self.root / "missing"), str(plan_file), str(denied)):
+                with self.subTest(cwd=cwd), redirect_stderr(StringIO()) as error:
+                    self.assertEqual(runner.main([*argv, "--claude-usage-cwd", cwd]), 1)
+                    self.assertIn("absolute, existing, accessible directory for --claude-usage-cwd", error.getvalue())
+            dispatch.assert_not_called()
+            probes.assert_not_called()
+        self.assertEqual(PlanRex.calls, [])
+
+    def test_non_codex_report_distinguishes_exhaustion_from_unverified_pool_binding(self):
+        controller = self.controller(self.plan([]), claude=sys.executable, grok=sys.executable,
+                                     antigravity=sys.executable)
+        claude = [dict(pool="Current week (all models)", remaining_percent=40, resets_at="Nov 21 at 2pm"),
+                  dict(pool="Current week (Fable)", remaining_percent=0, resets_at="Nov 21 at 2pm")]
+        groups = [dict(group="Gemini", window="weekly", percent_remaining=0, resets_at="2026-11-01T00:00:00Z")]
+        grok = [dict(pool="SuperGrok", remaining_percent=0, resets_at="November 15, 08:40")]
+        with (patch.object(native_antigravity, "probe", return_value=dict(groups=groups)),
+              patch.object(native_claude, "probe_usage", return_value=claude),
+              patch.object(native_grok, "probe_usage", return_value=grok)):
+            report = controller.harnesses()
+        self.assertIsNone(report["claude"]["available"])
+        self.assertFalse(report["grok"]["available"])
+        self.assertFalse(report["antigravity"]["available"])
+        self.assertIn("November 15, 08:40", report["grok"]["reason"])
+        self.assertEqual(controller.metrics["quota_probes"], 4)
+
+    def test_harnesses_compare_native_fractional_quota_at_and_above_reserve(self):
+        plan = self.plan([self.job()])
+        plan["limits"]["minimum_remaining_percent"] = 0.2
+        for used, remaining in (("99.8", 0.2), ("99.79", 0.21)):
+            with self.subTest(used=used):
+                raw_codex = dict(schema_version=1, observed_at=self.now, route="codex-native",
+                    binary=str(Path(sys.executable).resolve()), account=dict(account=dict(type="chatgpt")),
+                    rate_limits=dict(ordinaryUsageAllowed=True, rateLimits=dict(limitId="codex", spendControlReached=False,
+                        primary=dict(usedPercent=json.loads(used)))),
+                    models=[dict(model="fixture-model", supportedReasoningEfforts=[dict(reasoningEffort="high")])])
+                groups = [dict(group="Gemini", window="weekly", percent_remaining=remaining,
+                               resets_at="2026-11-01T00:00:00Z")]
+                claude = CLAUDE_USAGE.replace("100% 100% used", f"{used}% {used}% used")
+                grok = GROK_USAGE.replace("97%", f"{used}%")
+                controller = runner.Runner(self.directory, plan, codex=sys.executable, rex=sys.executable,
+                    server="unix:///test.sock", clock=lambda: self.now,
+                    claude=sys.executable, grok=sys.executable, antigravity=sys.executable)
+                launches_before = self.launches()
+                with (patch.object(native_codex, "probe", return_value=raw_codex) as probe,
+                      patch.object(native_antigravity, "probe", return_value=dict(groups=groups)),
+                      patch.object(native_claude, "probe_usage", side_effect=lambda *_: native_claude.parse_usage(claude)),
+                      patch.object(native_grok, "probe_usage", side_effect=lambda *_: native_grok.parse_usage(grok))):
+                    result = runner.run(controller, seconds=30, once=True, harnesses=True)
+                probe.assert_awaited_once()
+                expected_launches = int(remaining > 0.2)
+                self.assertEqual(self.launches() - launches_before, expected_launches)
+                self.assertEqual(result["metrics"]["launched"], expected_launches)
+                for harness, pool in (("claude", "Current week (all models)"), ("grok", "SuperGrok"),
+                                      ("antigravity", "Gemini"), ("codex", "codex")):
+                    observed = result["harnesses"][harness]
+                    self.assertEqual(observed["windows"][0]["pool"], pool)
+                    self.assertEqual(observed["windows"][0]["remaining_percent"], remaining)
+                    if remaining == 0.2:
+                        self.assertIs(observed["available"], False)
+                        self.assertIn("reserve", observed["reason"])
+                    else:
+                        self.assertIs(observed["available"], True if harness == "codex" else None)
+                        if harness in {"claude", "grok"}:
+                            self.assertIn("above reserve", observed["reason"])
 
     def test_codex_refuses_a_code_review_it_cannot_scope(self):
         # Codex takes no --base, so a Codex code review saw the whole tree and guessed what changed.
@@ -1702,6 +1988,30 @@ class ReadyRunner(unittest.TestCase):
             self.assertEqual(result["jobs"][0]["state"], "waiting")
         self.assertEqual(self.probes, 3)  # Initial observation plus the configured two retries.
         self.assertIn("retry allowance exhausted", result["capacity_error"])
+        self.assertEqual(PlanRex.sessions, [])
+
+    def test_outer_codex_timeout_reports_recovery_and_clears_stale_quota(self):
+        controller = self.controller(self.plan([self.job()]))
+        controller.refresh_capacity()
+        self.now += runner.CAPACITY_MAX_AGE
+        cancelled = []
+
+        async def stalled(binary):
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.append(binary)
+
+        controller.probe = stalled
+        with patch.object(runner, "PROBE_TIMEOUT", 0.01):
+            report = controller.harnesses()["codex"]
+        self.assertEqual(cancelled, [controller.binary])
+        self.assertEqual(report, dict(available=False, windows=[],
+            reason="Timed out waiting for native Codex quota and model metadata. "
+                   "Check the Codex connection and sign-in before refreshing."))
+        result = self.tick(controller)
+        self.assertEqual(result["jobs"][0]["state"], "waiting")
+        self.assertEqual(result["jobs"][0]["reason"], report["reason"])
         self.assertEqual(PlanRex.sessions, [])
 
     def test_preflight_failure_needs_an_explicit_controller_restart_after_repair(self):

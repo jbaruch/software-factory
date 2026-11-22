@@ -1,4 +1,4 @@
-"""Run an explicit native assignment plan (Codex or Claude) using the existing factory task store."""
+"""Run an explicit native assignment plan and report current native quota."""
 import argparse
 import asyncio
 import contextlib
@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 
@@ -18,7 +19,10 @@ from typing import Any
 
 import codex_capacity
 import factory
+import native_antigravity
+import native_claude
 import native_codex
+import native_grok
 
 POLL_SECONDS = 5
 CAPACITY_MAX_AGE = 60
@@ -253,7 +257,7 @@ def pool_reason(snapshot, binary, now, minimum):
 class Runner:
     def __init__(self, directory, plan, *, codex, rex, server, claude=None, grok=None, antigravity=None,
                  probe=codex_capacity.snapshot,
-                 clock=time.time, from_writer=None):
+                 clock=time.time, from_writer=None, claude_usage_cwd=None):
         self.plan = validate_plan(plan)
         self.supplied_plan, self.from_writer = self.plan, from_writer
         if from_writer is not None:
@@ -272,16 +276,26 @@ class Runner:
         if len(lines) > 1:
             raise factory.FactoryError("A plan serves one factory line; this one mixes " + ", ".join(sorted(lines)))
         self.line = lines.pop() if lines else factory.DEFAULT_LINE
-        self.claude = Path(claude).resolve() if claude else None
-        self.grok = Path(grok).resolve() if grok else None
-        self.antigravity = Path(antigravity).resolve() if antigravity else None
+        # The quota report can probe supplied harnesses even when the plan has no jobs for them.
+        for flag, binary in (("--claude", claude), ("--grok", grok), ("--antigravity", antigravity)):
+            if binary is not None and not Path(binary).is_absolute():
+                raise factory.FactoryError(f"Supply an absolute path for {flag}")
+        self.claude = Path(claude).resolve() if claude is not None else None
+        self.claude_usage_cwd = Path("/tmp").resolve()
+        if claude_usage_cwd is not None:
+            try:
+                self.claude_usage_cwd = native_claude.selected_path(claude_usage_cwd, directory=True)
+            except native_claude.ClaudeProbeError:
+                raise factory.FactoryError("Supply an absolute, existing, accessible directory for --claude-usage-cwd") from None
+        self.grok = Path(grok).resolve() if grok is not None else None
+        self.antigravity = Path(antigravity).resolve() if antigravity is not None else None
         if not Path(codex).is_absolute() or not Path(rex).is_absolute() or not server.startswith("unix://"):
             raise factory.FactoryError("Supply absolute Codex/Rex paths and an explicit unix:// Rex endpoint")
-        if any(job["harness"] == "claude" for job in self.plan["jobs"]) and (claude is None or not Path(claude).is_absolute()):
+        if claude is None and any(job["harness"] == "claude" for job in self.plan["jobs"]):
             raise factory.FactoryError("Supply the absolute --claude executable for the plan's Claude jobs")
-        if any(job["harness"] == "grok" for job in self.plan["jobs"]) and (grok is None or not Path(grok).is_absolute()):
+        if grok is None and any(job["harness"] == "grok" for job in self.plan["jobs"]):
             raise factory.FactoryError("Supply the absolute --grok executable for the plan's Grok jobs")
-        if any(job["harness"] == "antigravity" for job in self.plan["jobs"]) and (antigravity is None or not Path(antigravity).is_absolute()):
+        if antigravity is None and any(job["harness"] == "antigravity" for job in self.plan["jobs"]):
             raise factory.FactoryError("Supply the absolute --antigravity executable for the plan's Antigravity jobs")
         self.rex, self.server, self.probe, self.clock = str(rex), server, probe, clock
         self.capacity, self.capacity_error, self.probed_at = None, None, None
@@ -516,45 +530,68 @@ class Runner:
             self.capacity, self.capacity_error = None, str(exc)
             self.probe_failures = self.probe_limit
         except (native_codex.CodexProbeError, OSError, TimeoutError) as exc:
-            self.capacity, self.capacity_error = None, str(exc)
+            self.capacity = None
+            self.capacity_error = ("Timed out waiting for native Codex quota and model metadata. "
+                                   "Check the Codex connection and sign-in before refreshing."
+                                   if isinstance(exc, TimeoutError) else str(exc))
             self.probe_failures += 1
             if self.probe_failures == self.probe_limit:
                 self.capacity_error += "; metadata retry allowance exhausted: restore the service before restarting this controller"
 
     def harnesses(self):
-        """Each passed harness's routing availability, so a coordinator uses a harness the moment its quota
-        resets instead of waiting for the operator to say so. `available` is decided here, by the same gates
-        a launch applies; `windows` are observations only."""
-        self.refresh_capacity()
-        snapshot: dict[str, Any] = self.capacity if isinstance(self.capacity, dict) else {}
-        pools: list[Any] = snapshot.get("pools") or []
-        reason = self.capacity_error or (pool_reason(snapshot, self.binary, self.clock(), self.plan["limits"]["minimum_remaining_percent"])
-                                         if self.capacity is not None else "Capacity is unavailable")
-        if reason is None and not any(model.get("effort_ids") for model in snapshot.get("models") or []):
-            # Healthy pools with no launchable model/effort would still refuse every Codex job.
-            reason = "The fresh native catalog has no model with a supported effort; refresh it before planning Codex work"
-        report: dict[str, Any] = dict(codex=dict(available=reason is None, reason=reason, windows=[
-            dict(pool=pool.get("limit_id"), remaining_percent=window.get("remaining_percent"), resets_at=window.get("resets_at"))
-            for pool in pools for window in (pool.get("primary"), pool.get("secondary")) if window]))
+        """Observe included quota for planning, independent of explicit job execution."""
+        minimum = self.plan["limits"]["minimum_remaining_percent"]
+        report: dict[str, Any] = {}
+        for harness, binary, probe, error in (
+            ("claude", self.claude, native_claude.probe_usage, native_claude.ClaudeProbeError),
+            ("grok", self.grok, native_grok.probe_usage, native_grok.GrokProbeError),
+        ):
+            if binary is None:
+                continue
+            self.metrics["quota_probes"] += 1
+            try:
+                cwd = self.claude_usage_cwd if harness == "claude" else Path.home()
+                windows = probe(binary, cwd)
+            except error as exc:
+                report[harness] = dict(available=False, reason=str(exc), windows=[])
+                continue
+            # Model-specific Claude windows cannot establish a model-to-pool binding.
+            limiting = next((window for window in windows if
+                (harness == "grok" or window["pool"] in {"Current session", "Current week (all models)"})
+                and window["remaining_percent"] <= minimum), None)
+            if limiting is not None:
+                report[harness] = dict(available=False, reason=f'{limiting["pool"]} is at or below the quota reserve. '
+                    f'Observe again after the native reset ({limiting["resets_at"]}).', windows=windows)
+            else:
+                report[harness] = dict(available=None, reason="Included quota is above reserve. Verify model eligibility "
+                    "and subscription-only billing before selecting an assignment.", windows=windows)
+
         if self.antigravity is not None:
-            import native_antigravity
             self.metrics["quota_probes"] += 1
             try:
                 usage: dict[str, Any] = native_antigravity.probe(str(self.antigravity), str(self.directory))
                 groups: list[Any] = usage["groups"]
-                # Quota groups only: the probe can't verify account eligibility or which model draws on which group.
-                report["antigravity"] = dict(available=None, reason="Quota groups observed; eligibility and model-to-group "
-                    "binding are unverified, so a launch is the test", windows=[
-                    dict(pool=group["group"], remaining_percent=group["percent_remaining"], resets_at=group["resets_at"])
-                    for group in groups])
+                windows = [dict(pool=group["group"], remaining_percent=group["percent_remaining"],
+                                resets_at=group["resets_at"]) for group in groups]
+                if all(window["remaining_percent"] <= minimum for window in windows):
+                    report["antigravity"] = dict(available=False, reason="All observed quota groups are at or below "
+                        "reserve. Observe again after a native reset.", windows=windows)
+                else:
+                    report["antigravity"] = dict(available=None, reason="Quota groups observed. Model eligibility and "
+                        "model-to-group binding are unverified. Select a route with supported headroom.", windows=windows)
             except (native_antigravity.UsageError, OSError, subprocess.TimeoutExpired) as exc:
-                # The Antigravity worker runs this same probe before its model turn and fails on it, so it can't take work.
                 report["antigravity"] = dict(available=False, reason=str(exc), windows=[])
-        # Neither has a live usage probe, and a past run's numbers can't vouch for today's account.
-        if self.claude is not None:
-            report["claude"] = dict(available=None, reason="Claude reports its limits only inside a run; a launch is the test", windows=[])
-        if self.grok is not None:
-            report["grok"] = dict(available=None, reason="Grok reports no usage; a launch is the test", windows=[])
+
+        self.refresh_capacity()
+        snapshot: dict[str, Any] = self.capacity if isinstance(self.capacity, dict) else {}
+        pools: list[Any] = snapshot.get("pools") or []
+        reason = self.capacity_error or (pool_reason(snapshot, self.binary, self.clock(), minimum)
+                                         if self.capacity is not None else "Capacity is unavailable")
+        if reason is None and not any(model.get("effort_ids") for model in snapshot.get("models") or []):
+            reason = "The fresh native catalog has no model with a supported effort; refresh it before planning Codex work"
+        report["codex"] = dict(available=reason is None, reason=reason, windows=[
+            dict(pool=pool.get("limit_id"), remaining_percent=window.get("remaining_percent"), resets_at=window.get("resets_at"))
+            for pool in pools for window in (pool.get("primary"), pool.get("secondary")) if window])
         return report
 
     def tick(self) -> dict:
@@ -737,11 +774,13 @@ def main(argv=None):
     parser.add_argument("--from-writer", metavar="ASSIGNMENT_ID")
     parser.add_argument("--codex", required=True, help="Native Codex CLI; also sandboxes every writer's factory commit")
     parser.add_argument("--claude", help="Native Claude Code CLI; required when the plan has Claude jobs")
+    parser.add_argument("--claude-usage-cwd", help="Absolute directory for the Claude quota probe (default: system /tmp)")
     parser.add_argument("--grok", help="Native Grok CLI; required when the plan has Grok jobs")
     parser.add_argument("--antigravity", help="Native Antigravity CLI (agy); required when the plan has Antigravity jobs")
     parser.add_argument("--rex", required=True)
     parser.add_argument("--server", required=True)
-    parser.add_argument("--seconds", type=int, default=600)
+    parser.add_argument("--seconds", type=int, default=600,
+                        help="Dispatch budget in seconds, before the separate native quota observations")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -749,7 +788,7 @@ def main(argv=None):
             raise factory.FactoryError("Use an orchestration budget between 1 and 86400 seconds")
         plan = validate_plan(factory.decode_json(args.plan.read_text()))
         runner = Runner(args.state_dir, plan, codex=args.codex, claude=args.claude, grok=args.grok, antigravity=args.antigravity, rex=args.rex, server=args.server,
-                        from_writer=args.from_writer)
+                        from_writer=args.from_writer, claude_usage_cwd=args.claude_usage_cwd)
         result = run(runner, seconds=args.seconds, once=args.once, harnesses=True)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0 if result["result"] == "complete" else 1
@@ -758,7 +797,12 @@ def main(argv=None):
         return factory.EXIT_BUSY if isinstance(exc, factory.ExecutionBusy) else 1
 
 
+def terminate(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, terminate)
     controller_fd = sys._xoptions.get("factory-controller-fd")
     if isinstance(controller_fd, str):
         # Acknowledge entry and close before relocation or worker subprocesses.

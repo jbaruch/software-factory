@@ -1,5 +1,6 @@
 """Observe sanitized native Claude authentication metadata without a model turn."""
 import argparse
+from decimal import Decimal
 import json
 import math
 import os
@@ -14,6 +15,7 @@ from typing import NoReturn
 
 from codex_worker import native_environment
 from factory import decode_json
+from native_usage import PanelError, read_panel
 
 AUTH_METHODS = ("none", "claude.ai", "oauth_token", "api_key", "api_key_helper", "third_party")
 API_PROVIDERS = ("firstParty", "bedrock", "vertex", "foundry")
@@ -22,6 +24,25 @@ OVERRIDE_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "AWS_", "BEDROCK_", "GOOGLE_",
                      "GCLOUD_", "GCP_", "CLOUDSDK_", "CLOUD_ML_", "VERTEX_", "AZURE_", "FOUNDRY_")
 CONFIG_DIRECTORY = "CLAUDE_CONFIG_DIR"
 BACKGROUND_SWITCH = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+# Twelve host/session identity and run-mode keys observed in the Claude Code host environment.
+# Their presence is ignored at parent-process refusal; their values are never read, forwarded,
+# or used to select an executable, account, model, effort or child flag.
+_HOST_MARKERS = frozenset({
+    "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SAFE_MODE",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT", "CLAUDE_PID",
+})
+
+
+def _has_override(env_names):
+    """True if any name is a refused override (not a known host marker or config directory)."""
+    return any(
+        name != CONFIG_DIRECTORY and name not in _HOST_MARKERS and name.startswith(OVERRIDE_PREFIXES)
+        for name in env_names
+    )
 
 
 class ClaudeProbeError(Exception):
@@ -68,10 +89,10 @@ def selected_path(value, *, directory=False):
 
 
 def probe(binary, cwd, *, run=subprocess.run, clock=time.time, timer=time.monotonic):
-    if any(name != CONFIG_DIRECTORY and name.startswith(OVERRIDE_PREFIXES) for name in os.environ):
+    if _has_override(os.environ):
         raise ClaudeProbeError("Unset Claude API/provider/auth environment overrides before observing native sign-in; do not substitute credentials or accounts")
     binary, cwd = selected_path(binary), selected_path(cwd, directory=True)
-    environment = native_environment()
+    environment = {**native_environment(), "DISABLE_AUTOUPDATER": "1"}
     if CONFIG_DIRECTORY in os.environ:
         # The shared environment intentionally omits Claude-specific selectors.
         # Preserve this explicit selection, after metadata-only validation.
@@ -127,7 +148,7 @@ def main(argv=None):
 
 def environment():
     """Retain native account selection; refuse routing/auth overrides even if empty."""
-    if any(name != CONFIG_DIRECTORY and name.startswith(OVERRIDE_PREFIXES) for name in os.environ):
+    if _has_override(os.environ):
         raise ClaudeProbeError("Unset Claude API/provider/auth overrides; restore the intended native subscription")
     result = native_environment()
     # A background shell still running at the result wakes the session again, so one run ends with two results.
@@ -149,6 +170,71 @@ def validate_auth(observation, binary, cwd):
                    for k in ("started_at", "observed_at", "probe_seconds"))
             or observation["observed_at"] < observation["started_at"]):
         raise ClaudeProbeError("Restore native claude.ai/firstParty sign-in on Claude Code 2.1.319 or newer before execution")
+
+
+USAGE_CREDITS = r"Usage\s*credits\s*are\s*(?:off|on)\b"
+USAGE_PROMPT = (
+    r"\A\[Screen Reader Mode: on via flag\]\r?\n"
+    r"(?:(?!\$|[ \t]*/usage\b)[^\n]*\n)*\$[ \t\xa0]*[\r\n]*\Z"
+)
+USAGE_MENU = (
+    r"(?:\A|\n)[ \t]*/usage[ \t]+Show session cost, plan usage, and activity(?: stats)?[ \t]*\r?\n"
+    r"(?:(?!\$)[^\n]*\n)*\$[ \t\xa0]+/usage[ \t\xa0]*[\r\n]*\Z"
+)
+USAGE_HEADING = r"Current (?:session|week \([A-Za-z0-9][A-Za-z0-9 ._-]{0,31}\))"
+USAGE_BLOCKED = (
+    r"(?i)external[ -]import|import (?:external|settings)|trust (?:this|the) (?:folder|directory)|"
+    r"Quick safety check|Yes, I trust|No, exit|Enter to confirm|" + USAGE_HEADING
+)
+USAGE_WINDOW = re.compile(
+    r"(?P<heading>" + USAGE_HEADING + r")\s*(?:[█░ ]*|\d{1,3}(?:\.\d{1,2})?%\s+)"
+    r"\s*(?P<used>\d{1,3}(?:\.\d{1,2})?)%\s*used\s*"
+    r"Resets\s+(?P<reset>(?:[A-Z][a-z]{2} \d{1,2} at )?\d{1,2}(?::\d{2})?(?:am|pm)"
+    r" \([A-Za-z_+-]+(?:/[A-Za-z0-9_+-]+)*\))"
+)
+
+
+def parse_usage(output):
+    """Decode named subscription windows from the Claude Code usage tab."""
+    credit_states = set(re.findall(USAGE_CREDITS, output))
+    if not credit_states:
+        raise ClaudeProbeError("Claude /usage did not report its usage-credit setting; inspect the native usage tab before planning")
+    if any(state.endswith("on") for state in credit_states):
+        raise ClaudeProbeError("Claude usage credits are enabled; turn them off for subscription-only planning")
+    windows = {}
+    matches = list(USAGE_WINDOW.finditer(output))
+    if len(matches) != len(re.findall(USAGE_HEADING, output)):
+        raise ClaudeProbeError("Claude /usage has an incomplete quota window; inspect the percentage and reset in the native usage tab")
+    for match in matches:
+        pool, used, reset = match.group("heading", "used", "reset")
+        remaining = 100 - Decimal(used)
+        if remaining < 0:
+            raise ClaudeProbeError("Claude /usage returned an invalid percentage; inspect the native usage tab")
+        window = dict(pool=pool, remaining_percent=float(remaining), resets_at=reset)
+        if pool in windows and windows[pool] != window:
+            raise ClaudeProbeError("Claude /usage returned conflicting quota windows; refresh the native usage tab")
+        windows[pool] = window
+    if "Current week (all models)" not in windows:
+        raise ClaudeProbeError("Claude /usage did not show its all-model weekly window; inspect sign-in and the native usage tab")
+    return list(windows.values())
+
+
+def probe_usage(binary, cwd, *, auth_probe=probe, interactive=read_panel):
+    """Verify the existing native account and read /usage without a model turn."""
+    binary, cwd = selected_path(binary), selected_path(cwd, directory=True)
+    validate_auth(auth_probe(binary, cwd), binary, cwd)
+    command = [str(binary), "--safe-mode", "--ax-screen-reader", "--no-chrome", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+               "--settings", '{"remoteControlAtStartup":false}', "--tools", ""]
+    try:
+        output = interactive(command, cwd, {**environment(), "DISABLE_AUTOUPDATER": "1"},
+                             request=b"/usage", prompt=USAGE_PROMPT, menu=USAGE_MENU, blocked=USAGE_BLOCKED,
+                             raw_blocked=b"Quick safety check",
+                             complete=USAGE_CREDITS + r"(?s:.*?)Esc\s*to\s*close")
+    except PanelError as exc:
+        raise ClaudeProbeError(f"Claude /usage observation failed: {exc}. Probe folder: {cwd}. "
+                               "If Claude requests folder trust, approve a dedicated private probe folder in "
+                               "Claude Code's UI under the intended profile and pass it with --claude-usage-cwd.") from None
+    return parse_usage(output)
 
 
 # The oldest Claude Code whose event shapes were observed. Newer releases are accepted;

@@ -7,12 +7,11 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
-import subprocess
 from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import native_grok
 
@@ -32,6 +31,64 @@ def replies():
             _meta=dict(reasoningEfforts=[{"value": "high"}, {"value": "low"}]))])))),
         "authenticate": dict(result={"_meta": dict(auth_mode="Oidc", subscription_tier="Fixture subscriber",
             gate=None, backend_billed=False, email="private@example.invalid", team_id="private-team", token="private-token")})}
+
+
+GROK_USAGE = (
+    "│ Weekly limit (SuperGrok) ││ █████████████████████████████░ 97% │"
+    "│ Resets: November 15, 08:40 ││ Credits: $22.63 │"
+)
+GROK_USAGE_NO_CREDITS = (
+    "│ Weekly limit (SuperGrok) ││ ██████████████████████████████ 100% │"
+    "│ Resets: November 15, 10:40 │"
+)
+
+
+class GrokUsage(unittest.TestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ, {}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.interactive = Mock(return_value=GROK_USAGE)
+
+    def observe(self):
+        return native_grok.probe_usage(sys.executable, Path.cwd(), interactive=self.interactive)
+
+    def test_weekly_subscription_from_dashboard_without_config_or_json_commands(self):
+        os.environ["GROK_HOME"] = "/fixture/native-profile"
+        with patch.object(native_grok, "subscription_configuration", side_effect=AssertionError("unexpected inspect")):
+            self.assertEqual(self.observe(), [dict(pool="SuperGrok", remaining_percent=3, resets_at="November 15, 08:40")])
+        self.assertEqual(self.interactive.call_args.args[0],
+                         [sys.executable, "--no-auto-update", "--no-subagents", "dashboard"])
+        self.assertEqual(self.interactive.call_args.kwargs["request"], b"/usage show")
+        self.assertEqual(self.interactive.call_args.args[2]["GROK_HOME"], "/fixture/native-profile")
+
+    def test_exhausted_week_stays_zero_with_paid_credits(self):
+        self.interactive.return_value = GROK_USAGE.replace("97%", "100%")
+        self.assertEqual(self.observe()[0]["remaining_percent"], 0)
+
+    def test_exhausted_week_without_credits_reports_native_reset(self):
+        self.interactive.return_value = GROK_USAGE_NO_CREDITS
+        self.assertEqual(self.observe(), [dict(pool="SuperGrok", remaining_percent=0, resets_at="November 15, 10:40")])
+
+    def test_refuses_partial_or_inconsistent_panel(self):
+        for output in ("Credits: $22.63", GROK_USAGE.replace("97%", "101%"),
+                       GROK_USAGE.replace("Resets: November 15, 08:40", "Loading usage…"), GROK_USAGE * 2):
+            with self.subTest(output=output):
+                self.interactive.return_value = output
+                with self.assertRaises(native_grok.GrokProbeError):
+                    self.observe()
+
+    def test_api_and_routing_overrides_never_enter_tui(self):
+        for name in ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH", "GROK_MODELS_BASE_URL", "GROK_CONFIG_PATH"):
+            with self.subTest(name=name), patch.dict(os.environ, {name: ""}):
+                with self.assertRaisesRegex(native_grok.GrokProbeError, "Unset .*Grok"):
+                    self.observe()
+        self.interactive.assert_not_called()
+
+    def test_terminal_failure_reports_actionable_error(self):
+        self.interactive.side_effect = native_grok.PanelError("Timed out waiting for the complete /usage panel")
+        with self.assertRaisesRegex(native_grok.GrokProbeError, "Grok /usage observation failed: Timed out"):
+            self.observe()
 
 
 class Process:
