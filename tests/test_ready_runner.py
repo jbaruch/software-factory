@@ -431,11 +431,29 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.launches(), launches)
         self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
 
+        self.admit("other")
+        for task, candidate in (("task", before["inputs"]["candidate"]), ("other", self.candidate)):
+            with self.subTest(task=task):
+                off_plan = self.controller(self.plan([self.job("next", task=task, candidate=candidate,
+                                                               write=True, commit_message="Continue work")],
+                                                     workers=2, reserve=0))
+                with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+                    pending = self.tick(off_plan)
+                self.assertEqual({key: pending["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                                 dict(launched=0, collected=0, tabs_closed=0))
+                self.assertEqual(pending["active_workers"], 1)
+                self.assertEqual(self.states(pending), {(task, "next"): "waiting"})
+                self.assertIn("owns this checkout", pending["jobs"][0]["reason"])
+                self.assertEqual(PlanRex.sessions, sessions)
+                self.assertEqual(self.launches(), launches)
+                self.assertEqual({item: item.read_bytes() for item in saved}, saved)
+
         retry = self.tick(self.controller(effective))
         self.assertEqual(retry["result"], "complete")
         self.assertEqual(retry["metrics"]["collected"], 1)
         self.assertEqual(retry["metrics"]["tabs_closed"], 1)
         self.assertEqual(retry["metrics"]["launched"], 0)
+        self.assertEqual(retry["active_workers"], 0)
         self.assertEqual(self.launches(), launches)
         after = factory.load_task(path)
         self.assertEqual(after["assignments"]["verify"]["result"]["outcome"], "approved")
@@ -479,6 +497,51 @@ class ReadyRunner(unittest.TestCase):
                     self.assertNotIn("retry the original plan", str(caught.exception))
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(PlanRex.calls, calls)
+
+    def test_off_plan_legacy_worker_survives_while_same_interpreter_peers_tidy(self):
+        original = self.controller(self.plan([self.job()]))
+        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        protected = record["assignments"]["first"]
+        del protected["request"]["command"][1:3]  # Historical Codex used no -E/-s prefix.
+        factory.save(path, record)
+
+        self.admit("other")
+        peer = self.job("peer", task="other")
+        alternate_plan = self.controller(self.plan([peer]))
+        alternate = self.root / "alternate-python"
+        alternate.symlink_to(sys.executable)
+        with patch.object(sys, "executable", str(alternate)):
+            # The peers were already dispatched outside this plan's scheduler.
+            for task in ("task", "other"):
+                with factory.task_lock(self.directory, task) as peer_path:
+                    job = {**alternate_plan.plan["jobs"][0], "task": task}
+                    factory.launch(peer_path, task=task, assignment_id="peer", role=job["role"], goal=job["goal"],
+                                   cwd=job["cwd"], command=alternate_plan.command(peer_path, job),
+                                   purpose=job["purpose"], binary=alternate_plan.rex, server=alternate_plan.server)
+                self.finish(task, "peer")
+            launches = self.launches()
+            result = self.tick(alternate_plan)
+
+        self.assertEqual(self.states(result), {("other", "peer"): "approved"})
+        self.assertEqual({key: result["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                         dict(launched=0, collected=2, tabs_closed=2))
+        self.assertEqual(result["active_workers"], 1)
+        self.assertEqual(result["tidy_issues"], [])
+        self.assertEqual(factory.load_task(path)["assignments"]["first"], protected)
+        for task in ("task", "other"):
+            assignment = factory.load_task(self.directory / (task + ".json"))["assignments"]["peer"]
+            self.assertEqual(assignment["result"]["outcome"], "approved")
+            self.assertEqual(assignment["closed"]["state"], "exited")
+
+        retry = self.tick(self.controller(original.supplied_plan))
+        self.assertEqual(self.states(retry), {("task", "first"): "approved"})
+        self.assertEqual(retry["metrics"]["tabs_closed"], 1)
+        self.assertEqual(retry["active_workers"], 0)
+        self.assertEqual(self.launches(), launches)
+        self.assertEqual(PlanRex.sessions, [])
 
     def test_interpreter_replay_compares_all_worker_prefixes_and_frozen_arguments(self):
         original_python = sys.executable

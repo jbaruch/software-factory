@@ -156,7 +156,7 @@ def writer(request):
 
 
 def alternate_worker(command):
-    """Recognize a saved prefix for diagnostics only, without checking or running its interpreter."""
+    """Recognize a saved prefix without checking or running its interpreter."""
     interpreter = command[0]
     if (interpreter == sys.executable or not interpreter.isprintable() or not Path(interpreter).is_absolute()
             or any("\0" in arg for arg in command)):
@@ -409,26 +409,32 @@ class Runner:
                     record = factory.load_task(path)
                     records[source.stem] = record
                     protected = set()
-                    # Prove an interpreter-only conflict before any observation can reconcile or close its pane.
                     for identity, assignment in record["assignments"].items():
                         key = (source.stem, identity)
                         job = jobs.get(key)
                         request = assignment["request"]
                         saved = request["command"]
-                        if job is None or (prefix := alternate_worker(saved)) is None or prefix[0] != job["harness"]:
+                        prefix = alternate_worker(saved)
+                        if prefix is None:
                             continue
-                        planned = dict(candidate=job["candidate"], requirements=job["requirements"])
-                        if not replay_fields_match(request, job, planned):
-                            continue
-                        try:
-                            expected = self.command(path, job, compare_interpreter=saved[0])
-                        except (factory.FactoryError, OSError):
-                            continue
-                        if expected != [sys.executable, *saved[1:]]:
-                            continue
-                        phases[key] = dict(state="conflict", reason=interpreter_refusal("/".join(key), saved[0]))
+                        open_worker = assignment["state"] in {"launching", "launched"} and assignment.get("closed") is None
+                        if job is None:
+                            # A different plan still tidies this line. Leave the pane for its original runner.
+                            if not open_worker:
+                                continue
+                        else:
+                            planned = dict(candidate=job["candidate"], requirements=job["requirements"])
+                            if prefix[0] != job["harness"] or not replay_fields_match(request, job, planned):
+                                continue
+                            try:
+                                expected = self.command(path, job, compare_interpreter=saved[0])
+                            except (factory.FactoryError, OSError):
+                                continue
+                            if expected != [sys.executable, *saved[1:]]:
+                                continue
+                            phases[key] = dict(state="conflict", reason=interpreter_refusal("/".join(key), saved[0]))
                         protected.add(identity)
-                        if assignment["state"] in {"launching", "launched"} and assignment.get("closed") is None:
+                        if open_worker:
                             active.append((source.stem, request))
                     observable = {identity: assignment for identity, assignment in record["assignments"].items()
                                   if identity not in protected}
