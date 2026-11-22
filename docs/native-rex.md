@@ -44,6 +44,10 @@ Operator tab changes never block a task. Splitting, renaming, moving or closing 
 
 ## Tab tidying
 
+Foreman-created controller and helper terminals follow the shipped
+[controller launch and helper lifecycle](../skills/factory/references/commands.md#controller-terminals).
+The assignment lifecycle below does not collect those direct Rex tabs.
+
 Finished assignment tabs close automatically, so a factory session holds only work that is still running. A tab is finished once its process is `exited`, `failed` or `lost`; `running`, `unknown` and pending launches are never touched. Before a tab closes, its task record keeps the final process observation under the assignment's `closed` field, and its terminal text goes to a private `<task>.<id>.capture.txt` beside the record. Collecting a native report also writes its artifacts verbatim, one per line, to a private `<task>.<id>.<harness>.report.txt` beside the receipt, so a ruling's lines can be cited by path and digest; a hand-recorded `result` writes none. `status` and `capture` then answer from that retained copy without contacting Rex, even while the server is down, so collection, dependencies and delivery approvals keep working after the tab is gone. An abandoned launch likewise reports its status offline and has no output. A `lost` pane keeps no output: a closed pane has none, and a restored pane shows only a new shell.
 
 The ready runner tidies every task in its state directory on each tick, after collecting results. A successful `codex-collect`, `claude-collect` or `grok-collect` closes that assignment's tab. If that tidy fails, the command still prints the saved result, reports the tidy error and exits 1; run `tidy` to close the tab. `factory.py tidy` closes every finished tab in one task or in the whole state directory and reports per task what it closed, what is still running, and any error. Tidying closes only the factory's own block, so an operator split stays put; a lone block takes its tab along. Once a task has nothing open left it leaves its line's session; once the session holds no tab of any task and no operator tab, it is killed, and the next launch opens it again under the same label. Killing the shared session needs the line's execution lock, so another task's launch can never lose its session mid-launch: `tidy` and a collect's tidy run outside a launcher, take the lock only when it is free, and otherwise close their tabs and leave the session for the next tidy. A session killed outside the factory is recorded the same way, as `lost` tabs, the next time the task launches or tidies. If a close fails after the output was retained, the next tidy retries the close without capturing again.
@@ -52,13 +56,30 @@ The ready runner tidies every task in its state directory on each tick, after co
 
 Unit tests use a fake server and never touch live Rex or provider accounts. They cover concurrent mutations, changed inputs/host, repeat launches, unknown outcomes and restart reconciliation for both initial sessions and additional specialist tabs.
 
-The opt-in smoke check creates one session with two harmless commands, verifies the role briefs and actual working directory, checks process exit, captures output, repeats launches to confirm pane reuse, then tidies both tabs and confirms that their status and output survive and the session is gone:
+The opt-in smoke check creates a uniquely named disposable session with an operator
+sentinel, a short-lived auto-closing helper and a live log monitor. It captures and
+closes a deliberately retained helper. It invokes the shipped controller command
+for success, failure during shell startup and a retry,
+checking both output streams, exact exit status and the exact tab inventory after
+each run. Controller plans are empty and provider-free; this checks launch/log
+semantics, not native model success. Harmless QA/security workers verify role
+briefs, working directory, repeat-launch reuse and retained output/status after
+tidying. A running worker, sentinel and live monitor remain through collection;
+the check releases the worker, verifies output-before-close, stops its owned
+monitor by block ID, then removes only its own session and synthetic operator tab:
 
 ```sh
 python3 scripts/smoke_rex.py --rex '/absolute/path/to/rex' --server 'unix:///path/to/server.sock'
 ```
 
-It prints the state directory, full IDs and tidy report and leaves no tabs behind; `status` and `capture` on that state directory still show the retained results. Use `--state-dir PATH` to resume that same check. Ordinary tests do not run this command. A sandbox may block the Unix socket; rerun with the host's normal execution approval rather than bypassing it or selecting a different Rex server.
+It prints the state directory, full IDs, per-run inventories and tidy report;
+`status` and `capture` on that state directory still show retained worker results,
+and the logs retain controller JSON or startup diagnostics plus `controller_exit`.
+Use a fresh `--state-dir PATH` to select an artifacts directory. A failure after
+session creation leaves that session for inspection, with its ID on stderr;
+after capturing evidence, remove only it with `rex --autostart=false -S ENDPOINT kill SESSION_ID`.
+Ordinary tests do not run this command. A sandbox may block the Unix socket; rerun
+with the host's normal execution approval rather than selecting a different Rex server.
 
 Initial local conformance observations on Rex API revision 11:
 
