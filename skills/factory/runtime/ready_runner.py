@@ -444,9 +444,11 @@ class Runner:
                     try:
                         rex = factory.connect(record)
                     except factory.FactoryError as exc:
+                        self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
                         for identity, assignment in observable.items():
                             phases.setdefault((source.stem, identity), dict(state="unknown", reason=str(exc)))
-                            active.append((source.stem, assignment["request"]))
+                            if assignment.get("closed") is None:
+                                active.append((source.stem, assignment["request"]))
                         continue
                     for identity, assignment in observable.items():
                         key = (source.stem, identity)
