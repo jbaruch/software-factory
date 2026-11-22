@@ -446,7 +446,11 @@ class Runner:
                     except factory.FactoryError as exc:
                         self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
                         for identity, assignment in observable.items():
-                            phases.setdefault((source.stem, identity), dict(state="unknown", reason=str(exc)))
+                            key = (source.stem, identity)
+                            if assignment["state"] == "abandoned":
+                                phases.setdefault(key, dict(state="abandoned", reason=assignment["abandoned"]["reason"]))
+                                continue
+                            phases.setdefault(key, dict(state="unknown", reason=str(exc)))
                             if assignment.get("closed") is None:
                                 active.append((source.stem, assignment["request"]))
                         continue

@@ -1305,6 +1305,54 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(result["active_workers"], 0)
         self.assertEqual(result["result"], "needs_action")
 
+    def test_abandoned_launch_frees_its_slot_on_pinned_rex_host_mismatch(self):
+        self.admit("peer")
+        controller = self.controller(self.plan([self.job()], workers=1, reserve=0))
+        call = PlanRex.call
+
+        def reject(rex, *args, **kwargs):
+            if args[0] == "new":
+                raise factory.FactoryError("Error: unknown flag: --focus")
+            return call(rex, *args, **kwargs)
+
+        with patch.object(PlanRex, "call", reject):
+            rejected, = self.tick(controller)["jobs"]
+        self.assertIn("unknown flag: --focus", rejected["reason"])
+        reason = "Rex rejected an unknown flag"
+        with factory.task_lock(self.directory, "task") as path:
+            record = factory.load_task(path)
+            factory.abandon_launch(path, factory.connect(record), assignment_id="first", reason=reason)
+        before = path.read_bytes()
+        original_sessions = copy.deepcopy(PlanRex.sessions)
+        peer_path = self.directory / "peer.json"
+        self.assertIsNone(factory.load_task(peer_path)["rex"])
+
+        plan = self.plan([self.job(), self.job("second", after=["first"]), self.job(task="peer")], workers=1, reserve=0)
+        call_start = len(PlanRex.calls)
+        with patch.object(PlanRex, "host", "unexpected-host"), patch.object(PlanRex, "sessions", []):
+            result = self.tick(self.controller(plan))
+            self.assertEqual(self.states(result), {("task", "first"): "abandoned", ("task", "second"): "blocked",
+                                                   ("peer", "first"): "running"})
+            self.assertEqual(result["jobs"][0]["reason"], reason)
+            self.assertEqual(result["active_workers"], 1)
+            self.assertEqual(result["metrics"]["launched"], 1)
+            self.assertEqual(result["tidy_issues"], [dict(task="task", reason="Connected Rex host differs from the recorded task host")])
+            peer = factory.load_task(peer_path)
+            self.assertEqual(peer["rex"]["host_id"], "unexpected-host")
+            session, = PlanRex.sessions
+            self.assertEqual(session["session_id"], peer["session_id"])
+            window, = session["windows"]
+            self.assertEqual(window["label"], peer["assignments"]["first"]["window_label"])
+            # The first whoami is the rejected pinned connection. All remaining calls launch the peer.
+            pinned, peer_host, peer_list, peer_launch, peer_inspect = PlanRex.calls[call_start:]
+            self.assertEqual(pinned, ("whoami", "--json"))
+            self.assertEqual(peer_host, ("whoami", "--json"))
+            self.assertEqual(peer_list, ("ls", "--json"))
+            self.assertEqual(peer_launch[:4], ("new", session["label"], "--window", window["label"]))
+            self.assertEqual(peer_inspect, ("session", "inspect", session["session_id"], "--json"))
+        self.assertEqual(PlanRex.sessions, original_sessions)
+        self.assertEqual(path.read_bytes(), before)
+
     def claude_job(self, identity, **changes):
         return self.job(identity, **{"harness": "claude", "model": "claude-sonnet-5-5", "effort": "high", **changes})
 
