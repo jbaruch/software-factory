@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import stat
@@ -1625,25 +1626,70 @@ TOKEN_VARIABLE = "SOFTWARE_FACTORY_GITHUB_READ_TOKEN"
 ENVIRONMENT_TOKEN = os.environ.pop(TOKEN_VARIABLE, "").strip()
 
 
+def keychain_query(arguments, stage, *, stdout=subprocess.PIPE):
+    """Run a read-only security query without exposing its output in diagnostics."""
+    try:
+        return subprocess.run([SECURITY, *arguments], stdin=subprocess.DEVNULL, stdout=stdout,
+                              stderr=subprocess.DEVNULL, encoding="utf-8", timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        raise FactoryError(f"The Keychain did not answer within 30 seconds during {stage}; try factory.py inputs again "
+                           "from native macOS Terminal as the same user") from None
+    except OSError:
+        raise FactoryError(f"Cannot run the Keychain {stage}; check {SECURITY} and retry") from None
+    except UnicodeError:
+        raise FactoryError(f"The Keychain returned malformed output during {stage}; check Keychain Access and retry") from None
+
+
 def read_token():
-    """The read-only GitHub token: the macOS Keychain, or the environment variable where there is no Keychain."""
-    if not os.path.exists(SECURITY):
+    """The read-only GitHub token: the macOS Keychain, or the environment variable on other platforms."""
+    if sys.platform != "darwin":
         if ENVIRONMENT_TOKEN and any(character.isspace() for character in ENVIRONMENT_TOKEN):
             raise FactoryError(f"{TOKEN_VARIABLE} must hold one read-only GitHub token")
         return ENVIRONMENT_TOKEN or None
-    try:
-        found = subprocess.run([SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-                               capture_output=True, text=True, timeout=30, check=False)
-    except subprocess.TimeoutExpired:
-        raise FactoryError(f"The Keychain did not answer within 30 seconds for {KEYCHAIN_SERVICE}; unlock the login Keychain and retry") from None
-    except (OSError, UnicodeError) as exc:
-        raise FactoryError(f"Cannot read {KEYCHAIN_SERVICE} from the Keychain ({type(exc).__name__}); check {SECURITY} and retry") from None
-    if found.returncode == 44:  # The Keychain has no such item.
-        return None
+    lookup = ["find-generic-password", "-s", KEYCHAIN_SERVICE]
+    interaction = ("requires macOS user interaction. In native macOS Terminal as the same user, rerun the same "
+                   "factory.py inputs command with the same state directory, task, candidate and requirements revision, "
+                   "and respond to the macOS authorization prompt")
+    found = keychain_query(lookup, "implicit item lookup", stdout=subprocess.DEVNULL)
+    implicit_miss = found.returncode == 44  # Item not found in the effective search list.
+    if implicit_miss:
+        login = keychain_query(["list-keychains", "-d", "user"], "user Keychain list lookup")
+        recovery = "check that the login keychain is available in Keychain Access as the same user and retry"
+        if login.returncode == 36:
+            raise FactoryError(f"Listing the user Keychains {interaction}")
+        if login.returncode:
+            raise FactoryError(f"Cannot locate the user login Keychain (security status {login.returncode}); {recovery}")
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, OSError):
+            raise FactoryError(f"Cannot determine the current user's home directory; {recovery}") from None
+        keychain = os.path.join(home, "Library", "Keychains", "login.keychain-db")
+        # The user-domain list confirms the account's standard path. Never use an entry as the lookup argument.
+        listed_paths = {line.strip(" \t") for line in login.stdout.split("\n")}
+        if (not os.path.isabs(home) or re.search(r'["\x00-\x1f\x7f]', keychain)
+                or f'"{keychain}"' not in listed_paths):
+            raise FactoryError(f"The user Keychain list did not identify the standard login Keychain; {recovery}")
+        metadata = keychain_query([*lookup, keychain], "login-keychain item lookup", stdout=subprocess.DEVNULL)
+        if metadata.returncode == 44:
+            return None
+        if metadata.returncode == 36:
+            raise FactoryError(f"Looking up {KEYCHAIN_SERVICE} metadata in the login Keychain {interaction}")
+        if metadata.returncode:
+            raise FactoryError(f"Cannot check {KEYCHAIN_SERVICE} in the login Keychain (security status "
+                               f"{metadata.returncode}); check the entry in Keychain Access and retry")
+        found = keychain_query([*lookup, "-w", keychain], "login-keychain password read")
+    elif found.returncode == 0:
+        found = keychain_query([*lookup, "-w"], "implicit password read")
+
+    location = (f"Found {KEYCHAIN_SERVICE} in the login Keychain outside the current Keychain search. "
+                if implicit_miss else "")
+    if found.returncode == 36:
+        raise FactoryError(f"{location}Reading {KEYCHAIN_SERVICE} {interaction}")
     if found.returncode:
-        raise FactoryError(f"Cannot read {KEYCHAIN_SERVICE} from the Keychain: {found.stderr.strip()}; unlock the Keychain or fix the entry")
+        raise FactoryError(f"{location}Cannot read {KEYCHAIN_SERVICE} from the Keychain (security status {found.returncode}); "
+                           "check the entry in Keychain Access and retry")
     token = found.stdout.strip()
-    if not token or any(character.isspace() for character in token):
+    if not token or not token.isprintable() or any(character.isspace() for character in token):
         raise FactoryError(f"The Keychain entry {KEYCHAIN_SERVICE} must hold one read-only GitHub token")
     return token
 
@@ -1662,9 +1708,12 @@ def capture_acceptance(admission, requirements):
         return None
     token = read_token()
     if token is None:
+        if sys.platform == "darwin":
+            raise FactoryError(f"No read-only token entry {KEYCHAIN_SERVICE} was found in the Keychain search or the login "
+                               "Keychain. In Keychain Access, select login and create a new password item with that service "
+                               "name and a fine-grained read-only GitHub token, then rerun factory.py inputs from native macOS Terminal")
         raise FactoryError(f"The acceptance references are GitHub issues, and this machine has no read-only token for the "
-                           f"factory to capture them for readers: on macOS store it with `security add-generic-password -s "
-                           f"{KEYCHAIN_SERVICE} -a \"$USER\" -w`, elsewhere export {TOKEN_VARIABLE}; then select the inputs again")
+                           f"factory to capture them for readers. Export {TOKEN_VARIABLE}, then rerun factory.py inputs")
     return acceptance_evidence(admission, requirements, token)
 
 
@@ -1731,8 +1780,8 @@ def acceptance_evidence(admission, requirements, token):
         if not (paths.cafile or paths.capath) and os.path.exists("/etc/ssl/cert.pem"):
             # The python.org macOS build has no roots until its Install Certificates step runs; the system has them.
             context.load_verify_locations("/etc/ssl/cert.pem")
-    except (ssl.SSLError, OSError) as exc:
-        raise FactoryError(f"Cannot set up TLS for GitHub ({type(exc).__name__}: {exc}); repair Python's or the system's "
+    except OSError:
+        raise FactoryError("Cannot set up TLS for GitHub; repair Python's or the system's "
                            "certificate store, then select the inputs again") from None
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         """Never follow a redirect: urllib would forward the token's Authorization header to the new host."""
@@ -1747,16 +1796,16 @@ def acceptance_evidence(admission, requirements, token):
         try:
             with opener.open(request, timeout=30) as response:
                 answer = decode_json(response.read().decode("utf-8"))
-        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, UnicodeError) as exc:
-            raise FactoryError(f"Cannot capture acceptance {owner}/{repo}#{number} for the reader ({type(exc).__name__}: "
-                               f"{getattr(exc, 'reason', exc)}); restore GitHub access or the read-only token, then run factory.py inputs again") from None
+        except (http.client.HTTPException, OSError, ValueError) as exc:
+            status = f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+            raise FactoryError(f"Cannot capture acceptance {owner}/{repo}#{number} for the reader ({status}); "
+                               "restore GitHub access or the read-only token, then run factory.py inputs again") from None
         # GraphQL can answer partial data beside errors, a nulled body or edit time included: any error refuses.
         errors = answer.get("errors") if isinstance(answer, dict) else None
         issue = ((answer.get("data") or {}).get("repository") or {}).get("issueOrPullRequest") if isinstance(answer, dict) else None
         changed = github_time(issue.get("createdAt")) if isinstance(issue, dict) else None
         if errors or not isinstance(issue, dict) or changed is None or not isinstance(issue.get("timelineItems"), dict):
-            reason = errors[0].get("message") if isinstance(errors, list) and errors and isinstance(errors[0], dict) else None
-            raise FactoryError(f"GitHub returned no complete issue for {owner}/{repo}#{number} ({str(reason or 'no data')[:200]}); "
+            raise FactoryError(f"GitHub returned no complete issue for {owner}/{repo}#{number}; "
                                "inspect the acceptance reference and the read-only token's access")
         edits = [issue.get("lastEditedAt"), *(node.get("createdAt") for node in issue["timelineItems"].get("nodes") or []
                                               if isinstance(node, dict))]

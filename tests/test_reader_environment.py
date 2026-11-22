@@ -7,10 +7,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import call, patch
 
+import codex_worker
 import factory
 
 
@@ -116,11 +119,28 @@ class ReaderEnvironment(unittest.TestCase):
 class AcceptanceEvidence(unittest.TestCase):
     """Readers have no GitHub identity, so `inputs` captures their acceptance issues (0.39.3 regression)."""
 
+    marker = "fixture-marker"
+    account_home = "/Users/Fixture User"
+    login_keychain = account_home + "/Library/Keychains/login.keychain-db"
+    other_keychain = "/Users/Another User/Library/Keychains/login.keychain-db"
+    lookup = ["/usr/bin/security", "find-generic-password", "-s", "software-factory-github-read"]
+    list_keychains = ["/usr/bin/security", "list-keychains", "-d", "user"]
+    security_options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            encoding="utf-8", timeout=30, check=False)
+    metadata_options = security_options | {"stdout": subprocess.DEVNULL}
+
     def setUp(self):
         self.requirements = "jbaruch/nanoclaw#1368@2026-11-13T03:37:26Z"
         self.admission = dict(acceptance=["https://github.com/jbaruch/nanoclaw/issues/1368", "fixture/notes.md"])
         self.reader = [factory.sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py"), "--role", "qa"]
         self.fetches = []
+
+    def security_result(self, status, stdout=""):
+        return subprocess.CompletedProcess([], status, stdout, self.marker)
+
+    def login_lookup_results(self):
+        listing = f'    "{self.other_keychain}"\n    "{self.login_keychain}"\n'
+        return [self.security_result(44), self.security_result(0, listing)]
 
     def respond(self, updated_at="2026-11-13T03:37:26Z", *, edited_at=None, renamed_at=None, answer=None):
         """GitHub's GraphQL answer for the acceptance issue, created 2026-11-12 and changed as the arguments say."""
@@ -228,14 +248,14 @@ class AcceptanceEvidence(unittest.TestCase):
                   "capture_output=True, text=True).stdout.strip())")
         result = subprocess.run([factory.sys.executable, "-B", "-c", script, str(factory.ROOT)], capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.split(), ["github_pat_linux", "None"])
-        with patch.object(factory.os.path, "exists", return_value=False):
+        with patch.object(factory.sys, "platform", "linux"):
             with patch.object(factory, "ENVIRONMENT_TOKEN", "github_pat_linux"):
                 self.assertEqual(factory.read_token(), "github_pat_linux")
             with patch.object(factory, "ENVIRONMENT_TOKEN", ""):
                 self.assertIsNone(factory.read_token())
 
     def test_capture_fails_closed_without_a_token_or_on_drift(self):
-        with self.assertRaisesRegex(factory.FactoryError, "no read-only token"):
+        with self.assertRaisesRegex(factory.FactoryError, "(?i)no read-only token"):
             self.capture(token=None)
         for changes in (dict(edited_at="2026-11-14T09:00:00Z"), dict(renamed_at="2026-11-14T09:00:00Z")):
             with self.subTest(**changes), self.assertRaisesRegex(factory.FactoryError,
@@ -252,16 +272,18 @@ class AcceptanceEvidence(unittest.TestCase):
 
     def test_an_unreadable_issue_or_revision_time_refuses(self):
         missing = dict(data=dict(repository=dict(issueOrPullRequest=None)),
-                       errors=[dict(type="NOT_FOUND", message="Could not resolve to an issue or pull request with the number of 1368.")])
-        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*Could not resolve"):
-            self.capture(answer=missing)
+                       errors=[dict(type="NOT_FOUND", message=self.marker)])
+        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*inspect the acceptance reference") as error:
+            self.capture(token=self.marker, answer=missing)
+        self.assertNotIn(self.marker, str(error.exception))
         # Review of #173: partial data beside an error, its body and edit time nulled, refuses too.
         partial = dict(data=dict(repository=dict(issueOrPullRequest=dict(
             title="Cap context at 200K", body=None, createdAt="2026-11-12T06:07:07Z", updatedAt="2026-11-13T03:37:26Z",
             lastEditedAt=None, timelineItems=dict(nodes=[])))),
             errors=[dict(type="FORBIDDEN", path=["repository", "issueOrPullRequest", "body"], message="Resource not accessible")])
-        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*Resource not accessible"):
+        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*read-only token's access") as error:
             self.capture(answer=partial)
+        self.assertNotIn("Resource not accessible", str(error.exception))
         for revision in ("yesterday", "2026-11-13T03:37:26", "2026-11-13"):  # A zoneless time can't be compared.
             with self.subTest(revision=revision), patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
                     self.respond(), self.assertRaisesRegex(factory.FactoryError, "is not a time"):
@@ -306,27 +328,148 @@ class AcceptanceEvidence(unittest.TestCase):
     def test_fetch_and_tls_failures_explain_recovery(self):
         import http.client
         import ssl
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
-                patch("urllib.request.OpenerDirector.open", side_effect=http.client.IncompleteRead(b"partial")), \
-                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance jbaruch/nanoclaw#1368.*run factory.py inputs again"):
+        import urllib.error
+        for failure in (http.client.IncompleteRead(self.marker.encode()), urllib.error.URLError(self.marker)):
+            with self.subTest(failure=type(failure).__name__), patch.object(factory, "read_token", return_value=self.marker), \
+                    patch("urllib.request.OpenerDirector.open", side_effect=failure), \
+                    self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance.*run factory.py inputs again") as error:
+                factory.capture_acceptance(self.admission, self.requirements)
+            self.assertNotIn(self.marker, str(error.exception))
+        with patch.object(factory, "read_token", return_value=self.marker), \
+                patch.object(ssl, "create_default_context", side_effect=ssl.SSLError(self.marker)), \
+                self.assertRaisesRegex(factory.FactoryError, "Cannot set up TLS for GitHub") as error:
             factory.capture_acceptance(self.admission, self.requirements)
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
-                patch.object(ssl, "create_default_context", side_effect=ssl.SSLError("bad store")), \
-                self.assertRaisesRegex(factory.FactoryError, "Cannot set up TLS for GitHub"):
-            factory.capture_acceptance(self.admission, self.requirements)
+        self.assertNotIn(self.marker, str(error.exception))
 
-    def test_the_token_comes_from_the_keychain_and_its_failures_explain_recovery(self):
-        for code, out, expected in ((44, "", None), (0, "github_pat_keychainonly\n", "github_pat_keychainonly")):
-            with self.subTest(code=code), patch.object(factory.os.path, "exists", return_value=True), \
-                    patch.object(factory.subprocess, "run", return_value=subprocess.CompletedProcess([], code, out, "")):
-                self.assertEqual(factory.read_token(), expected)
-        refused = subprocess.CompletedProcess([], 51, "", "User interaction is not allowed.")
-        for effect, message in ((lambda *a, **k: refused, "unlock the Keychain"),
-                                (subprocess.TimeoutExpired("security", 30), "did not answer within 30 seconds"),
-                                (OSError("spawn failed"), "check /usr/bin/security")):
-            with self.subTest(message=message), patch.object(factory.os.path, "exists", return_value=True), \
-                    patch.object(factory.subprocess, "run", side_effect=effect), self.assertRaisesRegex(factory.FactoryError, message):
-                factory.read_token()
+    def test_working_implicit_keychain_read_captures_without_a_login_lookup(self):
+        with self.respond(), patch.object(factory.sys, "platform", "darwin"), \
+                patch.object(factory.subprocess, "run", side_effect=[
+                    self.security_result(0), self.security_result(0, self.marker + "\n")]) as run:
+            capture = factory.capture_acceptance(self.admission, self.requirements)
+        assert capture is not None
+        self.assertIn("Cap context at 200K", capture)
+        self.assertNotIn(self.marker, capture)
+        self.assertEqual(self.fetches[0][:2], ("https://api.github.com/graphql", "Bearer " + self.marker))
+        self.assertEqual(run.call_args_list, [call(self.lookup, **self.metadata_options),
+                                              call([*self.lookup, "-w"], **self.security_options)])
+
+    def test_login_keychain_denial_and_interactive_recovery_on_inputs(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        repo = root / "repo"
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet",
+                        "--allow-empty", "-m", "Fixture"], check=True)
+        state = root / "state"
+        state.mkdir(mode=0o700)
+        path = state / "task.json"
+        factory.admit(path, task="task", goal="Cap the context", repository=str(repo), acceptance=self.admission["acceptance"])
+        candidate = factory.git_commit(str(repo), "HEAD")
+        args = ["--state-dir", str(state), "inputs", "--task", "task", "--candidate", candidate,
+                "--requirements", self.requirements]
+        before = path.read_bytes()
+        commands = [call(self.lookup, **self.metadata_options),
+                    call(self.list_keychains, **self.security_options),
+                    call([*self.lookup, self.login_keychain], **self.metadata_options),
+                    call([*self.lookup, "-w", self.login_keychain], **self.security_options)]
+        steps = [*self.login_lookup_results(), self.security_result(0, self.marker)]
+        denied = self.security_result(36, self.marker)
+        results = iter([*steps[:1], denied, *steps[:2], denied, *steps, denied,
+                        *steps, self.security_result(0, self.marker + "\n")])
+        real_run = subprocess.run
+        security_calls = []
+
+        def run(command, *args, **options):
+            if command[0] == "/usr/bin/security":
+                security_calls.append(call(command, *args, **options))
+                return next(results)
+            return real_run(command, *args, **options)
+
+        errors, output = io.StringIO(), io.StringIO()
+        with self.respond(), patch.object(factory.sys, "platform", "darwin"), \
+                patch.object(factory.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=self.account_home)), \
+                patch.object(factory.subprocess, "run", side_effect=run), redirect_stderr(errors), redirect_stdout(output):
+            recovery = ("requires macOS user interaction. In native macOS Terminal as the same user, rerun the same "
+                        "factory.py inputs command with the same state directory, task, candidate and requirements revision, "
+                        "and respond to the macOS authorization prompt")
+            denials = ["Listing the user Keychains", "Looking up software-factory-github-read metadata in the login Keychain",
+                       "Found software-factory-github-read in the login Keychain outside the current Keychain search. "
+                       "Reading software-factory-github-read"]
+            for command_count, operation in enumerate(denials, start=2):
+                with self.subTest(operation=operation):
+                    self.assertEqual(factory.main(args), 1)
+                    self.assertEqual(security_calls, commands[:command_count])
+                    self.assertEqual(self.fetches, [])
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertEqual(errors.getvalue(), f"factory: {operation} {recovery}\n")
+                security_calls.clear()
+                errors.seek(0)
+                errors.truncate()
+            self.assertEqual(factory.main(args), 0)
+            saved = factory.load_task(path)["acceptance"]
+            self.assertIn("Cap context at 200K", saved[self.requirements])
+            self.assertEqual(factory.main(args), 0)
+            self.assertEqual(factory.load_task(path)["acceptance"], saved)
+        self.assertEqual(security_calls, commands)
+        self.assertEqual(self.fetches, [("https://api.github.com/graphql", "Bearer " + self.marker,
+                                         dict(owner="jbaruch", name="nanoclaw", number=1368))])
+        self.assertNotIn(self.marker, errors.getvalue() + output.getvalue() + path.read_text())
+        self.assertNotIn(self.marker, factory.rendered_acceptance(factory.load_task(path), self.reader, "qa"))
+        with patch.dict(os.environ, {factory.TOKEN_VARIABLE: self.marker}), \
+                patch.object(factory, "READER_GH_CONFIG", root / "gh-reader"):
+            environment = factory.worker_environment(codex_worker.native_environment(), str(repo))
+        self.assertNotIn(self.marker, environment.values())
+
+    def test_keychain_failures_do_not_fetch_or_expose_subprocess_output(self):
+        missing = self.security_result(44, self.marker)
+        login = self.login_lookup_results()
+        cases = [
+            ([*login, missing], "No read-only token entry .* was found.*In Keychain Access, select login"),
+            ([self.security_result(36, self.marker)], "requires macOS user interaction.*native macOS Terminal"),
+            ([self.security_result(0), self.security_result(36, self.marker)],
+             "requires macOS user interaction.*native macOS Terminal"),
+            ([missing, self.security_result(51)], "Cannot locate the user login Keychain .*status 51"),
+            ([*login, self.security_result(51, self.marker)], "Cannot check .* in the login Keychain .*status 51"),
+            ([*login, self.security_result(0), missing], "Found .* outside the current Keychain search.*Cannot read .*status 44"),
+            ([self.security_result(51, self.marker)], "Cannot read .*status 51"),
+            ([self.security_result(0), self.security_result(0, self.marker + " invalid\n")], "must hold one read-only GitHub token"),
+            ([self.security_result(0), self.security_result(0)], "must hold one read-only GitHub token"),
+            ([missing, subprocess.TimeoutExpired("security", 30, output=self.marker)],
+             "did not answer within 30 seconds during user Keychain list lookup"),
+            ([OSError(self.marker)], "Cannot run the Keychain implicit item lookup.*check /usr/bin/security"),
+            ([UnicodeDecodeError("utf-8", b"\xff", 0, 1, self.marker)], "malformed output during implicit item lookup"),
+        ]
+        for results, message in cases:
+            with self.subTest(message=message), self.respond(), patch.object(factory.sys, "platform", "darwin"), \
+                    patch.object(factory.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=self.account_home)), \
+                    patch.object(factory, "ENVIRONMENT_TOKEN", "unused-environment-marker"), \
+                    patch.object(factory.subprocess, "run", side_effect=results) as run, \
+                    self.assertRaisesRegex(factory.FactoryError, message) as error:
+                factory.capture_acceptance(self.admission, self.requirements)
+            self.assertEqual(run.call_count, len(results))
+            self.assertNotIn(self.marker, str(error.exception))
+            self.assertNotIn(self.marker, repr(run.call_args_list))
+        self.assertEqual(self.fetches, [])
+
+    def test_user_list_must_confirm_the_exact_standard_login_path_before_any_password_read(self):
+        for listing in ("", f'    "{self.other_keychain}"\n', f'"{self.login_keychain[:-3]}"\n',
+                        '"Library/Keychains/login.keychain-db"\n', f'{self.login_keychain}\n',
+                        f'"{self.login_keychain}\n', f'"{self.login_keychain}\x00"\n',
+                        f'"{self.login_keychain}" "{self.other_keychain}"\n'):
+            with self.subTest(listing=listing), self.respond(), patch.object(factory.sys, "platform", "darwin"), \
+                    patch.object(factory.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=self.account_home)), \
+                    patch.object(factory.subprocess, "run", side_effect=[
+                        self.security_result(44), self.security_result(0, listing)]) as run, \
+                    self.assertRaisesRegex(factory.FactoryError, "did not identify the standard login Keychain.*"
+                                           "Keychain Access as the same user") as error:
+                factory.capture_acceptance(self.admission, self.requirements)
+            self.assertEqual(run.call_args_list, [call(self.lookup, **self.metadata_options),
+                                                  call(self.list_keychains, **self.security_options)])
+            self.assertNotIn(listing.strip() or self.marker, str(error.exception))
+        self.assertEqual(self.fetches, [])
 
 
 if __name__ == "__main__":
