@@ -331,8 +331,12 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if version == 12 and "writer_origin" not in record:
+        raise FactoryError("Schema 12 task is missing writer_origin; restore the original task record")
+    if version < 12 and "writer_origin" in record:
+        raise FactoryError("Task has writer_origin at schema below 12; restore the original task record")
     if (version < 6 or version == 7) and "provisioning" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 11 and "acceptance" in record:
@@ -532,6 +536,8 @@ def load_task(path) -> dict:
             save(path, record)
         except OSError:
             raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
+    # Schema 12 records have writer_origin and are written by import-writer; they are not migrated up from 11.
+    # Validation of writer_origin content is done by writer_transfer; load_task only checks its presence/absence.
     return record
 
 
@@ -601,7 +607,7 @@ def allowance_limits(record):
                 or type(event["at"]) not in (int, float) or not 0 <= event["at"] <= 253402300799
                 or "judge" in event and (not isinstance(event["judge"], str) or event["judge"] in judges
                                          or event["purpose"] != "correction" or event["additional"] != 1
-                                         or len(judges) >= JUDGE_ROUNDS)):
+                                         or len(judges) + (record.get("writer_origin") or {}).get("judge_rounds", 0) >= JUDGE_ROUNDS)):
             raise FactoryError("Invalid allowance history; restore its original ordered adjustments before continuing")
         seen.add(event["id"])
         if "judge" in event:
@@ -937,10 +943,13 @@ def task_view(record):
     limits = allowance_limits(record)
     if limits is not None:
         allowances = {}
+        origin_used = record.get("writer_origin", {}).get("used") or {}
         for purpose, limit in limits.items():
-            used = sum(item["request"].get("purpose") == purpose
-                       for item in record["assignments"].values())
-            allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
+            local_used = sum(item["request"].get("purpose") == purpose
+                             for item in record["assignments"].values())
+            origin_count = origin_used.get(purpose, 0) if isinstance(origin_used, dict) else 0
+            total_used = local_used + (origin_count if isinstance(origin_count, int) else 0)
+            allowances[purpose] = dict(limit=limit, used=total_used, remaining=limit - total_used)
     assignments = {key: {**item, "result_current": result_current(record, item["result"])}
                    for key, item in record["assignments"].items()}
     item = record["provisioning"]
@@ -1575,7 +1584,8 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
         granted = [event["judge"] for event in record["allowance_events"] if "judge" in event]
         if judge in granted:
             raise FactoryError("That ruling already granted its correction round; a further round needs a new ruling")
-        if len(granted) >= JUDGE_ROUNDS:
+        origin_judge_rounds = (record.get("writer_origin") or {}).get("judge_rounds", 0)
+        if len(granted) + origin_judge_rounds >= JUDGE_ROUNDS:
             raise FactoryError(f"Judge rulings already added {JUDGE_ROUNDS} correction rounds to this task; "
                                "another needs the operator's approval")
     occurred = clock()
@@ -2348,6 +2358,11 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
         rex = Rex(str(Path(binary).resolve()), server)
         who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
+        # An imported task may only be launched on its destination host.
+        writer_origin = record.get("writer_origin")
+        if writer_origin is not None and who["host_id"] != writer_origin["destination_host"]:
+            raise FactoryError("First launch on an imported task must use the imported destination host; "
+                               "this Rex host is not the bundle's destination host")
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
         rex.instance_id = who["instance_id"]
     if not record["session_id"]:
@@ -3662,6 +3677,17 @@ def main(argv=None):
     abandon.add_argument("--reason", required=True, help="Why the launch is known not to have happened")
     cleanup = sub.add_parser("tidy", help="Close finished assignment tabs, retaining their final status and output")
     cleanup.add_argument("--task", help="Only this task; default is every task in the state directory")
+    export_cmd = sub.add_parser("export-writer", help="Export a settled writer as source history for one-hop transfer")
+    export_cmd.add_argument("--task", required=True)
+    export_cmd.add_argument("--id", required=True, help="The selected writer assignment ID")
+    export_cmd.add_argument("--to-host", required=True, help="Destination Rex host_id")
+    export_cmd.add_argument("--to-task", required=True, help="Destination task ID")
+    export_cmd.add_argument("--out", required=True, help="Output bundle path (outside the state directory)")
+    import_cmd = sub.add_parser("import-writer", help="Import a writer bundle on the destination host")
+    import_cmd.add_argument("--task", required=True)
+    import_cmd.add_argument("--file", required=True, help="Path to the bundle file")
+    import_cmd.add_argument("--from-host", required=True, help="Source host_id from the export output")
+    import_cmd.add_argument("--sha256", required=True, help="Bundle SHA-256 from the export output")
     args = parser.parse_args(argv)
     try:
         if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
@@ -3683,6 +3709,32 @@ def main(argv=None):
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
             print(json.dumps(report, indent=2))
             return 1 if failed else 0
+        if args.action == "export-writer":
+            import writer_transfer
+            state_dir = args.state_dir.resolve()
+            with task_lock(state_dir, args.task) as path:
+                # whoami is not called; source host is read from the pinned record.
+                source_host, sha256 = writer_transfer.export_writer(
+                    path, assignment_id=args.id, to_host=args.to_host, to_task=args.to_task,
+                    out_path=args.out, whoami_host_id=None)
+            print(json.dumps(dict(source_host=source_host, sha256=sha256, out=args.out), indent=2))
+            return 0
+        if args.action == "import-writer":
+            import writer_transfer
+            state_dir = args.state_dir.resolve()
+            # whoami requires Rex; call it here before acquiring the task lock.
+            rex_obj = Rex(str(Path(args.rex).resolve()), args.server) if args.rex and args.server else None
+            if rex_obj is None:
+                raise FactoryError("import-writer requires --rex PATH and --server unix:// to identify the destination host")
+            who = rex_object(rex_obj.call("whoami", "--json"), strings=("host_id",))
+            whoami_host_id = who["host_id"]
+            with task_lock(state_dir, args.task) as path:
+                record = writer_transfer.import_writer(
+                    path, file_path=args.file, from_host=args.from_host, sha256=args.sha256,
+                    whoami_host_id=whoami_host_id, state_dir=state_dir,
+                    repository=load_task(path)["admission"]["repository"] if os.path.lexists(path) else None)
+            print(json.dumps(task_view(record), indent=2))
+            return 0
         if args.action == "delivered":
             import integration
             import release_evidence

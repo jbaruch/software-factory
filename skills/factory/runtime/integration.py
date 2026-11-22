@@ -126,18 +126,40 @@ def antigravity_contributor(key, record, assignment):
     return "antigravity-unstarted:" + record["task"] + "/" + key
 
 
-def approvals(record, review, required):
-    """Re-read collected original native reports/events, never generic dependencies."""
-    if (not required or len(set(required)) != len(required) or review in required
-            or any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item) for item in [review, *required])):
-        raise factory.FactoryError("Explicitly select distinct required approval IDs and one release-review ID")
-    contributors, selected = set(), {}
+def _all_contributors(record):
+    """Combined local --write contributor contexts plus any origin contributors; fails closed on archive changes."""
+    import writer_transfer
+    contributors = set()
     for key, assignment in record["assignments"].items():
         command = assignment["request"]["command"]
         if factory.native_harness(command) is None:
             raise factory.FactoryError("Cannot establish contributor independence for an unverified command adapter: " + key)
         if "--write" in command:
             contributors.add(contributor_context(key, record, assignment))
+    wo = record.get("writer_origin")
+    if wo is not None:
+        from pathlib import Path
+        import hashlib
+        archive_path = Path(wo["archive"])
+        try:
+            raw = archive_path.read_bytes()
+        except OSError:
+            raise factory.FactoryError("Writer origin archive is missing; restore it before approvals can proceed")
+        import hashlib as _hashlib
+        if _hashlib.sha256(raw).hexdigest() != wo["sha256"]:
+            raise factory.FactoryError("Writer origin archive has been altered; restore the original bundle before approvals can proceed")
+        for c in wo.get("contributors", []):
+            contributors.add(c["context"])
+    return contributors
+
+
+def approvals(record, review, required):
+    """Re-read collected original native reports/events, never generic dependencies."""
+    if (not required or len(set(required)) != len(required) or review in required
+            or any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item) for item in [review, *required])):
+        raise factory.FactoryError("Explicitly select distinct required approval IDs and one release-review ID")
+    contributors = _all_contributors(record)
+    selected = {}
     contexts = set()
     for key in [*required, review]:
         assignment = record["assignments"].get(key)
@@ -252,9 +274,9 @@ def delivered_accepted(path, review, acceptance_id) -> dict:
     if evidence.from_delivery_assignment(record, assignment) != original:
         raise factory.FactoryError("Final acceptance assessed a different delivery; judge the recorded `delivered` receipt")
     judge = native_context(factory.native_harness(assignment["request"]["command"]), receipt)
-    for key, item in record["assignments"].items():
-        if "--write" in item["request"]["command"] and judge == contributor_context(key, record, item):
-            raise factory.FactoryError("A contributor cannot judge final acceptance")
+    contributors = _all_contributors(record)
+    if judge in contributors:
+        raise factory.FactoryError("A contributor cannot judge final acceptance")
     if read_owner(path) != record:
         raise factory.FactoryError("Task changed during final acceptance observation; reload current controls/inputs")
     return dict(outcome="approved", assignment=acceptance_id, review=review, native_receipt=str(args.receipt),

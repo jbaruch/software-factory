@@ -128,7 +128,49 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `rebase-worktree` | Saves the change as a patch, moves the worktree onto a new base and selects it | `{task, worktree, previous, candidate, patch, next}` | `rebase_worktree()` |
 | `release-worktree` | Removes the provisioned worktree; the branch stays | `{task, worktree, branch, head}` | `release_worktree()` |
 | `delivered` | Confirms the release skill merged the head the release judgment approved, and records its receipt | The receipt; `--acceptance` adds `acceptance` | `skills/factory/runtime/integration.py` `delivered()` |
+| `export-writer` | Exports a settled writer as source history for one-hop transfer; prints source host and SHA-256 | `{source_host, sha256, out}` | `writer_transfer.export_writer()` |
+| `import-writer` | Imports a writer bundle on the destination host; requires `--rex` and `--server` | Task view | `writer_transfer.import_writer()` |
 | `ready_runner.py` | Launches, collects and tidies a plan's jobs on its line | `{schema_version, result, jobs, …}`; exit 1 unless `result` is `complete` | `skills/factory/runtime/ready_runner.py` `run()` |
 
 - **Task view:** the task record (`task`, `line`, `admission`, `inputs`, `assignments`, `hold`, `provisioning` and its event logs), plus `allowances` and each assignment's `result_current`.
 - **Status object:** `{role, state, session_id, window_id, block_id, exit}`, plus `reason` for a lost or abandoned attempt and `closed: true` once tidied.
+
+## Cross-host writer transfer
+
+Transfer a settled writer's provenance from SOURCE_HOST (task `SRC`) to DEST_HOST (task `DST`). The bundle file must be outside the state directory, written to a path only the operator can read.
+
+**On the source host** (task must be held and schema 11):
+
+```sh
+# Export; prints source_host and sha256 — record both values.
+python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /src/state \
+  export-writer --task SRC --id WRITER_ID \
+  --to-host DEST_HOST_ID --to-task DST \
+  --out /tmp/transfer.bundle
+# {"source_host": "src-host-id", "sha256": "aabbcc...", "out": "/tmp/transfer.bundle"}
+```
+
+Transfer the bundle to the destination host by any secure operator channel. Confirm the SHA-256 of the received file matches the printed value before proceeding.
+
+**On the destination host** (fresh admission, no assignments):
+
+```sh
+# 1. Admit the task (use the exact candidate C and requirements R from the source).
+python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /dst/state \
+  admit --task DST --line DST --goal 'Imported writer provenance' \
+  --repo /dst/checkout
+
+# 2. Select inputs (must match the source bundle's candidate and requirements).
+python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /dst/state \
+  inputs --task DST --candidate C --requirements R
+
+# 3. Import; --from-host and --sha256 come from the export output, never from the bundle.
+python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir /dst/state \
+  --rex "$(command -v rex)" --server 'unix:///dst/rex.sock' \
+  import-writer --task DST --file /path/to/transfer.bundle \
+  --from-host src-host-id --sha256 aabbcc...
+```
+
+**Verify the destination is fresh before import** — `show --task DST` must have no assignments and no `writer_origin`. After import, `show` returns a schema-12 task view. Run `resume --task DST` to allow launches, then verify with a plain read-only plan (no `--from-writer`).
+
+The SHA-256 digest authenticates the operator-pinned bytes; it is not a host signature and cannot protect against a dishonest source host. The destination proves Git objects, repository, requirements and all new approvals independently.
