@@ -914,7 +914,7 @@ class ReadyRunner(unittest.TestCase):
                         auth_probe=lambda b, c: native_claude.probe(b, c, run=_r),
                         interactive=_i)
 
-                with (patch.dict(os.environ, extra_env),
+                with (patch.dict(os.environ, extra_env, clear=True),
                       patch.object(native_claude, "probe_usage", side_effect=injected_probe_usage)):
                     result = controller.harnesses()
 
@@ -990,7 +990,7 @@ class ReadyRunner(unittest.TestCase):
                         raise AssertionError("probe should have refused")
 
                     env = {**host_markers, override_name: ""}
-                    with (patch.dict(os.environ, env),
+                    with (patch.dict(os.environ, env, clear=True),
                           patch.object(native_claude, "probe_usage", side_effect=intercepted_probe_usage)):
                         result = controller.harnesses()
 

@@ -127,7 +127,7 @@ window contains `{pool, remaining_percent, resets_at}`. Claude and Grok keep
 their native reset labels. Reobserve after a reset before using the route.
 
 Claude opens its interactive `/usage` tab in safe mode with screen-reader output
-from the resolved system temporary root by default. If Claude asks for folder
+from resolved `/tmp` by default. If Claude asks for folder
 trust, select an absolute, existing, accessible directory with
 `--claude-usage-cwd`. Use a dedicated private folder outside repositories, free
 of project configuration, imports, and relevant inherited configuration. The
