@@ -158,7 +158,8 @@ def writer(request):
 def alternate_worker(command):
     """Recognize a saved prefix for diagnostics only, without checking or running its interpreter."""
     interpreter = command[0]
-    if interpreter == sys.executable or not interpreter.isprintable() or not Path(interpreter).is_absolute():
+    if (interpreter == sys.executable or not interpreter.isprintable() or not Path(interpreter).is_absolute()
+            or any("\0" in arg for arg in command)):
         return None
     for harness in HARNESSES:
         worker = str(factory.ROOT / (harness + "_worker.py"))
@@ -181,6 +182,12 @@ def interpreter_refusal(identity, interpreter):
     return (f"Python interpreter mismatch for {identity!r}. The saved worker command records {ascii(interpreter)}. "
             "Confirm the original installation, then retry the original plan with that exact interpreter and "
             "the same installed runner and arguments. If you cannot confirm it, stop and reconcile the launcher provenance.")
+
+
+def replay_fields_match(request, job, planned):
+    return (request.get("inputs") == planned
+            and all(request[key] == job[key] for key in ("role", "goal", "cwd", "purpose"))
+            and request.get("dependencies", []) == sorted(job["after"]))
 
 
 def settled_current(record, assignment):
@@ -391,6 +398,7 @@ class Runner:
     def observe(self):
         records, phases, active, issues = {}, {}, [], []
         self.tidy_issues = []
+        jobs = {(job["task"], job["id"]): job for job in self.plan["jobs"]}
         paths = sorted(p for p in self.directory.glob("*.json") if re.fullmatch(SLUG, p.stem))
         for source in paths:
             line = factory.peek_line(source)
@@ -400,16 +408,40 @@ class Runner:
                 with factory.task_lock(self.directory, source.stem, patience=LOCK_PATIENCE) as path:
                     record = factory.load_task(path)
                     records[source.stem] = record
-                    if not record["assignments"]:
+                    protected = set()
+                    # Prove an interpreter-only conflict before any observation can reconcile or close its pane.
+                    for identity, assignment in record["assignments"].items():
+                        key = (source.stem, identity)
+                        job = jobs.get(key)
+                        request = assignment["request"]
+                        saved = request["command"]
+                        if job is None or (prefix := alternate_worker(saved)) is None or prefix[0] != job["harness"]:
+                            continue
+                        planned = dict(candidate=job["candidate"], requirements=job["requirements"])
+                        if not replay_fields_match(request, job, planned):
+                            continue
+                        try:
+                            expected = self.command(path, job, compare_interpreter=saved[0])
+                        except (factory.FactoryError, OSError):
+                            continue
+                        if expected != [sys.executable, *saved[1:]]:
+                            continue
+                        phases[key] = dict(state="conflict", reason=interpreter_refusal("/".join(key), saved[0]))
+                        protected.add(identity)
+                        if assignment["state"] in {"launching", "launched"} and assignment.get("closed") is None:
+                            active.append((source.stem, request))
+                    observable = {identity: assignment for identity, assignment in record["assignments"].items()
+                                  if identity not in protected}
+                    if not observable:
                         continue
                     try:
                         rex = factory.connect(record)
                     except factory.FactoryError as exc:
-                        for identity, assignment in record["assignments"].items():
+                        for identity, assignment in observable.items():
                             phases[(source.stem, identity)] = dict(state="unknown", reason=str(exc))
                             active.append((source.stem, assignment["request"]))
                         continue
-                    for identity, assignment in record["assignments"].items():
+                    for identity, assignment in observable.items():
                         key = (source.stem, identity)
                         terminal = False
                         try:
@@ -443,7 +475,8 @@ class Runner:
                                 active.append((source.stem, assignment["request"]))
                     try:
                         # Finished tabs close after collection; their final status and output stay in the task.
-                        self.metrics["tabs_closed"] += len(factory.tidy(path, rex, record)["closed"])
+                        self.metrics["tabs_closed"] += len(factory.tidy(
+                            path, rex, record, only=observable.keys(), close_session=not protected)["closed"])
                     except (factory.FactoryError, OSError) as exc:
                         # Tidying never blocks work; it is reported and retried on the next tick.
                         self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
@@ -544,27 +577,16 @@ class Runner:
                 phases[key] = dict(state="blocked", reason=self.launch_errors[key])
                 continue
             if phase is not None:
+                if phase["state"] == "conflict":
+                    continue
                 request = record["assignments"][job["id"]]["request"]
                 path = self.directory / (job["task"] + ".json")
-                fields_match = (request.get("inputs") == planned
-                                and all(request[k] == job[k] for k in ("role", "goal", "cwd", "purpose"))
-                                and request.get("dependencies", []) == sorted(job["after"]))
                 reason = "Plan differs from the saved immutable assignment; use a new explicit ID"
                 try:
-                    if self.command(path, job) == request["command"] and fields_match:
+                    if self.command(path, job) == request["command"] and replay_fields_match(request, job, planned):
                         continue
                 except (factory.FactoryError, OSError) as exc:
                     reason = str(exc)
-                saved_command = request["command"]
-                prefix = alternate_worker(saved_command) if fields_match else None
-                if prefix is not None and prefix[0] == job["harness"]:
-                    # Builders read the original frozen bindings for comparison. The command is never launched here.
-                    try:
-                        expected = self.command(path, job, compare_interpreter=saved_command[0])
-                    except (factory.FactoryError, OSError):
-                        expected = None  # Keep the original refusal when the diagnostic comparison cannot be made.
-                    if expected == [sys.executable, *saved_command[1:]]:
-                        reason = interpreter_refusal("/".join(key), saved_command[0])
                 phases[key] = dict(state="conflict", reason=reason)
                 continue
             reason = None

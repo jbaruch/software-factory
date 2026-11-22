@@ -400,12 +400,57 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.task_view(factory.load_task(path))["allowances"]["correction"],
                          dict(limit=1, used=1, remaining=0))
 
+    def test_interpreter_replay_preserves_exited_verifier_until_original_retry(self):
+        original_python = sys.executable
+        writer = self.completed_writer()["assignments"]["implement"]
+        plan = self.verification_plan(purpose="correction")
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 1)
+        self.finish("task", "verify")
+        effective = self.verification_plan(candidate=writer["result"]["candidate"], purpose="correction")
+        path = self.directory / "task.json"
+        before = factory.load_task(path)
+        self.assertIsNone(before["assignments"]["verify"]["result"])
+        self.assertIsNone(before["assignments"]["verify"].get("closed"))
+        saved = {item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}
+        sessions, launches = copy.deepcopy(PlanRex.sessions), self.launches()
+        calls = len(PlanRex.calls)
+        replay = self.controller(effective)
+
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"), patch.object(
+                factory, "save", wraps=factory.save) as save:
+            refused = self.tick(replay)
+            save.assert_not_called()
+        self.assertEqual(refused["result"], "needs_action")
+        self.assertEqual(refused["jobs"][0]["state"], "conflict")
+        self.assertIn("Python interpreter mismatch for 'task/verify'", refused["jobs"][0]["reason"])
+        self.assertIn(ascii(original_python), refused["jobs"][0]["reason"])
+        self.assertEqual({key: refused["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                         dict(launched=0, collected=0, tabs_closed=0))
+        self.assertFalse(any(call[:2] == ("block", "close") or call[0] == "kill" for call in PlanRex.calls[calls:]))
+        self.assertEqual(PlanRex.sessions, sessions)
+        self.assertEqual(self.launches(), launches)
+        self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
+
+        retry = self.tick(self.controller(effective))
+        self.assertEqual(retry["result"], "complete")
+        self.assertEqual(retry["metrics"]["collected"], 1)
+        self.assertEqual(retry["metrics"]["tabs_closed"], 1)
+        self.assertEqual(retry["metrics"]["launched"], 0)
+        self.assertEqual(self.launches(), launches)
+        after = factory.load_task(path)
+        self.assertEqual(after["assignments"]["verify"]["result"]["outcome"], "approved")
+        self.assertEqual(factory.task_view(after)["allowances"], factory.task_view(before)["allowances"])
+        self.assertEqual(saved[self.directory / "task.verify.codex.json"],
+                         (self.directory / "task.verify.codex.json").read_bytes())
+
     def test_from_writer_interpreter_hint_requires_unambiguous_collected_command(self):
         record = self.completed_writer()
         path = self.directory / "task.json"
         command = record["assignments"]["implement"]["request"]["command"]
         alternate = "/fixture/alternate/python3.11"
         plausible = "/fixture/saved Python; $unused"
+        nul_command = command.copy()
+        nul_command[nul_command.index("--codex") + 1] = "/fixture/codex\0invalid"
         refused = "needs a collected, completed native writer"
         calls = list(PlanRex.calls)
         controller = self.controller(self.verification_plan(), from_writer="implement")
@@ -416,6 +461,7 @@ class ReadyRunner(unittest.TestCase):
             ("duplicated writer flag", [*command, "--write"], True, refused),
             ("abbreviated flag", [token if token != "--model" else "--mod" for token in command], True, refused),
             ("control character", ["/fixture/python\n3.11", *command[1:]], True, refused),
+            ("NUL in provider path", nul_command, True, refused),
             ("unproven collection", command, False, refused),
             ("plausible path", [plausible, *command[1:]], True, ascii(plausible)),
             ("historical Codex prefix", [command[0], *command[3:]], True, ascii(command[0])),
@@ -429,6 +475,8 @@ class ReadyRunner(unittest.TestCase):
                 with self.assertRaises(factory.FactoryError) as caught:
                     self.tick(controller)
                 self.assertIn(message, str(caught.exception))
+                if message == refused:
+                    self.assertNotIn("retry the original plan", str(caught.exception))
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(PlanRex.calls, calls)
 
