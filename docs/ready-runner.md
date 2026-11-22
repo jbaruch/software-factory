@@ -86,6 +86,18 @@ do not establish live handoff integration or specialist quality.
 
 ## Execution and recovery
 
+If a takeover reports a Python interpreter mismatch, confirm the installation
+recorded for that task and assignment against the original launcher. Invoke that
+exact absolute Python with `-B` and the same installed `ready_runner.py`. Its
+`sys.executable` must match the reported path exactly. Retry with the original
+arguments, including `--plan`, `--from-writer` if used, the same state directory
+or default environment, provider paths, `--rex` and `--server`. If Rex normally
+resolves Python through PATH, pin the confirmed absolute interpreter in the
+trusted Rex launcher. Treat the reported path as escaped data. If the original
+installation is missing, its identity is uncertain, or assignments report
+different interpreters, stop and reconcile the original launcher provenance.
+Keep the plan, assignment IDs, state and evidence for the retry.
+
 The owner store retains launch intent before Rex effects. A lost reply reconciles
 the original pane; failed or missing/unknown effects never acquire a new attempt
 automatically. A preflight failure with no intent is blocked for the invocation;

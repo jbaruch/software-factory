@@ -2,6 +2,8 @@
 import argparse
 import asyncio
 import contextlib
+import importlib
+import io
 import json
 import math
 from pathlib import Path
@@ -153,6 +155,46 @@ def writer(request):
     return not native_request(request) or "--write" in request["command"]
 
 
+def alternate_worker(command):
+    """Recognize a saved prefix without checking or running its interpreter."""
+    interpreter = command[0]
+    if (interpreter == sys.executable or not interpreter.isprintable() or not Path(interpreter).is_absolute()
+            or any("\0" in arg for arg in command)):
+        return None
+    for harness in HARNESSES:
+        worker = str(factory.ROOT / (harness + "_worker.py"))
+        if command[1:4] == ["-E", "-s", worker]:
+            offset = 4
+        elif harness == "codex" and command[1:2] == [worker]:
+            offset = 2
+        else:
+            continue
+        arguments = command[offset:]
+        flags = [arg for arg in arguments if arg.startswith("--")]
+        if ("--help" in flags or "-h" in arguments or len(flags) != len(set(flags))
+                or any(not re.fullmatch(r"--[a-z][a-z0-9-]*", arg) for arg in flags)):
+            return None
+        return harness, offset
+    return None
+
+
+def protected_worker(assignment):
+    return (assignment["state"] in {"launching", "launched"} and assignment.get("closed") is None
+            and assignment["result"] is None and alternate_worker(assignment["request"]["command"]) is not None)
+
+
+def interpreter_refusal(identity, interpreter):
+    return (f"Python interpreter mismatch for {identity!r}. The saved worker command records {ascii(interpreter)}. "
+            "Confirm the original installation, then retry the original plan with that exact interpreter and "
+            "the same installed runner and arguments. If you cannot confirm it, stop and reconcile the launcher provenance.")
+
+
+def replay_fields_match(request, job, planned):
+    return (request.get("inputs") == planned
+            and all(request[key] == job[key] for key in ("role", "goal", "cwd", "purpose"))
+            and request.get("dependencies", []) == sorted(job["after"]))
+
+
 def settled_current(record, assignment):
     """Whether a collected result still answers the task's selected inputs.
 
@@ -251,28 +293,28 @@ class Runner:
         self.metrics = dict(polls=0, quota_probes=0, launched=0, collected=0, tabs_closed=0)
         self.tidy_issues = []
 
-    def command(self, path, job):
-        """The frozen worker command for a plan job on its harness."""
+    def command(self, path, job, *, compare_interpreter=None):
+        """Build the command. In diagnostics, compare the saved prefix without using it in argv."""
         # Absent turns keep each builder's default, so older plans freeze the same commands.
         optional = {key: job[key] for key in ("turns", "base") if key in job}
         if job["harness"] == "claude":
             return factory.claude_command(path, task=job["task"], assignment_id=job["id"], claude=str(self.claude),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
-                **optional)
+                compare_interpreter=compare_interpreter, **optional)
         if job["harness"] == "grok":
             return factory.grok_command(path, task=job["task"], assignment_id=job["id"], grok=str(self.grok),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
-                **optional)
+                compare_interpreter=compare_interpreter, **optional)
         if job["harness"] == "antigravity":
             return factory.antigravity_command(path, task=job["task"], assignment_id=job["id"], agy=str(self.antigravity),
                 model=job["model"], effort=job["effort"], cwd=job["cwd"], role=job["role"], seconds=job["seconds"],
                 write=job["write"], commit_message=job["commit_message"], sandbox=str(self.binary) if job["write"] else None,
-                **optional)
+                compare_interpreter=compare_interpreter, **optional)
         return factory.codex_command(path, task=job["task"], assignment_id=job["id"], codex=str(self.binary),
             model=job["model"], effort=job["effort"], cwd=job["cwd"], write=job["write"], seconds=job["seconds"],
-            commit_message=job["commit_message"], role=job["role"])
+            commit_message=job["commit_message"], role=job["role"], compare_interpreter=compare_interpreter)
 
     def select_writer_candidate(self):
         """Called under the execution lock; derive each task's continuity from original evidence.
@@ -301,6 +343,26 @@ class Runner:
         if (source["state"] != "launched" or harness is None
                 or not writer(source["request"]) or source["result"] is None
                 or source["result"]["outcome"] != "completed"):
+            request = source["request"]
+            command = request["command"]
+            if (harness is None and source["state"] == "launched" and source["native_collected"] is True
+                    and source["result"]["outcome"] == "completed" and request.get("inputs") == original
+                    and source["result"]["inputs"] == original and "--write" in command
+                    and (prefix := alternate_worker(command)) is not None):
+                # Parse only the arguments of the installed worker for the hint. Evidence validation stays below.
+                worker, offset = prefix
+                parser = importlib.import_module(worker + "_worker").parser()
+                parser.allow_abbrev = False
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        saved_args = parser.parse_args(command[offset:])
+                except SystemExit:
+                    saved_args = None  # Malformed arguments retain the ordinary refusal.
+                identity = record["task"] + "/" + str(self.from_writer)
+                if (saved_args is not None and saved_args.write and saved_args.commit_message
+                        and saved_args.job == identity and saved_args.role in (None, request["role"])
+                        and (worker == "codex" or (saved_args.sandbox is not None and saved_args.sandbox.is_absolute()))):
+                    raise factory.FactoryError(interpreter_refusal(identity, command[0]))
             raise factory.FactoryError("--from-writer needs a collected, completed native writer")
         if source["request"].get("inputs") != original:
             raise factory.FactoryError("Verification plan inputs differ from the writer's frozen original pair")
@@ -331,16 +393,18 @@ class Runner:
             for identity, assignment in record["assignments"].items():
                 if identity == self.from_writer or assignment["state"] == "abandoned":
                     continue
+                protected = protected_worker(assignment)
                 # Even a saved result is no substitute for observing its process.
-                if assignment["state"] == "launching":
+                if not protected and assignment["state"] == "launching":
                     factory.reconcile(rex, record, assignment)
-                if factory.status(rex, record, assignment)["state"] not in TERMINAL:
+                if protected or factory.status(rex, record, assignment)["state"] not in TERMINAL:
                     raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
         return path, record["inputs"], target
 
     def observe(self):
         records, phases, active, issues = {}, {}, [], []
         self.tidy_issues = []
+        jobs = {(job["task"], job["id"]): job for job in self.plan["jobs"]}
         paths = sorted(p for p in self.directory.glob("*.json") if re.fullmatch(SLUG, p.stem))
         for source in paths:
             line = factory.peek_line(source)
@@ -350,16 +414,47 @@ class Runner:
                 with factory.task_lock(self.directory, source.stem, patience=LOCK_PATIENCE) as path:
                     record = factory.load_task(path)
                     records[source.stem] = record
-                    if not record["assignments"]:
+                    protected = set()
+                    for identity, assignment in record["assignments"].items():
+                        key = (source.stem, identity)
+                        job = jobs.get(key)
+                        request = assignment["request"]
+                        if protected_worker(assignment):
+                            protected.add(identity)
+                            active.append((source.stem, request))
+                            phases[key] = dict(state="unknown")
+                        if job is None:
+                            continue
+                        # Exact replay qualifies the recovery hint. Pane protection is line-wide.
+                        saved = request["command"]
+                        prefix = alternate_worker(saved)
+                        planned = dict(candidate=job["candidate"], requirements=job["requirements"])
+                        if prefix is None or prefix[0] != job["harness"] or not replay_fields_match(request, job, planned):
+                            continue
+                        try:
+                            expected = self.command(path, job, compare_interpreter=saved[0])
+                        except (factory.FactoryError, OSError):
+                            continue
+                        if expected == [sys.executable, *saved[1:]]:
+                            phases[key] = dict(state="conflict", reason=interpreter_refusal("/".join(key), saved[0]))
+                    observable = {identity: assignment for identity, assignment in record["assignments"].items()
+                                  if identity not in protected}
+                    if not observable:
                         continue
                     try:
                         rex = factory.connect(record)
                     except factory.FactoryError as exc:
-                        for identity, assignment in record["assignments"].items():
-                            phases[(source.stem, identity)] = dict(state="unknown", reason=str(exc))
-                            active.append((source.stem, assignment["request"]))
+                        self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
+                        for identity, assignment in observable.items():
+                            key = (source.stem, identity)
+                            if assignment["state"] == "abandoned":
+                                phases.setdefault(key, dict(state="abandoned", reason=assignment["abandoned"]["reason"]))
+                                continue
+                            phases.setdefault(key, dict(state="unknown", reason=str(exc)))
+                            if assignment.get("closed") is None:
+                                active.append((source.stem, assignment["request"]))
                         continue
-                    for identity, assignment in record["assignments"].items():
+                    for identity, assignment in observable.items():
                         key = (source.stem, identity)
                         terminal = False
                         try:
@@ -386,14 +481,15 @@ class Runner:
                                 result = assignment["result"]
                                 if result is not None:
                                     phase["state"] = result["outcome"] if settled_current(record, assignment) else "stale"
-                            phases[key] = phase
+                            phases.setdefault(key, phase)
                         except factory.FactoryError as exc:
-                            phases[key] = dict(state="blocked" if terminal else "unknown", reason=str(exc))
+                            phases.setdefault(key, dict(state="blocked" if terminal else "unknown", reason=str(exc)))
                             if not terminal and not any(task == source.stem and request is assignment["request"] for task, request in active):
                                 active.append((source.stem, assignment["request"]))
                     try:
                         # Finished tabs close after collection; their final status and output stay in the task.
-                        self.metrics["tabs_closed"] += len(factory.tidy(path, rex, record)["closed"])
+                        self.metrics["tabs_closed"] += len(factory.tidy(
+                            path, rex, record, only=observable.keys())["closed"])
                     except (factory.FactoryError, OSError) as exc:
                         # Tidying never blocks work; it is reported and retried on the next tick.
                         self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
@@ -494,15 +590,17 @@ class Runner:
                 phases[key] = dict(state="blocked", reason=self.launch_errors[key])
                 continue
             if phase is not None:
+                if phase["state"] == "conflict":
+                    continue
                 request = record["assignments"][job["id"]]["request"]
+                path = self.directory / (job["task"] + ".json")
+                reason = "Plan differs from the saved immutable assignment; use a new explicit ID"
                 try:
-                    expected = self.command(self.directory / (job["task"] + ".json"), job)
-                    if (request.get("inputs") != dict(candidate=job["candidate"], requirements=job["requirements"])
-                            or any(request[k] != job[k] for k in ("role", "goal", "cwd", "purpose"))
-                            or request.get("dependencies", []) != sorted(job["after"]) or request["command"] != expected):
-                        phases[key] = dict(state="conflict", reason="Plan differs from the saved immutable assignment; use a new explicit ID")
+                    if self.command(path, job) == request["command"] and replay_fields_match(request, job, planned):
+                        continue
                 except (factory.FactoryError, OSError) as exc:
-                    phases[key] = dict(state="conflict", reason=str(exc))
+                    reason = str(exc)
+                phases[key] = dict(state="conflict", reason=reason)
                 continue
             reason = None
             if record["hold"] is not None:

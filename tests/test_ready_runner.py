@@ -328,6 +328,264 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.task_view(factory.load_task(path))["allowances"]["correction"],
                          dict(limit=1, used=1, remaining=0))
 
+    def test_interpreter_takeover_refuses_both_paths_and_reuses_original_work(self):
+        original_python = sys.executable
+        record = self.completed_writer()
+        plan = self.plan([self.job("approved", after=["implement"]),
+                          self.job("running", after=["implement"], purpose="correction")])
+        plan_file = self.root / "verification.json"
+        plan_file.write_text(json.dumps(plan))
+        original_plan = plan_file.read_bytes()
+        argv = ["--state-dir", str(self.directory), "--plan", str(plan_file), "--from-writer", "implement",
+                "--codex", original_python, "--rex", original_python, "--server", "unix:///test.sock", "--once"]
+        alternate = "/fixture/alternate/python3.11"
+
+        def assert_writer_refusal():
+            stderr = StringIO()
+            calls = list(PlanRex.calls)
+            with patch.object(sys, "executable", alternate), redirect_stderr(stderr):
+                self.assertEqual(runner.main(argv), 1)
+            message = stderr.getvalue()
+            self.assertIn("Python interpreter mismatch for 'task/implement'", message)
+            self.assertIn(ascii(original_python), message)
+            self.assertIn("retry the original plan with that exact interpreter", message)
+            self.assertEqual(PlanRex.calls, calls)
+
+        path = self.directory / "task.json"
+        before_selection, launches = path.read_bytes(), self.launches()
+        assert_writer_refusal()
+        self.assertEqual(path.read_bytes(), before_selection)
+        self.assertEqual(self.launches(), launches)
+
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 2)
+        self.finish("task", "approved")
+        self.assertEqual(self.handoff(plan)["metrics"]["collected"], 1)
+        saved = {item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}
+        sessions, launches = copy.deepcopy(PlanRex.sessions), self.launches()
+        assert_writer_refusal()
+
+        effective = {**plan, "jobs": [{**job, "candidate": record["assignments"]["implement"]["result"]["candidate"]}
+                                     for job in plan["jobs"]]}
+        replay = self.controller(effective)
+        with patch.object(sys, "executable", alternate):
+            refused = self.tick(replay)
+        self.assertEqual(refused["result"], "needs_action")
+        self.assertEqual(refused["metrics"]["launched"], 0)
+        for item in refused["jobs"]:
+            self.assertEqual(item["state"], "conflict")
+            self.assertIn(f"Python interpreter mismatch for 'task/{item['id']}'", item["reason"])
+            self.assertIn(ascii(original_python), item["reason"])
+            self.assertIn("retry the original plan with that exact interpreter", item["reason"])
+
+        changed = copy.deepcopy(effective)
+        changed["jobs"][0]["model"] = "changed-model"
+        changed["jobs"][1]["goal"] = "Changed goal"
+        changed_replay = self.controller(changed)
+        with patch.object(sys, "executable", alternate):
+            conflicts = self.tick(changed_replay)
+        for item in conflicts["jobs"]:
+            self.assertEqual(item["state"], "conflict")
+            self.assertIn("Plan differs from the saved immutable assignment", item["reason"])
+
+        self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
+        self.assertEqual(PlanRex.sessions, sessions)
+        self.assertEqual(self.launches(), launches)
+        retry = self.handoff(plan)
+        self.assertEqual(self.states(retry), {("task", "approved"): "approved", ("task", "running"): "running"})
+        self.assertEqual(retry["metrics"]["launched"], 0)
+        self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
+        self.assertEqual(plan_file.read_bytes(), original_plan)
+        self.assertEqual(PlanRex.sessions, sessions)
+        self.assertEqual(self.launches(), launches)
+        self.assertEqual(factory.task_view(factory.load_task(path))["allowances"]["correction"],
+                         dict(limit=1, used=1, remaining=0))
+
+    def test_interpreter_replay_preserves_exited_verifier_until_original_retry(self):
+        original_python = sys.executable
+        writer = self.completed_writer()["assignments"]["implement"]
+        plan = self.verification_plan(purpose="correction")
+        self.assertEqual(self.handoff(plan)["metrics"]["launched"], 1)
+        self.finish("task", "verify")
+        effective = self.verification_plan(candidate=writer["result"]["candidate"], purpose="correction")
+        path = self.directory / "task.json"
+        before = factory.load_task(path)
+        self.assertIsNone(before["assignments"]["verify"]["result"])
+        self.assertIsNone(before["assignments"]["verify"].get("closed"))
+        saved = {item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}
+        sessions, launches = copy.deepcopy(PlanRex.sessions), self.launches()
+        calls = len(PlanRex.calls)
+        replay = self.controller(effective)
+
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"), patch.object(
+                factory, "save", wraps=factory.save) as save:
+            refused = self.tick(replay)
+            save.assert_not_called()
+        self.assertEqual(refused["result"], "needs_action")
+        self.assertEqual(refused["jobs"][0]["state"], "conflict")
+        self.assertIn("Python interpreter mismatch for 'task/verify'", refused["jobs"][0]["reason"])
+        self.assertIn(ascii(original_python), refused["jobs"][0]["reason"])
+        self.assertEqual({key: refused["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                         dict(launched=0, collected=0, tabs_closed=0))
+        self.assertFalse(any(call[:2] == ("block", "close") or call[0] == "kill" for call in PlanRex.calls[calls:]))
+        self.assertEqual(PlanRex.sessions, sessions)
+        self.assertEqual(self.launches(), launches)
+        self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
+
+        for changes in (dict(goal="Changed goal"), dict(model="changed-model")):
+            with self.subTest(changes=changes):
+                changed = {**effective, "jobs": [{**effective["jobs"][0], **changes}]}
+                changed_replay = self.controller(changed)
+                calls = len(PlanRex.calls)
+                with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+                    conflict = self.tick(changed_replay)
+                self.assertEqual(conflict["jobs"][0]["state"], "conflict")
+                self.assertIn("Plan differs from the saved immutable assignment", conflict["jobs"][0]["reason"])
+                self.assertEqual(conflict["active_workers"], 1)
+                self.assertFalse(any(call[0] in {"block", "kill"} for call in PlanRex.calls[calls:]))
+                self.assertEqual(PlanRex.sessions, sessions)
+                self.assertEqual(self.launches(), launches)
+                self.assertEqual({item: item.read_bytes() for item in saved}, saved)
+
+        self.admit("other")
+        for task, candidate in (("task", before["inputs"]["candidate"]), ("other", self.candidate)):
+            with self.subTest(task=task):
+                off_plan = self.controller(self.plan([self.job("next", task=task, candidate=candidate,
+                                                               write=True, commit_message="Continue work")],
+                                                     workers=2, reserve=0))
+                with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+                    pending = self.tick(off_plan)
+                self.assertEqual({key: pending["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                                 dict(launched=0, collected=0, tabs_closed=0))
+                self.assertEqual(pending["active_workers"], 1)
+                self.assertEqual(self.states(pending), {(task, "next"): "waiting"})
+                self.assertIn("owns this checkout", pending["jobs"][0]["reason"])
+                self.assertEqual(PlanRex.sessions, sessions)
+                self.assertEqual(self.launches(), launches)
+                self.assertEqual({item: item.read_bytes() for item in saved}, saved)
+
+        retry = self.tick(self.controller(effective))
+        self.assertEqual(retry["result"], "complete")
+        self.assertEqual(retry["metrics"]["collected"], 1)
+        self.assertEqual(retry["metrics"]["tabs_closed"], 1)
+        self.assertEqual(retry["metrics"]["launched"], 0)
+        self.assertEqual(retry["active_workers"], 0)
+        self.assertEqual(self.launches(), launches)
+        after = factory.load_task(path)
+        self.assertEqual(after["assignments"]["verify"]["result"]["outcome"], "approved")
+        self.assertEqual(factory.task_view(after)["allowances"], factory.task_view(before)["allowances"])
+        self.assertEqual(saved[self.directory / "task.verify.codex.json"],
+                         (self.directory / "task.verify.codex.json").read_bytes())
+
+    def test_from_writer_interpreter_hint_requires_unambiguous_collected_command(self):
+        record = self.completed_writer()
+        path = self.directory / "task.json"
+        command = record["assignments"]["implement"]["request"]["command"]
+        alternate = "/fixture/alternate/python3.11"
+        plausible = "/fixture/saved Python; $unused"
+        nul_command = command.copy()
+        nul_command[nul_command.index("--codex") + 1] = "/fixture/codex\0invalid"
+        refused = "needs a collected, completed native writer"
+        calls = list(PlanRex.calls)
+        controller = self.controller(self.verification_plan(), from_writer="implement")
+        for label, saved_command, proven, message in (
+            ("relative", ["python3.11", *command[1:]], True, "Invalid assignment identity or request"),
+            ("other worker path", [*command[:3], "/fixture/codex_worker.py", *command[4:]], True, refused),
+            ("reordered flags", [command[0], "-s", "-E", *command[3:]], True, refused),
+            ("duplicated writer flag", [*command, "--write"], True, refused),
+            ("abbreviated flag", [token if token != "--model" else "--mod" for token in command], True, refused),
+            ("control character", ["/fixture/python\n3.11", *command[1:]], True, refused),
+            ("NUL in provider path", nul_command, True, refused),
+            ("unproven collection", command, False, refused),
+            ("plausible path", [plausible, *command[1:]], True, ascii(plausible)),
+            ("historical Codex prefix", [command[0], *command[3:]], True, ascii(command[0])),
+        ):
+            altered = copy.deepcopy(record)
+            source = altered["assignments"]["implement"]
+            source["request"]["command"], source["native_collected"] = saved_command, proven
+            factory.save(path, altered)
+            before = path.read_bytes()
+            with self.subTest(label=label), patch.object(sys, "executable", alternate):
+                with self.assertRaises(factory.FactoryError) as caught:
+                    self.tick(controller)
+                self.assertIn(message, str(caught.exception))
+                if message == refused:
+                    self.assertNotIn("retry the original plan", str(caught.exception))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(PlanRex.calls, calls)
+
+    def test_off_plan_legacy_worker_survives_while_same_interpreter_peers_tidy(self):
+        original = self.controller(self.plan([self.job()]))
+        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        protected = record["assignments"]["first"]
+        del protected["request"]["command"][1:3]  # Historical Codex used no -E/-s prefix.
+        factory.save(path, record)
+
+        self.admit("other")
+        peer = self.job("peer", task="other")
+        alternate_plan = self.controller(self.plan([peer]))
+        alternate = self.root / "alternate-python"
+        alternate.symlink_to(sys.executable)
+        with patch.object(sys, "executable", str(alternate)):
+            # The peers were already dispatched outside this plan's scheduler.
+            for task in ("task", "other"):
+                with factory.task_lock(self.directory, task) as peer_path:
+                    job = {**alternate_plan.plan["jobs"][0], "task": task}
+                    factory.launch(peer_path, task=task, assignment_id="peer", role=job["role"], goal=job["goal"],
+                                   cwd=job["cwd"], command=alternate_plan.command(peer_path, job),
+                                   purpose=job["purpose"], binary=alternate_plan.rex, server=alternate_plan.server)
+                self.finish(task, "peer")
+            launches = self.launches()
+            result = self.tick(alternate_plan)
+
+        self.assertEqual(self.states(result), {("other", "peer"): "approved"})
+        self.assertEqual({key: result["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                         dict(launched=0, collected=2, tabs_closed=2))
+        self.assertEqual(result["active_workers"], 1)
+        self.assertEqual(result["tidy_issues"], [])
+        self.assertEqual(factory.load_task(path)["assignments"]["first"], protected)
+        for task in ("task", "other"):
+            assignment = factory.load_task(self.directory / (task + ".json"))["assignments"]["peer"]
+            self.assertEqual(assignment["result"]["outcome"], "approved")
+            self.assertEqual(assignment["closed"]["state"], "exited")
+
+        retry = self.tick(self.controller(original.supplied_plan))
+        self.assertEqual(self.states(retry), {("task", "first"): "approved"})
+        self.assertEqual(retry["metrics"]["tabs_closed"], 1)
+        self.assertEqual(retry["active_workers"], 0)
+        self.assertEqual(self.launches(), launches)
+        self.assertEqual(PlanRex.sessions, [])
+
+    def test_interpreter_replay_compares_all_worker_prefixes_and_frozen_arguments(self):
+        original_python = sys.executable
+        plan = self.plan([self.job(harness, harness=harness) for harness in factory.NATIVE_HARNESSES]
+                         + [self.job("historical")], workers=5, reserve=0)
+        binaries = dict(claude=original_python, grok=original_python, antigravity=original_python)
+        self.assertEqual(self.tick(self.controller(plan, **binaries))["metrics"]["launched"], 5)
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        del record["assignments"]["historical"]["request"]["command"][1:3]
+        factory.save(path, record)
+        saved, launches = path.read_bytes(), self.launches()
+        changed = copy.deepcopy(plan)
+        changed["jobs"][1]["seconds"] += 1
+        replay, changed_replay = self.controller(plan, **binaries), self.controller(changed, **binaries)
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+            refused = self.tick(replay)
+            other_conflict = self.tick(changed_replay)["jobs"][1]
+        self.assertEqual(refused["metrics"]["launched"], 0)
+        self.assertEqual(other_conflict["state"], "conflict")
+        self.assertNotIn("Python interpreter mismatch", other_conflict["reason"])
+        for item in refused["jobs"]:
+            self.assertEqual(item["state"], "conflict")
+            self.assertIn(ascii(original_python), item["reason"])
+        retry = self.tick(self.controller(plan, **binaries))
+        self.assertEqual([item["state"] for item in retry["jobs"]], ["running"] * 5)
+        self.assertEqual(path.read_bytes(), saved)
+        self.assertEqual(self.launches(), launches)
+
     def test_from_writer_restart_after_selection_before_dispatch(self):
         before = self.completed_writer()
         controller = self.controller(self.verification_plan(), from_writer="implement")
@@ -871,6 +1129,153 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(again["result"], "complete")
         self.assertEqual(again["metrics"]["tabs_closed"], 1)
 
+    def test_closed_interpreter_mismatch_allows_idle_session_cleanup(self):
+        path = self.directory / "task.json"
+        earlier, newer = self.job("earlier"), self.job("newer")
+        first = self.controller(self.plan([earlier]))
+        alternate = self.root / "alternate-python"
+        alternate.symlink_to(sys.executable)
+        with patch.object(sys, "executable", str(alternate)):
+            self.assertEqual(self.tick(first)["metrics"]["launched"], 1)
+            self.finish("task", "earlier")
+            self.assertEqual(self.tick(first)["metrics"]["tabs_closed"], 1)
+        closed = factory.load_task(path)["assignments"]["earlier"]
+        self.assertIsNotNone(closed["closed"])
+
+        self.assertEqual(self.tick(self.controller(self.plan([newer])))["metrics"]["launched"], 1)
+        before = factory.load_task(path)
+        self.assertIsNotNone(before["session_id"])
+        self.finish("task", "newer")
+        result = self.tick(self.controller(self.plan([earlier, newer])))
+        self.assertEqual(self.states(result), {("task", "earlier"): "conflict", ("task", "newer"): "approved"})
+        self.assertEqual({key: result["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                         dict(launched=0, collected=1, tabs_closed=1))
+        self.assertEqual(result["tidy_issues"], [])
+        after = factory.load_task(path)
+        self.assertEqual(after["assignments"]["earlier"], closed)
+        self.assertEqual(after["assignments"]["newer"]["closed"]["state"], "exited")
+        self.assertEqual(factory.task_view(after)["allowances"], factory.task_view(before)["allowances"])
+        self.assertIsNone(after["session_id"])
+        self.assertEqual(PlanRex.sessions, [])
+
+    def test_collected_alternate_worker_can_be_tidied_by_another_plan(self):
+        path = self.directory / "task.json"
+        original = self.controller(self.plan([self.job()]))
+        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        with patch.object(factory, "tidy", side_effect=factory.FactoryError("Fixture tidy interruption")):
+            self.assertEqual(self.tick(original)["metrics"]["collected"], 1)
+        before = factory.load_task(path)
+        saved = before["assignments"]["first"]
+        self.assertEqual(saved["result"]["outcome"], "approved")
+        self.assertIsNone(saved.get("closed"))
+
+        with factory.task_lock(self.directory, "task") as locked:
+            factory.hold_task(locked, "Operator hold")
+        peer = self.controller(self.plan([self.job("next")]))
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+            result = self.tick(peer)
+        self.assertEqual(result["metrics"]["launched"], 0)
+        self.assertEqual(result["active_workers"], 0)
+        self.assertEqual(result["metrics"]["collected"], 0)
+        self.assertEqual(result["metrics"]["tabs_closed"], 1)
+        after = factory.load_task(path)
+        self.assertEqual(after["assignments"]["first"]["result"], saved["result"])
+        self.assertEqual(after["assignments"]["first"]["request"], saved["request"])
+        self.assertEqual(after["assignments"]["first"]["closed"]["state"], "exited")
+        self.assertIsNone(after["session_id"])
+
+    def test_closed_only_alternate_replay_retries_cleanup_on_pinned_host(self):
+        path = self.directory / "task.json"
+        plan = self.plan([self.job()], workers=1, reserve=0)
+        original = self.controller(plan)
+        alternate = self.root / "alternate-python"
+        alternate.symlink_to(sys.executable)
+        with patch.object(sys, "executable", str(alternate)):
+            self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+            self.finish("task", "first")
+            with patch.object(factory, "close_idle_session", side_effect=factory.FactoryError("Fixture cleanup interruption")):
+                interrupted = self.tick(original)
+        self.assertEqual(interrupted["tidy_issues"], [dict(task="task", reason="Fixture cleanup interruption")])
+        before = factory.load_task(path)
+        self.assertIsNotNone(before["session_id"])
+        self.assertEqual(before["assignments"]["first"]["closed"]["state"], "exited")
+        self.assertEqual(before["assignments"]["first"]["result"]["outcome"], "approved")
+
+        unrelated = dict(session_id="unrelated-session", label="other-line", windows=[])
+        PlanRex.sessions.append(unrelated)
+        original_sessions = copy.deepcopy(PlanRex.sessions)
+        before_bytes = path.read_bytes()
+        receipt = self.directory / "task.first.codex.json"
+        capture = Path(before["assignments"]["first"]["closed"]["capture"])
+        evidence = {file: file.read_bytes() for file in (receipt, capture)}
+        call_start = len(PlanRex.calls)
+        rex_error = "Connected Rex host differs from the recorded task host"
+        # The other host has its own sessions. Only the peer may launch there.
+        with patch.object(PlanRex, "host", "unexpected-host"), patch.object(PlanRex, "sessions", []):
+            refused = self.tick(self.controller(plan))
+            historical, = refused["jobs"]
+            self.assertEqual(historical["state"], "conflict")
+            self.assertIn("Python interpreter mismatch for 'task/first'", historical["reason"])
+            self.assertEqual(refused["tidy_issues"], [dict(task="task", reason=rex_error)])
+            self.assertEqual(refused["issues"], [])
+            self.assertEqual(refused["active_workers"], 0)
+            self.assertEqual({key: refused["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                             dict(launched=0, collected=0, tabs_closed=0))
+            self.assertEqual(PlanRex.calls[call_start:], [("whoami", "--json")])
+            self.assertEqual(PlanRex.sessions, [])
+
+            self.admit("peer")
+            peer_plan = self.plan([self.job(), self.job(task="peer")], workers=1, reserve=0)
+            peer_controller = self.controller(peer_plan)
+            admitted = self.tick(peer_controller)
+            self.assertEqual(admitted["metrics"]["launched"], 1)
+            self.assertEqual(self.states(admitted), {("task", "first"): "conflict", ("peer", "first"): "running"})
+            self.finish("peer", "first")
+            self.assertEqual(self.tick(peer_controller)["metrics"]["tabs_closed"], 1)
+            self.assertEqual(PlanRex.sessions, [])
+        self.assertEqual(PlanRex.sessions, original_sessions)
+        self.assertEqual(path.read_bytes(), before_bytes)
+
+        peer_path = self.directory / "peer.json"
+        peer_before = factory.load_task(peer_path)
+        retry = self.plan([self.job(), self.job("next", task="peer")], workers=1, reserve=0)
+        call_start = len(PlanRex.calls)
+        result = self.tick(self.controller(retry))
+        self.assertEqual(self.states(result), {("task", "first"): "conflict", ("peer", "next"): "blocked"})
+        self.assertEqual(result["jobs"][1]["reason"], rex_error)
+        self.assertEqual(result["active_workers"], 0)
+        self.assertEqual(result["metrics"]["launched"], 0)
+        self.assertEqual(result["metrics"]["collected"], 0)
+        self.assertEqual(result["tidy_issues"], [dict(task="peer", reason=rex_error)])
+        self.assertEqual([call for call in PlanRex.calls[call_start:] if call[0] == "kill"],
+                         [("kill", before["session_id"])])
+        self.assertEqual(PlanRex.sessions, [unrelated])
+        after = factory.load_task(path)
+        self.assertEqual(after, {**before, "session_id": None})
+        self.assertEqual({file: file.read_bytes() for file in evidence}, evidence)
+        self.assertEqual(factory.load_task(peer_path), peer_before)
+
+    def test_connection_error_counts_collected_worker_without_closed_evidence(self):
+        self.admit("peer")
+        original = self.controller(self.plan([self.job()]))
+        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        with patch.object(factory, "tidy", side_effect=factory.FactoryError("Fixture tidy interruption")):
+            self.assertEqual(self.tick(original)["metrics"]["collected"], 1)
+        saved = factory.load_task(self.directory / "task.json")["assignments"]["first"]
+        self.assertEqual(saved["result"]["outcome"], "approved")
+        self.assertIsNone(saved.get("closed"))
+
+        plan = self.plan([self.job(), self.job(task="peer")], workers=1, reserve=0)
+        call_start = len(PlanRex.calls)
+        with patch.object(PlanRex, "host", "unexpected-host"):
+            result = self.tick(self.controller(plan))
+        self.assertEqual(self.states(result), {("task", "first"): "unknown", ("peer", "first"): "waiting"})
+        self.assertEqual(result["jobs"][1]["reason"], "Worker limit is occupied, including unknown processes")
+        self.assertEqual(result["active_workers"], 1)
+        self.assertEqual(PlanRex.calls[call_start:], [("whoami", "--json")])
+
     def test_tidy_failure_is_reported_without_blocking_work(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
         self.tick(controller)
@@ -899,6 +1304,54 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.states(result), {("task", "first"): "abandoned", ("task", "second"): "blocked"})
         self.assertEqual(result["active_workers"], 0)
         self.assertEqual(result["result"], "needs_action")
+
+    def test_abandoned_launch_frees_its_slot_on_pinned_rex_host_mismatch(self):
+        self.admit("peer")
+        controller = self.controller(self.plan([self.job()], workers=1, reserve=0))
+        call = PlanRex.call
+
+        def reject(rex, *args, **kwargs):
+            if args[0] == "new":
+                raise factory.FactoryError("Error: unknown flag: --focus")
+            return call(rex, *args, **kwargs)
+
+        with patch.object(PlanRex, "call", reject):
+            rejected, = self.tick(controller)["jobs"]
+        self.assertIn("unknown flag: --focus", rejected["reason"])
+        reason = "Rex rejected an unknown flag"
+        with factory.task_lock(self.directory, "task") as path:
+            record = factory.load_task(path)
+            factory.abandon_launch(path, factory.connect(record), assignment_id="first", reason=reason)
+        before = path.read_bytes()
+        original_sessions = copy.deepcopy(PlanRex.sessions)
+        peer_path = self.directory / "peer.json"
+        self.assertIsNone(factory.load_task(peer_path)["rex"])
+
+        plan = self.plan([self.job(), self.job("second", after=["first"]), self.job(task="peer")], workers=1, reserve=0)
+        call_start = len(PlanRex.calls)
+        with patch.object(PlanRex, "host", "unexpected-host"), patch.object(PlanRex, "sessions", []):
+            result = self.tick(self.controller(plan))
+            self.assertEqual(self.states(result), {("task", "first"): "abandoned", ("task", "second"): "blocked",
+                                                   ("peer", "first"): "running"})
+            self.assertEqual(result["jobs"][0]["reason"], reason)
+            self.assertEqual(result["active_workers"], 1)
+            self.assertEqual(result["metrics"]["launched"], 1)
+            self.assertEqual(result["tidy_issues"], [dict(task="task", reason="Connected Rex host differs from the recorded task host")])
+            peer = factory.load_task(peer_path)
+            self.assertEqual(peer["rex"]["host_id"], "unexpected-host")
+            session, = PlanRex.sessions
+            self.assertEqual(session["session_id"], peer["session_id"])
+            window, = session["windows"]
+            self.assertEqual(window["label"], peer["assignments"]["first"]["window_label"])
+            # The first whoami is the rejected pinned connection. All remaining calls launch the peer.
+            pinned, peer_host, peer_list, peer_launch, peer_inspect = PlanRex.calls[call_start:]
+            self.assertEqual(pinned, ("whoami", "--json"))
+            self.assertEqual(peer_host, ("whoami", "--json"))
+            self.assertEqual(peer_list, ("ls", "--json"))
+            self.assertEqual(peer_launch[:4], ("new", session["label"], "--window", window["label"]))
+            self.assertEqual(peer_inspect, ("session", "inspect", session["session_id"], "--json"))
+        self.assertEqual(PlanRex.sessions, original_sessions)
+        self.assertEqual(path.read_bytes(), before)
 
     def claude_job(self, identity, **changes):
         return self.job(identity, **{"harness": "claude", "model": "claude-sonnet-5-5", "effort": "high", **changes})

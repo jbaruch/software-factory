@@ -2494,7 +2494,8 @@ def check_commit_message(message, *, write):
 
 
 def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None,
-                  decision_store=None, decision=None, question=None, release_evidence=None, delivery_evidence=None):
+                  decision_store=None, decision=None, question=None, release_evidence=None, delivery_evidence=None,
+                  compare_interpreter=None):
     """Generate one explicit worker invocation; no model/effort or permission fallback."""
     if not model.strip() or not effort.strip():
         raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
@@ -2517,7 +2518,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
             raise FactoryError("Cannot access --codex; supply an existing executable native Codex path") from None
     prefix = path.parent / (task + "." + assignment_id + ".codex")
     worker = [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
-    if existing is not None and existing["request"]["command"][:2] == [sys.executable, str(ROOT / "codex_worker.py")]:
+    if existing is not None and existing["request"]["command"][:2] == [compare_interpreter or sys.executable, worker[-1]]:
         worker = [sys.executable, str(ROOT / "codex_worker.py")]  # Reconnect the original command unchanged.
     command = worker + ["--job", task + "/" + assignment_id,
                "--codex", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds),
@@ -2839,7 +2840,7 @@ def collect_claude(path, assignment_id, rex, record, assignment):
 
 def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None,
                    write=False, commit_message=None, sandbox=None, decision_store=None, decision=None, question=None,
-                   release_evidence=None, delivery_evidence=None):
+                   release_evidence=None, delivery_evidence=None, compare_interpreter=None):
     """Freeze one explicit Claude effect, reviewer or writer, including its native session."""
     import native_claude
     if (not isinstance(model, str) or not model.strip() or effort not in native_claude.EFFORTS
@@ -2877,7 +2878,7 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
         native_session, gitdir = str(uuid.uuid4()), str(git_dir(cwd))
     else:
         saved = existing["request"]["command"]
-        if saved[:4] != worker:
+        if saved[:4] != [compare_interpreter or sys.executable, *worker[1:]]:
             raise FactoryError("Existing assignment uses another command; inspect its original effect without relaunching")
         try:
             native_session = saved[saved.index("--native-session") + 1]
@@ -2982,7 +2983,8 @@ def check_commit_tool(provider, tool):
 
 
 def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, seconds=600, turns=30, base=None,
-                 write=False, commit_message=None, sandbox=None, release_evidence=None, delivery_evidence=None):
+                 write=False, commit_message=None, sandbox=None, release_evidence=None, delivery_evidence=None,
+                 compare_interpreter=None):
     """Freeze one explicit Grok effect, reviewer or writer, including its native session."""
     if (not model.strip() or not effort.strip() or not Path(grok).is_absolute()
             or type(seconds) is not int or not 1 <= seconds <= MAX_NATIVE_SECONDS
@@ -3006,7 +3008,7 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         native_session, gitdir = str(uuid.uuid4()), str(git_dir(cwd))
     else:
         saved = existing["request"]["command"]
-        if saved[:4] != worker:
+        if saved[:4] != [compare_interpreter or sys.executable, *worker[1:]]:
             raise FactoryError("Existing assignment uses another command; inspect its original effect without relaunching")
         try:
             native_session = saved[saved.index("--native-session") + 1]
@@ -3126,7 +3128,8 @@ def collect_grok(path, assignment_id, rex, record, assignment):
 
 
 def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, role, seconds=600, base=None,
-                        write=False, commit_message=None, sandbox=None, release_evidence=None, delivery_evidence=None):
+                        write=False, commit_message=None, sandbox=None, release_evidence=None, delivery_evidence=None,
+                        compare_interpreter=None):
     """Freeze one explicit Antigravity effect, reviewer or writer; the CLI assigns its conversation ID."""
     import native_antigravity
     if (not isinstance(model, str) or not model.strip() or (effort is not None and effort not in native_antigravity.EFFORTS)
@@ -3155,7 +3158,7 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
             check_commit_tool("Antigravity", writer[-1])
     else:
         saved = existing["request"]["command"]
-        if saved[:4] != worker:
+        if saved[:4] != [compare_interpreter or sys.executable, *worker[1:]]:
             raise FactoryError("Existing assignment uses another command; inspect its original effect without relaunching")
         try:
             gitdir = saved[saved.index("--worktree-git-dir") + 1]
