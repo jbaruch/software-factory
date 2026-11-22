@@ -1051,6 +1051,35 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(again["result"], "complete")
         self.assertEqual(again["metrics"]["tabs_closed"], 1)
 
+    def test_closed_interpreter_mismatch_allows_idle_session_cleanup(self):
+        path = self.directory / "task.json"
+        earlier, newer = self.job("earlier"), self.job("newer")
+        first = self.controller(self.plan([earlier]))
+        alternate = self.root / "alternate-python"
+        alternate.symlink_to(sys.executable)
+        with patch.object(sys, "executable", str(alternate)):
+            self.assertEqual(self.tick(first)["metrics"]["launched"], 1)
+            self.finish("task", "earlier")
+            self.assertEqual(self.tick(first)["metrics"]["tabs_closed"], 1)
+        closed = factory.load_task(path)["assignments"]["earlier"]
+        self.assertIsNotNone(closed["closed"])
+
+        self.assertEqual(self.tick(self.controller(self.plan([newer])))["metrics"]["launched"], 1)
+        before = factory.load_task(path)
+        self.assertIsNotNone(before["session_id"])
+        self.finish("task", "newer")
+        result = self.tick(self.controller(self.plan([earlier, newer])))
+        self.assertEqual(self.states(result), {("task", "earlier"): "conflict", ("task", "newer"): "approved"})
+        self.assertEqual({key: result["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
+                         dict(launched=0, collected=1, tabs_closed=1))
+        self.assertEqual(result["tidy_issues"], [])
+        after = factory.load_task(path)
+        self.assertEqual(after["assignments"]["earlier"], closed)
+        self.assertEqual(after["assignments"]["newer"]["closed"]["state"], "exited")
+        self.assertEqual(factory.task_view(after)["allowances"], factory.task_view(before)["allowances"])
+        self.assertIsNone(after["session_id"])
+        self.assertEqual(PlanRex.sessions, [])
+
     def test_tidy_failure_is_reported_without_blocking_work(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
         self.tick(controller)

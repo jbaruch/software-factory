@@ -476,7 +476,7 @@ class Runner:
                     try:
                         # Finished tabs close after collection; their final status and output stay in the task.
                         self.metrics["tabs_closed"] += len(factory.tidy(
-                            path, rex, record, only=observable.keys(), close_session=not protected)["closed"])
+                            path, rex, record, only=observable.keys())["closed"])
                     except (factory.FactoryError, OSError) as exc:
                         # Tidying never blocks work; it is reported and retried on the next tick.
                         self.tidy_issues.append(dict(task=source.stem, reason=str(exc)))
