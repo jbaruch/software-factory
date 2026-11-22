@@ -178,6 +178,11 @@ def alternate_worker(command):
     return None
 
 
+def protected_worker(assignment):
+    return (assignment["state"] in {"launching", "launched"} and assignment.get("closed") is None
+            and assignment["result"] is None and alternate_worker(assignment["request"]["command"]) is not None)
+
+
 def interpreter_refusal(identity, interpreter):
     return (f"Python interpreter mismatch for {identity!r}. The saved worker command records {ascii(interpreter)}. "
             "Confirm the original installation, then retry the original plan with that exact interpreter and "
@@ -388,10 +393,11 @@ class Runner:
             for identity, assignment in record["assignments"].items():
                 if identity == self.from_writer or assignment["state"] == "abandoned":
                     continue
+                protected = protected_worker(assignment)
                 # Even a saved result is no substitute for observing its process.
-                if assignment["state"] == "launching":
+                if not protected and assignment["state"] == "launching":
                     factory.reconcile(rex, record, assignment)
-                if factory.status(rex, record, assignment)["state"] not in TERMINAL:
+                if protected or factory.status(rex, record, assignment)["state"] not in TERMINAL:
                     raise factory.FactoryError("Another assignment is active or unknown; inspect its process before candidate selection: " + identity)
         return path, record["inputs"], target
 
@@ -413,29 +419,24 @@ class Runner:
                         key = (source.stem, identity)
                         job = jobs.get(key)
                         request = assignment["request"]
+                        if protected_worker(assignment):
+                            protected.add(identity)
+                            active.append((source.stem, request))
+                            phases[key] = dict(state="unknown")
+                        if job is None:
+                            continue
+                        # Exact replay qualifies the recovery hint. Pane protection is line-wide.
                         saved = request["command"]
                         prefix = alternate_worker(saved)
-                        if prefix is None:
+                        planned = dict(candidate=job["candidate"], requirements=job["requirements"])
+                        if prefix is None or prefix[0] != job["harness"] or not replay_fields_match(request, job, planned):
                             continue
-                        open_worker = assignment["state"] in {"launching", "launched"} and assignment.get("closed") is None
-                        if job is None:
-                            # A different plan still tidies this line. Leave the pane for its original runner.
-                            if not open_worker:
-                                continue
-                        else:
-                            planned = dict(candidate=job["candidate"], requirements=job["requirements"])
-                            if prefix[0] != job["harness"] or not replay_fields_match(request, job, planned):
-                                continue
-                            try:
-                                expected = self.command(path, job, compare_interpreter=saved[0])
-                            except (factory.FactoryError, OSError):
-                                continue
-                            if expected != [sys.executable, *saved[1:]]:
-                                continue
+                        try:
+                            expected = self.command(path, job, compare_interpreter=saved[0])
+                        except (factory.FactoryError, OSError):
+                            continue
+                        if expected == [sys.executable, *saved[1:]]:
                             phases[key] = dict(state="conflict", reason=interpreter_refusal("/".join(key), saved[0]))
-                        protected.add(identity)
-                        if open_worker:
-                            active.append((source.stem, request))
                     observable = {identity: assignment for identity, assignment in record["assignments"].items()
                                   if identity not in protected}
                     if not observable:
@@ -444,7 +445,7 @@ class Runner:
                         rex = factory.connect(record)
                     except factory.FactoryError as exc:
                         for identity, assignment in observable.items():
-                            phases[(source.stem, identity)] = dict(state="unknown", reason=str(exc))
+                            phases.setdefault((source.stem, identity), dict(state="unknown", reason=str(exc)))
                             active.append((source.stem, assignment["request"]))
                         continue
                     for identity, assignment in observable.items():
@@ -474,9 +475,9 @@ class Runner:
                                 result = assignment["result"]
                                 if result is not None:
                                     phase["state"] = result["outcome"] if settled_current(record, assignment) else "stale"
-                            phases[key] = phase
+                            phases.setdefault(key, phase)
                         except factory.FactoryError as exc:
-                            phases[key] = dict(state="blocked" if terminal else "unknown", reason=str(exc))
+                            phases.setdefault(key, dict(state="blocked" if terminal else "unknown", reason=str(exc)))
                             if not terminal and not any(task == source.stem and request is assignment["request"] for task, request in active):
                                 active.append((source.stem, assignment["request"]))
                     try:

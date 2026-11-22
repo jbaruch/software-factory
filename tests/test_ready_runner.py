@@ -431,6 +431,21 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(self.launches(), launches)
         self.assertEqual({item: item.read_bytes() for item in self.directory.iterdir() if item.is_file()}, saved)
 
+        for changes in (dict(goal="Changed goal"), dict(model="changed-model")):
+            with self.subTest(changes=changes):
+                changed = {**effective, "jobs": [{**effective["jobs"][0], **changes}]}
+                changed_replay = self.controller(changed)
+                calls = len(PlanRex.calls)
+                with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+                    conflict = self.tick(changed_replay)
+                self.assertEqual(conflict["jobs"][0]["state"], "conflict")
+                self.assertIn("Plan differs from the saved immutable assignment", conflict["jobs"][0]["reason"])
+                self.assertEqual(conflict["active_workers"], 1)
+                self.assertFalse(any(call[0] in {"block", "kill"} for call in PlanRex.calls[calls:]))
+                self.assertEqual(PlanRex.sessions, sessions)
+                self.assertEqual(self.launches(), launches)
+                self.assertEqual({item: item.read_bytes() for item in saved}, saved)
+
         self.admit("other")
         for task, candidate in (("task", before["inputs"]["candidate"]), ("other", self.candidate)):
             with self.subTest(task=task):
@@ -1142,6 +1157,62 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(factory.task_view(after)["allowances"], factory.task_view(before)["allowances"])
         self.assertIsNone(after["session_id"])
         self.assertEqual(PlanRex.sessions, [])
+
+    def test_collected_alternate_worker_can_be_tidied_by_another_plan(self):
+        path = self.directory / "task.json"
+        original = self.controller(self.plan([self.job()]))
+        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        with patch.object(factory, "tidy", side_effect=factory.FactoryError("Fixture tidy interruption")):
+            self.assertEqual(self.tick(original)["metrics"]["collected"], 1)
+        before = factory.load_task(path)
+        saved = before["assignments"]["first"]
+        self.assertEqual(saved["result"]["outcome"], "approved")
+        self.assertIsNone(saved.get("closed"))
+
+        with factory.task_lock(self.directory, "task") as locked:
+            factory.hold_task(locked, "Operator hold")
+        peer = self.controller(self.plan([self.job("next")]))
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+            result = self.tick(peer)
+        self.assertEqual(result["metrics"]["launched"], 0)
+        self.assertEqual(result["active_workers"], 0)
+        self.assertEqual(result["metrics"]["collected"], 0)
+        self.assertEqual(result["metrics"]["tabs_closed"], 1)
+        after = factory.load_task(path)
+        self.assertEqual(after["assignments"]["first"]["result"], saved["result"])
+        self.assertEqual(after["assignments"]["first"]["request"], saved["request"])
+        self.assertEqual(after["assignments"]["first"]["closed"]["state"], "exited")
+        self.assertIsNone(after["session_id"])
+
+    def test_closed_only_alternate_replay_retries_idle_session_cleanup(self):
+        path = self.directory / "task.json"
+        plan = self.plan([self.job()])
+        original = self.controller(plan)
+        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        with patch.object(factory, "close_idle_session", side_effect=factory.FactoryError("Fixture cleanup interruption")):
+            interrupted = self.tick(original)
+        self.assertEqual(interrupted["tidy_issues"], [dict(task="task", reason="Fixture cleanup interruption")])
+        before = factory.load_task(path)
+        self.assertIsNotNone(before["session_id"])
+        self.assertEqual(before["assignments"]["first"]["closed"]["state"], "exited")
+        self.assertEqual(before["assignments"]["first"]["result"]["outcome"], "approved")
+
+        replay = self.controller(plan)
+        with patch.object(sys, "executable", "/fixture/alternate/python3.11"):
+            result = self.tick(replay)
+        self.assertEqual(result["jobs"][0]["state"], "conflict")
+        self.assertIn("Python interpreter mismatch for 'task/first'", result["jobs"][0]["reason"])
+        self.assertEqual(result["active_workers"], 0)
+        self.assertEqual(result["metrics"]["launched"], 0)
+        self.assertEqual(result["metrics"]["collected"], 0)
+        self.assertEqual(result["tidy_issues"], [])
+        self.assertEqual(PlanRex.sessions, [])
+        after = factory.load_task(path)
+        self.assertIsNone(after["session_id"])
+        self.assertEqual(after["assignments"], before["assignments"])
+        self.assertEqual(factory.task_view(after)["allowances"], factory.task_view(before)["allowances"])
 
     def test_tidy_failure_is_reported_without_blocking_work(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
