@@ -2031,6 +2031,14 @@ def check_pins(record, binary=None, server=None):
     return connection
 
 
+def local_rex(binary, server):
+    if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
+            or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")
+            or server == "unix://"):
+        raise FactoryError("Supply an absolute executable --rex PATH and an explicit local --server unix:// endpoint")
+    return Rex(str(Path(binary).resolve()), server)
+
+
 def connect(record, binary=None, server=None):
     connection = check_pins(record, binary, server)
     rex = Rex(connection["binary"], connection["server"])
@@ -2206,10 +2214,13 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
     if not Path(command[0]).is_absolute() or not os.access(command[0], os.X_OK):
         raise FactoryError("Command executable must be an absolute executable file")
     record = load_task(path) if os.path.lexists(path) else new_task(task)
+    existing = record["assignments"].get(assignment_id)
     if record["schema_version"] == 12:
         import writer_transfer
-        writer_transfer.verified_origin(record)
-    existing = record["assignments"].get(assignment_id)
+        origin = writer_transfer.verified_origin(record)
+        if (existing is None and not any(a["state"] == "launched" for a in record["assignments"].values())
+                and record["inputs"] != dict(candidate=origin["candidate"], requirements=origin["requirements"])):
+            raise FactoryError("Reselect the imported candidate and requirements with inputs before the first launch")
     if existing is None and "--write" in command and (
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
@@ -2358,10 +2369,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             # Every pane of a vanished session is lost; keep that, then open a new session.
             tidy(path, rex, record)
     else:
-        if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
-                or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
-            raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
-        rex = Rex(str(Path(binary).resolve()), server)
+        rex = local_rex(binary, server)
         who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
         # An imported task may only be launched on its destination host.
         writer_origin = record.get("writer_origin")
@@ -3747,9 +3755,7 @@ def main(argv=None):
             import writer_transfer
             state_dir = args.state_dir.resolve()
             # whoami requires Rex; call it here before acquiring the task lock.
-            rex_obj = Rex(str(Path(args.rex).resolve()), args.server) if args.rex and args.server else None
-            if rex_obj is None:
-                raise FactoryError("import-writer requires --rex PATH and --server unix:// to identify the destination host")
+            rex_obj = local_rex(args.rex, args.server)
             who = rex_object(rex_obj.call("whoami", "--json"), strings=("host_id",))
             whoami_host_id = who["host_id"]
             with task_lock(state_dir, args.task) as path:

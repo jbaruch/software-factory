@@ -5,8 +5,9 @@ two fake Rex hosts.  No real Rex/provider calls, no network, no actual transfers
 """
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -306,6 +307,26 @@ class TestImport(TransferBase):
         with self.assertRaisesRegex(factory.FactoryError, "destination host"):
             self._do_import(self.out_path, self.sha256, host="wrong-dest-host")
 
+    def test_import_cli_checks_local_endpoint_before_whoami(self):
+        before = self.dst_path.read_bytes()
+        archive = self.dst_path.with_suffix(".writer-origin.bundle")
+        args = ["import-writer", "--task", self.dst_path.stem, "--file", str(self.out_path),
+                "--from-host", self.source_host, "--sha256", self.sha256]
+        for binary, server in ((sys.executable, "tcp://example.invalid:1"), (sys.executable, "unix://"),
+                               ("relative-rex", "unix:///fixture.sock")):
+            with self.subTest(binary=binary, server=server), redirect_stderr(StringIO()) as errors:
+                code = factory.main(["--state-dir", str(self.dst_state), "--rex", binary, "--server", server, *args])
+                self.assertEqual(code, 1)
+                self.assertIn("--server unix://", errors.getvalue())
+                self.assertEqual(FakeDestRex.calls, [])
+                self.assertFalse(archive.exists())
+                self.assertEqual(self.dst_path.read_bytes(), before)
+        with redirect_stdout(StringIO()):
+            self.assertEqual(factory.main(["--state-dir", str(self.dst_state), "--rex", sys.executable,
+                                           "--server", "unix:///fixture.sock", *args]), 0)
+        self.assertEqual(FakeDestRex.calls, [("whoami", "--json")])
+        self.assertEqual(archive.read_bytes(), self.out_path.read_bytes())
+
     def test_import_already_launched_destination_refused(self):
         """Import refuses when the destination already has assignments."""
         factory.launch(self.dst_path, task="dst-task", assignment_id="prior", role="qa", goal="Verify",
@@ -322,6 +343,28 @@ class TestImport(TransferBase):
             self._do_import(self.out_path, self.sha256)
         self.assertEqual(self.dst_path.read_bytes(), before)
         self.assertEqual(archive.read_bytes(), self.out_path.read_bytes())
+        inode = archive.stat().st_ino
+        record = self._do_import(self.out_path, self.sha256)
+        self.assertEqual(archive.stat().st_ino, inode)
+        self.assertEqual(record["schema_version"], 12)
+        self.assertEqual(len(record["control_events"]), 1)
+
+    def test_interrupted_archive_sync_requires_durable_orphan_on_retry(self):
+        before = self.dst_path.read_bytes()
+        archive = self.dst_path.with_suffix(".writer-origin.bundle")
+        fsync = os.fsync
+
+        # Fail the initial file sync, then each durability step during orphan reuse.
+        for target in (archive, archive, archive.parent):
+            def interrupt(fd):
+                if os.path.samestat(os.fstat(fd), target.stat()):
+                    raise OSError("interrupted sync")
+                fsync(fd)
+
+            with patch.object(os, "fsync", side_effect=interrupt), self.assertRaisesRegex(OSError, "interrupted sync"):
+                self._do_import(self.out_path, self.sha256)
+            self.assertEqual(self.dst_path.read_bytes(), before)
+            self.assertEqual(archive.read_bytes(), self.out_path.read_bytes())
         inode = archive.stat().st_ino
         record = self._do_import(self.out_path, self.sha256)
         self.assertEqual(archive.stat().st_ino, inode)
@@ -480,6 +523,30 @@ class TestGatesAfterImport(TransferBase):
         with patch.object(factory, "Rex", FakeSourceRex), self.assertRaisesRegex(factory.FactoryError, "archive"):
             self.launch(key="later")
 
+    def test_first_launch_requires_imported_pair_and_later_correction_can_change_it(self):
+        for candidate, requirements in ((self.base, self.base), (self.candidate, self.candidate)):
+            with self.subTest(candidate=candidate, requirements=requirements), redirect_stdout(StringIO()):
+                self.assertEqual(factory.main(["--state-dir", str(self.dst_state), "inputs", "--task", self.path.stem,
+                                               "--candidate", candidate, "--requirements", requirements]), 0)
+                if candidate == self.base:
+                    self.resume()
+                before = self.dst_path.read_bytes()
+                with self.assertRaisesRegex(factory.FactoryError, "imported candidate and requirements"):
+                    self.launch()
+                self.assertEqual(FakeDestRex.calls, [])
+                self.assertEqual(self.dst_path.read_bytes(), before)
+        original = dict(candidate=self.candidate, requirements=self.base)
+        factory.set_inputs(self.dst_path, **original)
+        _, first = self.launch()
+        self.assertEqual(first["request"]["inputs"], original)
+
+        changed = dict(candidate=self.base, requirements=self.candidate)
+        _git(self.dst_repo, "checkout", "--detach", self.base).check_returncode()
+        factory.set_inputs(self.dst_path, **changed)
+        record, later = self.launch(key="later", purpose="correction")
+        self.assertEqual(later["request"]["inputs"], changed)
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"]["remaining"], 0)
+
     def test_origin_cannot_supply_a_result_or_dependency(self):
         self.resume()
         self.assertEqual(self._dst_record()["assignments"], {})
@@ -563,6 +630,10 @@ class TestGatesAfterImport(TransferBase):
                     if problem == "symlink":
                         archive.symlink_to(self.out_path)
                 factory.save(self.path, altered)
+                before = self.path.read_bytes()
+                with self.assertRaisesRegex(factory.FactoryError, "archive|permissions|writer_origin"):
+                    self._do_import(self.out_path, self.sha256)
+                self.assertEqual(self.path.read_bytes(), before)
                 with self.assertRaisesRegex(factory.FactoryError, "archive|permissions|writer_origin"):
                     integration.approvals(altered, "release", ["qa"])
                 with self.assertRaisesRegex(factory.FactoryError, "archive|permissions|writer_origin"):

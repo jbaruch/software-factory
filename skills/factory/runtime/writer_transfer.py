@@ -4,6 +4,7 @@ The exported bundle authenticates source bytes through an operator-supplied dige
 a host signature and cannot protect against a dishonest source host.  The destination proves
 Git objects, repository, requirements and all new approvals independently.
 """
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -25,8 +26,9 @@ def _require(condition, message):
         raise factory.FactoryError(message)
 
 
-def _read_private_bounded(path, max_bytes=BUNDLE_MAX_BYTES):
-    """Read a private regular file without following symlinks, bounded in size."""
+@contextmanager
+def _private_bundle(path):
+    """Keep the verified descriptor open alongside its bounded contents."""
     descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -38,10 +40,10 @@ def _read_private_bounded(path, max_bytes=BUNDLE_MAX_BYTES):
             raise factory.FactoryError("Bundle file is not owned by the current user")
         if info.st_nlink != 1:
             raise factory.FactoryError("Bundle file has multiple hard links; use a plain regular file")
-        content = stream.read(max_bytes + 1)
-        if len(content) > max_bytes:
+        content = stream.read(BUNDLE_MAX_BYTES + 1)
+        if len(content) > BUNDLE_MAX_BYTES:
             raise factory.FactoryError("Bundle file exceeds the size limit; inspect the original source")
-        return content
+        yield content, descriptor
 
 
 def _write_exclusive_private(path, content: bytes):
@@ -51,6 +53,10 @@ def _write_exclusive_private(path, content: bytes):
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
+    _sync_parent(path)
+
+
+def _sync_parent(path):
     directory = os.open(str(path.parent), os.O_RDONLY)
     try:
         os.fsync(directory)
@@ -270,9 +276,9 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path, whoami_hos
 
     if out_path.exists():
         # Idempotent replay: same bytes → same digest → return without error.
-        existing = _read_private_bounded(out_path)
-        if hashlib.sha256(existing).hexdigest() == bundle_sha256:
-            return source_host, bundle_sha256
+        with _private_bundle(out_path) as (existing, _):
+            if hashlib.sha256(existing).hexdigest() == bundle_sha256:
+                return source_host, bundle_sha256
         raise factory.FactoryError(
             "Output file already exists with different content; use a new output path or remove the conflicting file")
 
@@ -298,11 +304,11 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_d
     # Bounded private no-follow read; digest before parsing.
     file_path = Path(file_path)
     try:
-        raw = _read_private_bounded(file_path)
+        with _private_bundle(file_path) as (raw, _):
+            observed_sha256 = _blob_digest(raw)
     except (OSError, factory.FactoryError) as exc:
         raise factory.FactoryError("Cannot read bundle file: " + str(exc)) from None
 
-    observed_sha256 = hashlib.sha256(raw).hexdigest()
     _require(observed_sha256 == sha256,
              "Bundle SHA-256 does not match --sha256; use the exact value from the export output")
 
@@ -355,11 +361,11 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id, state_d
     # Load the destination task.
     record = factory.load_task(path)
 
-    # Identical replay: already imported with same sha256 → return without error.
     if "writer_origin" in record:
         existing_wo = record["writer_origin"]
         _require(existing_wo.get("sha256") == sha256,
                  "Destination already has a different writer_origin; conflicting replay is not allowed")
+        verified_origin(record)
         return record
 
     _require(record["admission"] is not None,
@@ -453,9 +459,12 @@ def _save_archive(archive_path, bundle_bytes: bytes, sha256: str):
     try:
         _write_exclusive_private(archive_path, bundle_bytes)
     except FileExistsError:
-        if _blob_digest(_read_private_bounded(archive_path)) != sha256:
-            raise factory.FactoryError(
-                f"Conflicting archive at {archive_path}; inspect the orphan before retrying") from None
+        with _private_bundle(archive_path) as (content, descriptor):
+            if _blob_digest(content) != sha256:
+                raise factory.FactoryError(
+                    f"Conflicting archive at {archive_path}; inspect the orphan before retrying") from None
+            os.fsync(descriptor)
+        _sync_parent(archive_path)
 
 
 def _origin_fields(bundle, archive_path, sha256) -> dict:
@@ -504,11 +513,11 @@ def verified_origin(record) -> dict:
     if any(Path(item["brief"]).parent != archive.parent for item in record["assignments"].values()):
         raise factory.FactoryError("Writer origin archive is outside the task directory; restore the imported record")
     try:
-        raw = _read_private_bounded(archive)
+        with _private_bundle(archive) as (raw, _):
+            if _blob_digest(raw) != origin["sha256"]:
+                raise factory.FactoryError("Writer origin archive has been altered; restore the original bundle")
     except OSError as exc:
         raise factory.FactoryError(f"Cannot read writer origin archive; restore the original bundle: {exc}") from None
-    if _blob_digest(raw) != origin["sha256"]:
-        raise factory.FactoryError("Writer origin archive has been altered; restore the original bundle")
     try:
         bundle = factory.decode_json(raw)
         expected = _origin_fields(bundle, archive, origin["sha256"])
