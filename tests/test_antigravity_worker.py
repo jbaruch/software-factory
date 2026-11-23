@@ -158,6 +158,15 @@ class AntigravityWorker(unittest.TestCase):
         self.assertEqual(antigravity_worker.read_events(self.args.events),
                          [json.dumps(e) + "\n" for e in echo_cwd(stream(self.repo), dict(cwd=str(checkout)))])
 
+    def test_export_checks_original_brief_bytes(self):
+        from test_writer_transfer import check_provider_export_brief
+        factory.set_inputs(self.path, candidate=self.candidate, requirements=self.candidate)
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.collect("implement")
+        check_provider_export_brief(self, args, b"substituted fixture payload")
+
     def test_writer_edits_are_committed_by_the_factory_and_collected(self):
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
         receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)

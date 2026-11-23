@@ -331,8 +331,13 @@ def load_task(path) -> dict:
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
+    if version == 12:
+        import writer_transfer
+        writer_transfer.validate_origin(record.get("writer_origin"), path)
+    if version < 12 and "writer_origin" in record:
+        raise FactoryError("Task has writer_origin at schema below 12; restore the original task record")
     if (version < 6 or version == 7) and "provisioning" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 11 and "acceptance" in record:
@@ -532,6 +537,7 @@ def load_task(path) -> dict:
             save(path, record)
         except OSError:
             raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
+    # Schema 12 records have writer_origin and are written by import-writer; they are not migrated up from 11.
     return record
 
 
@@ -601,7 +607,7 @@ def allowance_limits(record):
                 or type(event["at"]) not in (int, float) or not 0 <= event["at"] <= 253402300799
                 or "judge" in event and (not isinstance(event["judge"], str) or event["judge"] in judges
                                          or event["purpose"] != "correction" or event["additional"] != 1
-                                         or len(judges) >= JUDGE_ROUNDS)):
+                                         or len(judges) + (record.get("writer_origin") or {}).get("judge_rounds", 0) >= JUDGE_ROUNDS)):
             raise FactoryError("Invalid allowance history; restore its original ordered adjustments before continuing")
         seen.add(event["id"])
         if "judge" in event:
@@ -937,10 +943,12 @@ def task_view(record):
     limits = allowance_limits(record)
     if limits is not None:
         allowances = {}
+        origin_used = record.get("writer_origin", {}).get("used", {})
         for purpose, limit in limits.items():
-            used = sum(item["request"].get("purpose") == purpose
-                       for item in record["assignments"].values())
-            allowances[purpose] = dict(limit=limit, used=used, remaining=limit - used)
+            local_used = sum(item["request"].get("purpose") == purpose
+                             for item in record["assignments"].values())
+            total_used = local_used + origin_used.get(purpose, 0)
+            allowances[purpose] = dict(limit=limit, used=total_used, remaining=limit - total_used)
     assignments = {key: {**item, "result_current": result_current(record, item["result"])}
                    for key, item in record["assignments"].items()}
     item = record["provisioning"]
@@ -1552,6 +1560,9 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
             or judge is not None and (not isinstance(judge, str) or not judge)):
         raise FactoryError("Supply a correction/investigation purpose, positive --additional, nonnegative --expected-limit, request ID and approval reason")
     record = load_task(path)
+    if record["schema_version"] == 12:
+        import writer_transfer
+        writer_transfer.verified_origin(record)
     limits = allowance_limits(record)
     if limits is None:
         raise FactoryError("Admit the task before adjusting its allowance")
@@ -1575,7 +1586,8 @@ def extend_allowance(path, *, purpose, additional, expected_limit, request_id, r
         granted = [event["judge"] for event in record["allowance_events"] if "judge" in event]
         if judge in granted:
             raise FactoryError("That ruling already granted its correction round; a further round needs a new ruling")
-        if len(granted) >= JUDGE_ROUNDS:
+        origin_judge_rounds = (record.get("writer_origin") or {}).get("judge_rounds", 0)
+        if len(granted) + origin_judge_rounds >= JUDGE_ROUNDS:
             raise FactoryError(f"Judge rulings already added {JUDGE_ROUNDS} correction rounds to this task; "
                                "another needs the operator's approval")
     occurred = clock()
@@ -2019,6 +2031,14 @@ def check_pins(record, binary=None, server=None):
     return connection
 
 
+def local_rex(binary, server):
+    if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
+            or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")
+            or server == "unix://"):
+        raise FactoryError("Supply an absolute executable --rex PATH and an explicit local --server unix:// endpoint")
+    return Rex(str(Path(binary).resolve()), server)
+
+
 def connect(record, binary=None, server=None):
     connection = check_pins(record, binary, server)
     rex = Rex(connection["binary"], connection["server"])
@@ -2195,6 +2215,12 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Command executable must be an absolute executable file")
     record = load_task(path) if os.path.lexists(path) else new_task(task)
     existing = record["assignments"].get(assignment_id)
+    if record["schema_version"] == 12:
+        import writer_transfer
+        origin = writer_transfer.verified_origin(record)
+        if (existing is None and not any(a["state"] == "launched" for a in record["assignments"].values())
+                and record["inputs"] != dict(candidate=origin["candidate"], requirements=origin["requirements"])):
+            raise FactoryError("Reselect the imported candidate and requirements with inputs before the first launch")
     if existing is None and "--write" in command and (
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
@@ -2343,11 +2369,13 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             # Every pane of a vanished session is lost; keep that, then open a new session.
             tidy(path, rex, record)
     else:
-        if (not binary or not Path(binary).is_absolute() or not Path(binary).is_file()
-                or not os.access(binary, os.X_OK) or not server or not server.startswith("unix://")):
-            raise FactoryError("First launch requires --rex PATH and an explicit local --server unix:// endpoint")
-        rex = Rex(str(Path(binary).resolve()), server)
+        rex = local_rex(binary, server)
         who = rex_object(rex.call("whoami", "--json"), strings=("host_id", "instance_id"))
+        # An imported task may only be launched on its destination host.
+        writer_origin = record.get("writer_origin")
+        if writer_origin is not None and who["host_id"] != writer_origin["destination_host"]:
+            raise FactoryError("First launch on an imported task must use the imported destination host; "
+                               "this Rex host is not the bundle's destination host")
         record["rex"] = dict(binary=rex.binary, server=server, host_id=who["host_id"])
         rex.instance_id = who["instance_id"]
     if not record["session_id"]:
@@ -2542,6 +2570,11 @@ def check_commit_message(message, *, write):
                            + length)
 
 
+def native_output_paths(path, task, assignment_id, harness):
+    prefix = f"{task}.{assignment_id}.{harness}"
+    return path.parent / (prefix + ".jsonl"), path.parent / (prefix + ".json")
+
+
 def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write=False, seconds=600, commit_message=None, role=None,
                   decision_store=None, decision=None, question=None, release_evidence=None, delivery_evidence=None,
                   compare_interpreter=None):
@@ -2565,7 +2598,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
                 raise FactoryError("Supply a regular executable native Codex file before creating an assignment")
         except OSError:
             raise FactoryError("Cannot access --codex; supply an existing executable native Codex path") from None
-    prefix = path.parent / (task + "." + assignment_id + ".codex")
+    events, receipt = native_output_paths(path, task, assignment_id, "codex")
     worker = [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
     if existing is not None and existing["request"]["command"][:2] == [compare_interpreter or sys.executable, worker[-1]]:
         worker = [sys.executable, str(ROOT / "codex_worker.py")]  # Reconnect the original command unchanged.
@@ -2573,8 +2606,8 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
                "--codex", str(binary), "--model", model, "--effort", effort, "--seconds", str(seconds),
                "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}",
                "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
-               "--requirements", "{requirements}", "--events", str(prefix) + ".jsonl",
-               "--receipt", str(prefix) + ".json"]
+               "--requirements", "{requirements}", "--events", str(events),
+               "--receipt", str(receipt)]
     if existing is None or "--repo-identity" in existing["request"]["command"]:
         command.extend(["--repo-identity", "{repository_identity}"])
     if existing is None:
@@ -2615,13 +2648,13 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
-def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False, delivery=False):
+def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False, delivery=False, captured=None):
     """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import parse_events, parser, read_events
     from factory_commit import check_commit_receipt
 
     args = evidence_worker_args("codex", parser(), assignment_id, record, assignment,
-                                replay=delivery and collected)
+                                replay=delivery and collected, captured=captured)
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
     if not failed_identity and (observe is None or collected) and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
@@ -2631,7 +2664,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     if observe is not None and observe()["state"] not in ({"failed", "exited", "lost"} if failed_identity else {"exited", "lost"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
-        receipt = decode_json(read_record(args.receipt))
+        receipt = decode_json(read_record(args.receipt) if captured is None else captured["receipt"])
     except FileNotFoundError:
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
     except (OSError, ValueError, UnicodeDecodeError):
@@ -2668,7 +2701,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     if failed_identity:
         # Identity-only recovery of a failed contributor. This is never a report,
         # success receipt, dependency or approval, even if partial events contain one.
-        events = read_events(args.events)
+        events = read_events(args.events, None if captured is None else captured["events"])
         threads = [event.get("thread_id") for event in events
                    if isinstance(event, dict) and event.get("type") == "thread.started"]
         if (not args.write or not events or not isinstance(events[0], dict)
@@ -2677,7 +2710,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
                 or receipt.get("thread_id") not in (None, threads[0])):
             raise FactoryError("Unknown or ambiguous original failed contributor context")
         try:
-            instructions = Path(assignment["brief"]).read_text()
+            instructions = Path(assignment["brief"]).read_text() if captured is None else captured["brief"]
         except (OSError, UnicodeError):
             raise FactoryError("Restore the original failed contributor brief") from None
         if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
@@ -2688,7 +2721,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     if args.decision is not None or args.question is not None:
         try:
             args.brief = Path(assignment["brief"])
-            instructions = args.brief.read_text()
+            instructions = args.brief.read_text() if captured is None else captured["brief"]
         except (OSError, UnicodeError):
             raise FactoryError("Restore the original native brief before collecting its bounded answer") from None
         if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
@@ -2701,7 +2734,8 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
                 args.model, args.effort, coordination.get("judge_model"), receipt["created_at"])
     if (receipt["schema_version"] == 6) != (coordination is not None):
         raise FactoryError("Native receipt format differs from its bounded coordination assignment")
-    native = parse_events(read_events(args.events), coordination)
+    events = read_events(args.events, None if captured is None else captured["events"])
+    native = parse_events(events, coordination)
     if any(receipt.get(key) != native[key] for key in ("thread_id", "report", "usage")):
         raise FactoryError("Native receipt differs from its original events; reconcile before recording results")
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
@@ -2724,7 +2758,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
             raise FactoryError("Collected result differs from the complete original native report")
     if observe is not None or collected:
         try:
-            instructions = Path(assignment["brief"]).read_text()
+            instructions = Path(assignment["brief"]).read_text() if captured is None else captured["brief"]
         except (OSError, UnicodeError):
             raise FactoryError("Missing original native brief") from None
         if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
@@ -2753,13 +2787,13 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     return record
 
 
-def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False):
+def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False, captured=None):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import claude_worker
     import native_claude
     import review_evidence
     args = evidence_worker_args("claude", claude_worker.parser(), assignment_id, record, assignment,
-                                replay=delivery and collected)
+                                replay=delivery and collected, captured=captured)
     request = assignment["request"]
     if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
         raise FactoryError("Claude evidence needs strict original collection, never manual result registration")
@@ -2770,8 +2804,8 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
     if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Claude worker has not exited successfully; inspect its original Rex pane")
     try:
-        receipt = decode_json(read_record(args.receipt, private=True))
-        instructions = read_record(Path(assignment["brief"]), private=True)
+        receipt = decode_json(read_record(args.receipt, private=True) if captured is None else captured["receipt"])
+        instructions = read_record(Path(assignment["brief"]), private=True) if captured is None else captured["brief"]
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Restore original private Claude receipt and brief before collection") from None
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
@@ -2826,7 +2860,8 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         elif not args.write:
             review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
         checkout = receipt["schema_version"] == 4
-        native = native_claude.parse_execution(claude_worker.read_events(args.events),
+        events = claude_worker.read_events(args.events, None if captured is None else captured["events"])
+        native = native_claude.parse_execution(events,
             session_id=args.native_session, cwd=receipt["checkout"] if checkout else request["cwd"], model=args.model,
             max_turns=args.turns, writer=args.write, coordination=coordination, checkout=checkout)
     except (ValueError, native_claude.ClaudeProbeError) as exc:
@@ -2918,13 +2953,13 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
             raise FactoryError("Saved Claude binding is damaged; restore the original command without relaunching") from None
     if writer and existing is None:
         check_commit_tool("Claude", writer[-1])
-    prefix = path.parent / (task + "." + assignment_id + ".claude")
+    events, receipt = native_output_paths(path, task, assignment_id, "claude")
     return worker + ([] if base is None else ["--base", base]) + writer + coordination + judgment + ["--job", task + "/" + assignment_id, "--claude", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
         "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
-        "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
+        "--worktree-git-dir", gitdir, "--events", str(events), "--receipt", str(receipt)]
 
 
 def evidence_arguments(release=None, delivery=None):
@@ -3048,22 +3083,22 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
             raise FactoryError("Saved Grok binding is damaged; restore the original command without relaunching") from None
     if writer and existing is None:
         check_commit_tool("Grok", writer[-1])
-    prefix = path.parent / (task + "." + assignment_id + ".grok")
+    events, receipt = native_output_paths(path, task, assignment_id, "grok")
     return worker + ([] if base is None else ["--base", base]) + writer + judgment + ["--job", task + "/" + assignment_id, "--grok", str(binary), "--model", model,
         "--effort", effort, "--seconds", str(seconds), "--turns", str(turns), "--role", role,
         "--native-session", native_session, "--repo", "{repository}", "--cwd", "{cwd}",
         "--brief", "{brief}", "--brief-sha256", "{brief_sha256}", "--candidate", "{candidate}",
         "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
-        "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
+        "--worktree-git-dir", gitdir, "--events", str(events), "--receipt", str(receipt)]
 
 
-def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False):
+def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False, captured=None):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import grok_worker
     import native_grok
 
     args = evidence_worker_args("grok", grok_worker.parser(), assignment_id, record, assignment,
-                                replay=delivery and collected)
+                                replay=delivery and collected, captured=captured)
     from review_evidence import valid_base
     if args.role == "code-review" and args.base is None:
         raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
@@ -3077,7 +3112,7 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
     if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
     try:
-        receipt = decode_json(read_record(args.receipt))
+        receipt = decode_json(read_record(args.receipt) if captured is None else captured["receipt"])
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Cannot read the original Grok receipt; inspect or restore it without relaunching") from None
     request = assignment["request"]
@@ -3116,7 +3151,8 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
         raise FactoryError("Grok receipt differs from its frozen completed assignment; inspect the original artifacts")
     try:
         native_grok.validate_discovery(receipt["discovery"], args.grok, request["cwd"])
-        native = native_grok.parse_execution(grok_worker.read_events(args.events), session_id=args.native_session,
+        events = grok_worker.read_events(args.events, None if captured is None else captured["events"])
+        native = native_grok.parse_execution(events, session_id=args.native_session,
                                             cwd=receipt.get("checkout", request["cwd"]), max_turns=args.turns)
     except native_grok.GrokProbeError as exc:
         raise FactoryError(str(exc)) from None
@@ -3190,23 +3226,23 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
                 raise ValueError("Invalid frozen binding")
         except (ValueError, IndexError):
             raise FactoryError("Saved Antigravity binding is damaged; restore the original command without relaunching") from None
-    prefix = path.parent / (task + "." + assignment_id + ".antigravity")
+    events, receipt = native_output_paths(path, task, assignment_id, "antigravity")
     return worker + ([] if base is None else ["--base", base]) + writer + judgment + ["--job", task + "/" + assignment_id,
         "--agy", str(binary), "--model", model, *(() if effort is None else ("--effort", effort)),
         "--seconds", str(seconds), "--role", role,
         "--repo", "{repository}", "--cwd", "{cwd}", "--brief", "{brief}", "--brief-sha256", "{brief_sha256}",
         "--candidate", "{candidate}", "--requirements", "{requirements}", "--repo-identity", "{repository_identity}",
-        "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
+        "--worktree-git-dir", gitdir, "--events", str(events), "--receipt", str(receipt)]
 
 
-def antigravity_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False):
+def antigravity_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False, captured=None):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import antigravity_worker
     import native_antigravity
     from codex_worker import outcome_schema
     from review_evidence import valid_base
     args = evidence_worker_args("antigravity", antigravity_worker.parser(), assignment_id, record, assignment,
-                                replay=delivery and collected)
+                                replay=delivery and collected, captured=captured)
     request = assignment["request"]
     valid_base(args.base, args.role)
     if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
@@ -3218,7 +3254,7 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
     if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Antigravity worker has not exited successfully; inspect its original status and capture")
     try:
-        receipt = decode_json(read_record(args.receipt, private=True))
+        receipt = decode_json(read_record(args.receipt, private=True) if captured is None else captured["receipt"])
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Cannot read the original Antigravity receipt; inspect or restore it without relaunching") from None
     keys = ("report", "conversation_id", "usage", "duration_seconds", "turns")
@@ -3253,7 +3289,8 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
         raise FactoryError("Antigravity receipt differs from its frozen completed assignment; inspect the original artifacts")
     try:
         native_antigravity.validate_usage(receipt.get("discovery"), args.agy)
-        native = native_antigravity.parse_execution(antigravity_worker.read_events(args.events),
+        events = antigravity_worker.read_events(args.events, None if captured is None else captured["events"])
+        native = native_antigravity.parse_execution(events,
             expected_model=args.model, expected_cwd=receipt.get("checkout", request["cwd"]), expected_schema=outcome_schema())
     except (native_antigravity.UsageError, native_antigravity.ExecutionError) as exc:
         raise FactoryError(str(exc)) from None
@@ -3323,7 +3360,7 @@ def parse_saved_args(parser, tail):
     return parser.parse_args(tail)
 
 
-def evidence_worker_args(harness, parser, assignment_id, record, assignment, *, replay):
+def evidence_worker_args(harness, parser, assignment_id, record, assignment, *, replay, captured=None):
     request = assignment["request"]
     command = request["command"]
     historical = native_harness(command) != harness
@@ -3367,7 +3404,7 @@ def evidence_worker_args(harness, parser, assignment_id, record, assignment, *, 
         if coordination and (len(coordination) != 3 or not args.decision_store.is_absolute()):
             raise FactoryError("Restore the original native coordination arguments before delivery")
         try:
-            instructions = read_record(brief, private=True)
+            instructions = read_record(brief, private=True) if captured is None else captured["brief"]
         except (OSError, UnicodeError):
             raise FactoryError("Restore the original frozen native assignment brief before delivery") from None
         if hashlib.sha256(instructions.encode()).hexdigest() != request["instructions_sha256"]:
@@ -3561,6 +3598,25 @@ def pane_line(harness, event):
     return "\n".join(pane_style(line) for line in "\n".join(lines).split("\n") if line) or None
 
 
+def settled_writer_target(record, source, args, receipt, native):
+    """Bind the selected pair and stored writer result to the verified native commit."""
+    original = source["request"]["inputs"]
+    if not args.write or args.commit_message is None or receipt.get("commit") is None:
+        raise FactoryError("--from-writer needs an explicit validated factory commit")
+    if receipt["commit"]["state"] == "unchanged":
+        # An earlier runtime collected such a writer as completed; its candidate is the one already verified (#166).
+        raise FactoryError("--from-writer: the writer committed nothing, so its candidate is the one already "
+                           "verified; plan a new writer instead of verifying it again")
+    expected = dict(inputs=original, candidate=receipt["candidate"], outcome=native["report"]["outcome"],
+        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
+    if source["result"] != expected:
+        raise FactoryError("Collected writer result differs from its original native evidence")
+    target = dict(candidate=receipt["candidate"], requirements=original["requirements"])
+    if record["inputs"] not in (original, target):
+        raise FactoryError("Selected task inputs changed; refuse stale or third-party candidate/requirements")
+    return target
+
+
 def evidence_reader(harness):
     """Each harness's strict original-evidence reader, resolved at call time."""
     return dict(codex=codex_evidence, claude=claude_evidence, grok=grok_evidence, antigravity=antigravity_evidence)[harness]
@@ -3718,6 +3774,17 @@ def main(argv=None):
     abandon.add_argument("--reason", required=True, help="Why the launch is known not to have happened")
     cleanup = sub.add_parser("tidy", help="Close finished assignment tabs, retaining their final status and output")
     cleanup.add_argument("--task", help="Only this task; default is every task in the state directory")
+    export_cmd = sub.add_parser("export-writer", help="Export a settled writer as source history for one-hop transfer")
+    export_cmd.add_argument("--task", required=True)
+    export_cmd.add_argument("--id", required=True, help="The selected writer assignment ID")
+    export_cmd.add_argument("--to-host", required=True, help="Destination Rex host_id")
+    export_cmd.add_argument("--to-task", required=True, help="Destination task ID")
+    export_cmd.add_argument("--out", required=True, help="Output bundle path (outside the state directory)")
+    import_cmd = sub.add_parser("import-writer", help="Import a writer bundle on the destination host")
+    import_cmd.add_argument("--task", required=True)
+    import_cmd.add_argument("--file", required=True, help="Path to the bundle file")
+    import_cmd.add_argument("--from-host", required=True, help="Source host_id from the export output")
+    import_cmd.add_argument("--sha256", required=True, help="Bundle SHA-256 from the export output")
     args = parser.parse_args(argv)
     try:
         if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
@@ -3739,6 +3806,29 @@ def main(argv=None):
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
             print(json.dumps(report, indent=2))
             return 1 if failed else 0
+        if args.action == "export-writer":
+            import writer_transfer
+            state_dir = args.state_dir.resolve()
+            with task_lock(state_dir, args.task) as path:
+                # whoami is not called; source host is read from the pinned record.
+                source_host, sha256 = writer_transfer.export_writer(
+                    path, assignment_id=args.id, to_host=args.to_host, to_task=args.to_task,
+                    out_path=args.out)
+            print(json.dumps(dict(source_host=source_host, sha256=sha256, out=args.out), indent=2))
+            return 0
+        if args.action == "import-writer":
+            import writer_transfer
+            state_dir = args.state_dir.resolve()
+            # whoami requires Rex; call it here before acquiring the task lock.
+            rex_obj = local_rex(args.rex, args.server)
+            who = rex_object(rex_obj.call("whoami", "--json"), strings=("host_id",))
+            whoami_host_id = who["host_id"]
+            with task_lock(state_dir, args.task) as path:
+                record = writer_transfer.import_writer(
+                    path, file_path=args.file, from_host=args.from_host, sha256=args.sha256,
+                    whoami_host_id=whoami_host_id)
+            print(json.dumps(task_view(record), indent=2))
+            return 0
         if args.action == "delivered":
             import integration
             import release_evidence

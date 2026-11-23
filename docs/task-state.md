@@ -164,7 +164,17 @@ revision `inputs` selected, the acceptance issues' text captured the first time.
 Every agent's brief renders the entry for the current `inputs.requirements`; selecting
 a revision again, even after others, reuses its first capture. Migrating version 10 adds
 none, so a migrated task whose acceptance names issues refuses new launches until
-`inputs` selects the revision again and captures it. A task still holding a session from before keeps its label, the `factory-<line>`
+`inputs` selects the revision again and captures it.
+
+Only `import-writer` writes schema 12. Its required `writer_origin` object has flat
+fields `schema_version` (1, copied from the bundle), `archive` (absolute path), `sha256`, `source_host`, `source_task`,
+`source_assignment`, `destination_host`, `candidate`, `requirements`, `contributors`
+(sorted source assignment IDs and their contexts), `used` (correction and investigation
+counts), and `judge_rounds`. Launch and approval check these values against the private
+archive at the operator-pinned digest. Ordinary tasks stay at schema 11. Loading a
+task with an invalid origin or an origin at an earlier schema fails.
+
+A task still holding a session from before keeps its label, the `factory-<line>`
 session lines first used or its own `factory-<task>-<8 hex>`, until that session
 closes; a task holding none joins its line's.
 

@@ -21,11 +21,11 @@ import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, cancelled, native_environment, outcome_schema, stop_child
 
 
-def read_events(path):
+def read_events(path, content=None):
     """The original native lines, exactly as the decoder reads them."""
     try:
         lines = []
-        for line in factory.read_record(path).splitlines():
+        for line in (factory.read_record(path) if content is None else content).splitlines():
             record = factory.decode_json(line)
             if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
                     or record["schema_version"] != 1 or record.get("kind") != "antigravity-event-line"

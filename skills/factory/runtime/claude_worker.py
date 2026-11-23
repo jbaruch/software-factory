@@ -24,10 +24,14 @@ from codex_worker import NATIVE_LINE_LIMIT, cancelled, stop_child
 RETAINED_STREAM_LIMIT = 16 * 1024 * 1024  # Serialized envelope bytes, including newlines.
 
 
-def read_events(path):
+def read_events(path, content=None):
     try:
         events = []
-        with StringIO(factory.read_record(path, private=True, max_bytes=RETAINED_STREAM_LIMIT)) as stream:
+        if content is None:
+            content = factory.read_record(path, private=True, max_bytes=RETAINED_STREAM_LIMIT)
+        elif len(content.encode("utf-8")) > RETAINED_STREAM_LIMIT:
+            raise ValueError("Oversized retained stream")
+        with StringIO(content) as stream:
             while True:
                 line = stream.readline(NATIVE_LINE_LIMIT * 6 + 1)
                 if not line:

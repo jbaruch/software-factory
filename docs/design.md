@@ -102,6 +102,8 @@ acceptance gates.
 
 The scheduler needs one durable effect identity and before-effect intent for each launch or external mutation. Reconnect/reconcile after restart and reuse completed effects. Do not claim exactly-once execution across unknown provider/network outcomes. See the [implementation inventory](implementation.md) for recovery coverage.
 
+A settled writer may be transferred as source history from one authorized Rex host to another using `export-writer` and `import-writer`. The exported bundle's SHA-256 digest authenticates the operator-pinned bytes; it is not a host signature and cannot protect against a dishonest source host. The source host does strict native validation under its original bindings before export. The destination proves Git objects, repository, requirements and all new approvals independently; it never claims native collection. Recovery cases: (1) source reachable — hold, export, import into an unlaunched destination; (2) destination already launched — never retrofit or edit its record, continue on its own evidence with no imported-provenance claim; (3) source or evidence lost — fresh admission, exact fetched SHA, ordinary inputs and fresh verification, explicitly without writer provenance or machine-checked independence from the lost writer; (4) unsupported — multi-hop, non-GitHub origin, uncommitted or failed selected writer — these refuse with the recovery instruction.
+
 Explicit writer-worktree provisioning belongs to the existing task owner and its
 locks. Save the selected-input request before Git mutation, retain a unique
 worktree ownership marker, and reuse completed effects. Conflicting or incomplete

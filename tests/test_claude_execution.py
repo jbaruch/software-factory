@@ -301,9 +301,12 @@ class Decoder(unittest.TestCase):
             path.chmod(0o600)
             with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw)):
                 self.assertEqual(claude_worker.read_events(path), [dict(text="ü")] * 100)
+                self.assertEqual(claude_worker.read_events(path, raw.decode()), [dict(text="ü")] * 100)
             with patch.object(claude_worker, "RETAINED_STREAM_LIMIT", len(raw) - 1):
                 with self.assertRaises(native_claude.ClaudeProbeError):
                     claude_worker.read_events(path)
+                with self.assertRaises(native_claude.ClaudeProbeError):
+                    claude_worker.read_events(path, raw.decode())
             self.assertEqual(factory.read_record(path), raw.decode())
             self.assertEqual(factory.read_record(path, private=True, max_bytes=len(raw)), raw.decode())
             with self.assertRaises(OSError):
@@ -833,6 +836,17 @@ class ClaudeWorker(unittest.TestCase):
         with redirect_stdout(StringIO()):
             return asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
                 timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
+
+    def test_export_checks_original_brief_bytes(self):
+        from test_writer_transfer import check_provider_export_brief
+        factory.set_inputs(self.path, candidate=self.candidate, requirements=self.candidate)
+        args = self.launch_writer()
+        receipt = self.execute_writer(args)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        record = factory.load_task(self.path)
+        with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
+            factory.collect_claude(self.path, "implement", self.rex, record, record["assignments"]["implement"])
+        check_provider_export_brief(self, args, args.brief.read_bytes().replace(b"\n", b"\r\n"))
 
     def test_writer_edits_are_committed_by_the_factory_and_collected(self):
         args = self.launch_writer()
