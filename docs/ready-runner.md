@@ -44,6 +44,10 @@ produced candidate and submit a verification phase, or use the opt-in handoff be
 Run again, the original writer plan reports the writer by its result, since its commit
 is now the selection; any other job in that plan, read-only jobs included, reports stale.
 
+## Cross-host writer transfer
+
+A settled writer's collected provenance can be transferred one hop between authorized Rex hosts. This is source history, not a destination assignment. The source operator runs `export-writer` while the task is held; the destination operator separately runs `admit`, `inputs`, then `import-writer` with the trust values the export printed. See [the command reference](../skills/factory/references/commands.md#cross-host-writer-transfer) for the full command sequence and verification steps. An imported origin cannot satisfy `--from-writer` or native-collection dependencies; run a plain verification plan on the selected inputs after import and `resume`.
+
 ## Opt-in writer candidate handoff
 
 For an explicitly authorized independent verification phase, add

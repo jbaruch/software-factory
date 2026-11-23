@@ -149,6 +149,15 @@ class GrokWorker(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
             return factory.collect_grok(self.path, "implement", self.rex, record, record["assignments"]["implement"])
 
+    def test_export_checks_original_brief_bytes(self):
+        from test_writer_transfer import check_provider_export_brief
+        factory.set_inputs(self.path, candidate=self.candidate, requirements=self.candidate)
+        args = self.launch_writer()
+        receipt = self.execute_writer(args)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.collect_writer()
+        check_provider_export_brief(self, args, b"substituted fixture payload")
+
     def test_writer_edits_are_committed_by_the_factory_and_collected(self):
         args = self.launch_writer()
         self.assertNotIn("Candidate path inventory", Path(factory.load_task(self.path)["assignments"]["implement"]["brief"]).read_text())

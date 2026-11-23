@@ -73,7 +73,11 @@ class EvidenceRex(FakeRex):
         return super().call(*args, **kwargs)
 
 
-class Integration(unittest.TestCase):
+class NativeReviewFixture(unittest.TestCase):
+    path: Path
+    head: str
+    frozen: dict
+
     def setUp(self):
         servers = patch.object(codex_worker, "configured_mcp_servers", return_value=[])  # No real `codex mcp list` (#153).
         servers.start()
@@ -83,35 +87,9 @@ class Integration(unittest.TestCase):
         self.addCleanup(self.native.doCleanups)
         self.root = self.native.root.resolve()
         self.repo = self.native.repo.resolve()
-        self.base = self.native.candidate
-        result = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
-                                 "commit", "--quiet", "--allow-empty", "-m", "Candidate")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.head = factory.git_commit(str(self.repo), "HEAD")
-        tree = factory.git_run(str(self.repo), "rev-parse", "HEAD^{tree}").stdout.strip()
-        merged = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "commit-tree", tree,
-                                 "-p", self.base, "-p", self.head, "-m", "Merge fixture")
-        self.assertEqual(merged.returncode, 0, merged.stderr)
-        self.transport = GitHub(self.base, self.head, merged.stdout.strip())
-        self.tasks = self.root / "tasks"
-        self.tasks.mkdir()
-        self.path = self.tasks / "deliver.json"
-        factory.git_run(str(self.repo), "remote", "add", "origin", "https://github.com/fixture/project.git")
-        factory.admit(self.path, task="deliver", goal="Deliver fixture", repository=str(self.repo), acceptance=["original-requirements"],
-                      corrections=2, investigations=1)
-        self.record = factory.load_task(self.path)
-        self.frozen = release_evidence.capture(self.record, self.transport.identity["url"], self.transport)
-        FakeRex.sessions, FakeRex.calls = [], []
-        FakeRex.fail_after_create, FakeRex.host = False, "test-host"
-        EvidenceRex.running = False
-        rex_patch = patch.object(factory, "Rex", EvidenceRex)
-        rex_patch.start()
-        self.addCleanup(rex_patch.stop)
         catalog = patch.object(codex_capacity, "snapshot", self.codex_catalog)
         catalog.start()
         self.addCleanup(catalog.stop)
-        self.review("qa", "qa", frozen=False)
-        self.review("release", "release")
 
     @staticmethod
     async def codex_catalog(binary):
@@ -123,7 +101,7 @@ class Integration(unittest.TestCase):
         frozen_release = self.frozen if frozen and delivery is None else None
         # A release judgment ID freezes the `delivered` receipt that confirmed it (#151).
         frozen_delivery = release_evidence.delivered_receipt(factory.load_task(self.path), delivery) if delivery else None
-        command = factory.codex_command(self.path, task="deliver", assignment_id=key, codex=sys.executable,
+        command = factory.codex_command(self.path, task=self.path.stem, assignment_id=key, codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(cwd), role=role, write=writer,
             commit_message="fix(fixture): Apply correction\n\nExercise sequential writer provenance." if change else None,
             release_evidence=frozen_release, delivery_evidence=frozen_delivery)
@@ -131,11 +109,10 @@ class Integration(unittest.TestCase):
             kind, payload = ("delivery", frozen_delivery) if delivery else ("release", frozen_release)
             index = command.index("--" + kind + "-evidence-digest")
             command[index:index + 2] = ["--" + kind + "-evidence", json.dumps(payload, sort_keys=True)]
-        with patch.object(factory, "Rex", EvidenceRex):
-            record, assignment = factory.launch(self.path, task="deliver", assignment_id=key, role=role,
-                goal="Judge the original complete evidence", cwd=str(cwd), command=command, purpose=purpose,
-                binary=sys.executable, server="unix:///fixture.sock",
-                frozen_release=frozen_release, frozen_delivery=frozen_delivery)
+        record, assignment = factory.launch(self.path, task=self.path.stem, assignment_id=key, role=role,
+            goal="Judge the original complete evidence", cwd=str(cwd), command=command, purpose=purpose,
+            binary=sys.executable, server="unix:///fixture.sock",
+            frozen_release=frozen_release, frozen_delivery=frozen_delivery)
         return self.finish_review(key, record, assignment, cwd, context=context, outcome=outcome,
                                   failed=failed, change=change, collect=collect)
 
@@ -172,6 +149,37 @@ class Integration(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             self.record = factory.collect_codex(self.path, key, None, record, assignment)
         return self.record["assignments"][key]
+
+
+class Integration(NativeReviewFixture):
+    def setUp(self):
+        super().setUp()
+        self.base = self.native.candidate
+        result = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                                 "commit", "--quiet", "--allow-empty", "-m", "Candidate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.head = factory.git_commit(str(self.repo), "HEAD")
+        tree = factory.git_run(str(self.repo), "rev-parse", "HEAD^{tree}").stdout.strip()
+        merged = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "commit-tree", tree,
+                                 "-p", self.base, "-p", self.head, "-m", "Merge fixture")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        self.transport = GitHub(self.base, self.head, merged.stdout.strip())
+        self.tasks = self.root / "tasks"
+        self.tasks.mkdir()
+        self.path = self.tasks / "deliver.json"
+        factory.git_run(str(self.repo), "remote", "add", "origin", "https://github.com/fixture/project.git")
+        factory.admit(self.path, task="deliver", goal="Deliver fixture", repository=str(self.repo), acceptance=["original-requirements"],
+                      corrections=2, investigations=1)
+        self.record = factory.load_task(self.path)
+        self.frozen = release_evidence.capture(self.record, self.transport.identity["url"], self.transport)
+        FakeRex.sessions, FakeRex.calls = [], []
+        FakeRex.fail_after_create, FakeRex.host = False, "test-host"
+        EvidenceRex.running = False
+        rex_patch = patch.object(factory, "Rex", EvidenceRex)
+        rex_patch.start()
+        self.addCleanup(rex_patch.stop)
+        self.review("qa", "qa", frozen=False)
+        self.review("release", "release")
 
     def test_large_frozen_evidence_stays_in_original_brief_and_legacy_commands_still_read(self):
         self.frozen = copy.deepcopy(self.frozen)

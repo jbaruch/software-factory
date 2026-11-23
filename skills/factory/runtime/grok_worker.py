@@ -20,9 +20,9 @@ import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, cancelled, outcome_schema, stop_child
 
 
-def read_events(path):
+def read_events(path, content=None):
     try:
-        records = factory.read_record(path).splitlines()
+        records = (factory.read_record(path) if content is None else content).splitlines()
         events = []
         for line in records:
             record = factory.decode_json(line)

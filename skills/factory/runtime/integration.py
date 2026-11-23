@@ -7,7 +7,7 @@ import factory
 import release_evidence as evidence
 
 
-def collected_native(assignment_id, record, assignment, *, current=True):
+def collected_native(assignment_id, record, assignment, *, current=True, captured=None):
     label = record["task"] + "/" + assignment_id
     command = assignment["request"]["command"]
     result = assignment["result"]
@@ -28,7 +28,8 @@ def collected_native(assignment_id, record, assignment, *, current=True):
                                        "ask the task owner to inspect the original worker command")
         rex = factory.connect(record)
         args, receipt, native = factory.evidence_reader(harness)(assignment_id, record, assignment,
-            collected=True, delivery=True, current=current, observe=lambda: factory.status(rex, record, assignment))
+            collected=True, delivery=True, current=current, captured=captured,
+            observe=lambda: factory.status(rex, record, assignment))
         return harness, args, receipt, native
     except (factory.FactoryError, ValueError) as exc:
         raise factory.FactoryError(f"{label}: {exc}") from None
@@ -158,19 +159,32 @@ def antigravity_contributor(label, assignment, args, receipt):
                                    "inspect or restore the original Antigravity event stream and receipt") from None
 
 
+def _all_contributors(record):
+    """Combined local --write contributor contexts plus any origin contributors; fails closed on archive changes."""
+    import writer_transfer
+    contributors = set()
+    for key, assignment in record["assignments"].items():
+        command = assignment["request"]["command"]
+        if "--write" in command:
+            contributors.add(contributor_context(key, record, assignment))
+    if record.get("schema_version") == 12 or "writer_origin" in record:
+        origin = writer_transfer.verified_origin(record)
+        contributors.update(c["context"] for c in origin["contributors"])
+    return contributors
+
+
 def approvals(record, review, required):
     """Re-read collected original native reports/events, never generic dependencies."""
     if (not required or len(set(required)) != len(required) or review in required
             or any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item) for item in [review, *required])):
         raise factory.FactoryError("Explicitly select distinct required approval IDs and one release-review ID")
-    contributors, selected = set(), {}
+    contributors = _all_contributors(record)
     for key, assignment in record["assignments"].items():
         command = assignment["request"]["command"]
-        if "--write" in command:
-            contributors.add(contributor_context(key, record, assignment))
-        elif factory.native_harness(command) is None and key not in required and key != review:
+        if "--write" not in command and factory.native_harness(command) is None and key not in required and key != review:
             # An omitted off-runtime reader still needs proof of what ran.
             collected_native(key, record, assignment, current=False)
+    selected = {}
     contexts = set()
     for key in [*required, review]:
         assignment = record["assignments"].get(key)
@@ -287,9 +301,8 @@ def delivered_accepted(path, review, acceptance_id) -> dict:
     if evidence.from_delivery_assignment(record, assignment) != original:
         raise factory.FactoryError("Final acceptance assessed a different delivery; judge the recorded `delivered` receipt")
     judge = native_context(harness, receipt)
-    for key, item in record["assignments"].items():
-        if "--write" in item["request"]["command"] and judge == contributor_context(key, record, item):
-            raise factory.FactoryError("A contributor cannot judge final acceptance")
+    if judge in _all_contributors(record):
+        raise factory.FactoryError("A contributor cannot judge final acceptance")
     if read_owner(path) != record:
         raise factory.FactoryError("Task changed during final acceptance observation; reload current controls/inputs")
     return dict(outcome="approved", assignment=acceptance_id, review=review, native_receipt=str(args.receipt),
