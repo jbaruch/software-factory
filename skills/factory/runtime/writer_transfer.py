@@ -134,14 +134,9 @@ def _writer_evidence_paths(path, key, assignment):
     return harness, {"receipt": receipt, "events": events, "brief": brief}
 
 
-def export_writer(path, *, assignment_id, to_host, to_task, out_path):
-    """Export a settled writer as source history.  Runs under the task lock; writes no task record.
-
-    Returns (source_host_id, sha256_hex) of the written bundle.
-    """
-    # Load the task record raw (before load_task would migrate it) to enforce schema 11.
+def _source_snapshot(path):
     try:
-        record_raw = factory.decode_json(factory.read_record(path))
+        return factory.read_record(path, exact=True)
     except OSError as exc:
         cause = exc.strerror or "expected a readable regular file"
         raise factory.FactoryError(
@@ -150,17 +145,25 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path):
     except UnicodeDecodeError:
         raise factory.FactoryError(
             f"Invalid UTF-8 in source task record {str(path)!r}. Restore the original record before retrying.") from None
+
+
+def export_writer(path, *, assignment_id, to_host, to_task, out_path):
+    """Export a settled writer as source history.  Runs under the task lock; writes no task record.
+
+    Returns (source_host_id, sha256_hex) of the written bundle.
+    """
+    snapshot = _source_snapshot(path)
+    try:
+        record = factory.decode_json(snapshot)
     except ValueError as exc:
         raise factory.FactoryError(
             f"Invalid JSON in source task record {str(path)!r} ({exc}). "
             "Restore the original record before retrying.") from None
-    _require(isinstance(record_raw, dict),
+    _require(isinstance(record, dict),
              f"Expected a JSON object in source task record {str(path)!r}. Restore the original record before retrying.")
-    _require(record_raw.get("schema_version") == 11,
-             "Export requires schema 11 source; load_task would migrate older records")
-    _require("writer_origin" not in record_raw, "Source already has writer_origin; it cannot be re-exported")
-
-    record = factory.load_task(path)
+    _require(record.get("schema_version") == 11, "Export requires a schema 11 source")
+    _require("writer_origin" not in record, "Source already has writer_origin; it cannot be re-exported")
+    factory.validate_task_record(path, record)
 
     _require(record["hold"] is not None,
              "Source task is not held; pause it before exporting")
@@ -315,15 +318,16 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path):
     _require(not out_path.resolve().is_relative_to(path.parent.resolve()),
              "Output file must be outside the state directory")
 
-    if out_path.exists():
-        # Idempotent replay: same bytes → same digest → return without error.
+    replay = out_path.exists()
+    if replay:
         with _private_bundle(out_path) as (existing, _):
-            if hashlib.sha256(existing).hexdigest() == bundle_sha256:
-                return source_host, bundle_sha256
-        raise factory.FactoryError(
-            "Output file already exists with different content; use a new output path or remove the conflicting file")
+            _require(_blob_digest(existing) == bundle_sha256,
+                     "Output file already exists with different content; use a new output path or remove the conflicting file")
 
-    _write_exclusive_private(out_path, bundle_bytes)
+    _require(_source_snapshot(path) == snapshot,
+             f"Source task record {str(path)!r} changed during export. Inspect the held source before retrying.")
+    if not replay:
+        _write_exclusive_private(out_path, bundle_bytes)
     return source_host, bundle_sha256
 
 

@@ -300,18 +300,18 @@ def new_task(task, line=DEFAULT_LINE) -> dict:
                 provisioning=None, rex=None, session_label=line_session_label(line), session_id=None, assignments={})
 
 
-def read_record(path, *, private=False, max_bytes=None):
-    """Read a regular gate record without following links or blocking on FIFOs."""
+def read_record(path, *, private=False, max_bytes=None, exact=False):
+    """Read a regular gate record. Exact and byte-limited reads preserve UTF-8 line endings."""
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise ValueError("Record byte limit must be a nonnegative integer")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "r" if max_bytes is None else "rb") as stream:
+    with os.fdopen(descriptor, "rb" if exact or max_bytes is not None else "r") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or (private and (
                 info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077)):
             raise OSError("Gate record must be a regular file with its required ownership and permissions")
         if max_bytes is None:
-            return stream.read()
+            return stream.read().decode("utf-8") if exact else stream.read()
         content = stream.read(max_bytes + 1)
         if len(content) > max_bytes:
             raise OSError("Record exceeds its byte limit; inspect the original without rewriting it")
@@ -330,6 +330,18 @@ def load_task(path) -> dict:
         raise FactoryError(f"Cannot read task {path.stem!r}; restore access to its original state file") from None
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
+    original_version = record.get("schema_version", 0)
+    validate_task_record(path, record)
+    if original_version != record["schema_version"]:
+        try:
+            save(path, record)
+        except OSError:
+            raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
+    return record
+
+
+def validate_task_record(path, record):
+    """Check the owner's full schema, upgrading legacy fields in memory."""
     version = record.get("schema_version", 0)
     if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
@@ -533,12 +545,7 @@ def load_task(path) -> dict:
     if version < 11:
         # Version 11 adds the optional `acceptance` capture; a migrated record has none until `inputs` captures one.
         record["schema_version"] = 11
-        try:
-            save(path, record)
-        except OSError:
-            raise FactoryError("Cannot confirm task schema migration save; restore state-store access/space, then reload or inspect the task record before continuing") from None
     # Schema 12 records have writer_origin and are written by import-writer; they are not migrated up from 11.
-    return record
 
 
 def valid_closed(assignment):

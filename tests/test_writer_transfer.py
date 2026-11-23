@@ -190,7 +190,7 @@ class TestExport(TransferBase):
         self.assertEqual(origin["contributors"], bundle["contributors"])
         self.assertEqual(Path(origin["archive"]).read_bytes(), out_path.read_bytes())
 
-    def assert_export_error(self, *expected_parts):
+    def assert_export_error(self, *expected_parts, existing_bundle=None):
         out = self.bundle_dir / "bundle.json"
         with patch.object(factory, "Rex", FakeSourceRex), redirect_stdout(StringIO()) as output, redirect_stderr(StringIO()) as errors:
             code = factory.main(["--state-dir", str(self.src_state), "export-writer", "--task", "src-task",
@@ -202,7 +202,10 @@ class TestExport(TransferBase):
             self.assertIn(str(expected), message)
         for private in ("fixture payload", "0xff", "Traceback"):
             self.assertNotIn(private, message)
-        self.assertFalse(out.exists())
+        if existing_bundle is None:
+            self.assertFalse(out.exists())
+        else:
+            self.assertEqual(out.read_bytes(), existing_bundle)
 
     def test_source_record_read_and_decode_failures(self):
         for content, cause in ((b'{"fixture payload":', "Invalid JSON"), (b"fixture payload\xff", "Invalid UTF-8")):
@@ -213,6 +216,61 @@ class TestExport(TransferBase):
         self.src_path.unlink()
         self.assert_export_error(self.src_path, os.strerror(errno.ENOENT), "Restore access to the original record")
         self.assertFalse(self.src_path.exists())
+
+    def test_export_refuses_schema_10_swap_without_migrating(self):
+        legacy = self._src_record()
+        legacy["schema_version"] = 10
+        legacy.pop("acceptance", None)
+        replacement = json.dumps(legacy, indent=2).encode()
+        read = factory.read_record
+        swapped = False
+
+        def swap_after_read(path, **kwargs):
+            nonlocal swapped
+            content = read(path, **kwargs)
+            if path == self.src_path and not swapped:
+                self.src_path.write_bytes(replacement)
+                swapped = True
+            return content
+
+        with patch.object(factory, "read_record", swap_after_read), patch.object(factory, "save", wraps=factory.save) as save:
+            self.assert_export_error(self.src_path, "changed during export")
+            save.assert_not_called()
+        self.assertEqual(self.src_path.read_bytes(), replacement)
+
+    def test_export_refuses_unsupported_schema_without_saving(self):
+        record = self._src_record()
+        record["schema_version"] = 13
+        self.src_path.write_bytes(json.dumps(record).encode())
+        with self.source_unchanged(), patch.object(factory, "save", wraps=factory.save) as save:
+            self.assert_export_error("schema 11")
+            save.assert_not_called()
+
+    def test_export_applies_owner_validation_to_schema_11(self):
+        record = self._src_record()
+        record["session_label"] = "unrelated-session"
+        self.src_path.write_bytes(json.dumps(record).encode())
+        with self.source_unchanged():
+            self.assert_export_error("Invalid Rex session identity")
+
+    def test_export_rechecks_source_before_successful_replay(self):
+        out, _, _ = self._do_export()
+        existing_bundle = out.read_bytes()
+        original = self.src_path.read_bytes()
+        changed = original.replace(b"\n", b"\r\n")
+        self.assertNotEqual(original, changed)
+        open_bundle = writer_transfer._private_bundle
+
+        @contextmanager
+        def change_during_replay(path):
+            with open_bundle(path) as bundle:
+                self.src_path.write_bytes(changed)
+                yield bundle
+
+        with patch.object(writer_transfer, "_private_bundle", change_during_replay), patch.object(factory, "save") as save:
+            self.assert_export_error(self.src_path, "changed during export", existing_bundle=existing_bundle)
+            save.assert_not_called()
+        self.assertEqual(self.src_path.read_bytes(), changed)
 
     def test_export_reports_first_damaged_original(self):
         # Damage all three before export. Restore each in turn to expose the next failure.
