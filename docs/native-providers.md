@@ -136,16 +136,30 @@ CLI 2.1.319 flag compatibility and a signed-out native status were supplied as
 admission evidence; they do not qualify execution or this candidate's live probe.
 
 Children receive the existing curated `native_environment()`. Claude/Anthropic
-and cloud provider environment selectors are refused, including empty values,
-before either child starts; remove overrides only when native account observation
-is intended. An explicit `CLAUDE_CONFIG_DIR` must be an accessible absolute
-directory and is forwarded unchanged, never silently replaced with the default.
-Assignment workers also get `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`. A background
-shell still running when the agent returns its result wakes the session again, so
-one run ends with two results that the worker cannot settle.
+and cloud provider environment selectors are refused by presence, including empty
+values, before either child starts; remove overrides only when native account
+observation is intended. An explicit `CLAUDE_CONFIG_DIR` must be an accessible
+absolute directory and is forwarded unchanged, never silently replaced with the
+default. Assignment workers also get `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`.
+A background shell still running when the agent returns its result wakes the
+session again, so one run ends with two results that the worker cannot settle.
 Only path metadata is checked, not directory contents. Other credentials and
 runtime injection variables are not forwarded. Path/timeout/process failures
 emit no native diagnostics and no partial observation JSON.
+
+The refusal predicate accepts exactly twelve host/session identity and run-mode
+keys observed in the Claude Code host environment. Their presence is ignored;
+their values are never read, forwarded or used to select an executable, account,
+model, effort or child flag. The fixed background-task switch and per-call flags
+stay as in a clean parent. The twelve exceptions (case-sensitive):
+`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`,
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_ENTRYPOINT`,
+`CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SAFE_MODE`,
+`CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_SESSION_ID`,
+`CLAUDE_EFFORT`, `CLAUDE_PID`.
+Any other `CLAUDE_*`, `ANTHROPIC_*` or cloud-provider key refuses before spawn,
+including unobserved markers and suffixed lookalikes of exempt names.
 
 `native_claude.py` owns the transient schema-1 `claude-native-auth` envelope:
 `harness`, resolved `binary`/`cwd`, validated `cli_version`, wall-clock

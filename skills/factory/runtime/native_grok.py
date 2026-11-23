@@ -1,12 +1,15 @@
 """Native Grok metadata discovery and final-event decoding."""
 import argparse
 import asyncio
+from decimal import Decimal
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
+from unicodedata import east_asian_width
 
 sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import time
@@ -14,6 +17,7 @@ import tomllib
 
 from factory import decode_json, RESULT_OUTCOMES
 from codex_worker import native_environment, stop_child
+from native_usage import COLUMNS, INPUT_CONTROL, POSITION, PRESENTATION, ROWS, PanelError, read_panel, render_evidence
 
 API_KEY_ENVIRONMENT = ("XAI_API_KEY", "GROK_CODE_XAI_API_KEY")
 # The metadata probes' tool interface. Assignments, reviewers included, get every built-in tool.
@@ -316,6 +320,127 @@ async def probe(binary, cwd, *, spawn=asyncio.create_subprocess_exec,
             except ProcessLookupError:
                 pass
             await process.wait()
+
+
+# The positioned dashboard can redraw the command text without its borders.
+USAGE_PROMPT = (
+    r"(?:│ ❯ +│(?s:.*?)\+ New Agent|\+ New Agent(?s:.*?)(?m:^(?P<input_line> *│ ❯ +│) *$))"
+    r"(?s:.*?)Enter:create[ \t]*│[ \t]*Tab:list(?:[ \t]*│[ \t]*Shift\+Tab:mode[ \t]*│[ \t]*\?:shortcuts)?\b"
+)
+USAGE_MENU = (
+    r"(?m:^(?P<selection_line> *❯ show View usage) *$)\n *─+ *\n(?: *\n)*"
+    r"(?m:^(?P<input_line> +/usage show) *)\n"
+    r"(?:[ \t]*\n)*[ \t]+send +│ +Ctrl\+s:send\+open +│ +Shift\+Tab:mode +│ +\?:shortcuts"
+)
+USAGE_BLOCKED = r"(?i)trust (?:this|the) (?:folder|directory|workspace)|Select a workspace|Choose an account|Weekly limit \("
+USAGE_CORE = (
+    r"Weekly limit \((?P<pool>SuperGrok)\)[\s│]*"
+    r"[█░]+[\s│]*(?P<used>\d{1,3}(?:\.\d{1,2})?)%[\s│]*"
+    r"(?P<reset_field>Resets: (?P<reset>[A-Z][a-z]{2,8} \d{1,2}, (?:[01]\d|2[0-3]):[0-5]\d))"
+)
+USAGE_PANEL = re.compile(USAGE_CORE + r"[\s│]*(?P<credits>Credits:[ \t]*\$[0-9]+\.[0-9]{2}[\s│]*)?\Z")
+VISIBLE_USAGE = re.compile(USAGE_CORE + r"(?=[ \t│]*(?:\n|\Z))")
+
+
+def usage_complete(raw: bytearray) -> str | None:
+    begin, end = b"\x1b[?2026h", b"\x1b[?2026l"
+    if begin not in raw:
+        if all(control[0] in (b"", b"\r\n") or PRESENTATION.fullmatch(control[0])
+               for control in INPUT_CONTROL.finditer(raw)):
+            text = PRESENTATION.sub(b"", raw).decode("utf-8", errors="replace")
+            panel = USAGE_PANEL.search(text)
+            if panel and panel["credits"] and text.count("Weekly limit (") == 1 and Decimal(panel["used"]) <= 100:
+                return panel[0]
+        return None
+
+    candidate_closes = set()
+    last_change = offset = reset_colons = 0
+    synchronized = positioned = False
+    for control in INPUT_CONTROL.finditer(raw):
+        if control.start() != offset:
+            if not synchronized or not positioned:
+                return None
+            last_change = control.start()
+            # A fresh reset needs both literal colons, even across positioned writes.
+            reset_colons += raw.count(b":", offset, control.start())
+        offset = control.end()
+        code = control[0]
+        if not code or PRESENTATION.fullmatch(code):
+            continue
+        if code == begin and not synchronized:
+            synchronized = True
+            positioned = False
+            reset_colons = 0
+        elif code == end and synchronized:
+            synchronized = False
+            if reset_colons >= 2:
+                candidate_closes.add(offset)
+        elif synchronized and (move := POSITION.fullmatch(code)):
+            row, col = map(int, move.groups())
+            if row > ROWS or col > COLUMNS:
+                last_change = offset
+            positioned = True
+        elif synchronized and code == b"\x1b[H":
+            positioned = True
+        elif synchronized and code == b"\x1b[2J":
+            last_change = offset
+            positioned = False
+        else:
+            return None
+    if synchronized or not candidate_closes:
+        return None
+
+    for close, (visible, _), (fresh, _) in render_evidence(raw, positioned_menu=True, frame_ends=candidate_closes):
+        panel = VISIBLE_USAGE.search(visible)
+        if panel is None or visible.count("Weekly limit (") != 1 or Decimal(panel["used"]) > 100:
+            continue
+        field = panel.start("reset_field")
+        row = visible.count("\n", 0, field)
+        fresh_lines = fresh.split("\n")
+        if row >= len(fresh_lines):
+            continue
+        fresh_line = fresh_lines[row]
+        reset = re.search(re.escape(panel["reset_field"]) + r"[ \t│]*\Z", fresh_line)
+        if reset is None:
+            continue
+        # The viewport omits wide glyphs' continuation cells when joining rows.
+        prefixes = visible[visible.rfind("\n", 0, field) + 1:field], fresh_line[:reset.start()]
+        visible_column, fresh_column = (
+            sum(2 if east_asian_width(char) in ("W", "F") else 1 for char in prefix) for prefix in prefixes
+        )
+        if visible_column == fresh_column:
+            # The first proof governs even when a later write restores the same cells.
+            return panel[0] if last_change <= close else None
+    return None
+
+
+def parse_usage(output):
+    """The weekly bar is percent used. Credits are outside the included quota."""
+    match = USAGE_PANEL.search(output)
+    if match is None or output.count("Weekly limit (") != 1:
+        raise GrokProbeError("Unexpected Grok /usage panel; inspect its weekly limit and reset before planning")
+    pool, used, reset = match.group("pool", "used", "reset")
+    remaining = 100 - Decimal(used)
+    if remaining < 0:
+        raise GrokProbeError("Grok /usage returned an invalid percentage; inspect the native usage panel")
+    return [dict(pool=pool, remaining_percent=float(remaining), resets_at=reset)]
+
+
+def probe_usage(binary, cwd, *, interactive=read_panel):
+    """Read included quota from the dashboard before opening an agent session."""
+    if any(key in os.environ for key in API_KEY_ENVIRONMENT):
+        raise GrokProbeError("Unset Grok API-key overrides before observing the native subscription")
+    binary, cwd = Path(binary), Path(cwd)
+    if not binary.is_absolute() or not cwd.is_absolute():
+        raise GrokProbeError("Supply absolute Grok and trusted working-directory paths before refreshing quota")
+    env = environment()
+    command = [str(binary), "--no-auto-update", "--no-subagents", "dashboard"]
+    try:
+        output = interactive(command, cwd, env, request=b"/usage show",
+                             prompt=USAGE_PROMPT, menu=USAGE_MENU, complete=usage_complete, blocked=USAGE_BLOCKED)
+    except PanelError as exc:
+        raise GrokProbeError(f"Grok /usage observation failed: {exc}") from None
+    return parse_usage(output)
 
 
 def main(argv=None):

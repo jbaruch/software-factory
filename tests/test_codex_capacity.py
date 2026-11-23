@@ -38,6 +38,7 @@ class Curation(unittest.TestCase):
         self.assertEqual(result["pools"], [dict(limit_id="codex", primary=dict(
             used_percent=11, remaining_percent=89, duration_minutes=10080, resets_at=1794000000), secondary=None,
             rate_limit_reached_type=None, spend_control_reached=None)])
+        self.assertIs(type(result["pools"][0]["primary"]["remaining_percent"]), int)
         self.assertEqual(result["models"], [dict(model="actual-native-model", id="picker-id",
             effort_ids=["high"], default_effort_id="high")])
         self.assertNotIn("PRIVATE", json.dumps(result))

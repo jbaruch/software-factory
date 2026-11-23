@@ -22,6 +22,96 @@ def transport(payload=SIGNED_IN, code=0):
                              subprocess.CompletedProcess([], code, json.dumps(payload), "fixture-private-stderr")])
 
 
+CLAUDE_USAGE = (
+    "Current week (all models)\n100% 100% used\nResets Nov 21 at 2pm (America/Los_Angeles)\n"
+    "Current week (Fable)\n0% 0% used\nResets Nov 21 at 2pm (America/Los_Angeles)\n"
+    "Usagecreditsareoff·/usage-creditstoturnthemon\r←/→toswitch·Esctoclose"
+)
+
+
+class ClaudeUsage(unittest.TestCase):
+    def test_observe_exhausted_week_and_optional_model_window(self):
+        with tempfile.TemporaryDirectory() as config, patch.dict(os.environ, {native.CONFIG_DIRECTORY: config}, clear=True):
+            auth = transport()
+            interactive = Mock(return_value=CLAUDE_USAGE)
+            windows = native.probe_usage(sys.executable, config, auth_probe=lambda b, c: native.probe(
+                b, c, run=auth), interactive=interactive)
+            self.assertEqual(windows, [
+                dict(pool="Current week (all models)", remaining_percent=0, resets_at="Nov 21 at 2pm (America/Los_Angeles)"),
+                dict(pool="Current week (Fable)", remaining_percent=100, resets_at="Nov 21 at 2pm (America/Los_Angeles)"),
+            ])
+            command, directory, env = interactive.call_args.args
+            self.assertEqual(command, [str(Path(sys.executable).resolve()), "--safe-mode", "--ax-screen-reader", "--no-chrome",
+                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                "--settings", '{"remoteControlAtStartup":false}', "--tools", ""])
+            self.assertEqual(directory, Path(config).resolve())
+            self.assertEqual(auth.call_args.kwargs["cwd"], str(directory))
+            self.assertEqual((env[native.CONFIG_DIRECTORY], env["DISABLE_AUTOUPDATER"]), (config, "1"))
+
+    def test_healthy_session_and_week_are_distinct_windows(self):
+        session = "Current session\n █░ 22% used\nResets 3:35pm (America/Los_Angeles)\n"
+        windows = native.parse_usage(session + CLAUDE_USAGE.replace("100% 100% used", "46% 45% used"))
+        self.assertEqual([window["remaining_percent"] for window in windows], [78, 55, 100])
+
+    def test_refuses_absent_incomplete_and_paid_panels(self):
+        for output in ("private fixture banner", CLAUDE_USAGE.replace("all models", "Opus"),
+                       CLAUDE_USAGE.replace("100% 100% used", "100% 101% used"),
+                       CLAUDE_USAGE.replace("Usagecreditsareoff", "Usagecreditsareon"),
+                       CLAUDE_USAGE.replace("Fable)\n0% 0% used", "Fable)"),
+                       CLAUDE_USAGE.replace("2pm (America/Los_Angeles)", "2pm")):
+            with self.subTest(output=output), self.assertRaises(native.ClaudeProbeError) as error:
+                native.parse_usage(output)
+            self.assertNotIn("private fixture banner", str(error.exception))
+
+    def test_refuses_non_subscription_auth_before_starting_terminal(self):
+        interactive = Mock()
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(native.ClaudeProbeError, "firstParty"):
+                native.probe_usage(sys.executable, Path.cwd(), auth_probe=lambda b, c: native.probe(
+                    b, c, run=transport(SIGNED_OUT, 1)), interactive=interactive)
+        interactive.assert_not_called()
+
+    def test_transport_failure_is_actionable(self):
+        interactive = Mock(side_effect=native.PanelError("Timed out waiting for the input prompt"))
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(native.ClaudeProbeError, "Claude /usage observation failed: Timed out"):
+                native.probe_usage(sys.executable, Path.cwd(), auth_probe=lambda b, c: native.probe(
+                    b, c, run=transport()), interactive=interactive)
+
+    def test_safety_screen_names_probe_folder_without_writing(self):
+        from native_usage import exchange, input_evidence
+
+        # Control-bearing Claude Code 2.1.323 reconstruction from the SRE replay.
+        screen = (b"\x1b[?2026h\x1b[2;3HQuick safety check\r\nYes, I trust\r\nNo, exit\r\n"
+                  b"\x1b[2J\x1b[?2026l")
+        self.assertEqual(input_evidence(screen, positioned_menu=False)[0], ("", None))
+        prompt = b"[Screen Reader Mode: on via flag]\r\nClaude Code v2.1.323\r\n$\r\n"
+
+        def interactive(_command, _cwd, _env, **spec):
+            return exchange(17, timeout=15, **spec)
+
+        for after_slash in (False, True):
+            chunks = [prompt, screen] if after_slash else [screen]
+            readable, idle = ([17], [], []), ([], [], [])
+            with (self.subTest(after_slash=after_slash),
+                  patch.dict(os.environ, {}, clear=True),
+                  patch("native_usage.time.monotonic", return_value=0),
+                  patch("native_usage.select.select", side_effect=[readable, idle, readable] if after_slash else [readable]),
+                  patch("native_usage.os.read", side_effect=chunks) as read,
+                  patch("native_usage.os.write", return_value=len(b"/usage")) as write):
+                with self.assertRaisesRegex(native.ClaudeProbeError, "showed a modal") as error:
+                    native.probe_usage(sys.executable, Path.cwd(), auth_probe=lambda b, c: native.probe(
+                        b, c, run=transport()), interactive=interactive)
+                self.assertEqual(read.call_count, len(chunks))
+                if after_slash:
+                    write.assert_called_once_with(17, b"/usage")
+                else:
+                    write.assert_not_called()
+                self.assertIn(f"Probe folder: {Path.cwd().resolve()}", str(error.exception))
+                self.assertIn("Claude Code's UI", str(error.exception))
+                self.assertIn("--claude-usage-cwd", str(error.exception))
+
+
 class NativeClaude(unittest.TestCase):
     def setUp(self):
         environment = patch.dict(os.environ, {"HOME": "/fixture/native-home", "PATH": "/usr/bin:/bin"}, clear=True)
@@ -76,7 +166,7 @@ class NativeClaude(unittest.TestCase):
         for call in run.call_args_list:
             self.assertEqual(call.kwargs, dict(cwd=str(Path.cwd().resolve()),
                              env={"HOME": "/fixture/native-home", "PATH": "/usr/bin:/bin",
-                                  "PYTHONDONTWRITEBYTECODE": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
+                                  "PYTHONDONTWRITEBYTECODE": "1", "GIT_NO_REPLACE_OBJECTS": "1", "DISABLE_AUTOUPDATER": "1"},
                              stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
                              errors="strict", timeout=20, check=False))
         self.assertEqual(result["auth"], SIGNED_OUT)
@@ -125,12 +215,47 @@ class NativeClaude(unittest.TestCase):
                 run.assert_not_called()
                 self.assertNotIn("fixture-private", str(error.exception))
 
+    def test_host_markers_pass_through_without_forwarding(self):
+        # Test 3 (ruling): hard-code the observed names independently of the implementation's set.
+        host_markers = [
+            "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SAFE_MODE",
+            "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_EFFORT", "CLAUDE_PID",
+        ]
+        clean = native.environment()
+        # Each name alone must equal the clean result, including the fixed background-task switch.
+        for name in host_markers:
+            for value in ("fixture-private", ""):
+                with self.subTest(name=name, value=repr(value)), patch.dict(os.environ, {name: value}):
+                    self.assertEqual(native.environment(), clean)
+        # All 13 (including the non-blocking CLAUDECODE) must equal the clean result.
+        all_markers = {name: "fixture-private" for name in host_markers}
+        all_markers["CLAUDECODE"] = "1"
+        with patch.dict(os.environ, all_markers):
+            self.assertEqual(native.environment(), clean)
+        # Test 2 override selectors must still raise.
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                     "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+                     "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                     "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_EFFORT_LEVEL"):
+            with self.subTest(name=name), patch.dict(os.environ, {name: ""}):
+                with self.assertRaises(native.ClaudeProbeError):
+                    native.environment()
+        # Invalid config-directory cases must still refuse.
+        for directory in ("", "relative-config", "/nonexistent/fixture-config", sys.executable):
+            with self.subTest(directory=directory), patch.dict(os.environ, {native.CONFIG_DIRECTORY: directory}):
+                with self.assertRaises(native.ClaudeProbeError):
+                    native.environment()
+
     def test_assignment_environment_disables_background_tasks(self):
         # A writer's background shell outlived its result; Claude woke again and the run ended with two results.
         self.assertEqual(native.environment()["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
         with patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}):
-            with self.assertRaisesRegex(native.ClaudeProbeError, "Unset"):
-                native.environment()
+            # Host marker: ignored at parent refusal; the factory's switch still overrides to 1.
+            self.assertEqual(native.environment()["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
 
     def test_explicit_config_directory_preserved_without_reading_contents(self):
         with tempfile.TemporaryDirectory() as directory:

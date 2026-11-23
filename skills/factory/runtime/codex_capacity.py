@@ -1,6 +1,7 @@
 """Curate native Codex capacity metadata; no eligibility or readiness claim."""
 import argparse
 import asyncio
+from decimal import Decimal
 import json
 import math
 from pathlib import Path
@@ -52,7 +53,10 @@ def window(value, field):
         return None
     data = obj(value, field)
     used = number(data.get("usedPercent"), field + ".usedPercent", maximum=100)
-    return dict(used_percent=used, remaining_percent=None if used is None else 100 - used,
+    remaining = None
+    if used is not None:
+        remaining = 100 - used if isinstance(used, int) else float(100 - Decimal(str(used)))
+    return dict(used_percent=used, remaining_percent=remaining,
                 duration_minutes=number(data.get("windowDurationMins"), field + ".windowDurationMins", integer=True),
                 resets_at=number(data.get("resetsAt"), field + ".resetsAt", integer=True))
 

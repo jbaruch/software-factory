@@ -22,6 +22,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
       "cwd": "/absolute/path/to/clean/worktree",
       "candidate": "<full-commit-sha>",
       "requirements": "requirements-v1",
+      "harness": "<selected-harness>",
       "model": "<discovered-eligible-model-id>",
       "effort": "high",
       "seconds": 180,
@@ -37,7 +38,7 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 ## Fields
 
 - `candidate`/`requirements` must equal the task's currently selected inputs (`factory.py show --task TASK`). One plan uses one pair per task; a job planned against other inputs reports `stale`, except a writer whose own commit became the selection, which reports its result.
-- `harness` is optional: `codex` (the default when omitted), `claude`, `grok` or `antigravity`. Model and effort belong to the job. Claude and Antigravity jobs take an effort from `low` to `max`. An Antigravity job may set `effort` to null for a model that refuses `--effort`, such as `claude-opus-4-6-thinking`. Grok jobs take one of the model's discovered efforts.
+- `harness` selects `codex`, `claude`, `grok` or `antigravity`. Write it explicitly in new plans. Schema 1 accepts omission as Codex for saved plans. Model and effort belong to the job. Claude and Antigravity jobs take an effort from `low` to `max`. An Antigravity job may set `effort` to null for a model that refuses `--effort`, such as `claude-opus-4-6-thinking`. Grok jobs take one of the model's discovered efforts.
 - `turns` is optional: a Claude or Grok job's turn budget, from 1 to 1000. Without it the job gets the worker's default of 30, so set it for long writers. Codex and Antigravity jobs refuse it.
 - `base` is optional: the full commit ID a Claude, Grok or Antigravity read-only job sees the change from. Its evidence then carries the changed paths and the full diff, which a Claude reader, limited to reading files, cannot get otherwise; set it on QA too. Code reviews require it, writers refuse it, and Codex jobs take none, so a Codex job can't be a code review.
 - `write: true` with an explicit `commit_message` authorizes the factory-owned local commit after a successful writer report, under the [writer contract](https://github.com/jbaruch/software-factory/blob/main/docs/native-providers.md#explicit-codex-assignments). Read-only jobs use `commit_message: null`. Changing the message changes the immutable assignment request.
@@ -45,6 +46,19 @@ Every job supplies all fields shown here. Replace the candidate and model with t
 - `cwd`: readers may share a checkout, including the writer's once it is collected. Codex, Antigravity and Grok readers work in a disposable copy of it, so their tests and MCP output never dirty it.
 - `purpose` is `work`, `correction` or `investigation`; `investigation` goes with the `investigator` role and only with it.
 - Jobs have distinct `(task, id)` pairs. `after` names earlier jobs in this plan or existing assignments in the same task. A dependency needs a successful current report and an observed successful process exit; findings, failures, stale reports and changed requests do not advance it.
+
+## Selecting a route
+
+For a fresh quota report before planning, run the ready runner with an empty `jobs` list, the intended limits, `--once` and every installed harness binary. For every job:
+
+1. Read the `harnesses` report. `available: true` means the Codex pool and catalog gates passed. `available: false` makes the route unavailable for the reported reason. `available: null` means headroom was measured and eligibility is provisional. A failed or stale observation supplies no capacity until a fresh measurement succeeds. Reobserve after a reset.
+2. Verify every route's role capabilities, including tool access, write mode, review scope and independence. Verify model and effort support through native discovery or operator evidence. Require included subscription billing without a paid override and a verified mapping from the model to its applicable quota windows. Each applicable window must show fresh numeric headroom strictly above the plan's reserve. For `null`, resolve any missing model, billing or pool evidence before selection or trial and apply the same window gates.
+3. Compare eligible routes by fit for the same role and work, and by measured headroom in their applicable windows. Give neither provider nor report status precedence. A Claude `null` route that meets all the gates and a Codex `true` route that meets them can both take suitable work.
+4. An otherwise eligible route that still needs evidence of suitability for the role can take one bounded trial with an explicit assignment, limited scope and budget. Check existing assignments across the line for that role and route first and await any outstanding trial. Investigate a failed trial before planning another. Use ordinary assignment and trial results only as evidence of suitability for that role. Use existing matched reviews for cross-model performance claims, with the same role, prompt and input packet, equivalent tool access, context and effort, and independent sessions.
+
+Gemini Flash and Gemini Pro share Antigravity's Gemini quota group. Use its observed weekly window when planning assignments. [Antigravity CLI /usage](https://antigravity.google/docs/cli/commands/usage/)
+
+Use existing plans and task records to track assignments and outcomes. Route selection carries no task acceptance, budget extension or launch authority.
 
 ## Runner flags
 
