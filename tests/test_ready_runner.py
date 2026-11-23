@@ -2104,6 +2104,49 @@ class ReadyRunner(unittest.TestCase):
         self.assertIn("new ID", runner.FAILED_NEXT)
         self.assertEqual(factory.load_task(self.directory / "task.json")["assignments"]["first"]["closed"]["state"], "failed")
 
+    def test_capture_diagnoses_a_failed_codex_start_after_tidy(self):
+        job = self.job()
+        plan = self.plan([job], workers=1, reserve=0)
+        self.tick(self.controller(plan))
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        original = record["assignments"]["first"]
+        PlanRex.processes[(record["session_id"], original["block_id"])] = "failed"
+        thread = "123e4567-e89b-12d3-a456-426614174000"
+        worker_error = "codex-worker: Native Codex exited unsuccessfully; inspect the retained events and Rex pane"
+        terminal = f"Error: turn/start: turn/start failed: thread not found: {thread} (code -32600)"
+        output = f"{terminal}\n{worker_error}\n"
+        original_call = PlanRex.call
+
+        def call(rex, *args, **kwargs):
+            if args[0] == "capture":
+                return output
+            return original_call(rex, *args, **kwargs)
+
+        with patch.object(PlanRex, "call", call):
+            self.assertEqual(self.tick(self.controller(plan))["jobs"][0]["state"], "failed")
+        self.assertEqual(self.launches(), 1)
+        failed = factory.load_task(path)["assignments"]["first"]
+        self.assertIsNone(failed["result"])
+        self.assertEqual(failed["closed"]["state"], "failed")
+        self.assertEqual(PlanRex.sessions, [])
+        capture = StringIO()
+        with redirect_stdout(capture), patch.object(PlanRex, "call", side_effect=AssertionError("capture is offline")):
+            self.assertEqual(factory.main([
+                "--state-dir", str(self.directory), "capture", "--task", "task", "--id", "first"]), 0)
+        retained = json.loads(capture.getvalue())
+        self.assertEqual(retained["text"], output)
+        self.assertIn("missing session at turn startup", retained["reason"])
+        self.assertIsNone(codex_worker.capture_diagnostic(f"failed to record rollout items: thread {thread} not found\n{worker_error}\n"))
+
+        replacement = {**job, "id": "replacement"}
+        self.tick(self.controller(self.plan([replacement], workers=1, reserve=0)))
+        record = factory.load_task(path)
+        request = record["assignments"]["replacement"]["request"]
+        self.assertEqual(request["role"], original["request"]["role"])
+        self.assertEqual(request["inputs"], original["request"]["inputs"])
+        self.assertEqual(record["assignments"]["first"], failed)
+
     def test_a_briefly_held_task_lock_does_not_idle_the_line(self):
         # A coordinator polling show/status every 10 s collided with the scan and two cycles launched nothing (#203).
         held, release = threading.Event(), threading.Event()

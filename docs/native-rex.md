@@ -18,7 +18,7 @@ python3 -B skills/factory/runtime/factory.py capture --task example --id qa
 python3 -B skills/factory/runtime/factory.py tidy [--task example]
 ```
 
-`status` prints the assignment's status object, and `capture` prints `{task, id, text}`, where `text` is the pane's output, live or kept from a tidied tab.
+`status` prints the assignment's status object, and `capture` prints `{task, id, text}`, where `text` is the pane's output, live or kept from a tidied tab. A recognized [Codex failure](native-providers.md#explicit-codex-assignments) also includes `reason` after tidying.
 
 The actual native agent flags depend on that harness. `{instructions}` as a whole argument expands to the selected role instructions and assignment goal. `{brief}` expands to a private Markdown file with the same content. Put the appropriate placeholder where that command accepts its prompt or prompt-file argument. Merely labeling an assignment `qa` does not make an arbitrary program read the brief. No provider/model is selected or permission mode weakened by the launcher.
 

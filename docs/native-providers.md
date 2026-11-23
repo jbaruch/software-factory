@@ -766,6 +766,15 @@ python3 -B skills/factory/runtime/factory.py codex-collect --task example --id w
 ```
 
 Inspect the retained receipt, stream and worktree before authorizing any retry.
+The Codex receipt and pane show a recognized terminal provider refusal. After
+tidying a failed Codex tab, `capture` also reports a `reason` when the retained
+output shows a recognized provider refusal or an explicit missing-thread error
+from `turn/start`. A standalone rollout diagnostic leaves the cause uncertain.
+These attempts stay failed and supply no verdict. To replace a read-only verifier
+after confirmed session loss, check that no verifier for the same role and inputs
+is still active and submit the same job under a new assignment ID. Keep the role,
+candidate and requirements fixed. For writers, reconcile worktree changes and any
+unknown external effects before authorizing another attempt.
 
 `codex_worker.py` owns version-5 `*.codex.json` execution receipts and their
 private JSONL streams. Each stream record has `schema_version: 1`,
