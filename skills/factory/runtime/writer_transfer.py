@@ -260,7 +260,6 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path):
         _require(read_original(name, file) == blobs[name]["content"],
                  f"Archival file {str(file)!r} changed during validation. Restore the original file before retrying.")
 
-    _require(COMMIT_RE.fullmatch(target["requirements"]), "Transfer requires an exact requirements commit SHA")
     # Effective limits and judge rounds.
     allowances = factory.task_view(record)["allowances"]
     limits = {purpose: counts["limit"] for purpose, counts in allowances.items()}
@@ -453,8 +452,10 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id):
                  "Destination acceptance digest does not match the source; verify the same acceptance issues")
 
     # Local Git object checks with GIT_NO_LAZY_FETCH=1 (via provisioning_git).
-    for obj_sha, obj_type in [(bundle["candidate"], "commit"), (bundle["requirements"], "commit"),
-                               (bundle["parent"], "commit"), (bundle["tree"], "tree")]:
+    objects = [(bundle["candidate"], "commit"), (bundle["parent"], "commit"), (bundle["tree"], "tree")]
+    if COMMIT_RE.fullmatch(bundle["requirements"]):
+        objects.append((bundle["requirements"], "commit"))
+    for obj_sha, obj_type in objects:
         observed_type = _git_object_type(dest_repo, obj_sha)
         _require(observed_type == obj_type,
                  f"Git object {obj_sha[:12]}... ({obj_type}) not found in destination repository; "
@@ -532,8 +533,7 @@ def validate_origin(origin, path):
             or any(not isinstance(origin[k], str) or not SLUG_RE.fullmatch(origin[k])
                    for k in ("source_host", "destination_host", "source_task", "source_assignment"))
             or origin["source_host"] == origin["destination_host"]
-            or any(not isinstance(origin[k], str) or not COMMIT_RE.fullmatch(origin[k])
-                   for k in ("candidate", "requirements"))
+            or not factory.valid_inputs(origin)
             or not isinstance(origin["used"], dict) or set(origin["used"]) != {"correction", "investigation"}
             or any(type(n) is not int or n < 0 for n in origin["used"].values())
             or type(origin["judge_rounds"]) is not int or not 0 <= origin["judge_rounds"] <= factory.JUDGE_ROUNDS

@@ -95,6 +95,8 @@ def check_provider_export_brief(case, args, replacement):
 
 
 class TransferBase(NativeReviewFixture):
+    named_requirements: str | None = None
+
     def setUp(self):
         super().setUp()
         self.tmp = self.root
@@ -111,7 +113,8 @@ class TransferBase(NativeReviewFixture):
         _git(self.src_repo, "remote", "add", "origin", "https://github.com/fixture/project.git").check_returncode()
         self.src_path = self.path = _admit(self.src_state, "src-task", self.repo)
         self.base = self.head = factory.git_commit(str(self.repo), "HEAD")
-        factory.set_inputs(self.path, candidate=self.base, requirements=self.base)
+        requirements = self.named_requirements or self.base
+        factory.set_inputs(self.path, candidate=self.base, requirements=requirements)
         with patch.object(factory, "Rex", FakeSourceRex):
             writer = self.review("w1", "backend", frozen=False, writer=True, outcome="completed",
                                  purpose="correction", change="Candidate change")
@@ -125,7 +128,7 @@ class TransferBase(NativeReviewFixture):
         _git(self.tmp, "clone", "--quiet", "--no-local", str(self.src_repo), str(self.dst_repo)).check_returncode()
         _git(self.dst_repo, "remote", "set-url", "origin", "https://github.com/fixture/project.git").check_returncode()
         self.dst_path = _admit(self.dst_state, "dst-task", self.dst_repo)
-        factory.set_inputs(self.dst_path, candidate=self.candidate, requirements=self.base)
+        factory.set_inputs(self.dst_path, candidate=self.candidate, requirements=requirements)
         self.path, self.repo, self.head = self.dst_path, self.dst_repo, self.candidate
         dest_rex = patch.object(factory, "Rex", FakeDestRex)
         dest_rex.start()
@@ -164,6 +167,19 @@ class TransferBase(NativeReviewFixture):
     def _dst_record(self):
         with factory.task_lock(self.dst_state, "dst-task") as p:
             return factory.load_task(p)
+
+
+class TestTransferRequirements(TransferBase):
+    named_requirements = "fixture/project#7@2026-11-13T03:37:26Z"
+
+    def test_transfer_preserves_named_requirements(self):
+        out, _, digest = self._do_export()
+        factory.set_inputs(self.dst_path, candidate=self.candidate, requirements="changed")
+        with self.assertRaisesRegex(factory.FactoryError, "requirements do not match"):
+            self._do_import(out, digest)
+        factory.set_inputs(self.dst_path, candidate=self.candidate, requirements=self.named_requirements)
+        record = self._do_import(out, digest)
+        self.assertEqual(record["writer_origin"]["requirements"], self.named_requirements)
 
 
 class TestExport(TransferBase):

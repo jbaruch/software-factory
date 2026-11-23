@@ -152,7 +152,7 @@ python3 -B "$SKILL_DIR/runtime/factory.py" \
 
 Transfer the bundle to the destination host by any secure operator channel. Confirm the SHA-256 of the received file matches the printed value before proceeding.
 
-On the destination host, fetch the exact candidate and requirements into local refs. Use a fresh admission with the original acceptance references.
+On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. Use a fresh admission with the original acceptance references and select the same requirements revision.
 
 ```sh
 # 1. Admit the task (use the exact candidate C and requirements R from the source).
