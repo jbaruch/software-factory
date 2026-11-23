@@ -834,6 +834,27 @@ class ClaudeWorker(unittest.TestCase):
             return asyncio.run(claude_worker.execute(args, spawn=spawn, probe=self.probe, clock=lambda: 1000,
                 timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
 
+    def test_reset_recovers_cancelled_writer_with_starting_receipt(self):
+        args = self.launch_writer()
+        writer = factory.load_task(self.path)["assignments"]["implement"]
+        factory.save(args.receipt, {"state": "starting", "finished_at": 1000, "exit_code": 0})
+        before = args.receipt.read_bytes()
+        (self.repo / "NOTES.md").write_text("Interrupted edit\n")
+
+        with patch.object(factory, "Rex", FakeRex), patch.object(FakeRex, "exits", {}) as exits:
+            with self.assertRaisesRegex(factory.FactoryError, "receipt is unfinished"):
+                factory.reset_writer(self.path, assignment_id="implement")
+            exits[writer["block_id"]] = 0
+            with self.assertRaisesRegex(factory.FactoryError, "receipt is unfinished"):
+                factory.reset_writer(self.path, assignment_id="implement")
+            exits[writer["block_id"]] = 130
+            result = factory.reset_writer(self.path, assignment_id="implement")
+
+        self.assertEqual(args.receipt.read_bytes(), before)
+        self.assertIn("+Interrupted edit", Path(result["patch"]).read_text())
+        self.assertFalse((self.repo / "NOTES.md").exists())
+        factory.check_checkout(str(self.base), str(self.repo), self.candidate)
+
     def test_writer_edits_are_committed_by_the_factory_and_collected(self):
         args = self.launch_writer()
         receipt = self.execute_writer(args)
