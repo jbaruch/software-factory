@@ -2615,26 +2615,13 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
-def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False):
+def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False, delivery=False):
     """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import parse_events, parser, read_events
     from factory_commit import check_commit_receipt
 
-    command = assignment["request"]["command"]
-    if command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]:
-        offset = 4
-    elif command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]:
-        offset = 2  # Historical assignments retain their original launch command.
-    else:
-        raise FactoryError("Assignment is not a native Codex worker; use its provider's result adapter")
-    if "--repo-identity" not in command:
-        raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
-    if "--worktree-git-dir" not in command:
-        raise FactoryError("Native assignment predates worktree identity; inspect its retained artifacts without relaunching it")
-    try:
-        args = parser().parse_args(command[offset:])
-    except SystemExit:
-        raise FactoryError("Saved native command is damaged; restore the original assignment arguments before collection, without relaunching it") from None
+    args = evidence_worker_args("codex", parser(), assignment_id, record, assignment,
+                                replay=delivery and collected)
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
     if not failed_identity and (observe is None or collected) and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
@@ -2644,11 +2631,11 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     if observe is not None and observe()["state"] not in ({"failed", "exited", "lost"} if failed_identity else {"exited", "lost"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
     try:
-        receipt = decode_json(args.receipt.read_text())
+        receipt = decode_json(read_record(args.receipt))
     except FileNotFoundError:
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
     except (OSError, ValueError, UnicodeDecodeError):
-        raise FactoryError(f"Cannot read native receipt {args.receipt.name!r}; inspect or restore the original artifact before collection") from None
+        raise FactoryError("Cannot read native receipt for this assignment; inspect or restore the original artifact before collection") from None
     if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
@@ -2766,21 +2753,14 @@ def collect_codex(path, assignment_id, rex, record, assignment):
     return record
 
 
-def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import claude_worker
     import native_claude
     import review_evidence
-    command, request = assignment["request"]["command"], assignment["request"]
-    if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]:
-        raise FactoryError("Not an original Claude worker; use the original provider collector")
-    options = [part.split("=", 1)[0] for part in command[4:] if part.startswith("--")]
-    if len(options) != len(set(options)) or any("=" in part for part in command[4:] if part.startswith("--")):
-        raise FactoryError("Restore the unambiguous original Claude command before collection")
-    try:
-        args = claude_worker.parser().parse_args(command[4:])
-    except SystemExit:
-        raise FactoryError("Restore original Claude worker arguments before collection") from None
+    args = evidence_worker_args("claude", claude_worker.parser(), assignment_id, record, assignment,
+                                replay=delivery and collected)
+    request = assignment["request"]
     if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
         raise FactoryError("Claude evidence needs strict original collection, never manual result registration")
     if collected and current and not result_current(record, assignment["result"]):
@@ -3077,18 +3057,13 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
 
 
-def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import grok_worker
     import native_grok
 
-    command = assignment["request"]["command"]
-    if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]:
-        raise FactoryError("Assignment is not a Grok worker; use its original provider's result adapter")
-    try:
-        args = grok_worker.parser().parse_args(command[4:])
-    except SystemExit:
-        raise FactoryError("Saved Grok command is damaged; restore its original arguments before collection") from None
+    args = evidence_worker_args("grok", grok_worker.parser(), assignment_id, record, assignment,
+                                replay=delivery and collected)
     from review_evidence import valid_base
     if args.role == "code-review" and args.base is None:
         raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
@@ -3102,7 +3077,7 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
     if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
     try:
-        receipt = decode_json(args.receipt.read_text())
+        receipt = decode_json(read_record(args.receipt))
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Cannot read the original Grok receipt; inspect or restore it without relaunching") from None
     request = assignment["request"]
@@ -3224,19 +3199,15 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
         "--worktree-git-dir", gitdir, "--events", str(prefix) + ".jsonl", "--receipt", str(prefix) + ".json"]
 
 
-def antigravity_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True):
+def antigravity_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import antigravity_worker
     import native_antigravity
     from codex_worker import outcome_schema
     from review_evidence import valid_base
-    command, request = assignment["request"]["command"], assignment["request"]
-    if command[:4] != [sys.executable, "-E", "-s", str(ROOT / "antigravity_worker.py")]:
-        raise FactoryError("Assignment is not an Antigravity worker; use its original provider's result adapter")
-    try:
-        args = antigravity_worker.parser().parse_args(command[4:])
-    except SystemExit:
-        raise FactoryError("Saved Antigravity command is damaged; restore its original arguments before collection") from None
+    args = evidence_worker_args("antigravity", antigravity_worker.parser(), assignment_id, record, assignment,
+                                replay=delivery and collected)
+    request = assignment["request"]
     valid_base(args.base, args.role)
     if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
         raise FactoryError("Antigravity evidence needs strict original collection, never manual result registration")
@@ -3252,7 +3223,7 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
         raise FactoryError("Cannot read the original Antigravity receipt; inspect or restore it without relaunching") from None
     keys = ("report", "conversation_id", "usage", "duration_seconds", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in ((2,) if args.write else (1, 3)) or receipt.get("kind") != "antigravity-execution"
+            or receipt["schema_version"] not in ((2, 4) if args.write else (1, 3)) or receipt.get("kind") != "antigravity-execution"
             # Version 3 readers ran in the disposable checkout named beside their receipt.
             or (receipt["schema_version"] == 3) != ("checkout" in receipt)
             or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
@@ -3327,6 +3298,91 @@ def native_harness(command):
         if command[:4] == [sys.executable, "-E", "-s", worker] or (harness == "codex" and command[:2] == [sys.executable, worker]):
             return harness
     return None
+
+
+def worker_hint(command):
+    """Select a parser for a saved argv. Only the evidence reader can establish its provenance."""
+    index = 3 if command[1:3] == ["-E", "-s"] else 1
+    if len(command) <= index or not Path(command[0]).is_absolute():
+        return None
+    worker = Path(command[index])
+    if worker.is_absolute() and str(worker) == command[index] and ".." not in worker.parts:
+        for harness in NATIVE_HARNESSES:
+            if worker.name == harness + "_worker.py" and (index == 3 or harness == "codex"):
+                return harness
+    return None
+
+
+def parse_saved_args(parser, tail):
+    """Read a saved worker command without argparse printing its values or help."""
+    def invalid(message=None):
+        raise FactoryError("Saved native command is damaged; restore the original assignment arguments "
+                           "before collection, without relaunching it")
+    parser.error = invalid
+    parser.print_help = invalid
+    return parser.parse_args(tail)
+
+
+def evidence_worker_args(harness, parser, assignment_id, record, assignment, *, replay):
+    request = assignment["request"]
+    command = request["command"]
+    historical = native_harness(command) != harness
+    if historical and not (replay and assignment.get("native_collected") is True
+                           and assignment["result"] is not None and worker_hint(command) == harness):
+        if replay:
+            raise FactoryError("Historical result lacks strict original collection; preserve the recorded attempt "
+                               "and ask the task owner to inspect its collection evidence")
+        raise FactoryError(f"{record['task']}/{assignment_id}: not a native {harness.title()} worker of this runtime; "
+                           "preserve the recorded attempt and ask the task owner to inspect its original execution evidence")
+    tail = command[4:] if command[1:3] == ["-E", "-s"] else command[2:]
+    if harness == "codex":
+        if "--repo-identity" not in tail:
+            raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
+        if "--worktree-git-dir" not in tail:
+            raise FactoryError("Native assignment predates worktree identity; inspect its retained artifacts without relaunching it")
+    if historical or harness == "claude":
+        options = [part for part in tail if part.startswith("--")]
+        if len(options) != len(set(options)) or any("=" in part for part in options):
+            raise FactoryError(f"Restore the unambiguous original {harness.title()} command before collection")
+    if historical:
+        parser.allow_abbrev = False
+    args = parse_saved_args(parser, tail)
+    if historical:
+        brief = Path(assignment["brief"])
+        name = record["task"] + "." + assignment_id
+        prefix = brief.parent / (name + "." + harness)
+        bindings = {"--job": record["task"] + "/" + assignment_id, "--repo": "{repository}",
+                    "--repo-identity": "{repository_identity}", "--cwd": "{cwd}", "--brief": "{brief}",
+                    "--brief-sha256": "{brief_sha256}", "--candidate": "{candidate}", "--requirements": "{requirements}",
+                    "--events": str(prefix) + ".jsonl", "--receipt": str(prefix) + ".json", "--seconds": str(args.seconds)}
+        if harness in ("grok", "claude"):
+            bindings["--turns"] = str(args.turns)
+        if (brief.name != name + ".md" or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
+                or any(flag not in tail or tail[tail.index(flag) + 1] != value for flag, value in bindings.items())):
+            raise FactoryError("Restore the original native command bound to this task, assignment and local artifacts")
+        check_commit_message(args.commit_message, write=args.write)
+        if (not args.write and "--sandbox" in tail) or (args.write and "--base" in tail):
+            raise FactoryError("Restore the original native reader or writer arguments before delivery")
+        coordination = {"--decision-store", "--decision", "--question"}.intersection(tail)
+        if coordination and (len(coordination) != 3 or not args.decision_store.is_absolute()):
+            raise FactoryError("Restore the original native coordination arguments before delivery")
+        try:
+            instructions = read_record(brief, private=True)
+        except (OSError, UnicodeError):
+            raise FactoryError("Restore the original frozen native assignment brief before delivery") from None
+        if hashlib.sha256(instructions.encode()).hexdigest() != request["instructions_sha256"]:
+            raise FactoryError("Restore the original frozen native assignment brief before delivery")
+        inputs = request["inputs"]
+        if carries_judgment(args):
+            import release_evidence
+            bound = argparse.Namespace(**vars(args))
+            bound.candidate, bound.requirements = inputs["candidate"], inputs["requirements"]
+            release_evidence.check_brief(bound, instructions)
+        elif harness in ("grok", "antigravity") and not args.write:
+            import review_evidence
+            review_evidence.validate(instructions, candidate=inputs["candidate"], requirements=inputs["requirements"],
+                                     base=args.base, role=args.role)
+    return args
 
 
 JUDGMENT_FLAGS = ("--release-evidence", "--release-evidence-digest", "--delivery-evidence", "--delivery-evidence-digest")

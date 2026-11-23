@@ -126,7 +126,7 @@ def parse_events(events, coordination=None) -> dict:
 def read_events(path):
     """Read versioned local records without changing the original native lines."""
     try:
-        lines = path.read_text().splitlines()
+        lines = factory.read_record(path).splitlines()
     except (OSError, UnicodeDecodeError):
         raise WorkerError("Cannot read native events; restore the original stream and its access before collection") from None
     events = []

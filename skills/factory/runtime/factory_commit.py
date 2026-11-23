@@ -696,7 +696,7 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
 
 
 def check_commit_receipt(receipt, args, repository, *, historical=False):
-    """Version 4 has no factory commit; version 5 declares its nullable intent."""
+    """Check commit evidence, including Codex receipts that predate factory commits."""
     if factory.repository_identity(repository) != receipt["repository_identity"]:
         raise factory.FactoryError("Admitted repository identity changed; restore its original repository marker before validating provenance")
     if not historical and (factory.repository_identity(str(args.cwd)) != receipt["repository_identity"]
@@ -712,7 +712,7 @@ def check_commit_receipt(receipt, args, repository, *, historical=False):
     if tree_object.returncode:
         raise factory.FactoryError("Restore the original candidate tree objects before validating provenance")
     commit = receipt.get("commit")
-    if receipt["schema_version"] == 4:
+    if receipt["kind"] == "codex-execution" and receipt["schema_version"] == 4:
         if "commit" in receipt or args.commit_message is not None:
             raise factory.FactoryError("Legacy receipt cannot supply a factory commit; inspect the original attempt without rewriting or relaunching it")
         return

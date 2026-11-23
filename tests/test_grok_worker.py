@@ -669,6 +669,8 @@ class GrokApprovals(unittest.TestCase):
     def test_collected_grok_approval_counts_beside_the_codex_release(self):
         selected = integration.approvals(self.record, "release", ["grok-qa"])
         self.assertEqual(selected["grok-qa"]["context"], self.REVIEW_SESSION)
+        with patch.object(factory, "ROOT", self.fixture.root / "another-install"):
+            self.assertEqual(integration.approvals(self.record, "release", ["grok-qa"]), selected)
 
     def test_grok_writer_contributes_and_cannot_approve_its_own_work(self):
         writer_session = "00000000-0000-0000-0000-00000000000b"
@@ -680,7 +682,7 @@ class GrokApprovals(unittest.TestCase):
                              writer_session)
             self.assertEqual(integration.approvals(record, "release", ["grok-qa"])["grok-qa"]["context"], self.REVIEW_SESSION)
             # Its commit moved past the task's inputs, so it is refused before its role is even weighed.
-            with self.assertRaisesRegex(factory.FactoryError, "read-only approved|current original native result"):
+            with self.assertRaisesRegex(factory.FactoryError, r"deliver/grok-writer: stale result \(candidate changed\)"):
                 integration.approvals(record, "release", ["grok-writer"])
 
     def test_grok_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):

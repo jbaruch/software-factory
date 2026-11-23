@@ -22,7 +22,7 @@ from codex_worker import NATIVE_LINE_LIMIT, cancelled, outcome_schema, stop_chil
 
 def read_events(path):
     try:
-        records = path.read_text().splitlines()
+        records = factory.read_record(path).splitlines()
         events = []
         for line in records:
             record = factory.decode_json(line)

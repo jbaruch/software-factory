@@ -1224,6 +1224,8 @@ class ClaudeApprovals(unittest.TestCase):
         selected=integration.approvals(self.record,"release",["claude-qa"])
         self.assertEqual(selected["claude-qa"]["context"],SESSION)
         self.assertEqual(selected["release"]["context"],"context-release")
+        with patch.object(factory, "ROOT", self.fixture.root / "another-install"):
+            self.assertEqual(integration.approvals(self.record, "release", ["claude-qa"]), selected)
 
     def test_context_must_be_independent_of_codex_review(self):
         f=self.fixture
@@ -1242,7 +1244,7 @@ class ClaudeApprovals(unittest.TestCase):
         from argparse import Namespace
         def judged(role):
             return patch.object(integration, "collected_native", return_value=(
-                Namespace(role=role, write=False, claude=Path(sys.executable)), {}, dict(report=dict(outcome="approved"))))
+                "claude", Namespace(role=role, write=False, claude=Path(sys.executable)), {}, dict(report=dict(outcome="approved"))))
         with patch.object(integration.evidence, "delivered_receipt", return_value={}):
             with judged("qa"), self.assertRaisesRegex(factory.FactoryError, "native release"):
                 integration.delivered_accepted(self.fixture.path, "release", "claude-qa")
