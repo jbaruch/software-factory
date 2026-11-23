@@ -1,5 +1,7 @@
 # Delivery
 
+Use this workflow when the task requires a recorded factory delivery.
+
 The line's foreman opens the PR itself: it pushes the task's selected candidate to the
 provisioned worktree's branch and runs `gh pr create`, so the release judgment runs before
 anything can merge (#149); the release skill runs end to end, merge included. The release
@@ -26,7 +28,7 @@ read-only `release` assignment, use any native start command (`codex-start`,
 `--release-scripts` names coding-policy's release skill as ACR
 (`.codex/skills/acr__jbaruch__coding-policy__release`) or Tessl
 (`.tessl/plugins/jbaruch/coding-policy/skills/release`) installs it. The
-coordinator picks the strongest model available on any harness; the release role
+coordinator selects an eligible model suited to the judgment. The release role
 runs at that model's maximum effort. Launch refuses less for Claude and
 Antigravity (`max`, so not an Antigravity model that refuses `--effort`) and for
 Codex (the top effort its fresh catalog lists). Grok publishes its efforts only to
