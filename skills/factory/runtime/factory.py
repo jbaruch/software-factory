@@ -1183,7 +1183,7 @@ def reset_writer(path, *, assignment_id):
     The failed receipt stays failed. A writer that failed after editing (a decoder refusal, a
     timeout, a refused commit) leaves the task's provisioned worktree dirty, and every later
     assignment refuses a dirty checkout. The patch keeps the work for a new writer to cite.
-    A writer lost with its host, its receipt never finished, resets the same way.
+    Rex can also confirm failure or loss when a writer's receipt never finished.
     Caller holds the owner's execution and task locks.
     """
     record = load_task(path)
@@ -1201,10 +1201,9 @@ def reset_writer(path, *, assignment_id):
     except (OSError, ValueError, UnicodeError, AttributeError):
         raise FactoryError("Cannot read the writer's original receipt; restore it before resetting") from None
     if state == "starting":
-        # A worker that died with its host never finishes its receipt (#133); Rex reporting the attempt
-        # lost is the proof it stopped.
-        if status(connect(record), record, assignment)["state"] != "lost":
-            raise FactoryError("This attempt's receipt is unfinished and Rex does not report it lost; "
+        # A restart or interrupt can leave the receipt at starting (#133, #260).
+        if assignment["state"] != "launched" or status(connect(record), record, assignment)["state"] not in {"lost", "failed"}:
+            raise FactoryError("This attempt's receipt is unfinished and Rex does not report it lost or failed; "
                                "let it finish, or cancel it, before resetting")
     elif state != "failed":
         raise FactoryError("Reset only an assignment whose original receipt failed; collect or inspect any other attempt")
