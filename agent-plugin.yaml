@@ -5,11 +5,10 @@ description: Entry point and role catalog for a script-and-Jev coordinated Rex f
 source:
   repository: https://github.com/jbaruch/software-factory
 artifacts:
-  rules:
-    - id: factory-process
-      path: rules/factory-process.md
-      activation:
-        mode: always
   skills:
     - id: factory
       path: skills/factory
+  hooks:
+    - id: foreman-rex-stop
+      event: stop
+      path: hooks/foreman-rex-stop.py

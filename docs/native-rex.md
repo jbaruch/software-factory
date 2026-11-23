@@ -26,6 +26,18 @@ State defaults to the per-user `~/.local/state/software-factory` (or `$XDG_STATE
 
 Repeat `start` with the same task, assignment ID and inputs to reconnect to the original pane. Changed inputs require a new explicit assignment ID. [Admitted tasks](task-state.md) require an explicit attempt purpose and enforce cumulative correction/investigation limits before new launches. They bind new assignments and reported results to selected revisions and check any `--after` dependencies before launch. Direct `start` without admission retains the original explicit-launch behavior with unknown task allowances. Neither mode selects roles or authorizes additional scope.
 
+## Foreman Stop reminder
+
+From the local Rex pane selected to coordinate the line, launch the agent in an ACR-realized project. Use the line's existing local Unix endpoint for `REX_SERVER` and keep the pane opt-in on the agent command.
+
+```sh
+REX_SERVER='unix:///path/to/server.sock' SOFTWARE_FACTORY_FOREMAN_BLOCK="$REX_BLOCK" '/absolute/path/to/agent'
+```
+
+In Codex, approve the realized hook in `/hooks`. The hook reads Rex metadata on Stop and stays quiet on the follow-up Stop.
+
+When reminded, follow the [Rex helpers procedure](../skills/factory/references/commands.md#rex-helpers) to inspect, capture and close only finished helpers you own. Worker tabs stay under factory collection.
+
 ## Recovery and status meanings
 
 Before launch, save the pending assignment. After Rex returns, save its session, window and block IDs. If the controller stops or the CLI times out between those writes, `status` or repeated `start` searches the exact unique session/window marker and records the existing pane. A pending assignment prevents another launch on that task until reconciliation.
@@ -35,6 +47,8 @@ If no unique matching pane is visible, the launch remains uncertain and is not r
 When the operator knows Rex rejected the request, for example with a CLI usage error after a Rex update, `factory.py abandon --task TASK --id ID --reason TEXT` records that decision instead of deleting state. It refuses while a pane carrying the launch marker exists in the line's session; reconcile it with `status`. The abandoned assignment keeps its history and allowance use, reports `abandoned`, never launches again and blocks dependents. Launch the work again under a new ID. If a pane with that marker appears later anyway, close it by hand.
 
 `factory.py cancel --task TASK --id ID` stops a running native assignment, for example one launched on a brief known to be wrong. It sends Ctrl-C to the assignment's pane. The worker's `asyncio.run` turns that SIGINT into cancelling its execution, and the terminal delivers the same SIGINT to the native child. The worker then saves its receipt as `failed` with a cancel error, stops the child as it does at a timeout, and exits. Inspect it with `status` or `capture`, `reset` a writer's checkout as for any failed attempt, and launch the replacement under a new ID. It refuses a pending, finished or non-native assignment. A Ctrl-C typed into the pane by hand records the same failure.
+
+If an interruption leaves the receipt at `starting`, `reset` can still save the writer's edits and restore its checkout when Rex reports the original attempt `failed` or `lost`. The receipt remains as recorded.
 
 Operator tab changes never block a task. Splitting, renaming, moving or closing factory panes and adding your own tabs to a factory session are tolerated, because each command checks only the pane it acts on. A pane or session closed outside the factory makes that assignment `lost`; other assignments are unaffected. A window labeled like this task's factory marker (`<task>:<catalog role>-<assignment>-<8 hex>`, or `<catalog role>-<assignment>-<8 hex>` in a task's own earlier session) that is missing from task history still refuses as lost task history. Other tasks' tabs in the shared session and any other operator tab name, such as `notes-20261108`, are ignored.
 

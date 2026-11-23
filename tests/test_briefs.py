@@ -18,6 +18,18 @@ class Briefs(unittest.TestCase):
         self.assertIn("with nothing to change, report blocked", factory.brief("backend", "Change it", designs=True))
         self.assertNotIn("report blocked", factory.brief("qa", "Check it"))
 
+    def test_independent_verifiers_get_source_verdict_criteria(self):
+        for role in sorted(factory.VERIFIER_ROLES):
+            with self.subTest(role=role):
+                brief = factory.brief(role, "Verify the candidate")
+                self.assertIn("Return findings for a concrete blocking source defect", brief)
+                self.assertIn("Return blocked when required pre-merge evidence is unavailable", brief)
+                self.assertIn("Return approved when the source criteria pass", brief)
+                self.assertIn("after merge or deployment as artifacts alongside the source approval", brief)
+        for role, writes in (("test-automation", True), ("release", False)):
+            with self.subTest(role=role):
+                self.assertNotIn("Judge the assigned source criteria", factory.brief(role, "Work", designs=writes))
+
 
 class TaskSchema(unittest.TestCase):
     """Version 11 adds the optional `acceptance` capture (review of #152)."""

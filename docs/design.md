@@ -24,16 +24,11 @@ One repository contains the application and its ACR package. The application shi
 
 The application will own scheduling, provider adapters, Rex integration, durable task state, measurement and the dashboard. Worker hooks will emit bounded lifecycle events after their native harness semantics are verified. Native Claude Code and Codex ACR realization does not establish Grok or Antigravity compatibility. Those harnesses need explicit instruction delivery and lifecycle conformance tests. ACR is not the process supervisor or model broker.
 
-The plugin ships one always-on rule, `rules/factory-process.md`, and no unimplemented hook stubs. It started with no global rules. That failed on 2026-11-09 (#46): asked to take over a nanoclaw backlog, a coordinator matched the request to the single-writer recipe, never opened the ready runner or the delivery steps, and hand-committed, hand-rebased and hand-opened PRs with no factory verification. The rule tells every agent in an installing project that the factory is the delivery process and points it at the skill's coordinator step; specialists the factory launches ignore it. Skills describe a discipline's work. Coordination algorithms live in code and versioned Jev questions, not a growing prose choreography interpreted on every turn.
+Projects retain their own development and release process. Use the factory skill when the operator or project requests a factory operation. Select the smallest operation that finishes the job. Additional assignments and judgments need a concrete contribution to the outcome. Coordination algorithms live in code and versioned Jev questions.
 
-## Admission and normal delivery
+## Coordinating factory assignments
 
-1. Establish the authorized goal, acceptance evidence, priority, affected repository, effects and budget. Clarify only information necessary to proceed.
-2. Decompose useful independent deliverables and select roles. A known task recipe can execute directly; unfamiliar decomposition remains model work. Jev can select a recipe or identify missing coverage, not invent an arbitrary project plan from a closed choice.
-3. Create isolated writer worktrees and explicit interface/dependency ownership. Review and testing get the exact candidate commit and relevant requirements. Concurrent writers never share one checkout.
-4. Start eligible ready assignments within work-in-progress and provider capacity. Reserve resources for verification, urgent work and recovery. Idle capacity without ready useful work stays idle.
-5. Route specialist findings to implementation directly. Within-scope routine corrections consume the task's cumulative allowance; changing worker identity does not reset it. Verify the changed candidate independently.
-6. After the release judgment, merge through the repository's own release skill, confirm the merge against what the judgment approved, and satisfy the project's actual review, test, publication and acceptance requirements. Revalidate only evidence affected by changed inputs. Release never substitutes a green job or model claim for the required actual outcome.
+Use the requested goal and repository requirements to select work. Give assignments the relevant inputs and exact candidate. Isolate concurrent writes and honor existing work and provider limits. Route a concrete finding back to implementation and repeat only affected verification. Use the repository's regular checks and review. Use the [factory delivery record](integration.md) when the task requires that evidence.
 
 No foreman turn is required to recognize that a dependency completed or to launch an already authorized next assignment. Dynamic scope decisions and unresolved technical conflicts still require reasoning.
 
