@@ -2,7 +2,7 @@
 
 Use this workflow for an explicitly requested or required factory delivery record. Follow the repository's regular release process for other work.
 
-Delivery starts after independent verifiers approve the task's current candidate. `SKILL_DIR` is the `factory` skill's directory, as in the skill. The factory never pushes; the line's foreman pushes the PR's branch in step 1, and specialists have no push or merge authority. `RELEASE-SKILL` is coding-policy's release skill where ACR or Tessl installed it: `.codex/skills/acr__jbaruch__coding-policy__release` or `.tessl/plugins/jbaruch/coding-policy/skills/release`. The full contract is in [docs/integration.md](https://github.com/jbaruch/software-factory/blob/main/docs/integration.md).
+Delivery starts after independent verifiers approve the task's current candidate. `SKILL_DIR` is the absolute realized `factory` skill directory. The factory never pushes; the line's foreman pushes the PR's branch in step 1, and specialists have no push or merge authority. `RELEASE-SKILL` is coding-policy's release skill where ACR or Tessl installed it: `.codex/skills/acr__jbaruch__coding-policy__release` or `.tessl/plugins/jbaruch/coding-policy/skills/release`. The full contract is in [docs/integration.md](https://github.com/jbaruch/software-factory/blob/main/docs/integration.md).
 
 1. Open the PR from the task's provisioned worktree. This step only opens it; the release skill runs end to end, merge included, so it comes after the release judgment:
 

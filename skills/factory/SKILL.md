@@ -17,7 +17,9 @@ Use the [ready-plan contract](references/ready-plan.md) for inputs, provider rou
 
 ## Step 2 — Launch one assignment
 
-Use the matching native start command in the [command reference](references/commands.md). Supply the task, role, exact inputs, checkout, local Rex endpoint, and eligible model. Collect the result when requested. Finish here.
+Reuse an admitted task and its selected inputs. For a new task, use `admit` and `inputs` from the [command reference](references/commands.md).
+
+Use the matching native start command from that reference. Supply the task, role, exact inputs, checkout, local Rex endpoint, and eligible model. Collect the result when requested. Finish here.
 
 ## Step 3 — Inspect a task
 
