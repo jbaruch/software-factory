@@ -142,7 +142,7 @@ class AcceptanceEvidence(unittest.TestCase):
         listing = f'    "{self.other_keychain}"\n    "{self.login_keychain}"\n'
         return [self.security_result(44), self.security_result(0, listing)]
 
-    def respond(self, updated_at="2026-11-13T03:37:26Z", *, edited_at=None, renamed_at=None, answer=None):
+    def respond(self, updated_at="2026-11-13T03:37:26Z", *, edited_at=None, renamed_at=None, answer=None, comment=None):
         """GitHub's GraphQL answer for the acceptance issue, created 2026-11-12 and changed as the arguments say."""
         class Response(io.BytesIO):
             def __enter__(self):
@@ -150,6 +150,10 @@ class AcceptanceEvidence(unittest.TestCase):
             def __exit__(self, *exc):
                 return False
         def urlopen(request, timeout):
+            if request.data is None:
+                self.assertIsNotNone(comment, "only the explicitly selected comment may be fetched")
+                self.fetches.append((request.full_url, request.get_header("Authorization"), None))
+                return Response(json.dumps(comment).encode())
             self.fetches.append((request.full_url, request.get_header("Authorization"), json.loads(request.data)["variables"]))
             issue = dict(title="Cap context at 200K", body="Acceptance: first call under 200K tokens.",
                          createdAt="2026-11-12T06:07:07Z", updatedAt=updated_at, lastEditedAt=edited_at,
@@ -161,7 +165,7 @@ class AcceptanceEvidence(unittest.TestCase):
         with patch.object(factory, "read_token", return_value=token), self.respond(updated_at, **changes):
             return factory.capture_acceptance(self.admission, self.requirements)
 
-    def record(self, acceptance, requirements=None):
+    def record(self, acceptance, requirements=None) -> dict[str, Any]:
         return dict(task="task", admission=self.admission,
                     inputs=dict(candidate="a" * 40, requirements=requirements or self.requirements),
                     acceptance={self.requirements: acceptance})
@@ -183,6 +187,50 @@ class AcceptanceEvidence(unittest.TestCase):
         # Review of #152: a reader launched before inputs were selected must not crash the launch.
         with patch.object(factory, "native_harness", return_value="codex"):
             self.assertEqual(factory.rendered_acceptance(dict(admission=self.admission, inputs=None), self.reader, "qa"), "")
+
+    def test_selected_owner_decision_is_frozen_in_its_requirements_revision(self):
+        permalink = "https://github.com/jbaruch/nanoclaw/issues/1368#issuecomment-7"
+        api = "https://api.github.com/repos/jbaruch/nanoclaw/issues"
+        comment = dict(id=7, html_url=permalink, issue_url=f"{api}/1368", author_association="OWNER",
+                       user=dict(id=12345, login="jbaruch"), updated_at="2026-11-14T00:00:00Z",
+                       body="Use 250K tokens for the initial call.")
+        prior = self.capture()
+        record = self.record(prior)
+        original_approval = dict(inputs=dict(record["inputs"]), candidate=record["inputs"]["candidate"], outcome="approved")
+        self.assertTrue(factory.result_current(record, original_approval))
+        revision = "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z"
+        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond(comment=comment):
+            with self.assertRaisesRegex(factory.FactoryError, "select a new revision"):
+                factory.inputs_acceptance(record, self.requirements, owner_decision=permalink)
+            with self.assertRaisesRegex(factory.FactoryError, "changed at"):
+                factory.capture_acceptance(self.admission, self.requirements, owner_decision=permalink)
+            fresh = factory.inputs_acceptance(record, revision, owner_decision=permalink)
+        self.assertEqual(self.fetches[-1], (f"{api}/comments/7", "Bearer github_pat_keychainonly", None))
+        assert fresh is not None
+        record["acceptance"][revision] = fresh
+        record["inputs"]["requirements"] = revision
+        self.assertFalse(factory.result_current(record, original_approval))
+        with patch.object(factory, "read_token", side_effect=AssertionError("frozen revisions are offline")):
+            self.assertIsNone(factory.inputs_acceptance(record, revision, owner_decision=permalink))
+            with self.assertRaisesRegex(factory.FactoryError, "select a new revision"):
+                factory.inputs_acceptance(record, revision, owner_decision=permalink.removesuffix("7") + "8")
+            brief = factory.rendered_acceptance(record, self.reader, "qa")
+        for excerpt in (permalink, "jbaruch (GitHub account 12345)", comment["updated_at"], comment["body"], "200K tokens"):
+            self.assertIn(excerpt, brief)
+        self.assertEqual(record["acceptance"][self.requirements], prior)
+
+    def test_unrelated_or_nonowner_comments_cannot_be_selected(self):
+        permalink = "https://github.com/jbaruch/nanoclaw/issues/1368#issuecomment-7"
+        api = "https://api.github.com/repos/jbaruch/nanoclaw/issues"
+        comment = dict(id=7, html_url=permalink, issue_url=f"{api}/1368", author_association="OWNER",
+                       user=dict(id=12345, login="jbaruch"), updated_at="2026-11-13T00:00:00Z", body="Decision.")
+        with patch.object(factory, "read_token", side_effect=AssertionError("check admission before network")):
+            with self.assertRaisesRegex(factory.FactoryError, "one of this task's admitted issues"):
+                factory.capture_acceptance(self.admission, self.requirements, owner_decision=permalink.replace("1368", "1369"))
+        for changes in ({"author_association": "MEMBER"}, {"issue_url": f"{api}/1369"}, {"id": 8}):
+            with (self.subTest(changes=changes), patch.object(factory, "read_token", return_value="github_pat_keychainonly"),
+                  self.respond(comment=comment | changes), self.assertRaisesRegex(factory.FactoryError, "check its permalink, authorship and access")):
+                factory.capture_acceptance(self.admission, self.requirements, owner_decision=permalink)
 
     def test_a_redirect_is_never_followed_with_the_token(self):
         import urllib.error

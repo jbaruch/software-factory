@@ -450,6 +450,14 @@ change the identifier when the relevant requirements change. Admission defaults
 the identifier to its initial Git commit. Set it explicitly before launch for
 requirements versioned elsewhere. The runtime does not monitor external documents.
 
+To include a later GitHub owner decision, select a new requirements revision with
+`inputs --owner-decision 'https://github.com/OWNER/REPO/issues/123#issuecomment-456'`.
+The issue must be in the task's admission. The capture includes the selected comment,
+GitHub author identity, edit time and original body alongside the issue. Reviews use
+the captured decision to interpret acceptance within the authorized task. Previous
+captures and reviews stay bound to their original revision. For an `OWNER/REPO#123@TIME`
+revision, use a time that includes the selected comment's edit time.
+
 Each new admitted launch puts the selected inputs into its request and role brief.
 The brief also includes the admitted task goal and original acceptance references.
 Reconnection uses the existing instruction hash and brief; a role/template change
