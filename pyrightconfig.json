@@ -1,5 +1,6 @@
 {
   "include": [
+    "hooks",
     "skills/factory/runtime",
     "tests",
     "scripts"

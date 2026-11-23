@@ -13,3 +13,7 @@ artifacts:
   skills:
     - id: factory
       path: skills/factory
+  hooks:
+    - id: foreman-rex-stop
+      event: stop
+      path: hooks/foreman-rex-stop.py
