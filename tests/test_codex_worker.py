@@ -417,6 +417,33 @@ class NativeResults(unittest.TestCase):
                 commit.assert_not_called()
                 self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
+    def test_nonzero_exit_uses_the_native_terminal_failure(self):
+        refusal = "This content was flagged for possible cybersecurity risk. Provider guidance follows."
+        rollout_notice = "failed to record rollout items: thread thread-fixture not found"
+        cases = (
+            (refusal, rollout_notice, "Native Codex reported a provider safety refusal"),
+            ("thread not found: another-thread", rollout_notice, "Native Codex exited unsuccessfully"),
+            (None, rollout_notice, "Native Codex exited unsuccessfully"),
+        )
+        for index, (terminal, notice, expected) in enumerate(cases):
+            with self.subTest(terminal=terminal):
+                self.args.events = self.root / f"failure-{index}.jsonl"
+                self.args.receipt = self.root / f"failure-{index}.json"
+                payload = events()[:-1]  # A partial specialist report still carries no verdict.
+                if notice is not None:
+                    payload.append(dict(type="error", message=notice))
+                if terminal is not None:
+                    payload.append(dict(type="turn.failed", error=dict(message=terminal)))
+                self.process = FakeProcess(payload, exit_code=1)
+                receipt = self.execute()
+                self.assertIn(expected, receipt["error"])
+                self.assertNotIn("Provider guidance follows", receipt["error"])
+                self.assertEqual(receipt["state"], "failed")
+                self.assertEqual(receipt["inputs"], dict(candidate=self.candidate, requirements="requirements-1"))
+                self.assertEqual(receipt["thread_id"], "thread-fixture")
+                self.assertIsNone(receipt["report"])
+                self.assertEqual(worker.read_events(self.args.events), payload)
+
     def test_unconfirmed_termination_retains_directory_and_primary_failure(self):
         self.writer()
         self.spawn = NativeResults.spawn.__get__(self)
