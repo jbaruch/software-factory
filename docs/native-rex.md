@@ -26,6 +26,18 @@ State defaults to the per-user `~/.local/state/software-factory` (or `$XDG_STATE
 
 Repeat `start` with the same task, assignment ID and inputs to reconnect to the original pane. Changed inputs require a new explicit assignment ID. [Admitted tasks](task-state.md) require an explicit attempt purpose and enforce cumulative correction/investigation limits before new launches. They bind new assignments and reported results to selected revisions and check any `--after` dependencies before launch. Direct `start` without admission retains the original explicit-launch behavior with unknown task allowances. Neither mode selects roles or authorizes additional scope.
 
+## Foreman Stop reminder
+
+From the local Rex pane selected to coordinate the line, launch the agent in an ACR-realized project. Use the line's existing local Unix endpoint for `REX_SERVER` and keep the pane opt-in on the agent command.
+
+```sh
+REX_SERVER='unix:///path/to/server.sock' SOFTWARE_FACTORY_FOREMAN_BLOCK="$REX_BLOCK" '/absolute/path/to/agent'
+```
+
+In Codex, approve the realized hook in `/hooks`. The hook reads Rex metadata on Stop and stays quiet on the follow-up Stop.
+
+When reminded, follow the [Rex helpers procedure](../skills/factory/references/commands.md#rex-helpers) to inspect, capture and close only finished helpers you own. Worker tabs stay under factory collection.
+
 ## Recovery and status meanings
 
 Before launch, save the pending assignment. After Rex returns, save its session, window and block IDs. If the controller stops or the CLI times out between those writes, `status` or repeated `start` searches the exact unique session/window marker and records the existing pane. A pending assignment prevents another launch on that task until reconciliation.

@@ -47,6 +47,8 @@ The Python checks use the standard library. `acr` is a separate prerequisite for
 | --- | --- |
 | `factory-process` | Always on: the factory is this project's delivery process; coordinate through the skill's Step 1 |
 
+- `foreman-rex-stop` prompts the foreman at Stop to triage finished Rex helpers in the [opted-in Rex pane](docs/native-rex.md#foreman-stop-reminder).
+
 Install the package with:
 
 ```sh
@@ -54,8 +56,8 @@ acr install github:jbaruch/software-factory
 acr realize
 ```
 
-The root `agent-plugin.yaml` declares the agent-facing rule and skill. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); releases are published there. ACR validation proves source structure, not publication, real-agent operation or live model access.
+The root `agent-plugin.yaml` declares the agent-facing rule, skill and Stop hook. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); releases are published there. ACR validation proves source structure, not publication, real-agent operation or live model access.
 
-The application, dashboard, catalogs and evaluation suite remain application source. ACR does not automatically install an application daemon or undeclared source files. Runtime packaging and native harness integration are separate implementation slices. No hooks are declared until there are real, tested entrypoints to wire.
+The application, dashboard, catalogs and evaluation suite remain application source. ACR does not automatically install an application daemon or undeclared source files. Runtime packaging and native harness integration are separate implementation slices.
 
 Specialists load only their assigned skill and relevant task artifacts. Do not preload this README, the entire design or every role into every worker.
