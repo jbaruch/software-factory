@@ -119,7 +119,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `result` | Records a non-native assignment's result | Task view | `record_result()` |
 | `start`, `codex-start`, `claude-start`, `grok-start`, `antigravity-start` | Writes the brief, records the assignment and opens its Rex tab; an existing ID reconnects | Status object | `launch()` |
 | `status` | Reconciles a pending launch | Status object | `status()` |
-| `capture` | None | `{task, id, text}`, the pane's output | `captured()` |
+| `capture` | None | `{task, id, text}`, the pane's output, with optional `reason` for a recognized failure in a tidied Codex tab | `captured()` |
 | `codex-collect`, `claude-collect`, `grok-collect`, `antigravity-collect` | Records the result from the worker's receipt and closes its tab | Task view; exit 1 with it when the tab didn't close (run `tidy`) | `collector()` |
 | `tidy` | Saves each finished tab's output, when it has any (a lost attempt has none), and closes it | `{TASK: {closed, running, session_closed}}`, or `{TASK: {error}}`; exit 1 when any task failed | `tidy_tasks()` |
 | `cancel` | Sends Ctrl-C to the pane; the worker records the attempt failed | `{cancelled, interrupted, next}` | `cancel_assignment()` |

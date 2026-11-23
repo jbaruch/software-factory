@@ -147,6 +147,33 @@ def read_events(path, content=None):
     return events
 
 
+CODEX_EXIT_FAILURE = "Native Codex exited unsuccessfully; inspect the retained events and Rex pane"
+CODEX_SAFETY_REFUSAL = "Native Codex reported a provider safety refusal; inspect the retained native error"
+
+
+def exit_diagnostic(events):
+    # A rollout log can follow a safety refusal. Only the native terminal event
+    # establishes the reported cause, and its raw text stays in the private stream.
+    failure = next((event.get("error") for event in reversed(events) if event.get("type") == "turn.failed"), None)
+    message = failure.get("message") if isinstance(failure, dict) else None
+    if isinstance(message, str) and message.startswith("This content was flagged for possible cybersecurity risk."):
+        return CODEX_SAFETY_REFUSAL
+    return CODEX_EXIT_FAILURE
+
+
+def capture_diagnostic(output):
+    # A rejected turn/start RPC is emitted by the CLI on stderr before it can
+    # emit turn.failed. Only the final CLI error gets a startup diagnosis.
+    lines = output.rstrip().rsplit("\n", 2)
+    if lines[-1] == "codex-worker: " + CODEX_SAFETY_REFUSAL:
+        return CODEX_SAFETY_REFUSAL
+    if (len(lines) >= 2 and lines[-1] == "codex-worker: " + CODEX_EXIT_FAILURE
+            and re.fullmatch(r"Error: turn/start: turn/start failed: thread not found: "
+                             r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12} \(code -32600\)", lines[-2])):
+        return "Native Codex reported a missing session at turn startup; inspect the retained capture before replacing the attempt"
+    return None
+
+
 # factory.py cancel sends Ctrl-C to the pane. asyncio.run turns that SIGINT into cancelling the worker's
 # execution, and the terminal delivers the same SIGINT to the native child.
 CANCELLED = "Cancelled by an interrupt in its pane (factory.py cancel or Ctrl-C); inspect the retained attempt without retrying"
@@ -407,7 +434,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
                 os.fsync(stream.fileno())
             if receipt["exit_code"] != 0:
-                raise factory.FactoryError("Native Codex exited unsuccessfully; inspect the retained events and Rex pane")
+                raise factory.FactoryError(exit_diagnostic(events))
             receipt.update(parse_events(events, coordination))
             factory.check_tool_evidence("codex", events, args, coordination)
             if not args.write:

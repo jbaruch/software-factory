@@ -4017,7 +4017,15 @@ def main(argv=None):
                 print(json.dumps(task_view(record), indent=2))
             elif args.action == "capture":
                 # One JSON document like every other command; the pane text is a field (#149).
-                print(json.dumps(dict(task=args.task, id=args.id, text=captured(rex, record, assignment)), indent=2))
+                output = captured(rex, record, assignment)
+                capture = dict(task=args.task, id=args.id, text=output)
+                closed = assignment.get("closed")
+                if closed is not None and closed["state"] == "failed" and native_harness(assignment["request"]["command"]) == "codex":
+                    from codex_worker import capture_diagnostic
+                    reason = capture_diagnostic(output)
+                    if reason is not None:
+                        capture["reason"] = reason
+                print(json.dumps(capture, indent=2))
             else:
                 print(json.dumps(status(rex, record, assignment), indent=2))
     except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:

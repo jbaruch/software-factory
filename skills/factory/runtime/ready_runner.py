@@ -29,8 +29,8 @@ CAPACITY_MAX_AGE = 60
 PROBE_TIMEOUT = 30
 # A coordinator's show or status holds a task lock briefly; a busy scan waits that out instead of idling the line (#203).
 LOCK_PATIENCE = 30
-FAILED_NEXT = ("The worker failed and its receipt can't be collected; read why with status or capture, "
-               "then relaunch the job under a new ID")
+FAILED_NEXT = ("The worker failed and its receipt can't be collected; inspect capture and the retained receipt. "
+               "Reconcile any unknown effects before deciding whether to launch a replacement under a new ID.")
 RESERVED_ROLES = {"qa", "code-review", "investigator", "judge", "standby-reasoner"}
 JOB_FIELDS = {"task", "id", "role", "goal", "cwd", "candidate", "requirements",
               "model", "effort", "seconds", "purpose", "write", "commit_message", "after"}
