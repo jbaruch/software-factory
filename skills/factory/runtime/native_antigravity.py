@@ -32,7 +32,7 @@ class ExecutionError(Exception):
 CLOSED_STEPS = ("DONE", "ERROR")  # States that end a step; ERROR only ends a tool step.
 
 
-def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
+def parse_execution(events, *, expected_model, expected_cwd, expected_schema, failed_identity=False):
     """Decode original 1.5.3 JSON lines only; callers retain provenance and exit.
 
     No I/O, execution admission, process success or acceptance is established.
@@ -148,6 +148,10 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
             elif not user_turns:
                 refuse("has telemetry before the supplied user turn")
             step_index, step_state, step_type = index, state, category
+        elif failed_identity and payload.get("status") == "ERROR":
+            if not isinstance(payload.get("error"), str) or not payload["error"].strip():
+                refuse("failed result has no original error")
+            final = payload
         else:
             if (payload.get("status") != "SUCCESS" or type(payload.get("num_turns")) is not int
                     or not user_turns or payload["num_turns"] != user_turns
@@ -172,6 +176,8 @@ def parse_execution(events, *, expected_model, expected_cwd, expected_schema):
                 if response != report:
                     refuse("result response disagrees with structured_output")
             final = payload
+    if failed_identity and conversation_id is not None:
+        return dict(conversation_id=conversation_id)
     if final is None:
         refuse("requires exactly one first init and one last result")
     return dict(report=final["structured_output"], conversation_id=conversation_id,

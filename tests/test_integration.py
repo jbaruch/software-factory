@@ -136,6 +136,12 @@ class Integration(unittest.TestCase):
                 goal="Judge the original complete evidence", cwd=str(cwd), command=command, purpose=purpose,
                 binary=sys.executable, server="unix:///fixture.sock",
                 frozen_release=frozen_release, frozen_delivery=frozen_delivery)
+        return self.finish_review(key, record, assignment, cwd, context=context, outcome=outcome,
+                                  failed=failed, change=change, collect=collect)
+
+    def finish_review(self, key, record, assignment, cwd, *, context=None, outcome="approved", failed=False,
+                      change=None, collect=True):
+        command = assignment["request"]["command"]
         replacements = {"{repository}": str(self.repo), "{cwd}": str(cwd), "{brief}": assignment["brief"],
             "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": self.head,
             "{requirements}": record["inputs"]["requirements"], "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
@@ -310,7 +316,252 @@ class Integration(unittest.TestCase):
         output, errors = StringIO(), StringIO()
         with patch.object(release_evidence, "GitHub", return_value=self.transport), redirect_stdout(output), redirect_stderr(errors):
             code = factory.main(command)
+        if code:
+            self.assertEqual(output.getvalue(), "")
         return code, json.loads(output.getvalue()) if output.getvalue() else None, errors.getvalue()
+
+    def test_mixed_runtimes_deliver_writer_candidate_and_accept_frozen_receipt(self):
+        # Strictly collect with three launch prefixes, leaving the saved requests untouched.
+        python = self.root / "previous-python"
+        python.symlink_to(sys.executable)
+        runtime = self.root / "previous-runtime"
+        runtime.symlink_to(factory.ROOT, target_is_directory=True)
+        for key, value in (("commit.gpgsign", "false"), ("core.hooksPath", "/dev/null")):
+            factory.git_run(str(self.repo), "config", key, value)
+        with patch.object(factory, "ROOT", runtime), patch.object(sys, "executable", str(python)):
+            writer = self.review("previous-writer", "backend", writer=True, frozen=False,
+                                 outcome="completed", change="original writer candidate\n")
+        self.head = writer["result"]["candidate"]
+        factory.set_inputs(self.path, candidate=self.head, requirements=self.record["inputs"]["requirements"])
+        tree = factory.git_run(str(self.repo), "rev-parse", "HEAD^{tree}").stdout.strip()
+        merge = factory.git_run(str(self.repo), "-c", "commit.gpgsign=false", "commit-tree", tree,
+            "-p", self.base, "-p", self.head, "-m", "Merge original writer").stdout.strip()
+        self.transport = GitHub(self.base, self.head, merge)
+        self.frozen = release_evidence.capture(factory.load_task(self.path), self.transport.identity["url"], self.transport)
+        with patch.object(sys, "executable", str(python)):
+            self.review("previous-reader", "qa", frozen=False)
+        with patch.object(factory, "ROOT", runtime):
+            self.review("omitted-reader", "qa", frozen=False)
+            self.review("previous-release", "release")
+        python.unlink()
+        runtime.unlink()
+        self.release_skill_merges()
+        original = factory.load_task(self.path)["assignments"]
+        artifacts = {}
+        for assignment in original.values():
+            command = assignment["request"]["command"]
+            for name in (assignment["brief"], command[command.index("--receipt") + 1], command[command.index("--events") + 1]):
+                artifacts[Path(name)] = Path(name).read_bytes()
+        select = dict(review="previous-release", required="previous-reader")
+        code, receipt, errors = self.delivered_cli(**select)
+        self.assertEqual((code, errors), (0, ""))
+        assert receipt is not None
+        self.assertEqual((receipt["head"], receipt["merge_commit"]), (self.head, merge))
+        self.assertEqual(self.delivered_cli(**select), (0, receipt, ""))
+
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            self.assertEqual(factory.main(self.native_cli("final", delivery="previous-release")), 0, errors.getvalue())
+        record = factory.load_task(self.path)
+        self.finish_review("final", record, record["assignments"]["final"], self.repo)
+        code, accepted, errors = self.delivered_cli("final", **select)
+        self.assertEqual((code, errors), (0, ""))
+        assert accepted is not None
+        frozen = release_evidence.digest({k: v for k, v in receipt.items() if k != "receipt_path"})
+        self.assertEqual((accepted["acceptance"]["outcome"], accepted["acceptance"]["delivery_receipt_digest"]),
+                         ("approved", frozen))
+        with patch.object(factory, "ROOT", self.root / "another-install"):
+            self.assertEqual(self.delivered_cli("final", **select), (0, accepted, ""))
+        after = factory.load_task(self.path)["assignments"]
+        self.assertEqual(original, {key: after[key] for key in original})
+        self.assertEqual(artifacts, {path: path.read_bytes() for path in artifacts})
+
+    def test_mixed_unselected_reader_requires_original_command_and_collected_artifacts(self):
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            previous = self.review("previous", "qa", frozen=False)
+        self.release_skill_merges()
+        original = factory.load_task(self.path)
+        command = previous["request"]["command"]
+        select = dict(review="release", required="qa")
+        for flag, value in (("--job", "deliver/qa"), ("--brief", previous["brief"]), ("--repo", "/elsewhere"),
+                            ("--requirements", "other"), ("--candidate", self.base), ("--model", "different"),
+                            ("--receipt", str(self.tasks / "deliver.qa.codex.json")),
+                            ("--events", str(self.tasks / "deliver.qa.codex.jsonl"))):
+            with self.subTest(flag=flag):
+                record = copy.deepcopy(original)
+                record["assignments"]["previous"]["request"]["command"][command.index(flag) + 1] = value
+                factory.save(self.path, record)
+                self.assertEqual(self.delivered_cli(**select)[0], 1)
+        for damage in ("unknown-worker", "duplicate-option", "abbreviation", "bad-value", "help", "reader-commit", "partial-decision", "different-result"):
+            with self.subTest(damage=damage):
+                record = copy.deepcopy(original)
+                item = record["assignments"]["previous"]
+                argv = item["request"]["command"]
+                if damage == "unknown-worker":
+                    argv[3] += ".old"
+                elif damage == "duplicate-option":
+                    argv.extend(["--job", "deliver/previous"])
+                elif damage == "abbreviation":
+                    argv[argv.index("--requirements")] = "--requirem"
+                elif damage == "bad-value":
+                    argv[argv.index("--seconds") + 1] = "private-fixture-text"
+                elif damage == "help":
+                    argv.append("--help")
+                elif damage == "reader-commit":
+                    argv.extend(["--commit-message", "Apply fixture change"])
+                elif damage == "partial-decision":
+                    argv.extend(["--decision-store", str(self.tasks)])
+                else:
+                    item["result"]["artifacts"].append("different-report")
+                factory.save(self.path, record)
+                code, output, error = self.delivered_cli(**select)
+                self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+                self.assertIn("deliver/previous:", error)
+                if damage in ("abbreviation", "bad-value", "help"):
+                    self.assertIn("restore the original assignment arguments", error)
+                    self.assertNotIn("private-fixture-text", error)
+        factory.save(self.path, original)
+        for name in (previous["brief"], command[command.index("--events") + 1], command[command.index("--receipt") + 1]):
+            path = Path(name)
+            content = path.read_bytes()
+            with self.subTest(artifact=path.name):
+                other = path.with_suffix(".copy")
+                path.rename(other)
+                try:
+                    for damage in ("missing", "symlink", "corrupt"):
+                        if damage == "symlink":
+                            path.symlink_to(other)
+                        elif damage == "corrupt":
+                            path.write_text("{}\n")
+                            path.chmod(0o600)
+                        code, output, error = self.delivered_cli(**select)
+                        self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+                        self.assertIn("deliver/previous:", error)
+                        self.assertIn({".md": "brief", ".jsonl": "event", ".json": "receipt"}[path.suffix], error.lower())
+                        self.assertRegex(error.lower(), "restore|inspect")
+                        path.unlink(missing_ok=True)
+                finally:
+                    other.replace(path)
+                self.assertEqual(path.read_bytes(), content)
+        self.assertFalse((self.tasks / "deliver.release.delivered.json").exists())
+        self.assertEqual(self.delivered_cli(**select)[0], 0)
+
+    def test_codex_receipt_read_refusals_hide_saved_arguments(self):
+        self.release_skill_merges()
+        marker = "private-fixture-receipt"
+        record = factory.load_task(self.path)
+        argv = record["assignments"]["qa"]["request"]["command"]
+        index = argv.index("--receipt") + 1
+        receipt = Path(argv[index])
+        alias = self.tasks / marker
+        alias.symlink_to(receipt)
+        argv[index] = str(alias)
+        factory.save(self.path, record)
+        read_error = "Cannot read native receipt for this assignment; inspect or restore the original artifact before collection"
+        binding_error = "Restore the original native command bound to this task, assignment and local artifacts"
+        for runtime, message in ((factory.ROOT, read_error), (self.root / "other-install", binding_error)):
+            with self.subTest(runtime=runtime), patch.object(factory, "ROOT", runtime):
+                code, output, error = self.delivered_cli(review="release", required="qa")
+                self.assertEqual((code, output, error), (1, None, f"factory: deliver/qa: {message}\n"))
+                self.assertNotIn(marker, error)
+
+        argv[index] = str(receipt)
+        factory.save(self.path, record)
+        alias.unlink()
+        receipt.rename(alias)
+        receipt.symlink_to(alias)
+        with patch.object(factory, "ROOT", self.root / "other-install"):
+            self.assertEqual(self.delivered_cli(review="release", required="qa"),
+                             (1, None, f"factory: deliver/qa: {read_error}\n"))
+
+    def test_mixed_writer_context_refuses_release_and_final_self_review(self):
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            self.review("writer", "backend", writer=True, frozen=False, outcome="completed", context="writer-session")
+        self.review("self-review", "release", context="writer-session")
+        self.review("duplicate", "qa", frozen=False, context="context-release")
+        self.release_skill_merges()
+        self.assertIn("independent of contributors", self.delivered_cli(review="self-review", required="qa")[2])
+        self.assertIn("distinct original native contexts", self.delivered_cli(review="release", required="duplicate")[2])
+        select = dict(review="release", required="qa")
+        self.assertEqual(self.delivered_cli(**select)[0], 0)
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            self.review("self-final", "release", delivery="release", context="writer-session")
+        self.assertIn("contributor cannot judge", self.delivered_cli("self-final", **select)[2])
+
+    def test_mixed_stale_approval_and_unverified_failed_writer_refuse(self):
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            self.review("previous-qa", "qa", frozen=False)
+        original = self.path.read_bytes()
+        self.release_skill_merges()
+        for head, requirements in ((self.base, self.record["inputs"]["requirements"]), (self.head, "new-requirements")):
+            with self.subTest(head=head, requirements=requirements):
+                factory.set_inputs(self.path, candidate=head, requirements=requirements)
+                changed = "candidate" if head == self.base else "requirements"
+                code, output, error = self.delivered_cli(review="release", required="previous-qa")
+                self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+                self.assertIn(f"deliver/previous-qa: stale result ({changed} changed)", error)
+                self.assertIn("select a fresh native judgment", error)
+                self.path.write_bytes(original)
+        failed = self.review("failed", "backend", writer=True, failed=True, frozen=False, context="context-qa")
+        self.assertIn("independent of contributors", self.delivered_cli(review="release", required="qa")[2])
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            code, output, error = self.delivered_cli(review="release", required="qa")
+            self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+            self.assertIn("deliver/failed: cannot verify the historical writer's original contributor identity", error)
+            self.assertIn("preserve the recorded attempt and ask the task owner", error)
+            with self.assertRaisesRegex(factory.FactoryError, "deliver/failed: not a native Codex worker.*inspect its original"):
+                factory.collect_codex(self.path, "failed", None, factory.load_task(self.path), failed)
+
+    def test_mixed_manual_result_cannot_replace_first_native_collection(self):
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            assignment = self.review("manual", "qa", frozen=False, collect=False)
+        command = assignment["request"]["command"]
+        self.release_skill_merges()
+        with patch.object(factory, "ROOT", self.root / "earlier"):
+            code, output, error = self.delivered_cli(review="release", required="manual")
+            self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+            self.assertIn("deliver/manual: missing native result; use codex-collect", error)
+        code, output, error = self.delivered_cli(review="release", required="manual")
+        self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+        self.assertIn("deliver/manual: missing native result; preserve the attempt", error)
+        self.assertNotIn("codex-collect", error)
+        receipt_path = command[command.index("--receipt") + 1]
+        receipt = json.loads(Path(receipt_path).read_text())
+        record = factory.record_result(self.path, assignment_id="manual", candidate=receipt["candidate"],
+            requirements=receipt["inputs"]["requirements"], outcome=receipt["report"]["outcome"],
+            artifacts=[receipt_path, *receipt["report"]["artifacts"]])
+        self.assertFalse(record["assignments"]["manual"]["native_collected"])
+        self.assertEqual(self.delivered_cli(review="release", required="manual")[0], 1)
+        with self.assertRaisesRegex(factory.FactoryError, "not a native Codex worker"):
+            factory.collect_codex(self.path, "manual", None, record, record["assignments"]["manual"])
+
+    def test_delivery_refuses_when_owner_changed_during_observation(self):
+        self.release_skill_merges()
+        original = self.path.read_bytes()
+        api = self.transport.api
+        receipt = self.tasks / "deliver.release.delivered.json"
+        for existing in (False, True):
+            before = None
+            if existing:
+                confirmed = self.confirm()
+                before = receipt.read_bytes()
+                self.assertEqual(self.confirm(), confirmed)
+            for change in ("inputs", "hold"):
+                with self.subTest(existing=existing, change=change):
+                    def observe(endpoint):
+                        if "/compare/" in endpoint:
+                            with factory.task_lock(self.tasks, "deliver"):
+                                if change == "inputs":
+                                    factory.set_inputs(self.path, candidate=self.head, requirements="revised")
+                                else:
+                                    factory.hold_task(self.path, "Operator hold")
+                        return api(endpoint)
+                    with patch.object(self.transport, "api", side_effect=observe):
+                        code, output, error = self.delivered_cli(review="release", required="qa")
+                    self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+                    self.assertIn("deliver/release: task changed during delivery observation", error)
+                    self.assertEqual(receipt.read_bytes() if receipt.exists() else None, before)
+                    self.assertNotEqual(self.path.read_bytes(), original)
+                    self.path.write_bytes(original)
 
     def test_delivered_cli_prints_the_receipt(self):
         self.release_skill_merges()

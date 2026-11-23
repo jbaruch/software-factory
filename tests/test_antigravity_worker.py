@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import antigravity_worker
 import factory
+import factory_commit
 import integration
 import native_antigravity
 from codex_worker import outcome_schema
@@ -161,11 +162,15 @@ class AntigravityWorker(unittest.TestCase):
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
         receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (2, True, "created"))
+        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (4, True, "created"))
         self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
         self.assertIn("do not stage or commit", json.loads(self.spawns[-1][1]["prompt"])["message"]["content"][0]["text"])
         result = self.collect("implement")["assignments"]["implement"]["result"]
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
+        factory.save(args.receipt, {**receipt, "schema_version": 2})
+        legacy = args.receipt.read_bytes()
+        self.assertEqual(self.collect("implement")["assignments"]["implement"]["result"], result)
+        self.assertEqual(args.receipt.read_bytes(), legacy)
 
     def test_failed_process_or_foreign_stream_cannot_supply_a_result(self):
         self.assertEqual(self.execute(self.args, exit_code=3)["state"], "failed")
@@ -400,7 +405,7 @@ class AntigravityApprovals(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             self.record = factory.collect_antigravity(self.fixture.path, "agy-qa", None, record, assignment)
 
-    def run_agy(self, identity, role, conversation, *, write=False, exit_code=0, effort: str | None = "high", frozen=None):
+    def run_agy(self, identity, role, conversation, *, write=False, exit_code=0, events=None, effort: str | None = "high", frozen=None):
         f = self.fixture
         writer: dict[str, Any] = dict(write=True, commit_message="Add fixture notes", sandbox=sys.executable) if write else {}
         command = factory.antigravity_command(f.path, task="deliver", assignment_id=identity, agy=sys.executable,
@@ -413,11 +418,12 @@ class AntigravityApprovals(unittest.TestCase):
             "{requirements}": record["inputs"]["requirements"],
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         args = antigravity_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
-        events = stream(f.repo, outcome="completed" if write else "approved", conversation=conversation)
+        if events is None:
+            events = stream(f.repo, outcome="completed" if write else "approved", conversation=conversation)
         async def spawn(*command, **options):
             if write and not exit_code:
                 (self.fixture.repo / "NOTES.md").write_text("Notes\n")  # A completed writer commits its change (#166).
-            return FakeProcess([] if exit_code else echo_cwd(events, options), exit_code=exit_code)
+            return FakeProcess(echo_cwd(events, options), exit_code=exit_code)
         with redirect_stdout(StringIO()):
             receipt = asyncio.run(antigravity_worker.execute(args, spawn=spawn, probe=usage_probe, clock=lambda: 1000,
                 timer=lambda: 10, git_scope=lambda *a, **k: nullcontext(), scan=lambda *a, **k: None))
@@ -426,20 +432,127 @@ class AntigravityApprovals(unittest.TestCase):
     def test_collected_antigravity_approval_counts_beside_the_codex_release(self):
         selected = integration.approvals(self.record, "release", ["agy-qa"])
         self.assertEqual(selected["agy-qa"]["context"], "11111111-1111-4111-8111-111111111111")
+        with patch.object(factory, "ROOT", self.fixture.root / "another-install"):
+            self.assertEqual(integration.approvals(self.record, "release", ["agy-qa"]), selected)
 
     def test_writer_contributes_and_a_failed_unstarted_writer_still_counts(self):
         # The failed writer runs first: the completed one commits and moves the checkout on (#166).
-        record, failed, receipt = self.run_agy("agy-failed", "backend", "unused", write=True, exit_code=3)
+        record, failed, receipt = self.run_agy("agy-failed", "backend", "unused", write=True, exit_code=3, events=[])
         self.assertEqual(receipt["state"], "failed")
         self.assertEqual(integration.contributor_context("agy-failed", record, failed),
                          "antigravity-unstarted:deliver/agy-failed")
+        self.fixture.release_skill_merges()
+        self.assertEqual(self.fixture.delivered_cli(review="release", required="agy-qa")[0], 0)
+        self.fixture.review("accept", "release", delivery="release")
+        self.assertEqual(integration.delivered_accepted(self.fixture.path, "release", "accept")["outcome"], "approved")
         record, assignment, receipt = self.run_agy("agy-writer", "backend", "22222222-2222-4222-8222-222222222222", write=True)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
             record = factory.collect_antigravity(self.fixture.path, "agy-writer", None, record, assignment)
-            self.assertEqual(integration.contributor_context("agy-writer", record, record["assignments"]["agy-writer"]),
-                             "22222222-2222-4222-8222-222222222222")
+            with patch.object(factory, "ROOT", self.fixture.root / "other-install"):
+                self.assertEqual(integration.contributor_context("agy-writer", record, record["assignments"]["agy-writer"]),
+                                 "22222222-2222-4222-8222-222222222222")
             self.assertIn("agy-qa", integration.approvals(record, "release", ["agy-qa"]))
+
+    def test_failed_writer_after_init_requires_original_stream_at_delivery_and_acceptance(self):
+        f = self.fixture
+        context = "11111111-1111-4111-8111-111111111111"  # agy-qa's original conversation
+        failed = stream(f.repo, conversation=context)[:1] + [
+            dict(event="result", result=dict(conversation_id=context, status="ERROR", error="fixture failure"))]
+        _, assignment, receipt = self.run_agy("failed", "backend", context, write=True, exit_code=3, events=failed)
+        self.assertEqual((receipt["schema_version"], receipt["state"], receipt["conversation_id"]), (4, "failed", None))
+        f.release_skill_merges()
+        self.assertIn("independent of contributors", f.delivered_cli(review="release", required="agy-qa")[2])
+        select = dict(review="release", required="qa")
+        events = Path(receipt["events"])
+        saved = events.read_bytes()
+        backup = events.with_suffix(".original")
+        events.rename(backup)
+        for damage in ("missing", "symlink", "unreadable", "corrupt", "emptied"):
+            with self.subTest(damage=damage):
+                if damage == "symlink":
+                    events.symlink_to(backup)
+                elif damage == "unreadable":
+                    events.mkdir()
+                elif damage in ("corrupt", "emptied"):
+                    events.write_bytes(b"{}\n" if damage == "corrupt" else b"")
+                code, output, error = f.delivered_cli(**select)
+                self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
+                self.assertIn("deliver/failed: cannot verify", error)
+                self.assertIn("original Antigravity event stream", error)
+                self.assertFalse((f.tasks / "deliver.release.delivered.json").exists())
+                if damage == "unreadable":
+                    events.rmdir()
+                else:
+                    events.unlink(missing_ok=True)
+        backup.rename(events)
+        command = assignment["request"]["command"]
+        receipt_path = Path(command[command.index("--receipt") + 1])
+        self.assertEqual(f.delivered_cli(**select)[0], 0)
+        f.review("accept", "release", delivery="release")
+        self.assertEqual(integration.delivered_accepted(f.path, "release", "accept")["outcome"], "approved")
+        f.review("self-final", "release", delivery="release", context=context)
+        with self.assertRaisesRegex(factory.FactoryError, "contributor cannot judge"):
+            integration.delivered_accepted(f.path, "release", "self-final")
+
+        replacement = saved.replace(context.encode(), CONVERSATION.encode())
+        unsigned = {key: value for key, value in receipt.items() if key != "events_digest"}
+        legacy = {**unsigned, "schema_version": 2}
+        for original, data in ((receipt, replacement), (unsigned, saved), ({**unsigned, "conversation_id": context}, saved),
+                               ({**receipt, "conversation_id": CONVERSATION}, saved),
+                               (legacy, replacement), (legacy, saved), (legacy, b""),
+                               ({**legacy, "conversation_id": context}, replacement),
+                               ({**legacy, "conversation_id": context}, saved + saved)):
+            with self.subTest(version=original["schema_version"], identity=original["conversation_id"], data=data[:30]):
+                factory.save(receipt_path, original)
+                before = receipt_path.read_bytes()
+                events.write_bytes(data)
+                self.assertIn("deliver/failed: cannot verify", f.delivered_cli(**select)[2])
+                with self.assertRaisesRegex(factory.FactoryError, "deliver/failed: cannot verify"):
+                    integration.delivered_accepted(f.path, "release", "accept")
+                self.assertEqual(receipt_path.read_bytes(), before)
+        factory.save(receipt_path, receipt)
+        events.unlink()
+        with self.assertRaisesRegex(factory.FactoryError, "deliver/failed: cannot verify"):
+            integration.delivered_accepted(f.path, "release", "accept")
+
+    def test_attested_init_only_failure_retains_its_conversation_across_receipt_versions(self):
+        f = self.fixture
+        context = "11111111-1111-4111-8111-111111111111"
+        _, assignment, receipt = self.run_agy("failed", "backend", context, write=True, exit_code=3,
+                                             events=stream(f.repo, conversation=context)[:1])
+        command = assignment["request"]["command"]
+        path = Path(command[command.index("--receipt") + 1])
+        f.release_skill_merges()
+        self.assertEqual(f.delivered_cli(review="release", required="qa")[0], 0)
+        f.review("accept", "release", delivery="release")
+        for version in (4, 2):
+            with self.subTest(version=version):
+                factory.save(path, {**receipt, "schema_version": version})
+                original = path.read_bytes()
+                self.assertIn("independent of contributors", f.delivered_cli(review="release", required="agy-qa")[2])
+                self.assertEqual(integration.delivered_accepted(f.path, "release", "accept")["outcome"], "approved")
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_legacy_failure_after_parsing_retains_its_receipt_bound_conversation(self):
+        f = self.fixture
+        context = "11111111-1111-4111-8111-111111111111"
+        with patch.object(factory_commit, "commit_completed", side_effect=factory.FactoryError("fixture commit failed")):
+            _, assignment, receipt = self.run_agy("failed", "backend", context, write=True)
+        self.assertEqual((receipt["state"], receipt["conversation_id"]), ("failed", context))
+        command = assignment["request"]["command"]
+        path = Path(command[command.index("--receipt") + 1])
+        receipt["schema_version"] = 2
+        del receipt["events_digest"]
+        factory.save(path, receipt)
+        original = path.read_bytes()
+        factory.reset_writer(f.path, assignment_id="failed")
+        f.release_skill_merges()
+        self.assertIn("independent of contributors", f.delivered_cli(review="release", required="agy-qa")[2])
+        self.assertEqual(f.delivered_cli(review="release", required="qa")[0], 0)
+        f.review("accept", "release", delivery="release")
+        self.assertEqual(integration.delivered_accepted(f.path, "release", "accept")["outcome"], "approved")
+        self.assertEqual(path.read_bytes(), original)
 
     def test_an_antigravity_qa_report_cannot_be_the_release_judgment(self):
         with self.assertRaises(factory.FactoryError):

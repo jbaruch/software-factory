@@ -333,16 +333,29 @@ assignment an implementation specialist for a writing role: the brief carries th
 task goal plus the shared writer contract, and `factory_commit.py` stages, scans,
 signs and commits a completed report. Receipts are version 3 for reviewers
 (`checkout`: the disposable worktree they ran in, which collection decodes against)
-and version 2 for writers (`writer`, `sandbox`, nullable `commit`); version-1
-reviewer receipts, which reviewed in place, still collect. A completed run copies each artifact
+and version 4 for writers (`writer`, `sandbox`, nullable `commit`). The strict
+collector also accepts completed version-2 writers and version-1 reviewers
+that reviewed in place. A completed run copies each artifact
 that is a file in agy's per-conversation brain directory into a private
 `TASK.ID.antigravity.artifacts/` beside its receipt, because agy does not keep
 that directory; the receipt and report stay unchanged. Events are
 version-1 `antigravity-event-line` envelopes holding each original line; native
 lines are limited to 64 MiB, and a longer one stops the child with a failed receipt.
-`delivered` counts collected `qa`, `security` and `code-review` approvals under
-their conversation ID and treats writers as contributors; a writer that failed
-before `init` is identified by its assignment.
+`antigravity_worker.py` records `events_digest` on a failed version-4 writer
+when it retained native lines or observed EOF and process exit. The digest is
+SHA-256 of the compact, ASCII-escaped JSON array of original line strings in
+order, including their line endings. An earlier failure can lack the digest
+and remains available for recovery.
+
+`delivered` identifies collected verifier approvals by conversation ID.
+Delivery and final acceptance require a matching digest to use a failed
+version-4 writer as contributor evidence. A verified empty stream with a null
+`conversation_id` identifies a pre-init failure by assignment. Otherwise both
+gates verify the stream's init against the frozen inputs and any receipt
+conversation ID. Both gates also verify the digest on version-2 receipts that
+already carry one. Without a digest, a failed version-2 receipt must name the
+original conversation and match the retained init. Preserve ambiguous
+attempts for the task owner. Readers leave all original receipt bytes intact.
 
 On 2026-11-09, live 1.5.3 runs in this mode with Gemini 3.8 Flash (High) went
 through `antigravity-start`/`antigravity-collect`. A reviewer approved a fixture

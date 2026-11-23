@@ -25,7 +25,7 @@ def read_events(path):
     """The original native lines, exactly as the decoder reads them."""
     try:
         lines = []
-        for line in path.read_text().splitlines():
+        for line in factory.read_record(path).splitlines():
             record = factory.decode_json(line)
             if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
                     or record["schema_version"] != 1 or record.get("kind") != "antigravity-event-line"
@@ -143,8 +143,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         native_antigravity.validate_usage(observation, binary)
     except native_antigravity.UsageError as exc:
         raise factory.FactoryError(str(exc)) from None
-    # Version 2 writes; version 3 reviews in a disposable checkout (version 1 reviewed in place).
-    receipt = dict(schema_version=2 if args.write else 3, kind="antigravity-execution", state="starting", job=args.job,
+    receipt = dict(schema_version=4 if args.write else 3, kind="antigravity-execution", state="starting", job=args.job,
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort, discovery=observation,
@@ -152,7 +151,6 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         report=None, conversation_id=None, usage=None, duration_seconds=None, turns=None,
         candidate=None, events=str(args.events), error=None)
     if args.write:
-        # Version 2 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
     else:
         # agy cannot restrict its tools, so a reader works in a throwaway checkout of the candidate.
@@ -232,6 +230,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
     except (factory.FactoryError, native_antigravity.ExecutionError, ValueError) as exc:
         receipt.update(state="failed", error=str(exc))
     finally:
+        # An empty buffer proves pre-init failure only after consume observed EOF.
+        if args.write and receipt["state"] == "failed" and (lines or receipt["exit_code"] is not None):
+            receipt["events_digest"] = release_evidence.digest(lines)
         if process is not None:
             await stop_child(process)
             receipt["exit_code"] = process.returncode
