@@ -1,6 +1,6 @@
 # Software Factory
 
-A specialist engineering team coordinated by scripts and Jev, with Rex as its execution surface. Product, design, engineering, security, QA and operations retain their own responsibilities. The foreman handles priorities and exceptional planning decisions; routine delivery does not depend on a foreman turn.
+Use Software Factory for explicit specialist assignments, ready plans, and delivery evidence. Choose the operations the task needs. Projects keep their own development and release process.
 
 The [implementation inventory](docs/implementation.md) records current coverage,
 verification limits and the remaining work toward live delivery.
@@ -41,11 +41,7 @@ The Python checks use the standard library. `acr` is a separate prerequisite for
 
 | Skill | Purpose |
 | --- | --- |
-| `factory` | Coordinate delivery through the factory, launch one assignment or inspect a task |
-
-| Rule | Purpose |
-| --- | --- |
-| `factory-process` | Always on: the factory is this project's delivery process; coordinate through the skill's Step 1 |
+| `factory` | Coordinate selected assignments, launch one assignment, inspect a task, or record delivery |
 
 - `foreman-rex-stop` prompts the foreman at Stop to triage finished Rex helpers in the [opted-in Rex pane](docs/native-rex.md#foreman-stop-reminder).
 
@@ -56,7 +52,7 @@ acr install github:jbaruch/software-factory
 acr realize
 ```
 
-The root `agent-plugin.yaml` declares the agent-facing rule, skill and Stop hook. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); releases are published there. ACR validation proves source structure, not publication, real-agent operation or live model access.
+The root `agent-plugin.yaml` declares the factory skill and the opt-in Stop hook. Source is hosted at [jbaruch/software-factory](https://github.com/jbaruch/software-factory); releases are published there. ACR validation proves source structure, not publication, real-agent operation or live model access.
 
 The application, dashboard, catalogs and evaluation suite remain application source. ACR does not automatically install an application daemon or undeclared source files. Runtime packaging and native harness integration are separate implementation slices.
 
