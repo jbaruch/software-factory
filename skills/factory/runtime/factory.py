@@ -1988,6 +1988,10 @@ def brief(role_id, goal, *, designs=False):
     role = role_spec(role_id)
     return (f"# Assignment: {role_id}\n\n{goal}\n\n"
             + "\n".join("- " + item for item in role["instructions"])
+            + ("\n- Judge the assigned source criteria. Return findings for a concrete blocking source defect. "
+               "Return blocked when required pre-merge evidence is unavailable. Return approved when the source "
+               "criteria pass. Record advisories and evidence available only after merge or deployment as "
+               "artifacts alongside the source approval." if role_id in VERIFIER_ROLES and not designs else "")
             + ("\n- " + SIMPLICITY if designs or role_id == "architecture" else "")
             # A completed writer whose checkout ends unchanged fails: nothing to commit or verify (#166).
             + ("\n- Report completed only with your changes left in the checkout, which the factory commits; with "
