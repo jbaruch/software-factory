@@ -603,8 +603,8 @@ class TestImport(TransferBase):
     def test_interrupted_task_save_reuses_identical_orphan(self):
         before = self.dst_path.read_bytes()
         archive = self.dst_path.with_suffix(".writer-origin.bundle")
-        with patch.object(factory, "save", side_effect=OSError("interrupted")), self.assertRaisesRegex(
-                OSError, "interrupted"):
+        with (patch.object(factory, "save", side_effect=OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))),
+              self.assertRaisesRegex(factory.FactoryError, "inspect any archive.*retry the identical bundle")):
             self._do_import(self.out_path, self.sha256)
         self.assertEqual(self.dst_path.read_bytes(), before)
         self.assertEqual(archive.read_bytes(), self.out_path.read_bytes())
@@ -626,7 +626,8 @@ class TestImport(TransferBase):
                     raise OSError("interrupted sync")
                 fsync(fd)
 
-            with patch.object(os, "fsync", side_effect=interrupt), self.assertRaisesRegex(OSError, "interrupted sync"):
+            with patch.object(os, "fsync", side_effect=interrupt), self.assertRaisesRegex(
+                    factory.FactoryError, "Cannot persist writer transfer.*Restore access or space"):
                 self._do_import(self.out_path, self.sha256)
             self.assertEqual(self.dst_path.read_bytes(), before)
             self.assertEqual(archive.read_bytes(), self.out_path.read_bytes())

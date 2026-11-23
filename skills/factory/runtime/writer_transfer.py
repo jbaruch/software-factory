@@ -477,8 +477,6 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id):
                  f"Destination {purpose} limit ({limit}) exceeds source ({source_limits[purpose]}); "
                  "lower the destination limit or raise the source before importing")
 
-    _save_archive(archive_path, raw, sha256)
-
     # Apply hold if not already held.
     hold_reason = f"writer-origin: source task {source['task']!r} on host {source['host_id']!r} is held"
 
@@ -496,7 +494,14 @@ def import_writer(path, *, file_path, from_host, sha256, whoami_host_id):
             previous_hold=None, hold=hold_reason, at=occurred))
         record["hold"] = hold_reason
 
-    factory.save(path, record)
+    try:
+        _save_archive(archive_path, raw, sha256)
+        factory.save(path, record)
+    except OSError as exc:
+        cause = os.strerror(exc.errno) if exc.errno is not None else "storage error"
+        raise factory.FactoryError(
+            f"Cannot persist writer transfer for {str(path)!r} ({cause}). Restore access or space, "
+            f"inspect any archive at {str(archive_path)!r}, then retry the identical bundle.") from None
     return record
 
 

@@ -128,8 +128,8 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `rebase-worktree` | Saves the change as a patch, moves the worktree onto a new base and selects it | `{task, worktree, previous, candidate, patch, next}` | `rebase_worktree()` |
 | `release-worktree` | Removes the provisioned worktree; the branch stays | `{task, worktree, branch, head}` | `release_worktree()` |
 | `delivered` | Confirms the release skill merged the head the release judgment approved, and records its receipt | The receipt; `--acceptance` adds `acceptance` | `skills/factory/runtime/integration.py` `delivered()` |
-| `export-writer` | Exports a settled writer as source history for one-hop transfer; prints source host and SHA-256 | `{source_host, sha256, out}` | `writer_transfer.export_writer()` |
-| `import-writer` | Imports a writer bundle on the destination host; requires `--rex` and `--server` | Task view | `writer_transfer.import_writer()` |
+| `export-writer` | Exports a settled writer as source history for one-hop transfer; prints source host and SHA-256 | `{source_host, sha256, out}` | `skills/factory/runtime/writer_transfer.py` `export_writer()` |
+| `import-writer` | Imports a writer bundle on the destination host; requires `--rex` and `--server` | Task view | `skills/factory/runtime/writer_transfer.py` `import_writer()` |
 | `ready_runner.py` | Launches, collects and tidies a plan's jobs on its line | `{schema_version, result, jobs, …}`; exit 1 unless `result` is `complete` | `skills/factory/runtime/ready_runner.py` `run()` |
 
 - **Task view:** the task record (`task`, `line`, `admission`, `inputs`, `assignments`, `hold`, `provisioning` and its event logs), plus `allowances` and each assignment's `result_current`.
