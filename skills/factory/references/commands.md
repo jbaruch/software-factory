@@ -6,7 +6,7 @@
 
 - **0:** success; stdout is one JSON document, except for `--help`, which prints usage text.
 - **1, stderr only:** refused, with `factory: REASON` (`ready-runner: REASON` from the runner) naming what to do next.
-- **1, JSON on stdout:** a non-success result from `tidy` or `ready_runner.py`, as the table says.
+- **1, JSON on stdout:** a non-success result from `tidy` or `ready_runner.py`, or a failed build or readback from `go-caches --trim-go`.
 - **1, JSON on stdout and `factory: REASON` on stderr:** `*-collect` saved the result but couldn't close the tab, or `go-caches --clean-task` could not complete the selected cleanup.
 - **2:** the command line doesn't parse; argparse prints usage and the error on stderr.
 - **75:** lock contention; stderr says so as `factory: REASON` (`ready-runner: REASON`). `factory.py` returns 75 if its task lock or its line execution lock is held. `ready_runner.py` returns 75 for line execution-lock contention. Follow the diagnostic and retry when the indicated lock clears. Carry the same assignment ID and inputs on native launch retry.
@@ -126,7 +126,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `abandon` | Marks a launch that never made a pane abandoned | Task view | `abandon_launch()` |
 | `reset` | Saves a failed writer's leftover edits as a patch and restores its checkout | `{task, assignment, checkout, candidate, patch, next}` | `reset_writer()` |
 | `rebase-worktree` | Saves the change as a patch, moves the worktree onto a new base and selects it | `{task, worktree, previous, candidate, patch, next}` | `rebase_worktree()` |
-| `go-caches --repo PATH` | Inspects linked Go caches. Use `--clean-task TASK` only in an attended exclusive maintenance window | JSON rows with path, allocated KiB, decision and evidence or retain reason | `skills/factory/runtime/go_cache.py` `census()` |
+| `go-caches --repo PATH` | Inspects linked Go caches. Select `--trim-go /absolute/path/to/go` for native aging or `--clean-task TASK` for attended exclusive retirement | JSON rows with path, allocated KiB, decision and evidence or retain reason. Native aging reports entry counts after readback | `skills/factory/runtime/go_cache.py` `census()` |
 | `release-worktree` | Removes the provisioned worktree during an attended exclusive window and keeps the branch | `{task, worktree, branch, head}` | `release_worktree()` |
 | `delivered` | Confirms the release skill merged the head the release judgment approved, and records its receipt | The receipt; `--acceptance` adds `acceptance` | `skills/factory/runtime/integration.py` `delivered()` |
 | `export-writer` | Exports a settled writer as source history for one-hop transfer; prints source host and SHA-256 | `{source_host, sha256, out}` | `skills/factory/runtime/writer_transfer.py` `export_writer()` |

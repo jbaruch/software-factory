@@ -3,13 +3,18 @@ import runtime_path  # noqa: F401
 import asyncio
 from contextlib import chdir
 import copy
+import fcntl
 import hashlib
 import shutil
 import json
 import os
 from pathlib import Path
 from io import StringIO
+import signal
+import socket
+import stat
 import subprocess
+import time
 import unittest
 import sys
 from unittest.mock import patch
@@ -108,6 +113,313 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
                  if not p.is_relative_to(self.cache)]
         return {p: (p.stat().st_ino, p.stat().st_mode, p.stat().st_mtime_ns,
                     p.read_bytes() if p.is_file() else None) for p in paths}
+
+    def trim(self, executable=None, status=0):
+        code, out, err = self.cli("go-caches", "--repo", str(self.repo), "--trim-go", executable or shutil.which("go"))
+        self.assertEqual(code, status, (out, err))
+        row, = json.loads(out)
+        return row
+
+    def test_native_go_ages_only_old_entries_when_go_deems_trim_due(self):
+        # The fixture gives the existing Go entries old mtimes. Go owns the actual clock and trim marker.
+        old = next(self.cache.glob("*/*-a"))
+        recent = self.cache / "ab" / ("ab" + "1" * 62 + "-d")
+        recent.write_bytes(b"recent fixture")
+        root, readme = self.cache.stat(), (self.cache / "README").read_bytes()
+        protected = self.protected()
+        with patch.dict(os.environ, GOFLAGS="-unknown", GOTOOLCHAIN="missing", GOENV="/missing",
+                        GOCACHEPROG="/missing", GOPROXY="invalid", GOROOT="/missing"):
+            row = self.trim()
+            self.assertEqual((row["decision"], row["removed_entries"]), ("retained", 0), row)
+            self.assertTrue(old.is_file())
+            (self.cache / "trim.txt").write_text(str(self.at))
+            before = {p.name for p in self.cache.glob("*/*")}
+            row = self.trim()
+        after = {p.name for p in self.cache.glob("*/*")}
+        self.assertFalse(after - before, "The hourly probe should reuse its own cache entries")
+        self.assertEqual((row["decision"], row["removed_entries"], row["retained_entries"]),
+                         ("cleaned", len(before - after), len(before & after)), row)
+        self.assertFalse(old.exists())
+        self.assertEqual(recent.read_bytes(), b"recent fixture")
+        self.assertTrue(os.path.samestat(self.cache.stat(), root))
+        self.assertEqual((self.cache / "README").read_bytes(), readme)
+        self.assertEqual(self.protected(), protected)
+        self.observer.assert_not_called()
+        self.build()
+
+    def test_native_aging_requires_owner_terminal_local_cache_and_exclusive_locks(self):
+        with patch.object(go_cache, "native_build") as build:
+            with go_cache.inode_lock(self.admin, shared=True):
+                self.assertIn("Busy lock", self.trim()["reason"])
+            unknown = self.cache / "not-a-go-entry"
+            unknown.touch()
+            self.assertIn("unexpected cache entry", self.trim()["reason"])
+            unknown.unlink()
+            other = factory.new_task("other", "other-line")
+            other["assignments"]["consumer"] = {"request": {"command": ["/bin/cat", str(self.cache / "README")],
+                                                            "cwd": str(self.root)}}
+            factory.save(self.state / "other.json", other)
+            self.assertIn("reuse by other/consumer", self.trim()["reason"])
+            (self.state / "other.json").unlink()
+            self.assignment["closed"] = None
+            factory.save(self.path, self.record)
+            self.assertEqual(self.trim()["decision"], "retained")
+            self.path.unlink()
+            self.assertIn("one provisioned task", self.trim()["reason"])
+            build.assert_not_called()
+
+    def test_failed_native_build_reports_readback_and_nonzero_status(self):
+        executable = self.root / "fixture-go"
+        executable.write_text("#!/bin/sh\nif [ \"$1\" = env ]; then printf '\\n\\n'; else exit 7; fi\n")
+        executable.chmod(0o700)
+        row = self.trim(str(executable), status=1)
+        self.assertEqual(row["decision"], "failed")
+        self.assertIn("Go build exited 7", row["reason"])
+        self.assertEqual((row["removed_entries"], row["after_kib"]), (0, row["size_kib"]))
+
+    def test_parent_only_sigterm_cancels_the_gated_native_compiler(self):
+        # This disposable tool gate pauses the real Go driver while it waits for its compiler.
+        fixture = self.root / "disposable-trim-go"
+        ready = self.root / "disposable-compiler-ready"
+        gate = self.root / "disposable-compiler-gate"
+        diagnostic = self.root / "disposable-go.stderr"
+        go = shutil.which("go")
+        fixture.write_text(f"""#!{sys.executable}
+import fcntl, os, sys
+from pathlib import Path
+if sys.argv[1] == "build":
+    # Keep fixture diagnostics readable after the CLI's stderr pipe loses its reader.
+    with open({str(diagnostic)!r}, "w") as log:
+        os.dup2(log.fileno(), 2)
+    os.environ["PATH"] = {str(self.root)!r} + os.pathsep + os.defpath
+    sys.argv.insert(2, "-toolexec={fixture.name}")
+elif sys.argv[1] != "env":
+    with open({str(gate)!r}) as gate:
+        Path({str(ready)!r}).touch()
+        fcntl.flock(gate, fcntl.LOCK_SH)
+    os.execv(sys.argv[1], sys.argv[1:])
+os.execv({go!r}, [{go!r}, *sys.argv[1:]])
+""")
+        fixture.chmod(0o700)
+        old = self.cache / "ab" / ("ab" + "2" * 62 + "-d")
+        old.write_bytes(b"disposable old entry")
+        os.utime(old, (self.at, self.at))
+        (self.cache / "trim.txt").write_text(str(self.at))
+        paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
+                 self.path.with_suffix(".lock"), self.admin, self.cache)
+        with gate.open("w") as hold:
+            fcntl.flock(hold, fcntl.LOCK_EX)
+            with subprocess.Popen([sys.executable, factory.__file__, "--state-dir", str(self.state),
+                                   "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)],
+                                  env={**os.environ, "TMPDIR": str(self.root)}, stdout=subprocess.PIPE) as parent:
+                try:
+                    deadline = time.monotonic() + 30
+                    while not ready.exists():
+                        self.assertIsNone(parent.poll(), "Factory exited before the disposable compiler gate")
+                        self.assertLess(time.monotonic(), deadline, "Go did not reach the disposable compiler gate")
+                        time.sleep(0.02)
+                finally:
+                    parent.terminate()
+                self.assertEqual(parent.communicate(timeout=10), (b"", None))
+                self.assertEqual(parent.returncode, -signal.SIGTERM)
+            # Keep the compiler gate closed. Cancellation must release the locks
+            # independently of both the gate and the normal build deadline.
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with go_cache.inode_lock(self.cache):
+                        break
+                except factory.ExecutionBusy:
+                    self.assertLess(time.monotonic(), deadline, "Go retained the disposable cache lock")
+                    time.sleep(0.02)
+            self.assertTrue(old.exists(), diagnostic.read_text())
+            for path in paths:
+                with go_cache.inode_lock(path, directory=path.is_dir()):
+                    pass
+
+    def test_native_go_process_failures(self):
+        fixture = self.root / "disposable-go"
+        ready = self.root / "compiler-ready"
+        exit_driver = self.root / "exit-driver"
+        entry = next(self.cache.glob("*/*-d"))
+        fixture.write_text(f"""#!{sys.executable}
+import fcntl, os, sys, time
+from pathlib import Path
+if sys.argv[1] == "env":
+    sys.stdout.write("\\n\\n")
+    sys.exit(0)
+compiler = os.fork()
+if compiler:
+    while not Path({str(exit_driver)!r}).exists():
+        if os.waitpid(compiler, os.WNOHANG)[0]:
+            sys.exit(0)
+        time.sleep(0.01)
+    sys.exit(7)
+os.closerange(0, os.sysconf("SC_OPEN_MAX"))
+with open({str(entry)!r}, "ab", buffering=0) as cache:
+    fcntl.flock(cache, fcntl.LOCK_EX)
+    Path({str(ready)!r}).touch()
+    until = time.monotonic() + 20
+    while time.monotonic() < until:
+        cache.write(b".")
+        time.sleep(0.02)
+""")
+        fixture.chmod(0o700)
+        paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
+                 self.path.with_suffix(".lock"), self.admin, self.cache)
+        for failure in ("timeout", "driver exit", "parent kill", "parent interrupt", "group teardown"):
+            with self.subTest(failure=failure):
+                # A session-leading Factory can have unrelated peers. This peer echoes
+                # a byte after readback to prove it survived the hosted timeout.
+                probe, peer = socket.socketpair()
+                with probe, peer:
+                    launch = f"""import os, subprocess, sys
+import factory, go_cache
+subprocess.Popen(["/bin/cat"], stdin={peer.fileno()}, stdout={peer.fileno()})
+os.close({peer.fileno()})
+go_cache.GO_BUILD_SECONDS = {2 if failure == "timeout" else 30}
+raise SystemExit(factory.main())
+"""
+                    cli = [sys.executable, "-B", "-c", launch, "--state-dir", str(self.state),
+                           "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)]
+                    with subprocess.Popen(cli, cwd=factory.ROOT, env={**os.environ, "TMPDIR": str(self.root)},
+                                          start_new_session=True, pass_fds=(peer.fileno(),),
+                                          stdout=subprocess.PIPE) as caller:
+                        peer.close()
+                        deadline = time.monotonic() + 10
+                        while not ready.exists():
+                            self.assertIsNone(caller.poll(), "Factory exited before the compiler wrote")
+                            self.assertLess(time.monotonic(), deadline)
+                            time.sleep(0.01)
+                        for path in paths:
+                            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
+                                self.fail(f"Acquired {path} during a compiler write")
+                        if failure == "parent kill":
+                            caller.kill()
+                        elif failure == "parent interrupt":
+                            caller.send_signal(signal.SIGINT)
+                        elif failure == "group teardown":
+                            os.killpg(caller.pid, signal.SIGKILL)
+                        elif failure == "driver exit":
+                            exit_driver.touch()
+                        # At the first opportunity to acquire each admission lock, the
+                        # compiler must already have released its separate mutation flock.
+                        deadline = time.monotonic() + 5
+                        with entry.open("rb") as mutation:
+                            pending = set(paths)
+                            while pending:
+                                for path in pending.copy():
+                                    try:
+                                        with go_cache.inode_lock(path, directory=path.is_dir()):
+                                            fcntl.flock(mutation, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                                            pending.remove(path)
+                                    except factory.ExecutionBusy:
+                                        continue
+                                self.assertLess(time.monotonic(), deadline, f"Locks retained after stop: {pending}")
+                                time.sleep(0.01)
+                        output, _ = caller.communicate(timeout=6)
+                        if failure in ("timeout", "driver exit"):
+                            row, = json.loads(output)
+                            self.assertEqual((caller.returncode, row["decision"], row["go_exit_code"]),
+                                             (1, "failed", 124 if failure == "timeout" else 7), row)
+                            self.assertEqual(row["removed_entries"], 0)
+                            self.assertGreater(row["after_kib"], 0)
+                            if failure == "timeout":
+                                self.assertIn("exceeded its 2-second deadline", row["reason"])
+                            probe.settimeout(2)
+                            probe.sendall(b"?")
+                            self.assertEqual(probe.recv(1), b"?")
+                        elif failure == "parent interrupt":
+                            self.assertEqual(caller.returncode, -signal.SIGINT)
+                        else:
+                            self.assertEqual(caller.returncode, -signal.SIGKILL)
+                ready.unlink()
+                exit_driver.unlink(missing_ok=True)
+
+    def test_native_aging_retains_cache_under_replaceable_ancestor(self):
+        self.root.chmod(0o770)
+        with patch.object(go_cache, "native_build") as build:
+            row = self.trim()
+            self.assertEqual(row["decision"], "retained")
+            self.assertIn(f"replaceable directory {self.root}", row["reason"])
+            build.assert_not_called()
+
+    def test_native_aging_refuses_foreign_owner_of_mode_0700_ancestor(self):
+        root = self.root.stat()
+        fstat = os.fstat
+
+        def fixture_owner(fd):
+            info = fstat(fd)
+            if os.path.samestat(info, root):
+                fields = list(info)
+                fields[stat.ST_UID] = os.getuid() + 1  # Fixture owner could chmod this ancestor.
+                return os.stat_result(fields)
+            return info
+
+        with patch.object(os, "fstat", side_effect=fixture_owner), patch.object(go_cache, "native_build") as build:
+            row = self.trim()
+            self.assertEqual(row["decision"], "retained")
+            self.assertIn(f"replaceable directory {self.root}", row["reason"])
+            build.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin extended ACLs")
+    def test_native_aging_checks_acl_grants_on_cache_and_ancestors(self):
+        subprocess.run(["/bin/chmod", "+a", "everyone deny delete", self.root], check=True)
+        self.addCleanup(subprocess.run, ["/bin/chmod", "-a", "everyone deny delete", self.root], check=True)
+        self.assertEqual(self.trim()["go_exit_code"], 0)
+        for path, add in ((self.cache, "+ai"), (self.root, "+a")):
+            with self.subTest(path=path), patch.object(go_cache, "native_build") as build:
+                grant = "group:staff allow list,search"
+                subprocess.run(["/bin/chmod", add, grant, path], check=True)
+                try:
+                    row = self.trim()
+                    self.assertEqual(row["decision"], "retained")
+                    self.assertIn(f"granting ACL at {path}", row["reason"])
+                    build.assert_not_called()
+                finally:
+                    subprocess.run(["/bin/chmod", "-a", grant, path], check=True)
+
+    def test_native_aging_refuses_distribution_cache_backend(self):
+        executable = self.root / "fixture-go"
+        executable.write_text("#!/bin/sh\nif [ \"$1\" = env ]; then printf '/fixture/backend\\n\\n'; "
+                              "else touch \"$GOCACHE/build-ran\"; fi\n")
+        executable.chmod(0o700)
+        row = self.trim(str(executable), status=1)
+        self.assertIn("GOCACHEPROG", row["reason"])
+        self.assertFalse((self.cache / "build-ran").exists())
+
+    def test_native_aging_leaves_an_attended_retirement_empty(self):
+        self.assertEqual(self.inspect(True)["decision"], "cleaned")
+        remaining = list(self.cache.iterdir())
+        row = self.trim()
+        self.assertEqual((row["decision"], row["removed_entries"], row["retained_entries"]), ("retained", 0, 0))
+        self.assertCountEqual(self.cache.iterdir(), remaining)
+
+    def test_native_build_and_readback_hold_admission_locks(self):
+        line = factory.execution_lock_path(self.state, factory.task_line(self.record))
+        def contend():
+            for path in (line, self.path.with_suffix(".lock"), self.admin, self.cache):
+                with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
+                    self.fail(f"Acquired {path} during native aging")
+
+        build = go_cache.native_build
+        def run(*args):
+            contend()
+            return build(*args)
+
+        walk = go_cache.cache_contents
+        def readback(*args, **kwargs):
+            if invoked.called:
+                contend()
+                raise OSError("fixture readback failure")
+            return walk(*args, **kwargs)
+
+        with patch.object(go_cache, "native_build", side_effect=run) as invoked, \
+                patch.object(go_cache, "cache_contents", side_effect=readback):
+            row = self.trim(status=1)
+        self.assertEqual(row["decision"], "failed")
+        self.assertIn("fixture readback failure", row["reason"])
+        self.assertNotIn("removed_entries", row)
 
     def test_census_preserves_review_exports_but_refuses_a_damaged_task(self):
         export = self.state / "release-review.json"
@@ -1111,6 +1423,15 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
 
 
 class ActivityObservation(unittest.TestCase):
+    def test_native_aging_refuses_a_remote_primary_mount(self):
+        repo = Path("/fixture/repo")
+        table = "server:/home on / (nfs)\n"
+        with patch.object(sys, "platform", "darwin"), patch.object(subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, table, "")), \
+                self.assertRaisesRegex(factory.FactoryError, "local filesystem"):
+            go_cache.check_mounts(repo, Path("/fixture/work"), repo / ".git/worktrees/work/go-build",
+                                  native_mount=(b"fixture", b"/\0"))
+
     def test_same_device_mount_under_a_shard_is_retained(self):
         repo = Path("/fixture/repo")
         cache = repo / ".git/worktrees/linked/go-build"
