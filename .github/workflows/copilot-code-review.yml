@@ -27,15 +27,16 @@ jobs:
 
           mkdir project
           export XDG_CACHE_HOME="$scratch/cache"
-          ./acr install github:jbaruch/coding-policy@v0.10.50 --project project \
+          ./acr install github:jbaruch/coding-policy@v0.9.0 --project project \
             --agent codex --freshness none --non-interactive
-          if ! grep -Fxq '      commit: b006bd1709327da833356af198e2715bf81ec728' project/.agents/registry.lock; then
-            echo 'Unexpected coding-policy release commit. Verify the upstream v0.10.50 release before rerunning.' >&2
+          if ! grep -Fxq '      commit: 8371cf1b701de51905af33630c73cbc121453dd1' project/.agents/registry.lock; then
+            echo 'Unexpected coding-policy release commit. Verify the upstream v0.9.0 release before rerunning.' >&2
             exit 1
           fi
           ./acr realize --project project --agent codex
 
-          for reference in coding-contracts/references/{ci-safety,error-handling,language-diagnostics,script-delegation,testing-standards}.md release/SKILL.md; do
+          for reference in coding-contracts/references/{ci-safety,error-handling,language-diagnostics,script-delegation,testing-standards}.md \
+            release/SKILL.md release/references/review-severity-carve-outs.md; do
             if [[ ! -s "project/.codex/skills/acr__jbaruch__coding-policy__$reference" ]]; then
               printf 'Missing coding-policy file %s. Verify the pinned release before rerunning.\n' "$reference" >&2
               exit 1
@@ -53,4 +54,4 @@ jobs:
             exit 1
           fi
           cp -a project/.codex/skills/. "$codex_dir/skills/"
-          echo 'Installed coding-policy v0.10.50 skills for Copilot code review.'
+          echo 'Installed coding-policy v0.9.0 skills for Copilot code review.'
