@@ -22,7 +22,7 @@ import grok_worker
 import integration
 import native_grok
 from test_abandoned_scratch import listing_cli
-from test_codex_worker import FakeProcess
+from test_codex_worker import FakeProcess, check_reader_stop_timeout
 from test_rex_launcher import FakeRex
 
 
@@ -155,6 +155,9 @@ class GrokWorker(unittest.TestCase):
         record = factory.load_task(self.path)
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
             return factory.collect_grok(self.path, "implement", self.rex, record, record["assignments"]["implement"])
+
+    def test_reader_stop_timeout_retains_directories(self):
+        check_reader_stop_timeout(self, self.execute)
 
     def test_export_checks_original_brief_bytes(self):
         from test_writer_transfer import check_provider_export_brief

@@ -2,13 +2,18 @@
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
-from contextlib import nullcontext, redirect_stdout, redirect_stderr
+from contextlib import ExitStack, nullcontext, redirect_stdout, redirect_stderr
+from functools import partial
+import gc
 from io import StringIO
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 import sys
@@ -60,6 +65,26 @@ def events(cwd, session=SESSION):
                  api_error_status=None, safety_stops=0, permission_denials=[], subagent_stats=dict(spawned=0), num_turns=1,
                  result=json.dumps(report), structured_output=report, usage=dict(input_tokens=2, output_tokens=20),
                  modelUsage={MODEL: dict(provider="firstParty", canonicalModel=MODEL, costBasis="list", costUSD=0.01, inputTokens=2, outputTokens=20)})]
+
+
+def run_sleeping_claude(scratch_root, stdout_socket, argv):
+    factory.SCRATCH_ROOT = scratch_root
+
+    async def spawn(*command, **options):
+        if stdout_socket >= 0:
+            # Give the test parent a copy of native stdout so it can own and reap the pipe holder.
+            child = ("import signal, socket, sys, time\n"
+                     "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+                     "socket.send_fds(socket.socket(fileno=int(sys.argv[1])), [b'x'], [1])\n"
+                     "time.sleep(30)")
+            return await asyncio.create_subprocess_exec(sys.executable, "-c", child, str(stdout_socket),
+                pass_fds=(stdout_socket,), **options)
+        return await asyncio.create_subprocess_exec("/bin/sleep", "30", **options)
+
+    fixture = ClaudeWorker()
+    fixture.probes = []
+    with patch.object(claude_worker, "execute", partial(claude_worker.execute, spawn=spawn, probe=fixture.probe)):
+        return claude_worker.main(argv)
 
 
 def in_checkout(process, options):
@@ -777,7 +802,8 @@ class ClaudeWorker(unittest.TestCase):
         actual = next(call for call in FakeRex.calls if call[0] == "new")
         argv = actual[actual.index("--") + 1:]
         argv = argv[argv.index("--") + 1:]
-        self.args = claude_worker.parser().parse_args(argv[4:])
+        self.worker_argv = argv[4:]
+        self.args = claude_worker.parser().parse_args(self.worker_argv)
         previous = Path.cwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, previous)
@@ -933,6 +959,117 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(str(scratch.parent), factory.SCRATCH_ROOT)  # /tmp in production, a per-run root in tests.
         self.assertLess(len(scratch.name), 12)  # Go tests put Unix sockets under TMPDIR; macOS caps them at 104 bytes.
         self.assertFalse(scratch.exists())
+        self.assertFalse(Path(receipt["checkout"]).exists())
+
+    def interrupt_sleeping_claude(self, stdout_socket=-1, receive_stdout=None):
+        launch = ("import sys; from test_claude_execution import run_sleeping_claude; "
+                  "sys.exit(run_sleeping_claude(sys.argv[1], int(sys.argv[2]), sys.argv[3:]))")
+        with subprocess.Popen([sys.executable, "-c", launch, str(self.root), str(stdout_socket), *self.worker_argv],
+                              env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
+                              pass_fds=(stdout_socket,) if stdout_socket >= 0 else (),
+                              stderr=subprocess.PIPE, text=True) as worker:
+            try:
+                deadline = time.monotonic() + 10
+                while worker.poll() is None and time.monotonic() < deadline:
+                    if self.args.receipt.exists():
+                        starting = json.loads(self.args.receipt.read_bytes())
+                        if starting.get("native_process"):
+                            break
+                    time.sleep(0.02)
+                else:
+                    self.fail("Worker exited or timed out before persisting the native process")
+                child = starting["native_process"]
+                scratch = Path(starting["scratch"])
+                identity = scratch.stat()
+                self.assertEqual(starting["scratch_identity"], dict(st_dev=identity.st_dev, st_ino=identity.st_ino))
+                self.assertIsInstance(child["start_time"], int)
+                os.kill(child["pid"], 0)
+                if receive_stdout is not None:
+                    receive_stdout()
+                worker.send_signal(signal.SIGTERM)
+                _, diagnostic = worker.communicate(timeout=15)
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+            self.assertEqual(worker.returncode, 1, diagnostic)
+        terminal = json.loads(self.args.receipt.read_bytes())
+        self.assertEqual(terminal["state"], "failed")
+        self.assertIsNotNone(terminal["finished_at"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child["pid"], 0)
+        for field in ("scratch", "scratch_identity", "native_process"):
+            self.assertEqual(terminal[field], starting[field])
+        return terminal
+
+    def test_parent_only_sigterm_finalizes_owned_child_and_scratch(self):
+        terminal = self.interrupt_sleeping_claude()
+        self.assertEqual(terminal["exit_code"], -signal.SIGINT)
+        self.assertIs(terminal["scratch_removed"], True)
+        self.assertFalse(Path(terminal["scratch"]).exists())
+        self.assertFalse(Path(terminal["checkout"]).exists())
+
+    def test_parent_only_sigterm_with_inherited_stdout_retains_directories(self):
+        with ExitStack() as stack:
+            receiver, sender = socket.socketpair()
+            stack.enter_context(receiver)
+            stack.enter_context(sender)
+            receiver.settimeout(5)
+            holders = []
+
+            def receive_stdout():
+                _, (fd,), _, _ = socket.recv_fds(receiver, 1, 1)
+                with os.fdopen(fd, "wb") as output:
+                    holder = stack.enter_context(subprocess.Popen(["/bin/sleep", "30"], stdout=output))
+                stack.callback(holder.kill)
+                holders.append(holder)
+
+            terminal = self.interrupt_sleeping_claude(sender.fileno(), receive_stdout)
+            self.assertIsNone(holders[0].poll())
+            self.assertEqual(terminal["exit_code"], -signal.SIGKILL)
+            self.assertIn("child stop timed out", terminal["error"])
+            self.assertIs(terminal["scratch_removed"], False)
+            self.assertTrue(Path(terminal["scratch"]).is_dir())
+            self.assertTrue(Path(terminal["checkout"]).is_dir())
+
+    def assert_retained_reader(self, receipt):
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIsNone(receipt["exit_code"])
+        self.assertIs(receipt["scratch_removed"], False)
+        self.assertTrue(Path(receipt["scratch"]).is_dir())
+        self.assertTrue(Path(receipt["checkout"]).is_dir())
+        self.assertEqual(json.loads(self.args.receipt.read_bytes()), receipt)
+
+    def test_sigterm_during_spawn_retains_reader_directories(self):
+        with patch.object(self, "spawn", side_effect=asyncio.CancelledError(signal.SIGTERM)):
+            receipt = self.execute()
+        self.assertIsNone(receipt["native_process"])
+        self.assert_retained_reader(receipt)
+
+    def test_unconfirmed_stop_retains_reader_directories(self):
+        with patch.object(self.process, "readline", side_effect=asyncio.CancelledError(signal.SIGTERM)), \
+                patch.object(self.process, "send_signal", side_effect=PermissionError):
+            receipt = self.execute()
+        self.assertIn("child exit unconfirmed", receipt["error"])
+        self.assert_retained_reader(receipt)
+
+    def test_sigterm_while_waiting_for_stop_retains_reader_directories(self):
+        with patch.object(self.process, "readline", side_effect=TimeoutError), \
+                patch.object(self.process, "wait", side_effect=asyncio.CancelledError(signal.SIGTERM)):
+            receipt = self.execute()
+        self.assertIn("allowance expired", receipt["error"])
+        self.assertIn("child exit unconfirmed", receipt["error"])
+        self.assert_retained_reader(receipt)
+
+    def test_reader_checkout_retention_survives_stack_disposal(self):
+        checkout = factory.reader_checkout_path(self.args.receipt)
+        stack = ExitStack()
+        removable = True
+        stack.enter_context(factory.reader_checkout(self.args.repo, self.candidate, checkout,
+            identity=json.loads(self.args.repo_identity), can_remove=lambda: removable))
+        removable = False
+        del stack
+        gc.collect()
+        self.assertTrue((checkout / "README.md").is_file())
 
     @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
     def test_failed_scratch_removal_is_persisted_without_failing_the_attempt(self):
@@ -951,6 +1088,7 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(receipt["scratch"], str(scratch))
         self.assertIs(receipt["scratch_removed"], False)
         self.assertTrue(scratch.is_dir())
+        self.assertFalse(Path(receipt["checkout"]).exists())
         self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
