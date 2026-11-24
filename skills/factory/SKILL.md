@@ -13,7 +13,7 @@ Use the smallest factory operation that finishes the request. Follow the project
 
 Reuse the existing task and selected inputs for continuation. Admit a task and provision an isolated writer worktree when the work needs them. Select only the roles the task needs from the [role catalog](references/roles.json).
 
-Record the requester's words as original acceptance evidence. Label coordinator inferences as nonbinding assumptions. Apply relevant repository requirements and acceptance criteria established by authorized roles within the requested scope. Before planning a repeat correction to the same area, reset the approach by restating the problem in the requester's words and naming the simplest approach.
+Record the requester's words as original acceptance evidence. Label coordinator inferences as nonbinding assumptions. Apply relevant repository requirements and acceptance criteria established by authorized roles within the requested scope. Start each correction plan by restating the problem in the requester's words and naming the simplest approach.
 
 Use the [ready-plan contract](references/ready-plan.md) for inputs, provider routing, and result states. Run the plan with the controller command in the [command reference](references/commands.md). Inspect its JSON result and reconcile partial effects before retrying. Keep active work within the selected limits. Leave spare capacity idle. Finish here.
 
