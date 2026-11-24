@@ -21,7 +21,7 @@ import integration
 import native_antigravity
 from codex_worker import outcome_schema
 from test_abandoned_scratch import listing_cli
-from test_codex_worker import FakeProcess
+from test_codex_worker import FakeProcess, check_reader_stop_timeout
 from test_rex_launcher import FakeRex
 
 CONVERSATION = "ec43bd74-84de-47ea-abd3-b6ab8e7b5c8e"
@@ -139,6 +139,9 @@ class AntigravityWorker(unittest.TestCase):
         record = factory.load_task(self.path)
         with patch.object(factory, "status", return_value=dict(state="exited", exit=dict(exit_code=0))):
             return factory.collect_antigravity(self.path, identity, self.rex, record, record["assignments"][identity])
+
+    def test_reader_stop_timeout_retains_directories(self):
+        check_reader_stop_timeout(self, lambda: self.execute(self.args))
 
     def test_reviewer_runs_unprompted_with_the_brief_on_stdin_and_collects(self):
         with patch.object(factory, "native_start_time", return_value=123456):

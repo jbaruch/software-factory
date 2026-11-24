@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path
 import sys
 import time
@@ -17,7 +18,7 @@ import factory_commit
 import native_grok
 import release_evidence
 import review_evidence
-from codex_worker import NATIVE_LINE_LIMIT, cancelled, outcome_schema, stop_child
+from codex_worker import NATIVE_LINE_LIMIT, cancelled, outcome_schema, finish_native_child, with_sigterm
 
 
 def read_events(path, content=None):
@@ -126,11 +127,13 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         raise
     started, process, events = timer(), None, []
     checkouts, workdir = contextlib.ExitStack(), Path(".")
+    cleanup_unconfirmed = False
     reader_admin_stat = None
     try:
         if not args.write:
             workdir, reader_admin_stat, report_source = checkouts.enter_context(factory.reader_checkout(
-                args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
+                args.repo, args.candidate, Path(receipt["checkout"]), identity=identity,
+                can_remove=lambda: not cleanup_unconfirmed and (process is None or process.returncode is not None)))
         with os.fdopen(fd, "w") as stream:
             environment = factory.worker_environment(native_grok.environment(), workdir,
                 scratch=checkouts.enter_context(factory.scratch_directory(args.receipt, receipt)))
@@ -192,16 +195,18 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         receipt.update(state="completed", candidate=candidate)
     except TimeoutError:
         receipt.update(state="failed", error="Grok execution allowance expired; inspect the original attempt without retrying")
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         receipt.update(state="failed", error=cancelled())
+        if exc.args == (signal.SIGTERM,) and process is None and receipt["scratch"] is not None:
+            cleanup_unconfirmed = True
+            receipt["scratch_removed"] = False
     except OSError:
         receipt.update(state="failed", error="Grok process/event I/O failed; restore local access/storage and inspect the retained attempt")
     except (factory.FactoryError, native_grok.GrokProbeError, ValueError) as exc:
         receipt.update(state="failed", error=str(exc))
     finally:
         if process is not None:
-            await stop_child(process)
-            receipt["exit_code"] = process.returncode
+            cleanup_unconfirmed = not await finish_native_child(process, receipt)
         try:
             checkouts.close()  # Only after the native process has stopped.
         except factory.FactoryError as exc:
@@ -230,7 +235,7 @@ def parser():
 
 def main(argv=None):
     try:
-        receipt = asyncio.run(execute(parser().parse_args(argv)))
+        receipt = asyncio.run(with_sigterm(execute(parser().parse_args(argv))))
         if receipt["state"] != "completed":
             print("grok-worker: " + receipt["error"], file=sys.stderr)
             return 1

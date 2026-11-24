@@ -179,6 +179,23 @@ def capture_diagnostic(output):
 CANCELLED = "Cancelled by an interrupt in its pane (factory.py cancel or Ctrl-C); inspect the retained attempt without retrying"
 
 
+async def with_sigterm(execution):
+    """Cancel this CLI execution once, allowing its asynchronous cleanup to finish."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+
+    def terminate(signum, frame):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        loop.call_soon_threadsafe(task.cancel, signum)
+
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        return await execution
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def cancelled():
     """Record a pane interrupt as the attempt's failure, then let cleanup await normally."""
     task = asyncio.current_task()
@@ -204,6 +221,42 @@ async def stop_child(process):
         except ProcessLookupError:
             pass  # The owned child exited before the signal; still observe its exit below.
         await process.wait()
+
+
+async def stop_worker_child(process):
+    # A reaped child can leave stdout open in another process.
+    async with asyncio.timeout(10):
+        await stop_child(process)
+        while await process.stdout.read(64 * 1024):
+            pass  # Discard buffered output until EOF under the same stop deadline.
+
+
+async def finish_native_child(process, receipt):
+    """Record the stop outcome before the worker releases its scratch directory."""
+    stop_confirmed = False
+    try:
+        await stop_worker_child(process)
+    except TimeoutError:
+        receipt.update(state="failed", scratch_removed=False, exit_code=process.returncode,
+                       error=f"{receipt['error'] or 'Native cleanup failed'}; child stop timed out, retain directories for reconciliation")
+        return False
+    except asyncio.CancelledError as exc:
+        # A first SIGTERM can arrive while another failure is already stopping the child.
+        if exc.args != (signal.SIGTERM,):
+            raise
+        interrupt = cancelled()
+        receipt.update(state="failed", error=receipt["error"] or interrupt)
+    except OSError as exc:
+        receipt.update(state="failed", error=f"{receipt['error'] or 'Native cleanup failed'}; cannot stop owned child ({type(exc).__name__})")
+    else:
+        stop_confirmed = True
+    receipt["exit_code"] = process.returncode
+    if not stop_confirmed or process.returncode is None:
+        unconfirmed = "child exit" if process.returncode is None else "child stdout closure"
+        receipt["scratch_removed"] = False
+        receipt.update(state="failed", error=f"{receipt['error'] or 'Native cleanup failed'}; {unconfirmed} unconfirmed, retain directories for reconciliation")
+        return False
+    return True
 
 
 # Codex 0.166 adds MCP servers at runtime that `mcp list` never shows: the Codex Apps server behind `apps`, plugin
@@ -354,12 +407,14 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
     events = []
     # Readers run unconfined, so they work in a disposable checkout of the candidate.
     checkouts, workdir = contextlib.ExitStack(), "."
+    cleanup_unconfirmed = False
     reader_admin_stat = None
     try:
         try:
             if not args.write:
                 reader_dir, reader_admin_stat, report_source = checkouts.enter_context(factory.reader_checkout(
-                    str(args.repo), args.candidate, factory.reader_checkout_path(args.receipt), identity=identity))
+                    str(args.repo), args.candidate, factory.reader_checkout_path(args.receipt), identity=identity,
+                    can_remove=lambda: not cleanup_unconfirmed and (process is None or process.returncode is not None)))
                 workdir = str(reader_dir)
             with os.fdopen(fd, "w") as stream:
                 if args.commit_message is not None:
@@ -376,6 +431,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 # JSON basic-string escapes also fit TOML, except raw DEL;
                 # keep non-BMP Unicode literal rather than JSON surrogate pairs.
                 shell_path = json.dumps(str(directory), ensure_ascii=False).replace("\x7f", "\\u007f")
+                spawning = False
                 try:
                     # A seekable private stdin avoids argv limits and pipe backpressure.
                     # The child owns its inherited descriptor; the parent closes its copy.
@@ -385,6 +441,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                         # No --strict-config: tessl writes its own `tessl` tables into .codex/config.toml, which
                         # Codex ignores with a warning and strict mode made fatal for every assignment.
                         configured = await asyncio.to_thread(mcp_servers, binary, workdir, environment)
+                        spawning = True
                         process = await spawn(str(binary), "--no-daemon", "exec",
                                           "--disable", "multi_agent", "--disable", "multi_agent_v2",
                                           *RUNTIME_MCP_OFF,
@@ -403,6 +460,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           cwd=workdir, env=environment,
                                           limit=NATIVE_LINE_LIMIT,
                                           stdin=prompt, stdout=asyncio.subprocess.PIPE)
+                except asyncio.CancelledError as exc:
+                    if spawning and exc.args == (signal.SIGTERM,):
+                        cleanup_unconfirmed = True
+                    raise
                 except OSError:
                     raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
                 factory.record_native_process(args.receipt, receipt, process)
@@ -448,17 +509,21 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             # mkdtemp has no finalizer: an unconfirmed child keeps its directory.
             try:
                 if process is not None:
-                    try:
-                        await stop_child(process)
-                    except OSError:
-                        cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
-                    receipt["exit_code"] = process.returncode
+                    cleanup_unconfirmed = True
+                    await stop_worker_child(process)
+                    cleanup_unconfirmed = process.returncode is None
+            except TimeoutError:
+                cleanup_errors.append("Cannot stop the owned native child; child stop timed out, retain directories for reconciliation")
+            except OSError:
+                cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
             finally:
-                if process is not None and process.returncode is None:
+                if process is not None:
+                    receipt["exit_code"] = process.returncode
+                if cleanup_unconfirmed:
                     receipt["scratch_removed"] = False
                 scratch_handles.close()
             if directory is not None:
-                if process is not None and process.returncode is None:
+                if cleanup_unconfirmed:
                     cleanup_errors.append(f"Native termination is unconfirmed; retain shell directory {str(directory)!r} until owned-child reconciliation confirms exit")
                 else:
                     try:
@@ -484,15 +549,13 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         receipt.update(state="failed", error=str(exc))
     finally:
         # The reader checkout goes last, once the native child is confirmed stopped.
-        if process is not None and process.returncode is None:
-            if not args.write:
-                cleanup_errors.append("Native termination is unconfirmed; retain the reader checkout until owned-child reconciliation confirms exit")
-        else:
-            try:
-                checkouts.close()
-            except factory.FactoryError as exc:
-                cleanup_errors.append("Cannot remove the reader checkout " + str(factory.reader_checkout_path(args.receipt))
-                                      + "; remove it with git worktree remove --force --force after reconciling: " + str(exc))
+        if not args.write and cleanup_unconfirmed:
+            cleanup_errors.append("Native termination is unconfirmed; retain the reader checkout until owned-child reconciliation confirms exit")
+        try:
+            checkouts.close()
+        except factory.FactoryError as exc:
+            cleanup_errors.append("Cannot remove the reader checkout " + str(factory.reader_checkout_path(args.receipt))
+                                  + "; remove it with git worktree remove --force --force after reconciling: " + str(exc))
         if cleanup_errors:
             receipt.update(state="failed", error="; ".join(filter(None, [receipt["error"], *cleanup_errors])))
         receipt.update(finished_at=clock(), elapsed_seconds=timer() - started)
@@ -520,7 +583,7 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        receipt = asyncio.run(execute(args))
+        receipt = asyncio.run(with_sigterm(execute(args)))
         if receipt["state"] != "completed":
             print("codex-worker: " + receipt["error"], file=sys.stderr)
             return 1

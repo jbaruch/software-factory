@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -57,12 +58,34 @@ class FakeProcess:
             raise TimeoutError("fixture")
         return line or b""
 
+    async def read(self, _size):
+        return next(self.lines, b"")
+
     async def wait(self):
         self.returncode = self.exit_code
         return self.returncode
 
     def send_signal(self, signal):
         self.signals.append(signal)
+
+
+def check_reader_stop_timeout(case, execute):
+    async def timed_out(process):
+        process.returncode = -signal.SIGKILL  # Child reaped while its stdout is still open.
+        raise TimeoutError
+
+    with patch.object(FakeProcess, "readline", side_effect=asyncio.CancelledError(signal.SIGTERM)), \
+            patch.object(worker, "stop_worker_child", side_effect=timed_out):
+        receipt = execute()
+    case.assertEqual(receipt["state"], "failed")
+    case.assertIsNotNone(receipt["finished_at"])
+    case.assertIn(worker.CANCELLED, receipt["error"])
+    case.assertIn("child stop timed out", receipt["error"])
+    case.assertEqual(receipt["exit_code"], -signal.SIGKILL)
+    case.assertIs(receipt["scratch_removed"], False)
+    case.assertTrue(Path(receipt["scratch"]).is_dir())
+    case.assertTrue(factory.reader_checkout_path(case.args.receipt).is_dir())
+    case.assertEqual(json.loads(case.args.receipt.read_text()), receipt)
 
 
 def effective_mcp_servers(command, configured, *, runtime_plugins=("hosted-connector",)):
@@ -520,6 +543,12 @@ class NativeResults(unittest.TestCase):
                 self.assertEqual(receipt["thread_id"], "thread-fixture")
                 self.assertIsNone(receipt["report"])
                 self.assertEqual(worker.read_events(self.args.events), payload)
+
+    def test_reader_stop_timeout_retains_dependent_shell(self):
+        check_reader_stop_timeout(self, self.execute)
+        directory = self.shell_directories[-1]
+        self.assertTrue(directory.is_dir())
+        self.addCleanup(shutil.rmtree, directory)
 
     def test_unconfirmed_termination_retains_directory_and_primary_failure(self):
         self.writer()

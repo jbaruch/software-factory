@@ -1274,7 +1274,7 @@ def reader_checkout_path(receipt):
 
 
 @contextmanager
-def reader_checkout(repository, candidate, destination, *, identity):
+def reader_checkout(repository, candidate, destination, *, identity, can_remove):
     """A disposable detached worktree at the candidate for a reader that has every tool.
 
     Codex and Antigravity readers run unconfined, so tests and installs they run
@@ -1302,7 +1302,8 @@ def reader_checkout(repository, candidate, destination, *, identity):
     finally:
         # Two --force flags remove a locked worktree with every untracked and ignored file;
         # a reader's node_modules can take minutes on slow storage.
-        provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination), timeout=600)
+        if can_remove():
+            provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination), timeout=600)
 
 
 def report_copy_path(receipt_path, receipt, copy):
