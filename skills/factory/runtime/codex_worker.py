@@ -224,13 +224,16 @@ async def stop_child(process):
 
 
 async def stop_worker_child(process):
-    # Leave time for the SIGINT grace period, but bound wait() if stdout stays open after SIGKILL.
+    # A reaped child can leave stdout open in another process.
     async with asyncio.timeout(10):
         await stop_child(process)
+        while await process.stdout.read(64 * 1024):
+            pass  # Discard buffered output until EOF under the same stop deadline.
 
 
 async def finish_native_child(process, receipt):
     """Record the stop outcome before the worker releases its scratch directory."""
+    stop_confirmed = False
     try:
         await stop_worker_child(process)
     except TimeoutError:
@@ -245,11 +248,15 @@ async def finish_native_child(process, receipt):
         receipt.update(state="failed", error=receipt["error"] or interrupt)
     except OSError as exc:
         receipt.update(state="failed", error=f"{receipt['error'] or 'Native cleanup failed'}; cannot stop owned child ({type(exc).__name__})")
+    else:
+        stop_confirmed = True
     receipt["exit_code"] = process.returncode
-    if process.returncode is None:
+    if not stop_confirmed or process.returncode is None:
+        unconfirmed = "child exit" if process.returncode is None else "child stdout closure"
         receipt["scratch_removed"] = False
-        receipt.update(state="failed", error=f"{receipt['error'] or 'Native cleanup failed'}; child exit unconfirmed, retain scratch for reconciliation")
-    return process.returncode is not None
+        receipt.update(state="failed", error=f"{receipt['error'] or 'Native cleanup failed'}; {unconfirmed} unconfirmed, retain directories for reconciliation")
+        return False
+    return True
 
 
 # Codex 0.166 adds MCP servers at runtime that `mcp list` never shows: the Codex Apps server behind `apps`, plugin
@@ -502,16 +509,16 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             # mkdtemp has no finalizer: an unconfirmed child keeps its directory.
             try:
                 if process is not None:
+                    cleanup_unconfirmed = True
                     await stop_worker_child(process)
+                    cleanup_unconfirmed = process.returncode is None
             except TimeoutError:
-                cleanup_unconfirmed = True
                 cleanup_errors.append("Cannot stop the owned native child; child stop timed out, retain directories for reconciliation")
             except OSError:
                 cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
             finally:
                 if process is not None:
                     receipt["exit_code"] = process.returncode
-                    cleanup_unconfirmed = cleanup_unconfirmed or process.returncode is None
                 if cleanup_unconfirmed:
                     receipt["scratch_removed"] = False
                 scratch_handles.close()

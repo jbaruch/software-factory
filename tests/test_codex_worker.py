@@ -58,6 +58,9 @@ class FakeProcess:
             raise TimeoutError("fixture")
         return line or b""
 
+    async def read(self, _size):
+        return next(self.lines, b"")
+
     async def wait(self):
         self.returncode = self.exit_code
         return self.returncode
