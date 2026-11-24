@@ -2621,12 +2621,33 @@ def remove_scratch(directory, identity, fd):
             if (os.fstat(fd).st_mode & 0o077 or not directory.name.startswith("sf-")
                     or directory.parent.resolve() != Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve()):
                 raise
-            for _, _, _, descriptor in os.fwalk(".", dir_fd=fd, onerror=unreadable):
+            for _, children, _, descriptor in os.fwalk(".", topdown=True, dir_fd=fd, onerror=unreadable):
                 current = os.fstat(descriptor)
                 if current.st_uid != os.getuid() or current.st_dev != info.st_dev:
                     raise PermissionError("Scratch directory ownership or identity changed")
                 if current.st_mode & 0o700 != 0o700:
                     os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | 0o700)
+                # fwalk opens each child before yielding its descriptor.
+                for name in children.copy():
+                    child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if not stat.S_ISDIR(child.st_mode):
+                        children.remove(name)
+                        continue
+                    if child.st_uid != os.getuid() or child.st_dev != info.st_dev:
+                        raise PermissionError("Scratch directory ownership or identity changed")
+                    if child.st_mode & 0o700 != 0o700:
+                        try:
+                            os.chmod(name, stat.S_IMODE(child.st_mode) | 0o700,
+                                     dir_fd=descriptor, follow_symlinks=False)
+                        except ValueError as exc:
+                            # Linux can reject this combination if the entry became a symlink.
+                            if not stat.S_ISLNK(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
+                                raise OSError(f"Cannot repair permissions for {name!r}: {exc}") from exc
+                            children.remove(name)
+                        else:
+                            # Darwin can chmod the link itself. Keep fwalk from opening its target.
+                            if not stat.S_ISDIR(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
+                                children.remove(name)
             remove_contents()
         check(directory.lstat())
         # rmdir has no expected-inode argument. Claim the last name in a private

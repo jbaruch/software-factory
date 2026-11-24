@@ -603,6 +603,36 @@ class ManagedScratch(unittest.TestCase):
             self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
             self.assertEqual(marker.read_text(), "keep")
 
+    @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
+    def test_permission_repair_skips_directory_replaced_by_symlink(self):
+        chmod = os.chmod
+
+        def replace_entry(name, mode, *, dir_fd=None, follow_symlinks=True):
+            if name == "nested" and dir_fd is not None:
+                os.rmdir(name, dir_fd=dir_fd)
+                os.symlink(outside, name, dir_fd=dir_fd)
+                if reject_link_chmod and not follow_symlinks:
+                    raise ValueError("chmod: cannot use dir_fd and follow_symlinks together")
+            return chmod(name, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+        for reject_link_chmod in (False, True):
+            with self.subTest(reject_link_chmod=reject_link_chmod), tempfile.TemporaryDirectory() as state:
+                root = Path(state)
+                outside = root / "outside"
+                outside.mkdir()
+                marker = outside / "marker"
+                marker.write_text("keep")
+                outside.chmod(0)
+                receipt = {}
+                with patch.object(factory, "SCRATCH_ROOT", state), patch.object(os, "chmod", side_effect=replace_entry):
+                    with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                        (scratch / "nested").mkdir(mode=0)
+                self.assertIs(receipt["scratch_removed"], True)
+                self.assertFalse(scratch.exists())
+                self.assertEqual(outside.stat().st_mode & 0o777, 0)
+                outside.chmod(0o700)
+                self.assertEqual(marker.read_text(), "keep")
+
     def test_cleanup_and_permission_retry_stay_with_the_recorded_directory(self):
         rmtree = factory.shutil.rmtree
         fwalk = os.fwalk

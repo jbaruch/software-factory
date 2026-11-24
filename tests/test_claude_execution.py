@@ -3,6 +3,7 @@ import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
 from contextlib import ExitStack, nullcontext, redirect_stdout, redirect_stderr
+import errno
 from functools import partial
 import gc
 from io import StringIO
@@ -1079,7 +1080,15 @@ class ClaudeWorker(unittest.TestCase):
         (unreadable / "report.txt").write_text("Fixture output\n")
         self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o700))
         unreadable.chmod(0)
+        chmod = os.chmod
+
+        def fail_repair(path, mode, *, dir_fd=None, follow_symlinks=True):
+            if dir_fd is not None and path == unreadable.name:
+                raise OSError(errno.EIO, "fixture scratch repair failed")
+            return chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
         with patch.object(factory, "new_scratch", return_value=scratch), \
+                patch.object(os, "chmod", side_effect=fail_repair), \
                 redirect_stderr(StringIO()) as errors:
             receipt = self.execute()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
@@ -1090,6 +1099,7 @@ class ClaudeWorker(unittest.TestCase):
         self.assertTrue(scratch.is_dir())
         self.assertFalse(Path(receipt["checkout"]).exists())
         self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
+        self.assertIn("fixture scratch repair failed", errors.getvalue())
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_collection_writes_the_report_as_plain_text_lines(self):
