@@ -1,5 +1,6 @@
 """Read-only assignments get no GitHub identity: a Codex release judgment merged and deployed."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
+import errno
 import io
 import json
 import os
@@ -603,34 +604,42 @@ class ManagedScratch(unittest.TestCase):
             self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
             self.assertEqual(marker.read_text(), "keep")
 
-    @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
-    def test_permission_repair_skips_directory_replaced_by_symlink(self):
-        chmod = os.chmod
-
-        def replace_entry(name, mode, *, dir_fd=None, follow_symlinks=True):
-            if name == "nested" and dir_fd is not None:
-                os.rmdir(name, dir_fd=dir_fd)
-                os.symlink(outside, name, dir_fd=dir_fd)
-                if reject_link_chmod and not follow_symlinks:
-                    raise ValueError("chmod: cannot use dir_fd and follow_symlinks together")
-            return chmod(name, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
-
-        for reject_link_chmod in (False, True):
-            with self.subTest(reject_link_chmod=reject_link_chmod), tempfile.TemporaryDirectory() as state:
+    @unittest.skipUnless(sys.platform == "darwin" and os.getuid() != 0, "Requires unprivileged Darwin directory repair")
+    def test_permission_repair_refuses_substituted_links(self):
+        libc = factory.ctypes.CDLL(None, use_errno=True)
+        fchmodat = libc.fchmodat
+        for symlink, expected_errno in ((True, errno.ELOOP), (False, errno.ENOTDIR)):
+            with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as state:
                 root = Path(state)
-                outside = root / "outside"
-                outside.mkdir()
+                outside = root / "outside-directory"
+                outside.mkdir(mode=0o700)
                 marker = outside / "marker"
                 marker.write_text("keep")
-                outside.chmod(0)
+                marker.chmod(0o400)
+                outside.chmod(0o500)
+
+                def replace_entry(parent_fd, path, mode, flags):
+                    os.rmdir("nested", dir_fd=parent_fd)
+                    if symlink:
+                        os.symlink(outside, "nested", dir_fd=parent_fd)
+                    else:
+                        os.link(marker, "nested", dst_dir_fd=parent_fd)
+                    return fchmodat(parent_fd, path, mode, flags)
+
                 receipt = {}
-                with patch.object(factory, "SCRATCH_ROOT", state), patch.object(os, "chmod", side_effect=replace_entry):
+                with patch.object(factory, "SCRATCH_ROOT", state), \
+                        patch.object(factory.ctypes, "CDLL", return_value=libc), \
+                        patch.object(libc, "fchmodat", side_effect=replace_entry) as repair, \
+                        redirect_stderr(io.StringIO()) as errors:
                     with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
                         (scratch / "nested").mkdir(mode=0)
-                self.assertIs(receipt["scratch_removed"], True)
-                self.assertFalse(scratch.exists())
-                self.assertEqual(outside.stat().st_mode & 0o777, 0)
-                outside.chmod(0o700)
+                repair.assert_called_once()
+                self.assertIs(receipt["scratch_removed"], False)
+                self.assertTrue(scratch.is_dir())
+                self.assertIn(os.strerror(expected_errno), errors.getvalue())
+                self.assertIn("'nested'", errors.getvalue())
+                self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
+                self.assertEqual(marker.stat().st_mode & 0o777, 0o400)
                 self.assertEqual(marker.read_text(), "keep")
 
     def test_cleanup_and_permission_retry_stay_with_the_recorded_directory(self):

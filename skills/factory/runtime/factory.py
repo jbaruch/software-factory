@@ -2627,27 +2627,26 @@ def remove_scratch(directory, identity, fd):
                     raise PermissionError("Scratch directory ownership or identity changed")
                 if current.st_mode & 0o700 != 0o700:
                     os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | 0o700)
+                if sys.platform != "darwin":
+                    continue
                 # fwalk opens each child before yielding its descriptor.
                 for name in children.copy():
                     child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    if not stat.S_ISDIR(child.st_mode):
+                    if stat.S_ISLNK(child.st_mode):
                         children.remove(name)
                         continue
+                    if not stat.S_ISDIR(child.st_mode):
+                        raise OSError(f"Scratch entry {name!r} changed before permission repair")
                     if child.st_uid != os.getuid() or child.st_dev != info.st_dev:
                         raise PermissionError("Scratch directory ownership or identity changed")
                     if child.st_mode & 0o700 != 0o700:
-                        try:
-                            os.chmod(name, stat.S_IMODE(child.st_mode) | 0o700,
-                                     dir_fd=descriptor, follow_symlinks=False)
-                        except ValueError as exc:
-                            # Linux can reject this combination if the entry became a symlink.
-                            if not stat.S_ISLNK(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
-                                raise OSError(f"Cannot repair permissions for {name!r}: {exc}") from exc
-                            children.remove(name)
-                        else:
-                            # Darwin can chmod the link itself. Keep fwalk from opening its target.
-                            if not stat.S_ISDIR(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
-                                children.remove(name)
+                        libc = ctypes.CDLL(None, use_errno=True)
+                        # A trailing slash requires a directory. Darwin's AT_SYMLINK_NOFOLLOW_ANY
+                        # (sys/fcntl.h) also rejects symlinks when resolving that slash.
+                        if libc.fchmodat(descriptor, os.fsencode(name) + b"/",
+                                         stat.S_IMODE(child.st_mode) | 0o700, 0x0800) != 0:
+                            error = ctypes.get_errno()
+                            raise OSError(error, f"Cannot repair scratch permissions: {os.strerror(error)}", name)
             remove_contents()
         check(directory.lstat())
         # rmdir has no expected-inode argument. Claim the last name in a private

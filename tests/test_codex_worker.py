@@ -341,7 +341,7 @@ class NativeResults(unittest.TestCase):
                          [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))])
 
     @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
-    def test_mode_zero_native_scratch_is_removed_and_codex_report_is_preserved(self):
+    def test_mode_zero_native_scratch_cleanup_preserves_codex_report(self):
         spawn = self.spawn
         outside = self.root / "outside-scratch"
         outside.mkdir(mode=0o700)
@@ -367,9 +367,12 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["exit_code"], 0)
         self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
-        self.assertIs(receipt["scratch_removed"], True)
+        removed = sys.platform == "darwin"
+        self.assertIs(receipt["scratch_removed"], removed)
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
-        self.assertFalse(self.scratch_at_spawn.exists())
+        self.assertEqual(self.scratch_at_spawn.exists(), not removed)
+        if not removed:
+            self.assertEqual((self.scratch_at_spawn / "nested").stat().st_mode & 0o777, 0)
         self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
         self.assertEqual(marker.read_text(), "keep")
 
