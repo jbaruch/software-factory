@@ -9,7 +9,7 @@
 - **1, JSON on stdout:** a non-success result from `tidy` or `ready_runner.py`, as the table says.
 - **1, JSON on stdout and `factory: REASON` on stderr:** `*-collect` saved the result but couldn't close the tab.
 - **2:** the command line doesn't parse; argparse prints usage and the error on stderr.
-- **75:** the task's line is busy, because another launcher or runner holds its execution lock; stderr says so as `factory: REASON` (`ready-runner: REASON`). Retry later.
+- **75:** lock contention; stderr says so as `factory: REASON` (`ready-runner: REASON`). `factory.py` returns 75 if its task lock or its line execution lock is held. `ready_runner.py` returns 75 for line execution-lock contention. Follow the diagnostic and retry when the indicated lock clears. Carry the same assignment ID and inputs on native launch retry.
 
 A command that fails may already have written part of its effect. Check with `show` or `status` before running it again.
 

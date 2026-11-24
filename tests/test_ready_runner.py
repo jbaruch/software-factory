@@ -2213,6 +2213,32 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual((self.directory / "task.json").read_bytes(), original)
         self.assertEqual(PlanRex.calls, [])
 
+    def test_native_cli_retries_a_busy_task_lock_with_the_same_assignment_id(self):
+        path = self.directory / "task.json"
+        original = path.read_bytes()
+        command = ["--state-dir", str(self.directory), "--rex", sys.executable, "--server", "unix:///test.sock",
+                   "codex-start", "--task", "task", "--id", "manual", "--role", "qa", "--cwd", str(self.repo),
+                   "--purpose", "correction", "--codex", sys.executable, "--model", "fixture-model", "--effort", "high",
+                   "--goal", "Inspect the candidate"]
+        output, error = StringIO(), StringIO()
+        with factory.task_lock(self.directory, "task"), redirect_stdout(output), redirect_stderr(error):
+            self.assertEqual(factory.main(command), factory.EXIT_BUSY)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(error.getvalue(), "factory: Another command is working on this task; retry later\n")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(PlanRex.calls, [])
+
+        error = StringIO()
+        with redirect_stdout(StringIO()), redirect_stderr(error):
+            self.assertEqual(factory.main(command), 0, error.getvalue())
+            self.assertEqual(factory.main(command), 0, error.getvalue())
+            self.assertEqual(factory.main([*command[:-1], "Inspect something else"]), 1)
+        self.assertIn("Assignment ID already has different inputs", error.getvalue())
+        self.assertEqual(self.launches(), 1)
+        record = factory.load_task(path)
+        self.assertEqual(list(record["assignments"]), ["manual"])
+        self.assertEqual(factory.task_view(record)["allowances"]["correction"]["used"], 1)
+
     def test_run_loop_advances_dependencies_and_budget_return_keeps_live_jobs(self):
         controller = self.controller(self.plan([self.job(), self.job("second", after=["first"])]))
         sleeps = []

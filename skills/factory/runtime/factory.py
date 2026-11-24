@@ -148,7 +148,11 @@ class ExecutionBusy(FactoryError):
     """Another launcher holds the execution lock: try again later, nothing failed."""
 
 
-# sysexits EX_TEMPFAIL: a busy execution lock is a retry, not a failure.
+class TaskLockBusy(FactoryError):
+    """Another command holds the task lock."""
+
+
+# sysexits EX_TEMPFAIL: retry after lock contention.
 EXIT_BUSY = 75
 
 
@@ -202,7 +206,7 @@ def task_lock(directory, task, *, wait=False, patience=0.0):
                 break
             except BlockingIOError as exc:
                 if time.monotonic() >= deadline:
-                    raise FactoryError("Another command is working on this task; retry later") from exc
+                    raise TaskLockBusy("Another command is working on this task; retry later") from exc
                 time.sleep(0.1)
         yield directory / (task + ".json")
     finally:
@@ -4072,7 +4076,7 @@ def main(argv=None):
                 print(json.dumps(status(rex, record, assignment), indent=2))
     except (FactoryError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         print("factory: " + str(exc), file=sys.stderr)
-        return EXIT_BUSY if isinstance(exc, ExecutionBusy) else 1
+        return EXIT_BUSY if isinstance(exc, (ExecutionBusy, TaskLockBusy)) else 1
     return 0
 
 
