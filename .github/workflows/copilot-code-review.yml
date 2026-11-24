@@ -1,0 +1,57 @@
+name: Copilot code review setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Retire these pins by removing this workflow through normal review after
+      # the temporary Copilot reviews of #274 and #275.
+      - name: Install pinned coding-policy skills
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d "$RUNNER_TEMP/copilot-policy.XXXXXXXX")
+          cd "$scratch"
+          curl --fail --silent --show-error --location --output acr-linux-amd64.tar.gz \
+            https://github.com/jbaruch/agentic-context-registry/releases/download/v0.6.0/acr-linux-amd64.tar.gz
+          echo 'ebdcd78473c2a052624a03af84a61dce1f88e55b935320bd40f4918e504424c8  acr-linux-amd64.tar.gz' | sha256sum --check
+          tar -xzf acr-linux-amd64.tar.gz
+
+          mkdir project
+          export XDG_CACHE_HOME="$scratch/cache"
+          ./acr install github:jbaruch/coding-policy@v0.9.0 --project project \
+            --agent codex --freshness none --non-interactive
+          if ! grep -Fxq '      commit: 8371cf1b701de51905af33630c73cbc121453dd1' project/.agents/registry.lock; then
+            echo 'Unexpected coding-policy release commit. Verify the upstream v0.9.0 release before rerunning.' >&2
+            exit 1
+          fi
+          ./acr realize --project project --agent codex
+
+          for reference in coding-contracts/references/{ci-safety,error-handling,language-diagnostics,script-delegation,testing-standards}.md \
+            release/SKILL.md release/references/review-severity-carve-outs.md; do
+            if [[ ! -s "project/.codex/skills/acr__jbaruch__coding-policy__$reference" ]]; then
+              printf 'Missing coding-policy file %s. Verify the pinned release before rerunning.\n' "$reference" >&2
+              exit 1
+            fi
+          done
+
+          codex_dir="$GITHUB_WORKSPACE/.codex"
+          if [[ -L "$codex_dir" ]]; then
+            echo 'The checkout .codex path is a symlink. Rerun with a clean checkout.' >&2
+            exit 1
+          fi
+          mkdir -p "$codex_dir"
+          if ! mkdir "$codex_dir/skills"; then
+            echo 'Cannot create .codex/skills. Rerun with a clean checkout and a writable workspace.' >&2
+            exit 1
+          fi
+          cp -a project/.codex/skills/. "$codex_dir/skills/"
+          echo 'Installed coding-policy v0.9.0 skills for Copilot code review.'
