@@ -182,9 +182,31 @@ gap between the pilot's last attempt and the attended cleanup. Both the newest
 cache write and the last observed terminal attempt must clear that grace.
 [Mini census and linked-worktree pilot](https://github.com/jbaruch/software-factory/issues/259#issuecomment-7094118940)
 
-Schedule only the read-only census above. Direct Go builds open the cache by
-path and can write between any two observations, even while Factory holds all
-four locks.
+For native age trimming, the existing hourly Mini job selects a trusted Go
+executable by absolute path.
+
+```sh
+python3 -B "$runtime" go-caches --repo /absolute/primary/checkout --trim-go /absolute/path/to/go
+```
+
+Select only repositories whose linked caches are used for native Go builds.
+Keep a repository with an independently known non-Go cache consumer out of
+the job. Complete the disposable pilot through the host wrapper before enabling
+production trimming. A plain invocation remains a read-only census.
+
+Factory verifies the original checkout, terminal writer receipts, reuse, mount
+and cache structure under the admission locks. It builds a no-import package
+in a private temporary directory with an isolated home, the local toolchain,
+the selected disk cache and dependency fetching disabled. The Go installation
+must report empty `GOCACHEPROG` and `GOFLAGS` settings. Go checks its own
+trim marker and ages entries under its native concurrent-build policy.
+The whole-cache size floor, idle window and process inventory apply to
+retirement. A concurrent Go build can add or remove entries during observation.
+`removed_entries` and `retained_entries` count previously observed Go entry
+names absent or present at readback. A successful build reports `cleaned` only
+when an entry disappeared. `size_kib` and `after_kib` include newly created
+entries in their respective measurements. A build or readback failure reports
+`failed` and exits nonzero.
 
 For attended retirement, stop admissions and direct builds, reconcile every
 launch store, and drain all descendants that might reopen this cache. Keep
@@ -196,7 +218,7 @@ and cache locks while it waits. Save the command output for the maintenance
 record. The independently enforced window supplies writer exclusion.
 If a writer can still enter, leave the cache in place.
 
-Automatic removal requires a shared lock on the verified physical checkout or
+Automatic full retirement requires a shared lock on the verified physical checkout or
 cache inode for the full lifetime of **every** cache user, including descendants.
 The cleaner needs its exclusive counterpart through removal and readback.
 Account for independent Go builds as well as Factory launches, or isolate
@@ -264,7 +286,7 @@ build entries relative to their open parent directories. Go's recursive clean
 cannot enforce that boundary. The root inode and its sticky backup exclusion
 survive. After interruption, run a fresh census before retrying.
 
-Before scheduling, integrate #256's producer and PID witness on current main,
+Before scheduling the retirement census, integrate #256's producer and PID witness on current main,
 then reconcile #257's original collector, launch attestation and delivery replay.
 Verify the combined runtime privately against released schema 11, imported schema
 12 with writer provenance, and ordinary schema 13. Conversion of standalone

@@ -5417,9 +5417,11 @@ def main(argv=None):
     inputs.add_argument("--candidate", required=True)
     inputs.add_argument("--requirements", required=True)
     inputs.add_argument("--owner-decision", help="Explicit GitHub owner comment permalink for this requirements revision")
-    caches = sub.add_parser("go-caches", help="Inspect one repository's linked Go caches")
+    caches = sub.add_parser("go-caches", allow_abbrev=False, help="Inspect one repository's linked Go caches")
     caches.add_argument("--repo", required=True, type=Path)
-    caches.add_argument("--clean-task", help="Retire one eligible cache during an attended exclusive maintenance window")
+    cache_action = caches.add_mutually_exclusive_group()
+    cache_action.add_argument("--clean-task", help="Retire one eligible cache during an attended exclusive maintenance window")
+    cache_action.add_argument("--trim-go", type=Path, metavar="GO", help="Age verified private local caches with this absolute trusted Go executable")
     release = sub.add_parser("release-worktree", help="Remove the task's provisioned worktree after its work is done; the branch stays")
     release.add_argument("--task", required=True)
     rebase = sub.add_parser("rebase-worktree", help="Move the task's provisioned worktree onto a new base, keeping its change as a patch")
@@ -5496,12 +5498,12 @@ def main(argv=None):
             raise FactoryError("Supply an absolute native Antigravity path and bounded seconds before launch")
         if args.action == "go-caches":
             import go_cache
-            rows = go_cache.census(args.state_dir, args.repo, args.clean_task)
+            rows = go_cache.census(args.state_dir, args.repo, args.clean_task, trim_go=args.trim_go)
             print(json.dumps(rows, indent=2))
             if args.clean_task and not any(row["decision"] == "cleaned" for row in rows):
                 print(f"factory: No completed cleanup for {args.clean_task!r}; inspect the census reasons and owner", file=sys.stderr)
                 return 1
-            return 0
+            return int(any(row["decision"] == "failed" for row in rows))
         if args.action == "tidy":
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
             print(json.dumps(report, indent=2))

@@ -1,4 +1,4 @@
-"""Read-only linked-cache census and one explicitly selected build-cache cleanup."""
+"""Linked-cache census, attended retirement and native Go aging."""
 from contextlib import contextmanager, ExitStack
 import calendar
 import ctypes
@@ -12,6 +12,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 import factory
@@ -533,7 +534,8 @@ def check_reuse(directory, owner, original_raw, work, admin, readers):
                           or provision.get("git_dir") and matches_admin(admin, provision["git_dir"], repository)):
             raise factory.FactoryError(f"Reconcile conflicting provisioning by {name}")
         for identity, assignment in row["assignments"].items():
-            if assignment_uses_checkout(assignment, work, admin, repository, f"{name}/{identity}"):
+            if (assignment_uses_checkout(assignment, work, admin, repository, f"{name}/{identity}")
+                    or any(str(admin / "go-build") in arg for arg in assignment["request"]["command"])):
                 raise factory.FactoryError(f"Inspect worktree reuse by {name}/{identity}")
 
     # Only an actual owner release covers removal of a separate assignment cwd.
@@ -686,18 +688,21 @@ def process_check(work, admin, task, intervals, *, attended_release=False):
     return dict(observed_processes=len(observed), host_boot=boot, first_possible_start_this_boot=earliest)
 
 
-def check_mounts(repo, work, cache):
+def check_mounts(repo, work, cache, *, native_mount=None):
     # A same-device submount can hide under a shard. Check before opening the cache.
+    local = False
     if sys.platform == "darwin":
         table = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=10, check=True)
         if table.stderr or not table.stdout.strip():
             raise factory.FactoryError("Cannot verify the complete mount table before inspecting the cache")
         mounts = []
         for line in table.stdout.splitlines():
-            match = re.fullmatch(r".+? on (/.*?) \(.+\)", line)
+            match = re.fullmatch(r".+? on (/.*?) \((.+)\)", line)
             if not match or line.count(" on ") != 1:
                 raise factory.FactoryError("Cannot verify local mount paths; inspect the mount table")
             mounts.append(Path(match[1]))
+            if native_mount and os.fsencode(match[1]) + b"\0" == native_mount[1]:
+                local = "local" in match[2].split(", ")
     elif sys.platform == "linux":
         mounts = []
         for line in Path("/proc/self/mountinfo").read_text().splitlines():
@@ -705,6 +710,8 @@ def check_mounts(repo, work, cache):
             if len(fields) < 6:
                 raise factory.FactoryError("Cannot verify the mount namespace")
             mounts.append(Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])))
+            if fields[0] == native_mount:
+                local = line.partition(" - ")[2].split(" ", 1)[0] in {"ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs"}
     else:
         raise factory.FactoryError("Cannot verify local mounts on this platform")
     work_mounts = {m for m in mounts if work.is_relative_to(m)}
@@ -712,6 +719,8 @@ def check_mounts(repo, work, cache):
     if not work_mounts or work_mounts != repo_mounts or any(p == work or p.is_relative_to(cache) or p.is_relative_to(repo) and p in cache.parents
                          for p in mounts):
         raise factory.FactoryError("Unexpected mount at the worktree, Git directory or cache; inspect before cleanup")
+    if native_mount is not None and not local:
+        raise factory.FactoryError("Cannot establish a local filesystem for native Go aging")
 
 
 def mount_id(fd):
@@ -735,7 +744,7 @@ def mount_id(fd):
     raise factory.FactoryError("Cannot verify the mount identity of an open cache entry")
 
 
-def cache_contents(fd, mount, *, clean=False, size_only=False):
+def cache_contents(fd, mount, *, clean=False, size_only=False, entries=None):
     """Size and retire Go build entries only through verified open parent directories."""
     base = os.fstat(fd)
     if mount_id(fd) != mount or stat.S_IMODE(base.st_mode) != 0o700:
@@ -769,6 +778,8 @@ def cache_contents(fd, mount, *, clean=False, size_only=False):
                     or len(parts) == 2 and info.st_mode & 0o111))
             if not valid or info.st_uid != os.getuid() or info.st_dev != base.st_dev or info.st_mode & 0o022:
                 raise factory.FactoryError(f"Inspect unexpected cache entry {name}")
+            if entries is not None and len(parts) == 1:
+                entries.add(name)
             latest = max(latest, info.st_mtime_ns)
             changed = max(changed, info.st_ctime_ns)
             blocks += info.st_blocks
@@ -805,15 +816,40 @@ def confirm_window(task):
         raise factory.FactoryError("Exclusive maintenance window unconfirmed; retain the checkout and cache")
 
 
-def census(directory, repo, clean_task=None):
+def native_build(go, cache):
+    parent = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()).resolve(strict=True)
+    if any(os.path.lexists(p / ".git") for p in (parent, *parent.parents)):
+        raise factory.FactoryError("Supply a temporary directory outside Git worktrees")
+    with tempfile.TemporaryDirectory(prefix="factory-go-trim-", dir=parent) as temporary:
+        # A stable import path reuses the probe's own cache entries across hourly runs.
+        package = Path(temporary) / "src/factory.local/trim"
+        package.mkdir(parents=True)
+        (package / "trim.go").write_text("package trim\nconst Value = 1\n")
+        environment = dict(PATH=os.defpath, HOME=temporary, TMPDIR=temporary, GOTMPDIR=temporary, GOPATH=temporary, GOCACHE=str(cache),
+                           GOENV="off", GOWORK="off", GO111MODULE="off", GOPROXY="off", GOSUMDB="off",
+                           GOTOOLCHAIN="local", CGO_ENABLED="0", GOTELEMETRY="off")
+        # GOENV=off skips user configuration. The distribution can still set build flags and a cache program.
+        config = subprocess.run([go, "env", "GOCACHEPROG", "GOFLAGS"], cwd=package, env=environment,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=True)
+        if config.stdout != "\n\n":
+            raise factory.FactoryError("Select a Go installation with empty GOCACHEPROG and GOFLAGS defaults")
+        return subprocess.run([go, "build", "-trimpath", "."], cwd=package, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=120, env=environment)
+
+
+def census(directory, repo, clean_task=None, *, trim_go=None):
+    if trim_go is not None:
+        if clean_task is not None or not trim_go.is_absolute() or not trim_go.is_file() or not os.access(trim_go, os.X_OK):
+            raise factory.FactoryError("Select native aging alone with an absolute executable --trim-go PATH")
+        trim_go = trim_go.resolve(strict=True)
     environment = dict(factory.git_environment(), GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="",
                        GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
                        GIT_TRACE2="0", GIT_TRACE2_PERF="0", GIT_TRACE2_EVENT="0")
     with factory.git_execution(list, environment):
-        return _census(directory, repo, clean_task)
+        return _census(directory, repo, clean_task, trim_go)
 
 
-def _census(directory, repo, clean_task):
+def _census(directory, repo, clean_task, trim_go):
     if clean_task is not None and not TASK.fullmatch(clean_task):
         raise factory.FactoryError("Select one Factory task slug for explicit cleanup")
     directory, repo = Path(directory), Path(repo)
@@ -860,7 +896,7 @@ def _census(directory, repo, clean_task):
             if clean_task and rows and not any(r["task"] == clean_task for r, _ in owners):
                 continue
             work = Path(owners[0][0]["provisioning"]["request"]["path"]) if len(owners) == 1 else repo
-            check_mounts(repo, work, cache)
+            check_mounts(repo, work, cache, native_mount=mount if trim_go is not None else None)
             cache_fd = os.open(cache, os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 _, result["size_kib"], _ = cache_contents(cache_fd, mount, size_only=True)
@@ -876,6 +912,8 @@ def _census(directory, repo, clean_task):
             current = factory.validate_task(path, first)
             original = binding(current, repo, cache)
             work = original[0]
+            if trim_go is not None and (trim_go.is_relative_to(work) or trim_go.is_relative_to(repo)):
+                raise factory.FactoryError("Select a trusted Go installation outside the admitted repository and worktree")
             result.update(worktree=str(work), owner_record=str(path))
             line = factory.task_line(current)
             # The process doing the deletion holds every lock for its entire walk.
@@ -887,21 +925,25 @@ def _census(directory, repo, clean_task):
                 if binding(current, repo, cache) != original:
                     raise factory.FactoryError("Line or linked worktree identity changed during census; retry")
                 check_mounts(repo, work, cache)
-                latest, size, changed = cache_contents(fds[-1], mount)
-                result.update(last_cache_write=latest, size_kib=size)
+                retirement_sample = None
+                if trim_go is None:
+                    retirement_sample = cache_contents(fds[-1], mount)
+                    result.update(last_cache_write=retirement_sample[0], size_kib=retirement_sample[1])
                 intervals, readers, receipts = terminal_attempts(current, directory, work, admin)
                 terminal = max(closed for _, closed in intervals)
                 result.update(last_terminal=terminal, attempts=len(current["assignments"]))
-                if size < MIN_KIB:
+                if retirement_sample and retirement_sample[1] < MIN_KIB:
                     raise factory.FactoryError("Below the 1 GiB allocated-size floor")
                 evidence = check_reuse(directory, current, original_raw, work, admin, readers)
-                if time.time() - max(terminal, latest) < IDLE_SECONDS:
-                    raise factory.FactoryError("Wait for 24 hours after the last terminal observation and cache write")
-                result.update(process_check(work, admin, task, intervals))
+                if retirement_sample:
+                    if time.time() - max(terminal, retirement_sample[0]) < IDLE_SECONDS:
+                        raise factory.FactoryError("Wait for 24 hours after the last terminal observation and cache write")
+                    result.update(process_check(work, admin, task, intervals))
                 if not os.path.samestat(cache.lstat(), os.fstat(fds[-1])):
                     raise factory.FactoryError("Cache identity changed before cleanup; retry census")
                 if clean_task == task:
                     confirm_window(task)
+                if clean_task == task or trim_go is not None:
                     if (factory.read_record_bytes(path, private=True) != original_raw
                             or terminal_attempts(current, directory, work, admin) != (intervals, readers, receipts)):
                         raise factory.FactoryError("Owner, receipt or cache changed during observation; rerun the census")
@@ -910,17 +952,39 @@ def _census(directory, repo, clean_task):
                     for cwd, reader_admin, original_reader in readers.values():
                         if checkout_binding(cwd, reader_admin, current["admission"]["repository_identity"]) != original_reader:
                             raise factory.FactoryError(f"Reader worktree identity changed before cleanup at {cwd}; retry census")
-                if (factory.read_record_bytes(path, private=True) != original_raw or binding(current, repo, cache) != original or any(
-                        not os.path.samestat(p.lstat(), os.fstat(fd)) for p, fd in zip(lock_paths, fds))):
-                    raise factory.FactoryError("Worktree or lock identity changed immediately before cleanup; retry census")
-                result.update(decision="eligible", reason="Owner, terminal exits, process, age and size checks passed. Retirement requires attended writer exclusion.")
-                if clean_task == task:
-                    check_mounts(repo, work, cache)
+                if clean_task == task or trim_go is not None:
+                    check_mounts(repo, work, cache, native_mount=mount if trim_go is not None else None)
                     for owner_path, raw in (receipts | evidence[0] | evidence[1]).items():
                         if factory.read_record_bytes(owner_path, private=True) != raw:
                             raise factory.FactoryError(f"Reader owner changed during observation at {owner_path}")
+                before = set()
+                if trim_go is not None:
+                    result["last_cache_write"], result["size_kib"], _ = cache_contents(fds[-1], mount, entries=before)
+                if (factory.read_record_bytes(path, private=True) != original_raw or binding(current, repo, cache) != original or any(
+                        not os.path.samestat(p.lstat(), os.fstat(fd)) for p, fd in zip(lock_paths, fds))):
+                    raise factory.FactoryError("Worktree or lock identity changed immediately before cleanup; retry census")
+                if trim_go is not None and not before:
+                    result.update(decision="retained", reason="No native Go entries to age",
+                                  removed_entries=0, retained_entries=0)
+                elif trim_go is not None:
+                    result.update(decision="failed")
+                    try:
+                        build = native_build(trim_go, cache)
+                        result["go_exit_code"] = build.returncode
+                        if build.returncode:
+                            raise factory.FactoryError(f"Go build exited {build.returncode}: {build.stderr.strip()}")
+                    finally:
+                        after = set()
+                        _, after_kib, _ = cache_contents(fds[-1], mount, entries=after)
+                        if binding(current, repo, cache) != original or any(
+                                not os.path.samestat(p.lstat(), os.fstat(fd)) for p, fd in zip(lock_paths, fds)):
+                            raise factory.FactoryError("Checkout or lock identity changed during native aging")
+                        result.update(after_kib=after_kib, removed_entries=len(before - after), retained_entries=len(before & after))
+                    result.update(decision="cleaned" if result["removed_entries"] else "retained",
+                                  reason="Native Go build completed; compared cache entries before and after")
+                elif clean_task == task:
                     final = cache_contents(fds[-1], mount)
-                    if (final != (latest, size, changed) or final[1] < MIN_KIB
+                    if (final != retirement_sample or final[1] < MIN_KIB
                             or time.time() - max(terminal, final[0]) < IDLE_SECONDS):
                         raise factory.FactoryError("Cache changed during observation; rerun the census")
                     result.update(decision="failed")
@@ -931,9 +995,12 @@ def _census(directory, repo, clean_task):
                     if result["after_kib"] >= MIN_KIB:
                         raise factory.FactoryError("Cache still exceeds the size floor; inspect the remaining entries")
                     result.update(decision="cleaned", reason="Attended cleanup completed and cache readback passed")
+                else:
+                    result.update(decision="eligible", reason="Owner, terminal exits, process, age and size checks passed. Retirement requires attended writer exclusion.")
         except (factory.FactoryError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
             if result["decision"] == "failed":
-                result["reason"] = f"Go cache cleanup may be partial ({exc}); rerun the census"
+                result["reason"] = (f"Native Go aging failed ({exc}); inspect the cache before retrying" if trim_go is not None
+                                    else f"Go cache cleanup may be partial ({exc}); rerun the census")
             else:
                 result.update(decision="retained", reason=str(exc))
         report.append(result)
