@@ -6,6 +6,7 @@ from contextlib import nullcontext, redirect_stdout, redirect_stderr
 from io import StringIO
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -272,8 +273,8 @@ class Decoder(unittest.TestCase):
             original_open = os.fdopen
             counts = []
 
-            def open_stream(fd, mode):
-                stream = original_open(fd, mode)
+            def open_stream(fd, mode, **options):
+                stream = original_open(fd, mode, **options)
                 original_read = stream.read
 
                 def read(count=-1):
@@ -800,6 +801,7 @@ class ClaudeWorker(unittest.TestCase):
             model=MODEL, effort="low", cwd=str(self.repo), role="qa", seconds=30, turns=3), **changes})
 
     async def spawn(self, *command, **options):
+        self.receipt_at_spawn = json.loads(self.args.receipt.read_text())
         self.prompt = options["stdin"].read().decode()
         self.spawns.append((command, options))
         return in_checkout(self.process, options)
@@ -873,7 +875,7 @@ class ClaudeWorker(unittest.TestCase):
         args = self.launch_writer()
         receipt = self.execute_writer(args)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (2, True, "created"))
+        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (8, True, "created"))
         self.assertEqual(receipt["commit"]["parent"], self.candidate)
         self.assertNotEqual(receipt["candidate"], self.candidate)
         self.assertEqual(factory.git_commit(".", "HEAD"), receipt["candidate"])
@@ -920,11 +922,37 @@ class ClaudeWorker(unittest.TestCase):
 
     def test_the_agent_gets_a_private_tmpdir_removed_when_it_finishes(self):
         # Agents' mktemp and go test filled /private/tmp and $TMPDIR with 84 GB in five days (local-dev).
-        self.assertEqual(self.execute()["state"], "completed")
+        with patch.object(factory, "native_start_time", return_value=123456):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed")
         scratch = Path(self.spawns[0][1]["env"]["TMPDIR"])
+        self.assertEqual(self.receipt_at_spawn["scratch"], str(scratch))
+        self.assertIsNone(self.receipt_at_spawn["native_process"])
+        self.assertEqual(receipt["native_process"], dict(pid=self.process.pid, start_time=123456, scope=factory.process_scope()))
+        self.assertIs(receipt["scratch_removed"], True)
         self.assertEqual(str(scratch.parent), factory.SCRATCH_ROOT)  # /tmp in production, a per-run root in tests.
         self.assertLess(len(scratch.name), 12)  # Go tests put Unix sockets under TMPDIR; macOS caps them at 104 bytes.
         self.assertFalse(scratch.exists())
+
+    @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
+    def test_failed_scratch_removal_is_persisted_without_failing_the_attempt(self):
+        scratch = factory.new_scratch()
+        unreadable = scratch / "nested" / "unreadable"
+        unreadable.mkdir(parents=True)
+        (unreadable / "report.txt").write_text("Fixture output\n")
+        self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o700))
+        unreadable.chmod(0)
+        with patch.object(factory, "new_scratch", return_value=scratch), \
+                redirect_stderr(StringIO()) as errors:
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["README.md"]))
+        self.assertEqual(receipt["scratch"], str(scratch))
+        self.assertIs(receipt["scratch_removed"], False)
+        self.assertTrue(scratch.is_dir())
+        self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_collection_writes_the_report_as_plain_text_lines(self):
         # A judge's ruling cites its FINDING: and HEAD= lines from this file by path and digest (#218).
@@ -935,6 +963,18 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(report.read_text(), "\n".join(artifacts) + "\n")
         self.assertEqual(report.read_text().splitlines(), artifacts)
         self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+
+    def test_first_collection_after_clean_reader_advance_keeps_original_approval(self):
+        self.assertEqual(self.execute()["state"], "completed")
+        frozen = self.assignment["launch_checkout"]
+        original = [p.read_bytes() for p in (self.args.brief, self.args.events, self.args.receipt)]
+        self.git("commit", "--allow-empty", "-qm", "Advance reader", directory=self.repo)
+        self.assertNotEqual(self.git("rev-parse", "HEAD", directory=self.repo).stdout.strip(), self.candidate)
+        collected = self.collect()["assignments"]["inspect"]
+        self.assertTrue(collected["native_collected"])
+        self.assertEqual(collected["launch_checkout"], frozen)
+        self.assertEqual((collected["result"]["outcome"], collected["result"]["candidate"]), ("approved", self.candidate))
+        self.assertEqual(original, [p.read_bytes() for p in (self.args.brief, self.args.events, self.args.receipt)])
 
     def test_lost_pane_defers_to_the_completed_receipt(self):
         self.record=factory.load_task(self.path)
@@ -971,9 +1011,47 @@ class ClaudeWorker(unittest.TestCase):
         self.assertEqual(metadata["model"],MODEL)
         with self.assertRaises(factory.FactoryError):self.execute()
 
+    def test_legacy_scratchless_receipt_collects_and_verifies_in_place(self):
+        receipt = self.execute()
+        old = {key: value for key, value in receipt.items() if key not in factory.SCRATCH_RECEIPT_FIELDS | {"interpreter", "retained_files"}}
+        factory.save(self.args.receipt, {**old, "schema_version": 4})
+        original = self.args.receipt.read_bytes()
+        record = self.collect()
+        _, verified, _ = factory.claude_evidence("inspect", record, record["assignments"]["inspect"], collected=True)
+        self.assertEqual(verified["report"]["outcome"], "approved")
+        self.assertEqual(self.args.receipt.read_bytes(), original)
+
+    def test_cache_replay_validates_collected_claude_v5_events(self):
+        import go_cache
+
+        receipt = self.execute()
+        record = self.collect()
+        assignment = record["assignments"]["inspect"]
+        with patch.dict(FakeRex.exits, {assignment["block_id"]: 0}):
+            factory.tidy(self.path, self.rex, record)
+        record = factory.load_task(self.path, persist_migration=False)
+        assignment = record["assignments"]["inspect"]
+        legacy_fields = factory.SCRATCH_RECEIPT_FIELDS | {"interpreter", "retained_files"}
+        legacy = {key: value for key, value in receipt.items() if key not in legacy_fields}
+        legacy["schema_version"] = 5
+        factory.save(self.args.receipt, legacy)
+        inputs = (record, self.root, self.repo, self.args.worktree_git_dir, "inspect", assignment)
+        original = self.args.receipt.read_bytes()
+        with patch.object(factory, "connect", side_effect=AssertionError("Cache replay contacted Rex")):
+            _, _, selected_writer, (path, raw) = go_cache.terminal_attempt(*inputs)
+            self.assertFalse(selected_writer)
+            self.assertEqual((path, raw), (self.args.receipt, original))
+            factory.save(self.args.receipt, {**legacy, "events_digest": "0" * 64})
+            with self.assertRaisesRegex(factory.FactoryError, "complete history bound by its worker"):
+                go_cache.terminal_attempt(*inputs)
+
     def test_failure_timeout_and_partial_report_never_collect(self):
         self.process=FakeProcess(self.events,exit_code=1)
-        self.assertEqual(self.execute()["state"],"failed")
+        with patch.object(factory, "remove_scratch", return_value=False):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(receipt["exit_code"], 1)
+        self.assertIs(receipt["scratch_removed"], False)
         with self.assertRaises(factory.FactoryError):self.collect()
 
     def test_thinking_worker_collection_preserves_raw_and_actual_usage(self):
@@ -1120,6 +1198,7 @@ class ClaudeWorker(unittest.TestCase):
     def assert_special_file_refused(self, path, read, error):
         original = path.read_bytes() if path.exists() else None
         original_open = os.open
+        path_open = Path.open
         required_flags = os.O_NOFOLLOW | os.O_NONBLOCK
         for kind in ("fifo", "fifo-link", "directory", "file-link"):
             with self.subTest(kind=kind):
@@ -1145,8 +1224,12 @@ class ClaudeWorker(unittest.TestCase):
                         opened.append(name)
                     return original_open(name, flags, *args, **kwargs)
 
+                def other_path_open(file, *args, **kwargs):
+                    self.assertNotEqual(file, path, "Unsafe Path.open on the challenged file")
+                    return path_open(file, *args, **kwargs)
+
                 try:
-                    with patch.object(Path, "open", side_effect=AssertionError("Unsafe Path.open")), \
+                    with patch.object(Path, "open", other_path_open), \
                             patch.object(os, "open", side_effect=safe_open):
                         with self.assertRaises(error):
                             read()
@@ -1207,6 +1290,24 @@ class ClaudeWorker(unittest.TestCase):
         (self.repo / "README.md").write_text("Changed after execution")
         with self.assertRaises(factory.FactoryError):self.collect()
 
+    def test_clean_reader_advance_collects_only_the_frozen_approval(self):
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.git("commit", "-qm", "Advance the assigned checkout", "--allow-empty", directory=self.repo)
+        advanced = self.git("rev-parse", "HEAD", directory=self.repo).stdout.strip()
+        self.assertNotEqual(advanced, self.candidate)
+        factory.set_inputs(self.path, candidate=advanced, requirements="requirements-1")
+        record = factory.load_task(self.path)
+        assignment = record["assignments"]["inspect"]
+        originals = {path: path.read_bytes() for path in (self.args.events, self.args.receipt, self.args.brief)}
+        with patch.dict(FakeRex.exits, {assignment["block_id"]: 0}):
+            record = factory.collect_claude(self.path, "inspect", self.rex, record, assignment)
+        result = assignment["result"]
+        self.assertTrue(assignment["native_collected"])
+        self.assertEqual((result["outcome"], result["candidate"]), ("approved", self.candidate))
+        self.assertFalse(factory.result_current(record, result))
+        self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+
     def test_auth_failure_does_not_infer(self):
         def bad(binary,cwd):
             value=self.probe(binary,cwd);value["auth"]["authMethod"]="api_key";return value
@@ -1234,26 +1335,409 @@ class ClaudeApprovals(unittest.TestCase):
         self.fixture = Integration()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        record, assignment, self.args = self.run_reader("claude-qa", "qa", SESSION)
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            self.record = factory.collect_claude(self.fixture.path, "claude-qa", None, record, assignment)
+
+    def run_reader(self, key, role, session, *, expired=False, cancelled=False, cancel_during_spawn=False, shell_read=False, python=None, generic=False):
         f = self.fixture
-        with patch.object(factory.uuid,"uuid4",return_value=uuid.UUID(SESSION)):
-            command=factory.claude_command(f.path,task="deliver",assignment_id="claude-qa",claude=sys.executable,
-                model=MODEL,effort="low",cwd=str(f.repo),role="qa")
-        record,assignment=factory.launch(f.path,task="deliver",assignment_id="claude-qa",role="qa",
-            goal="Independent fixture QA",cwd=str(f.repo),command=command,purpose="work",binary=sys.executable,server="unix:///fixture.sock")
-        replacements={"{repository}":str(f.repo),"{cwd}":str(f.repo),"{brief}":assignment["brief"],
-            "{brief_sha256}":assignment["request"]["instructions_sha256"],"{candidate}":record["inputs"]["candidate"],
-            "{requirements}":record["inputs"]["requirements"],"{repository_identity}":json.dumps(record["admission"]["repository_identity"],sort_keys=True)}
-        self.args=claude_worker.parser().parse_args([replacements.get(part,part) for part in command[4:]])
-        async def spawn(*command,**options):return in_checkout(FakeProcess(read_events(str(f.repo))),options)
-        def probe(binary,cwd):
-            return dict(schema_version=1,kind="claude-native-auth",harness="claude",binary=str(binary),cwd=str(cwd),
-                cli_version="2.1.319 (Claude Code)",started_at=1000,observed_at=1000,probe_seconds=0,
-                auth=dict(loggedIn=True,authMethod="claude.ai",apiProvider="firstParty"))
+        executable = sys.executable
+        with patch.object(factory.uuid, "uuid4", return_value=uuid.UUID(session)), \
+             patch.object(sys, "executable", python or executable):
+            command = factory.claude_command(f.path, task="deliver", assignment_id=key, claude=executable,
+                model=MODEL, effort="low", cwd=str(f.repo), role=role)
+            if generic:
+                for flag in ("--seconds", "--turns"):
+                    index = command.index(flag)
+                    del command[index:index + 2]
+                index = command.index("--model")
+                command[index:index + 2] = ["--model=" + MODEL]
+                cli = ["--state-dir", str(f.tasks), "start", "--task", "deliver", "--id", key,
+                       "--role", role, "--goal", "Inspect", "--cwd", str(f.repo), "--purpose", "work", "--", *command]
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+                    before = f.path.read_bytes()
+                    self.assertEqual(factory.main([*cli, "--model", MODEL]), 1)
+                    self.assertIn("unambiguous", errors.getvalue())
+                    self.assertEqual(f.path.read_bytes(), before)
+                    self.assertFalse((f.tasks / ("deliver." + key + ".md")).exists())
+                    self.assertEqual(factory.main(cli), 0, errors.getvalue())
+                record = factory.load_task(f.path)
+                assignment = record["assignments"][key]
+                self.assertEqual(assignment["request"]["command"], command)
+            else:
+                record, assignment = factory.launch(f.path, task="deliver", assignment_id=key, role=role,
+                    goal="Independent fixture verification", cwd=str(f.repo), command=command, purpose="work",
+                    binary=factory.load_task(f.path)["rex"]["binary"], server="unix:///fixture.sock")
+        replacements = {"{repository}": str(f.repo), "{cwd}": str(f.repo), "{brief}": assignment["brief"],
+            "{brief_sha256}": assignment["request"]["instructions_sha256"], "{candidate}": record["inputs"]["candidate"],
+            "{requirements}": record["inputs"]["requirements"],
+            "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
+        args = claude_worker.parser().parse_args([replacements.get(part, part) for part in command[4:]])
+        async def spawn(*command, **options):
+            stream = read_events(str(f.repo), session)
+            if cancel_during_spawn:
+                raise asyncio.CancelledError
+            self.assertFalse(cancelled, "A pre-launch interrupt must never reach native spawn")
+            if expired or shell_read:
+                stream[1]["message"]["content"][0].update(name="Bash", input={"command": "pwd"})
+            if expired:
+                # Every observed Bash can have a result even though the timeout lost the end of the stream.
+                stream[2]["tool_use_result"] = {"stdout": str(f.repo), "stderr": "", "interrupted": False}
+                stream = stream[:3]
+            return in_checkout(FakeProcess(stream, timeout=expired), options)
+        def probe(binary, cwd):
+            if cancelled:
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel()
+            return dict(schema_version=1, kind="claude-native-auth", harness="claude", binary=str(binary), cwd=str(cwd),
+                cli_version="2.1.319 (Claude Code)", started_at=1000, observed_at=1000, probe_seconds=0,
+                auth=dict(loggedIn=True, authMethod="claude.ai", apiProvider="firstParty"))
         with redirect_stdout(StringIO()):
-            receipt=asyncio.run(claude_worker.execute(self.args,spawn=spawn,probe=probe,clock=lambda:1000,timer=lambda:10))
-        self.assertEqual(receipt["state"],"completed",receipt["error"])
-        with patch.object(factory,"status",return_value=dict(state="exited")):
-            self.record=factory.collect_claude(f.path,"claude-qa",None,record,assignment)
+            receipt = asyncio.run(claude_worker.execute(args, spawn=spawn, probe=probe, clock=lambda: 1000, timer=lambda: 10))
+        self.assertEqual(receipt["state"], "failed" if expired or cancelled or cancel_during_spawn else "completed", receipt["error"])
+        if cancelled:
+            from codex_worker import CANCELLED
+            self.assertEqual(receipt["error"], CANCELLED)
+            self.assertEqual(receipt["events_digest"], release_evidence.digest([]))
+        if expired or cancelled or cancel_during_spawn:
+            # The worker returns status 1 for a failed receipt, even if its interrupted child exits zero.
+            with patch.object(factory, "Rex", FakeRex), patch.dict(FakeRex.exits, {assignment["block_id"]: 1}):
+                factory.tidy(f.path, factory.connect(record), record, only={key}, close_session=False)
+            self.assertEqual(assignment["closed"]["state"], "failed")
+        return record, assignment, args
+
+    def observer_python(self):
+        other = shutil.which("python3.15" if sys.version_info[:2] == (3, 11) else "python3.11")
+        if other and not Path(other).samefile(sys.executable):
+            return Path(other)
+        # A copied venv provides a distinct physical installation on single-Python hosts.
+        prefix = self.fixture.root / "observer"
+        subprocess.run([str(Path(sys.executable).resolve()), "-m", "venv", "--without-pip", "--copies", str(prefix)], check=True)
+        return prefix / "bin" / "python"
+
+    def observe_delivery(self, python, required):
+        f = self.fixture
+        # Reconstruct only the fake transports in a fresh interpreter. Both observers
+        # read the same frozen files through the real delivery CLI.
+        observer = """
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+from test_integration import EvidenceRex, FakeRex, GitHub, Integration, factory
+tasks, base, head, merge, FakeRex.sessions, required = json.load(sys.stdin)
+fixture = Integration()
+fixture.tasks = Path(tasks)
+fixture.transport = GitHub(base, head, merge)
+fixture.release_skill_merges()
+with patch.object(factory, "Rex", EvidenceRex):
+    print(json.dumps(fixture.delivered_cli(review="release-pr247", required=required)))
+"""
+        inputs = [str(f.tasks), f.base, f.head, f.transport.merge_sha, FakeRex.sessions, required]
+        result = subprocess.run([str(python), "-B", "-c", observer], cwd=Path(__file__).parent,
+                                input=json.dumps(inputs), capture_output=True, text=True, check=True)
+        return tuple(json.loads(result.stdout))
+
+    def collect_release_roster(self):
+        f = self.fixture
+        required = ["claude-qa", "security", "sre", "test-automation", "architecture"]
+        for role in required[1:]:
+            f.review(role, role, frozen=False)
+        f.frozen = release_evidence.capture(factory.load_task(f.path), f.transport.identity["url"], f.transport)
+        f.review("release-pr247", "release")
+        return required
+
+    def run_historical_readers(self, python, readers, *, expired):
+        # Run the launcher and worker in the recorded interpreter. Only Rex and native I/O are fakes.
+        f = self.fixture
+        script = """
+import json, os, sys, uuid
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from test_claude_execution import ClaudeApprovals, FakeRex, factory
+path, repo, FakeRex.sessions, calls, readers, expired = json.load(sys.stdin)
+FakeRex.calls = list(map(tuple, calls))
+os.chdir(repo)
+case = ClaudeApprovals()
+case.fixture = SimpleNamespace(path=Path(path), repo=Path(repo))
+with patch.object(factory, "Rex", FakeRex):
+    for index, (key, role) in enumerate(readers, 8):
+        case.run_reader(key, role, str(uuid.UUID(int=index)), cancelled=not expired, expired=expired)
+print(json.dumps([FakeRex.sessions, FakeRex.calls]))
+"""
+        child = subprocess.run([str(python), "-B", "-c", script], cwd=Path(__file__).parent,
+            input=json.dumps([str(f.path), str(f.repo), FakeRex.sessions, FakeRex.calls, readers, expired]), text=True, capture_output=True)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        FakeRex.sessions, calls = json.loads(child.stdout)
+        FakeRex.calls[:] = map(tuple, calls)
+
+    def test_delivery_preserves_omitted_current_readers_and_failed_contributor(self):
+        f = self.fixture
+        older = self.observer_python()
+        self.run_historical_readers(older, [("cancelled", "qa")], expired=False)
+        cancelled = factory.load_task(f.path)["assignments"]["cancelled"]
+        self.assertTrue(older.samefile(cancelled["request"]["command"][0]))
+        originals = {path: path.read_bytes() for path in f.tasks.glob("deliver.cancelled.*")}
+        from test_rex_launcher import NativeLauncher
+        reject = NativeLauncher().reject_creation()
+        try:
+            with self.assertRaisesRegex(factory.FactoryError, "outcome uncertain"):
+                self.run_reader("abandoned", "qa", str(uuid.UUID(int=11)))
+        finally:
+            reject.stop()
+        record = factory.load_task(f.path)
+        factory.abandon_launch(f.path, factory.connect(record), assignment_id="abandoned", reason="Rex rejected window creation")
+        writer = str(uuid.UUID(int=10))
+        record, assignment, _ = self.run_claude_writer(writer, exit_code=1)
+        with patch.object(factory, "Rex", FakeRex), patch.dict(FakeRex.exits, {assignment["block_id"]: 1}):
+            factory.tidy(f.path, factory.connect(record), record, only={"claude-writer"}, close_session=False)
+        self.assertEqual(assignment["closed"]["exit"]["exit_code"], 1)
+        self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer)
+        required = self.collect_release_roster()
+        originals[f.path] = f.path.read_bytes()
+        f.release_skill_merges()
+        code, receipt, error = f.delivered_cli(review="release-pr247", required=required)
+        self.assertEqual((code, error), (0, ""))
+        assert receipt is not None
+        self.assertEqual(set(receipt["approvals"]), {*required, "release-pr247"})
+        self.assertEqual(receipt["approvals"]["claude-qa"]["context"], SESSION)
+        self.assertEqual(f.delivered_cli(review="release-pr247", required=required), (0, receipt, ""))
+        self.assertNotEqual(cancelled["native_launch"]["runtime"],
+                            record["assignments"]["claude-qa"]["native_launch"]["runtime"])
+        self.assertEqual(self.observe_delivery(older, required), (0, receipt, ""))
+        for key in ("cancelled", "abandoned"):
+            with self.subTest(selected=key):
+                self.assertEqual(f.delivered_cli(review="release-pr247", required=key)[0], 1)
+        self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        f.review("final", "release", delivery="release-pr247")
+        code, accepted, error = f.delivered_cli("final", review="release-pr247", required=required)
+        self.assertEqual((code, error), (0, ""))
+        assert accepted is not None
+        self.assertEqual(accepted["acceptance"]["outcome"], "approved")
+        self.assertEqual(factory.load_task(f.path)["assignments"]["cancelled"], cancelled)
+        # Selected evidence still has to be re-read on every retry.
+        self.args.events.write_text("")
+        refusal = f.delivered_cli(review="release-pr247", required=required)
+        self.assertEqual(refusal[0], 1)
+        self.assertEqual(self.observe_delivery(older, required), refusal)
+
+    def test_historical_timeout_cannot_confirm_delivery_even_with_a_read_only_prefix(self):
+        f = self.fixture
+        older = self.observer_python()
+        originals = {}
+        required = self.collect_release_roster()
+        readers = [("expired-" + role, role) for role in ("qa", "test-automation")]
+        self.run_historical_readers(older, readers, expired=True)
+        for key, _ in readers:
+            assignment = factory.load_task(f.path)["assignments"][key]
+            reader = claude_worker.parser().parse_args(assignment["request"]["command"][4:])
+            # A legacy v4 timeout has neither the launch attestation nor a digest of complete actions.
+            receipt = json.loads(reader.receipt.read_text())
+            receipt["schema_version"] = 4
+            del receipt["events_digest"]
+            factory.save(reader.receipt, receipt)
+            for path in (reader.receipt, reader.events, Path(assignment["brief"]), Path(assignment["closed"]["capture"])):
+                originals[path] = path.read_bytes()
+        record = factory.load_task(f.path)
+        self.assertTrue(all(record["assignments"][key]["native_collected"] for key in [*required, "release-pr247"]))
+        for item in record["assignments"].values():
+            item.pop("native_launch")
+            item.pop("interpreter", None)
+            item.pop("writer_source", None)
+        record["schema_version"] = 10
+        record.pop("acceptance", None)
+        factory.save(f.path, record)
+        originals[f.path] = f.path.read_bytes()
+        f.release_skill_merges()
+        command = record["assignments"]["expired-qa"]["request"]["command"]
+        args = claude_worker.parser().parse_args(command[4:])
+        stream = claude_worker.read_events(args.events)
+        self.assertIn("Bash", stream[0]["tools"])
+        self.assertEqual(stream[1]["message"]["content"][0]["name"], "Bash")
+        self.assertEqual(stream[2]["message"]["content"][0]["tool_use_id"], stream[1]["message"]["content"][0]["id"])
+        for retained in (stream, stream[:1]):
+            args.events.write_bytes(envelope_bytes([json.dumps(item) for item in retained]))
+            before = args.events.read_bytes()
+            code, receipt, error = f.delivered_cli(review="release-pr247", required=required)
+            self.assertEqual((code, receipt), (1, None))
+            self.assertIn("deliver/expired-qa: missing native result", error)
+            self.assertEqual(self.observe_delivery(older, required), (code, receipt, error))
+            self.assertEqual(args.events.read_bytes(), before)
+            self.assertFalse((f.tasks / "deliver.release-pr247.delivered.json").exists())
+        # Even the legacy in-place tool declaration has no independent launcher attestation.
+        legacy = {**json.loads(originals[args.receipt]), "schema_version": 1}
+        del legacy["checkout"]
+        factory.save(args.receipt, legacy)
+        args.events.write_bytes(envelope_bytes([json.dumps(read_events(str(f.repo), args.native_session)[0])]))
+        self.assertIn("deliver/expired-qa: missing native result", f.delivered_cli(review="release-pr247", required=required)[2])
+        args.receipt.write_bytes(originals[args.receipt])
+        args.events.write_bytes(originals[args.events])
+        self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+
+    def test_uncollected_success_cannot_be_omitted_even_after_manual_registration(self):
+        f = self.fixture
+        record, _, args = self.run_reader("completed", "qa", str(uuid.UUID(int=9)))
+        f.release_skill_merges()
+        for manual in (False, True):
+            if manual:
+                factory.record_result(f.path, assignment_id="completed", candidate=f.head,
+                    requirements=record["inputs"]["requirements"], outcome="approved", artifacts=[str(args.receipt)])
+            before = f.path.read_bytes()
+            code, _, error = f.delivered_cli(review="release", required="qa")
+            self.assertEqual(code, 1)
+            self.assertIn("Collect the successful native reader", error)
+            self.assertEqual(f.path.read_bytes(), before)
+            self.assertFalse((f.tasks / "deliver.release.delivered.json").exists())
+
+    def test_uncollected_shell_reader_needs_strict_collection(self):
+        f = self.fixture
+        record, item, args = self.run_reader("shell-reader", "qa", str(uuid.UUID(int=8)), shell_read=True)
+        self.assertEqual(json.loads(args.receipt.read_text())["events_digest"],
+                         release_evidence.digest(claude_worker.read_events(args.events)))
+        f.release_skill_merges()
+        self.assertIn("Collect the successful native reader", f.delivered_cli(review="release", required="qa")[2])
+        with patch.object(factory, "status", return_value=dict(state="exited")):
+            factory.collect_claude(f.path, "shell-reader", None, record, item)
+        self.assertEqual(f.delivered_cli(review="release", required="qa")[0], 0)
+
+    def test_ambiguous_cancel_and_nonterminal_reader_need_proof(self):
+        f = self.fixture
+        f.release_skill_merges()
+        self.run_reader("ambiguous", "qa", str(uuid.UUID(int=8)), cancel_during_spawn=True)
+        self.assertIn("Missing original proof of read-only actions", f.delivered_cli(review="release", required="qa")[2])
+        # The same known reader also needs a definitive Rex exit when its pane is still open.
+        record = factory.load_task(f.path)
+        record["assignments"]["ambiguous"].pop("closed")
+        factory.save(f.path, record)
+        original_status = factory.status
+        for state in ("running", "unknown", "lost"):
+            def observe(rex, task, item):
+                return dict(state=state) if item["brief"] == record["assignments"]["ambiguous"]["brief"] else original_status(rex, task, item)
+            with self.subTest(state=state), patch.object(factory, "status", side_effect=observe):
+                self.assertIn("definitive original exit", f.delivered_cli(review="release", required="qa")[2])
+        self.assertFalse((f.tasks / "deliver.release.delivered.json").exists())
+
+    def test_replaced_interpreter_or_worker_at_same_path_refuses_before_admission(self):
+        import shutil
+        f = self.fixture
+        runtime = f.root / "installed-copy"
+        shutil.copytree(factory.ROOT, runtime)
+        python = f.root / "python"
+        shutil.copyfile(sys.executable, python)
+        python.chmod(0o700)
+        with patch.object(factory, "ROOT", runtime):
+            self.run_reader("original", "qa", str(uuid.UUID(int=8)), expired=True, python=str(python))
+            before = f.path.read_bytes()
+            for replaced in (python, runtime / "claude_worker.py"):
+                original = replaced.read_bytes()
+                with self.subTest(replaced=replaced.name):
+                    replaced.write_bytes(original + b"\n# changed fixture bytes\n")
+                    with self.assertRaisesRegex(factory.FactoryError, "deliver/original: cannot omit"):
+                        self.run_reader("later", "qa", str(uuid.UUID(int=9)), python=str(python))
+                    self.assertEqual(f.path.read_bytes(), before)
+                    self.assertFalse((f.tasks / "deliver.later.md").exists())
+                replaced.write_bytes(original)
+
+    def test_generic_native_alias_launch_freezes_the_owned_runtime(self):
+        f = self.fixture
+        alias = f.root / "installed-runtime"
+        alias.symlink_to(factory.ROOT, target_is_directory=True)
+        key = "alias-review"
+        command = factory.claude_command(f.path, task="deliver", assignment_id=key, claude=sys.executable,
+            model=MODEL, effort="low", cwd=str(f.repo), role="qa")
+        python_root = Path(sys.executable).parent.parent
+        python_alias = f.root / "equivalent-prefix"
+        python_alias.symlink_to(python_root, target_is_directory=True)
+        python = python_alias / Path(sys.executable).relative_to(python_root)
+        proposed = [str(python), *command[1:3], str(alias / "claude_worker.py"), *command[4:]]
+        cli = ["--state-dir", str(f.tasks), "start", "--task", "deliver", "--id", key, "--role", "qa",
+               "--cwd", str(f.repo), "--goal", "Inspect", "--purpose", "work", "--", *proposed]
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            self.assertEqual(factory.main(cli), 0, errors.getvalue())
+            original = f.path.read_bytes()
+            self.assertEqual(factory.main(cli), 0, errors.getvalue())
+        record = factory.load_task(f.path)
+        self.assertEqual(record["assignments"][key]["request"]["command"], command)
+        self.assertEqual(original, f.path.read_bytes())
+
+    def test_generic_native_start_refuses_a_different_venv_before_admission(self):
+        f = self.fixture
+        other = f.root / "other-venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", "--symlinks", str(other)], check=True)
+        command = factory.claude_command(f.path, task="deliver", assignment_id="other-prefix",
+            claude=sys.executable, model=MODEL, effort="low", cwd=str(f.repo), role="qa")
+        command[0] = str(other / "bin/python")
+        original = f.path.read_bytes()
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            result = factory.main(["--state-dir", str(f.tasks), "start", "--task", "deliver", "--id", "other-prefix",
+                "--role", "qa", "--cwd", str(f.repo), "--goal", "Inspect", "--purpose", "work", "--", *command])
+        self.assertEqual(result, 1)
+        self.assertIn("original Python", errors.getvalue())
+        self.assertEqual(f.path.read_bytes(), original)
+
+    def test_native_admission_refuses_unproven_saved_and_proposed_envelopes(self):
+        f = self.fixture
+        record, assignment, _ = self.run_reader("outstanding", "qa", str(uuid.UUID(int=8)), expired=True)
+        original = assignment["request"]["command"]
+        command = factory.claude_command(f.path, task="deliver", assignment_id="later", claude=sys.executable,
+            model=MODEL, effort="low", cwd=str(f.repo), role="qa")
+        foreign = str(f.root / "elsewhere" / "claude_worker.py")
+        before = copy.deepcopy(record)
+        # Every case uses the generic start CLI, including an exact native command built by the adapter.
+        for saved, proposed in ((["/other/python", *original[1:]], command),
+                                ([*original[:3], foreign, *original[4:]], command),
+                                ([*original[:3], foreign + ".old", *original[4:]], command),
+                                (original, [*command[:3], foreign, *command[4:]]),
+                                (original, [*command[:3], foreign + ".old", *command[4:]]),
+                                (original, ["/bin/sh", *command[1:]]),
+                                (original, [*record["assignments"]["qa"]["request"]["command"], "--writ"])):
+            with self.subTest(saved=saved[:4], proposed=proposed[:4]):
+                state = copy.deepcopy(before)
+                state["assignments"]["outstanding"]["request"]["command"] = saved
+                for item in state["assignments"].values():
+                    item.pop("native_launch")
+                    item.pop("interpreter", None)
+                    item.pop("writer_source", None)
+                state["schema_version"] = 10
+                state.pop("acceptance", None)
+                factory.save(f.path, state)
+                snapshot = f.path.read_bytes()
+                with redirect_stderr(StringIO()) as errors, patch.object(factory, "connect", side_effect=AssertionError):
+                    code = factory.main(["--state-dir", str(f.tasks), "start", "--task", "deliver", "--id", "later",
+                        "--role", "qa", "--cwd", str(f.repo), "--goal", "Inspect", "--purpose", "work", "--", *proposed])
+                self.assertEqual(code, 1, errors.getvalue())
+                self.assertRegex(errors.getvalue(), "outstanding|native start|Spell out --write")
+                self.assertEqual(f.path.read_bytes(), snapshot)
+                self.assertFalse((f.tasks / "deliver.later.md").exists())
+
+    def test_every_native_start_checks_history_before_reserving_an_attempt(self):
+        f = self.fixture
+        self.run_historical_readers(self.observer_python(), [("previous", "qa")], expired=True)
+        record = f.path.read_bytes()
+        for name, binary in (("codex", "--codex"), ("claude", "--claude"), ("grok", "--grok"), ("antigravity", "--agy")):
+            args = ["--state-dir", str(f.tasks), name + "-start", "--task", "deliver", "--id", "later",
+                    "--role", "qa", "--cwd", str(f.repo), "--goal", "Inspect", "--purpose", "correction",
+                    binary, sys.executable, "--model", MODEL]
+            if name != "antigravity":
+                args.extend(["--effort", "low"])
+            with self.subTest(harness=name), redirect_stderr(StringIO()) as errors, \
+                    patch.object(factory, "connect", side_effect=AssertionError):
+                self.assertEqual(factory.main(args), 1)
+                self.assertIn("deliver/previous", errors.getvalue())
+                self.assertEqual(f.path.read_bytes(), record)
+                self.assertFalse((f.tasks / "deliver.later.md").exists())
+
+    def test_generic_claude_options_collect_and_replay_with_worker_defaults(self):
+        f = self.fixture
+        self.run_reader("generic", "qa", str(uuid.UUID(int=10)), generic=True)
+        cli = ["--state-dir", str(f.tasks), "claude-collect", "--task", "deliver", "--id", "generic"]
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            self.assertEqual(factory.main(cli), 0, errors.getvalue())
+        f.release_skill_merges()
+        self.assertEqual(f.delivered_cli(review="release", required="generic")[0], 0)
+        f.review("final", "release", delivery="release")
+        self.assertEqual(f.delivered_cli("final", review="release", required="generic")[0], 0)
 
     def test_collected_claude_ordinary_approval_and_codex_release(self):
         selected=integration.approvals(self.record,"release",["claude-qa"])
@@ -1381,7 +1865,77 @@ class ClaudeApprovals(unittest.TestCase):
         writer_session = "00000000-0000-0000-0000-000000000003"
         record, assignment, receipt = self.run_claude_writer(writer_session, exit_code=1)
         self.assertEqual(receipt["state"], "failed")
-        self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+        from test_ready_runner import PlanRex
+        f = self.fixture
+        before = f.path.read_bytes()
+        command = factory.claude_command(f.path, task="deliver", assignment_id="next", role="qa",
+            claude=sys.executable, model=MODEL, effort="low", cwd=str(f.repo))
+        pane = (record["session_id"], assignment["block_id"])
+        with patch.object(factory, "Rex", PlanRex), patch.object(factory, "native_runtime_digest", return_value="0" * 64):
+            for state in ("running", "unknown", "exited"):
+                with self.subTest(state=state), patch.dict(PlanRex.processes, {pane: state}):
+                    with self.assertRaisesRegex(factory.FactoryError, "confirm the original writer"):
+                        integration.approvals(record, "release", ["claude-qa"])
+                    with self.assertRaisesRegex(factory.FactoryError, "confirm the original writer"):
+                        factory.launch(f.path, task="deliver", assignment_id="next", role="qa", goal="Check the change",
+                            cwd=str(f.repo), command=command, purpose="correction", binary=sys.executable, server="unix:///fixture.sock")
+                    self.assertEqual(f.path.read_bytes(), before)
+            with patch.dict(PlanRex.processes, {pane: "failed"}):
+                self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer_session)
+                factory.check_native_history(record, runtime="0" * 64)
+        self.assertIsNone(assignment["result"])
+
+    def test_interrupted_writer_reset_preserves_independence_through_final_delivery(self):
+        f = self.fixture
+        writer = str(uuid.UUID(int=4))
+        path = f.tasks / "deliver.claude-writer.claude.json"
+        save = factory.save
+
+        def interrupted(pathname, value, **options):
+            if pathname == path and not options.get("exclusive"):
+                raise OSError("Fixture interrupted the worker before its final receipt")
+            return save(pathname, value, **options)
+
+        with patch.object(factory, "save", side_effect=interrupted), self.assertRaisesRegex(OSError, "interrupted"):
+            self.run_claude_writer(writer, exit_code=130)
+        original = path.read_bytes()
+        record = factory.load_task(f.path)
+        assignment = record["assignments"]["claude-writer"]
+        # Released schema 11 saved the immutable request and receipt without a runtime digest.
+        record["schema_version"] = 11
+        for prior in record["assignments"].values():
+            del prior["native_launch"]
+        factory.save(f.path, record)
+        self.assertEqual(json.loads(original)["state"], "starting")
+        (f.repo / "NOTES.md").write_text("Interrupted edit\n")
+        with patch.object(factory, "Rex", FakeRex), patch.dict(FakeRex.exits, {assignment["block_id"]: 130}):
+            with redirect_stdout(StringIO()) as output:
+                self.assertEqual(factory.main(["--state-dir", str(f.tasks), "reset", "--task", "deliver",
+                                               "--id", "claude-writer"]), 0)
+            reset = json.loads(output.getvalue())
+            record = factory.load_task(f.path)
+            assignment = record["assignments"]["claude-writer"]
+            factory.tidy(f.path, factory.connect(record), record, only={"claude-writer"}, close_session=False)
+        self.assertIn("+Interrupted edit", Path(reset["patch"]).read_text())
+        self.assertEqual(integration.contributor_context("claude-writer", record, assignment), writer)
+        self.assertIsNone(assignment["result"])
+        f.release_skill_merges()
+        required = ["qa", "claude-qa"]
+        self.assertEqual(f.delivered_cli(review="release", required=required)[0], 0)
+        f.review("same-session", "release", context=writer, delivery="release")
+        self.assertIn("contributor cannot judge", f.delivered_cli("same-session", review="release", required=required)[2])
+        f.review("independent", "release", delivery="release")
+        self.assertEqual(f.delivered_cli("independent", review="release", required=required)[0], 0)
+        self.assertEqual(path.read_bytes(), original)
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            self.assertEqual(factory.main(["--state-dir", str(f.tasks), "codex-start", "--task", "deliver",
+                "--id", "replacement", "--role", "backend", "--purpose", "correction", "--goal", "Apply the patch",
+                "--cwd", str(f.repo), "--codex", sys.executable, "--model", "fixture-model", "--effort", "high",
+                "--write", "--commit-message", "Apply interrupted edit"]), 0, errors.getvalue())
+        saved = factory.load_task(f.path)["assignments"]["claude-writer"]
+        self.assertIsNone(saved["result"])
+        self.assertNotIn("native_launch", saved)
+
 
     def test_writer_lost_with_its_host_stays_a_contributor_under_its_frozen_session(self):
         # Observed (#156): a writer lost to the 2026-11-12 reboot kept a starting receipt and blocked delivery for good.

@@ -110,7 +110,7 @@ def _git_parent_sha(repository, sha):
 
 def _writer_evidence_paths(path, key, assignment):
     command = assignment["request"]["command"]
-    harness = (factory.worker_hint(command) if assignment.get("native_collected") is True
+    harness = (factory.worker_hint(command) if assignment.get("native_collected") is True or factory.launch_runtime(assignment)
                else factory.native_harness(command))
     if harness is None:
         raise factory.FactoryError(f"Restore the original native writer command for {key!r}.")
@@ -119,6 +119,7 @@ def _writer_evidence_paths(path, key, assignment):
 
     # Use the worker's interpretation of argv, including the historical Codex prefix.
     parser = importlib.import_module(harness + "_worker").parser()
+    command = factory.native_argument_view(command)
     argv = command[4:] if command[1:3] == ["-E", "-s"] else command[2:]
 
     def damaged_command(_message=None):
@@ -161,7 +162,7 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path):
             "Restore the original record before retrying.") from None
     _require(isinstance(record, dict),
              f"Expected a JSON object in source task record {str(path)!r}. Restore the original record before retrying.")
-    _require(record.get("schema_version") == 11, "Export requires a schema 11 source")
+    _require(record.get("schema_version") in (11, 13), "Export requires an ordinary schema 11 or 13 source")
     _require("writer_origin" not in record, "Source already has writer_origin; it cannot be re-exported")
     factory.validate_task_record(path, record)
 
@@ -191,7 +192,7 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path):
     # Find the selected writer assignment.
     writer_assignment = record["assignments"].get(assignment_id)
     _require(writer_assignment is not None, f"Unknown writer assignment {assignment_id!r}")
-    _require("--write" in writer_assignment["request"]["command"],
+    _require(factory.native_write_option(writer_assignment["request"]["command"]),
              f"Assignment {assignment_id} is not a writer (no --write flag)")
 
     # Re-read the original native evidence under the source host binding.
@@ -240,10 +241,10 @@ def export_writer(path, *, assignment_id, to_host, to_task, out_path):
     contributors = []
     for key, assignment in record["assignments"].items():
         command = assignment["request"]["command"]
-        if "--write" not in command:
-            if factory.native_harness(command) is None:
+        if not factory.native_write_option(command):
+            if factory.local_launch_harness(assignment) is None:
                 # The destination will have no local assignment to replay at its approval gate.
-                integration.collected_native(key, record, assignment, current=False)
+                integration.verify_omitted_reader(key, record, assignment)
             continue
         if key != assignment_id:
             _writer_evidence_paths(path, key, assignment)

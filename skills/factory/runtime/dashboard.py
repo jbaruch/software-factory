@@ -37,19 +37,19 @@ def invalid_worker(message=None):
 
 
 def application_worker(path):
-    """Bind an exact worker file to this application or its registered Git worktrees."""
+    """Recognize a worker location for the requested-adapter display."""
     worker = Path(path)
     try:
         info = worker.lstat()
-        if (not worker.is_absolute() or str(worker.resolve(strict=True)) != path
+        if (not worker.is_absolute() or str(worker) != path or ".." in worker.parts
                 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
             return False
         root = worker.parent
-        if root == factory.ROOT:
+        if root.resolve(strict=True) in (factory.ROOT.resolve(), (factory.runtime_home() / "skill" / "runtime").resolve()):
             return True
         # A source checkout keeps its runtime at skills/factory/runtime; Git registers
         # each worktree by its top level, so compare that directory.
-        if root.parts[-3:] != RUNTIME_LAYOUT:
+        if root != root.resolve() or root.parts[-3:] != RUNTIME_LAYOUT:
             return False
         top = root.parents[2]
         # Inventory comes from the trusted application, never the task's repository
@@ -177,7 +177,7 @@ def pane_detail(state_dir, task, identity, *, connect=factory.connect, clock=tim
         return detail
     try:
         with factory.task_lock(state_dir, task) as path:
-            record = factory.load_task(path)
+            record = factory.load_task(path, persist_migration=False)
             assignment = record["assignments"].get(identity)
             if assignment is None:
                 return detail
@@ -321,7 +321,7 @@ def decision_inbox(state_dir, decision_store, tasks):
                     if item["task"] is None:
                         raise factory.FactoryError("Unbound investigation")
                     with factory.task_lock(state_dir, item["task"]) as path:
-                        task_record = factory.load_task(path)
+                        task_record = factory.load_task(path, persist_migration=False)
                         coordination_evidence.check_investigation(request, task_record)
                     item["availability"] = "Investigation binding verified; native eligibility and authority still require owner checks"
                 except (factory.FactoryError, OSError, ValueError):
@@ -448,7 +448,7 @@ def snapshot(state_dir, *, decision_store=None, live=False, connect=factory.conn
             continue  # Receipts and schemas are evidence, not task records.
         try:
             with factory.task_lock(state_dir, path.stem):
-                record = factory.load_task(path)
+                record = factory.load_task(path, persist_migration=False)
                 view = factory.task_view(record)
             rex, observation_error = None, None
             if live and record["rex"] is not None:

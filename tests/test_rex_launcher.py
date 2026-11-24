@@ -18,6 +18,30 @@ from unittest.mock import patch
 import factory
 
 
+def capture_writer_handoff(wrapper):
+    program = """
+import json
+import os
+from pathlib import Path
+import sys
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import checkout_exec
+
+def stop_before_native(*args, **kwargs):
+    print(json.dumps(dict(os.environ)))
+
+with (
+    patch.object(os, "execve", side_effect=AssertionError("Expected managed Python entry")),
+    patch.object(checkout_exec.runpy, "run_path", side_effect=stop_before_native) as worker,
+):
+    assert checkout_exec.main(sys.argv[2:]) == 0
+    worker.assert_called_once()
+"""
+    return json.loads(subprocess.check_output([*wrapper[:3], "-B", "-c", program, *wrapper[3:]], text=True))
+
+
 class FakeRex:
     sessions = []
     calls = []
@@ -29,6 +53,11 @@ class FakeRex:
     def __init__(self, binary, server):
         self.binary, self.server = str(binary), server
         self.instance_id: str | None = None
+
+    @classmethod
+    def writer_environment(cls):
+        actual = [call for call in cls.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
+        return capture_writer_handoff(actual[actual.index("--") + 1:])
 
     @staticmethod
     def require_block(session, block_id):
@@ -557,12 +586,41 @@ class NativeLauncher(unittest.TestCase):
         self.assertFalse(any(call[0] == "capture" for call in FakeRex.calls))
         self.assertEqual(FakeRex.sessions, [])
 
+    def test_inspection_preserves_legacy_bytes_until_actual_reconciliation(self):
+        record, qa = self.start()
+        self.finish(qa)
+        factory.tidy(self.path, factory.connect(record), record, close_session=False)
+        record, pending = self.start(assignment_id="later")
+        record["schema_version"] = 11
+        factory.save(self.path, record)
+        original = self.path.read_bytes()
+        cli = ["--state-dir", str(self.root)]
+        for action, args in [("show", []), ("status", ["--id", "qa"]), ("capture", ["--id", "qa"]),
+                             ("status", ["--id", "later"]), ("capture", ["--id", "later"])]:
+            with self.subTest(action=action, args=args), redirect_stdout(StringIO()):
+                self.assertEqual(factory.main([*cli, action, "--task", "task", *args]), 0)
+                self.assertEqual(self.path.read_bytes(), original)
+        window, block = pending.pop("window_id"), pending.pop("block_id")
+        pending["state"] = "launching"
+        factory.save(self.path, record)
+        original = self.path.read_bytes()
+        with redirect_stdout(StringIO()) as output:
+            self.assertEqual(factory.main([*cli, "capture", "--task", "task", "--id", "later"]), 0)
+            self.assertEqual(json.loads(output.getvalue())["text"], f"output of {block}\n")
+        self.assertEqual(self.path.read_bytes(), original)
+        with redirect_stdout(StringIO()):
+            self.assertEqual(factory.main([*cli, "status", "--task", "task", "--id", "later"]), 0)
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["schema_version"], 11)
+        self.assertEqual((saved["assignments"]["later"]["window_id"], saved["assignments"]["later"]["block_id"]),
+                         (window, block))
+
     def test_closed_tab_records_are_validated(self):
         record, qa = self.start()
         self.finish(qa)
         factory.tidy(self.path, factory.connect(record), record)
         saved = factory.load_task(self.path)
-        for change in (dict(state="running"), dict(exit=None), dict(reason="extra"), dict(session_id=""),
+        for change in (dict(state="running"), dict(state="failed"), dict(exit=dict(exit_code=1)), dict(exit=None), dict(reason="extra"), dict(session_id=""),
                        dict(capture="relative.txt"), dict(at=-1), dict(extra=True)):
             damaged = copy.deepcopy(saved)
             damaged["assignments"]["qa"]["closed"].update(change)
@@ -1518,6 +1576,11 @@ class TaskAdmission(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(FakeRex.calls, [])
 
+    def git_with_replacements(self, *args):
+        # Observe the substituted object in this synthetic repo, even inside a Factory writer.
+        env = {k: v for k, v in os.environ.items() if k != "GIT_NO_REPLACE_OBJECTS"}
+        return subprocess.check_output(["git", "-C", str(self.repo), *args], env=env)
+
     def test_replacement_commit_cannot_substitute_selected_source(self):
         source = self.repo / "source.txt"
         source.write_text("original\n")
@@ -1531,7 +1594,7 @@ class TaskAdmission(unittest.TestCase):
         substitute = factory.git_commit(str(self.repo), "HEAD")
         subprocess.run(["git", "-C", str(self.repo), "reset", "--soft", original], check=True)
         subprocess.run(["git", "-C", str(self.repo), "replace", original, substitute], check=True)
-        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "status", "--porcelain"]), b"")
+        self.assertEqual(self.git_with_replacements("status", "--porcelain"), b"")
         self.assert_source_refuses_at_both_launch_boundaries(record)
 
     def test_child_git_reads_unreplaced_candidate_in_a_clean_checkout(self):
@@ -1546,7 +1609,7 @@ class TaskAdmission(unittest.TestCase):
         substitute = factory.git_commit(str(self.repo), "HEAD")
         subprocess.run(["git", "-C", str(self.repo), "reset", "--quiet", "--hard", original], check=True)
         subprocess.run(["git", "-C", str(self.repo), "replace", original, substitute], check=True)
-        self.assertEqual(subprocess.check_output(["git", "-C", str(self.repo), "show", "HEAD:source.txt"]), b"substitute\n")
+        self.assertEqual(self.git_with_replacements("show", "HEAD:source.txt"), b"substitute\n")
         self.admit()
         self.start(command=[sys.executable, "-c", "import subprocess; subprocess.run(['git','show','HEAD:source.txt'],check=True)"])
         call = self.creation_calls()[0]

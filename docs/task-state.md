@@ -127,11 +127,11 @@ no-follow/nonblocking open and descriptor-based regular-file checks, plus owner,
 single-link and private-permission checks with `private=True`. The default reader
 behavior is unchanged. External consumers must not edit or migrate these records. The
 runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
-`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions define schema version 11:
+`provision_worktree`, `record_result`, `collect_codex` and `collect_claude` functions own the following fields.
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `11` on every task record |
+| `schema_version` | `11` for ordinary tasks, `13` after a bound native launch, `12` for imported writer history |
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
@@ -143,6 +143,30 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 | `rex` | `null` before connection, otherwise pinned binary, endpoint and host ID |
 | `session_label`, `session_id` | Unique reconciliation marker and nullable returned Rex identity |
 | `assignments` | Assignment IDs mapped to immutable request inputs, launch state, brief path, unique window marker, returned pane IDs, the Rex server `rex_instance` each new launch ran on and, once its tab is tidied, `closed` |
+
+A new managed assignment records `native_launch` in the reservation that consumes
+its attempt. That same owner write advances an ordinary task from 11 to 13.
+An imported task keeps schema 12 and its original archive. Before reserving the
+attempt, Factory identifies the launch interpreter by its path, resolved executable,
+version, prefixes and bytes of the launcher, mapped image and C API provider.
+It also hashes the configured shared library or framework when installed. On
+Linux the executable itself can provide the C API. The runtime digest also covers
+the Factory installation path and its Python sources. A second digest binds the immutable request, including the brief
+digest and command. It treats the unambiguous Codex writer spellings as equivalent.
+Migration leaves earlier attempts without a launch attestation. For an installed
+native command, the Rex checkout wrapper verifies the digest again while holding a shared
+lock on the installed VERSION file. The installer needs the exclusive lock to
+replace those files. The Factory CLI and ready runner take the same shared lock
+before loading collection code and hold it through result registration. Retry a contended upgrade
+after active workers and controllers finish.
+
+Each new native assignment records the absolute Python invocation and executable device and inode in
+`assignments[].interpreter` when the launcher observes its own interpreter. Older
+assignments have no launch observation. Listing never backfills it. Each native
+writer's optional `writer_source` records the physical checkout root and the
+device/inode pairs displaced by normalization. The launcher and Rex entry save
+these pairs before replacing files. A later writer reusing that checkout carries
+the exclusions forward. Incomplete history leaves external files unproved.
 
 An assignment's own `state` records only its launch (`launching`, `launched` or
 `abandoned`), never whether its process is still alive. Read `closed` for that: a
@@ -166,13 +190,21 @@ a revision again, even after others, reuses its first capture. Migrating version
 none, so a migrated task whose acceptance names issues refuses new launches until
 `inputs` selects the revision again and captures it.
 
-Only `import-writer` writes schema 12. Its required `writer_origin` object has flat
+Only `import-writer` creates schema 12. Its required `writer_origin` object has flat
 fields `schema_version` (1, copied from the bundle), `archive` (absolute path), `sha256`, `source_host`, `source_task`,
 `source_assignment`, `destination_host`, `candidate`, `requirements`, `contributors`
 (sorted source assignment IDs and their contexts), `used` (correction and investigation
 counts), and `judge_rounds`. Launch and approval check these values against the private
-archive at the operator-pinned digest. Ordinary tasks stay at schema 11. Loading a
-task with an invalid origin or an origin at an earlier schema fails.
+archive at the operator-pinned digest. Observation preserves schema 11 byte for
+byte. An origin at any other schema, or an invalid or missing origin at schema 12,
+refuses. The earlier private #257 producer also used 12 for ordinary tasks.
+A missing origin, a matching version string or a launch digest alone cannot
+distinguish its output from a damaged import. Preserve the original. An offline
+owner conversion requires an independently retained snapshot bound to the exact
+ordinary producer and task bytes. On a copy of that verified snapshot, change
+only the schema tag to 13 and validate the complete record with the owner loader
+before resuming. If provenance is unavailable, restore a verified backup or keep
+the task stopped.
 
 A task still holding a session from before keeps its label, the `factory-<line>`
 session lines first used or its own `factory-<task>-<8 hex>`, until that session
@@ -221,9 +253,8 @@ migrate with this flag false, preserving original assignments/results, admission
 selected inputs, controls, holds, allowance history and used attempts. Migration
 never infers collection from a matching report or invents historical proof.
 Legacy results remain available for inspection but cannot supply historical native
-approval/delivery until explicitly recollected through the original provider's strict
-collector (`collect_codex` or `collect_claude`) with their
-original checkout, Git directory and required HEAD still available. If cleanup or
+approval or delivery until the original released Factory and Python strictly
+collect them with the original checkout, Git directory and required HEAD available. If cleanup or
 later work has removed that strict original context, retained artifacts alone
 cannot recover collection proof; do not backfill it or use a replacement checkout.
 
@@ -241,8 +272,7 @@ admission and holds. The owner migrates either on read, preserving requests,
 launch intents, limits, holds and IDs. It adds `result: null` to old assignments,
 without inventing revision-bound evidence. Old assignments can reconnect but
 cannot acquire results retroactively. Admitted version 1 tasks initialize current
-inputs from their recorded initial candidate. `show` can write a legacy format
-upgrade, but never contacts Rex. Version 2 added revision-bound inputs/results.
+inputs from their recorded initial candidate. `show` reads the legacy format in memory. Version 2 added revision-bound inputs/results.
 Version 3 used a Git common-directory path plus filesystem device/inode. Those
 numbers can be reused after deletion and cannot establish admission continuity.
 Version 4 replaces that active pin with `{common_dir, repository_id}`. The path is
@@ -333,7 +363,9 @@ and `git_dir: null`. Admission supplies the immutable repository identity. Paths
 are absolute with a resolved existing parent. A paused task or pending launch
 blocks new provisioning. Missing legacy repository identity refuses action.
 Git creates a locked worktree without checkout; its lock reason includes this
-task, worktree ID and owner token. The owner writes the new index and independent
+task, worktree ID and owner token. Before materializing files, the owner saves the
+checkout, Git admin and reciprocal pointer inode identities in the pending intent.
+The owner writes the new index and independent
 regular files directly from raw blobs, preserves executable modes, verifies the
 selected candidate and repository, then saves `state: provisioned` and `git_dir`.
 No checkout hooks, clean/smudge filters or provider calls run. Existing source
@@ -353,8 +385,10 @@ that resolve to the same physical file, including during pending reconciliation.
 Repeat the exact command after a restart or lost reply. A completed request
 returns the same worktree after verifying its ownership, without writing state
 or resetting subsequent writer edits. A pending request can reconcile only when
-the uniquely locked worktree is already complete and clean; this read-only
-inspection is permitted while held. Missing, partial, dirty or conflicting
+the uniquely locked worktree is already complete and clean and its four identities
+match the pending intent. If the original observation was never saved, the worktree,
+cache and intent remain pending for owner inspection. Read-only inspection is
+permitted while held. Missing, partial, dirty or conflicting
 outcomes remain pending for inspection, without retry, reset, deletion or repair.
 A lock marker, branch, Git directory or repository identity mismatch refuses.
 Missing or unreadable ownership metadata reports how to inspect the existing
@@ -369,10 +403,35 @@ moves the worktree onto COMMIT and selects it as the task's candidate; a writer 
 replays the patch and resolves any conflicts.
 
 `release-worktree --task TASK` removes the provisioned worktree once the task's
-work is done: it verifies the ownership marker, refuses a dirty checkout or an
-assignment there that may still run (an unfinished receipt counts as stopped beside
-a reset patch or once Rex reports the attempt lost), unlocks and removes the worktree, and keeps
-the branch; the repository's release policy prunes merged branches. Collected writers keep their provenance after the checkout is gone.
+work is done. Under the owner's line and task locks it takes the exclusive
+linked Git admin lock, reconciles registered stores, checkout users and
+terminal receipts, and checks for active processes. Release requires an
+attended window with independent exclusion of direct checkout and cache users,
+including new entrants and surviving descendants, through publication and readback.
+An observed user blocks removal. If process ancestry or cwd coverage is incomplete,
+the operator must verify exclusion outside Factory before confirming the task
+at the terminal. The line, task and admin locks are held while the prompt waits.
+The owner checks the clean worktree, branch, marker and physical checkout,
+admin and pointer identities from provisioning. A completed pre-upgrade record
+without `checkout_inodes` uses the same attended command. The owner verifies
+the current registration, HEAD, branch and owner lock before confirmation and
+again before Git removal. An invalid or changed saved identity blocks release.
+The owner verifies Git deregistration
+and both absent endpoints before publishing the private
+`TASK.worktree-release.json` receipt. The branch stays available.
+A stopped owner attempt with an original reset patch or a recorded lost exit
+allows attended release. The receipt records Git removal and its original
+publication alias. A later census retains caches that depend on this checkout
+because direct-user exclusion at release cannot be established from the receipt.
+Single-link version 1 receipts remain available for release readback. Two-link
+version 1 receipts require preserving both names because the publisher recorded
+no alias. For an attended pre-upgrade release the version 3 receipt stores
+`observed_checkout` in place of `checkout`. That observation is bound to the
+current release only. The original provisioning and launch records stay intact.
+Retry validates the receipt against the same owner record and reports
+`already_released`. Dependent caches remain retained before release, after
+release and after retry. Missing proof after removal also retains dependent caches.
+Collected writers keep their provenance after the checkout is gone.
 
 Provisioning does not launch a writer, select new task inputs, hand off a produced
 candidate, accept a task or grant merge/release authority. Select the provisioned

@@ -1,5 +1,69 @@
 # Native provider observations
 
+## Native scratch receipts
+
+All four native workers write version-8 execution receipts. Each preserves the
+provider's previous writer, reader and coordination contracts. The workers save
+`scratch` and its `scratch_identity` (`st_dev` and `st_ino`) before launching.
+Immediately after spawning, the worker reads the kernel `start_time` before
+looking up the boot/PID `scope` and saves both with the PID in `native_process`.
+The start time is in microseconds on macOS and kernel clock ticks on Linux.
+Asyncio may reap a fast child before the probe, leaving `start_time` null. An
+integer `exit_code` from the worker waiting on and reaping its own child is
+stronger evidence of exit than the start-time fingerprint.
+`scratch_removed` records the cleanup result. It is false when removal fails
+or Codex keeps the directory after an unconfirmed exit. Fields for steps that
+have not run are null. Collectors still accept their supported older receipts.
+
+`factory.py --state-dir PATH abandoned-scratch` prints a JSON list of scratch
+and receipt paths. The state directory defaults to the per-user factory state.
+The command reads terminal receipts bound to observed native launches. It parses
+the saved worker arguments and resolves relative receipt paths from the launch
+directory. Each receipt must match the original job, candidate and requirements and have `scratch_removed`
+set to `false`. A retained report needs a recognized outcome and evidence that
+survives scratch removal. Grok and Antigravity also accept a verdict with an
+empty artifact list. A valid bounded coordination answer supplies its own result.
+Each ordinary inline artifact is a string encoding a JSON object such as
+`{"observation":"The worker records its scratch in worker.py","citations":["worker.py:12"]}`.
+The specialist supplies the complete finding in the nonblank `observation` string.
+Only `citations` is optional and holds an array of nonblank strings. When the
+finding lives in a file, use `File: ` followed by its exact path. Collection
+preserves all original strings, including historical reports and prescribed judge
+and release lines. For listing, historical free text needs independently verified
+file contents, even when it starts with `Result: `.
+
+The worker saves its interpreter device and inode in `interpreter`. Listing matches
+them to the task's launch observation and checks any surviving invocation against
+that same file. In `retained_files`, each original artifact string names its worker
+copy by resolved source root and relative path, conversation ID for Antigravity
+brain files, and destination device, inode and SHA-256 digest. Antigravity
+freezes its resolved `conversation_root`. A report from a provider conversation
+directory in any home requires a worker binding. New bindings record an explicit
+`copy` location in the receipt's `.artifacts` sibling for conversation files or
+`.checkout-artifacts` for checkout files. Its filename encodes the source root's
+device and inode followed by the source file's device and inode. Aliases within
+one root share the private copy. Indexed files from the execution checkout
+remain citations through either copy root, including hard links.
+
+Optional file verification reads up to 16 MiB per file. A publication gets 32
+attempts, 32 MiB total and up to two seconds of the remaining native allowance.
+The worker binds a copy after syncing the file and its directory. If storing
+that copy fails, the native verdict and original artifact order still collect.
+One census shares 128 attempts, 128 MiB and five seconds across all tasks and
+both retained files and committed blobs. Git discovery and commit validation
+use that same deadline. Failed attempts count. A filesystem call can outlast
+the deadline, so the reader checks time again before accepting file evidence.
+When a limit prevents verification, the census emits one diagnostic on stderr.
+
+For v8 bindings without `copy`, listing checks the historical relative path in
+`.artifacts`. A historical checkout binding uses `.checkout-artifacts` only
+when the recorded conversation also binds the identical relative path. Listing
+verifies the destination identity and digest at that exact location. Version 7 and older
+supported receipts still collect and verify in place. The scratch must be an owned directory
+directly under the local scratch root and retain its recorded device and inode.
+The PID must be vacant in the recorded boot and namespace. An occupied PID,
+including a reused one, excludes the directory.
+
 ## Execution policy
 
 Every native agent runs unattended, without approval prompts or a harness
@@ -91,6 +155,133 @@ Account, catalog and allowance observations are distinct from native worker
 lifecycle and subscription eligibility. Do not substitute API-key billing for
 subscription routes. See the [implementation inventory](implementation.md) for
 provider coverage.
+
+## Linked Go cache retention
+
+Run the standalone census with the already-installed shared runtime and the
+interpreter used by its launchers. The ACR project entry point can install a
+runtime before dispatch. Use the shared entry point directly:
+
+```sh
+runtime="${XDG_DATA_HOME:-$HOME/.local/share}/software-factory/skill/runtime/factory.py"
+python3 -B "$runtime" go-caches --repo /absolute/primary/checkout
+```
+
+The global `--state-dir` selects an existing owner store. Each JSON row names
+the cache, allocated KiB when measurable, and the evidence for eligibility or
+retention. Unowned and stranded reader caches remain visible. The census reads
+original records without migrating them and opens existing locks.
+
+The Mini census measured 2.84–7.92 GiB for each of five writer caches. ACR 202
+grew to 4.86 GiB during an active attempt despite a stale root timestamp. The
+attended ACR 242 pilot cleaned 7,195,228 KiB to 8 KiB and rebuilt offline to
+147,968 KiB, with 990 source entries, ten Git admin entries and the sticky
+exclusion verified. The **1 GiB** floor leaves that rebuilt cache warm. The
+**24-hour** grace covers a full daily work cycle, including the roughly six-hour
+gap between the pilot's last attempt and the attended cleanup. Both the newest
+cache write and the last observed terminal attempt must clear that grace.
+[Mini census and linked-worktree pilot](https://github.com/jbaruch/software-factory/issues/259#issuecomment-7094118940)
+
+Schedule only the read-only census above. Direct Go builds open the cache by
+path and can write between any two observations, even while Factory holds all
+four locks.
+
+For attended retirement, stop admissions and direct builds, reconcile every
+launch store, and drain all descendants that might reopen this cache. Keep
+every route to the cache exclusive until the actuator finishes its readback.
+During that window invoke
+`python3 -B "$runtime" go-caches --repo /absolute/primary/checkout --clean-task TASK`
+from a terminal and confirm the task. The prompt holds the line, task, admin
+and cache locks while it waits. Save the command output for the maintenance
+record. The independently enforced window supplies writer exclusion.
+If a writer can still enter, leave the cache in place.
+
+Automatic removal requires a shared lock on the verified physical checkout or
+cache inode for the full lifetime of **every** cache user, including descendants.
+The cleaner needs its exclusive counterpart through removal and readback.
+Account for independent Go builds as well as Factory launches, or isolate
+the cache so only cooperating processes can access it. Verify both admission
+paths and surviving descendants against an exclusive cleaner before enabling
+automatic removal.
+The later managed-cache stage must demonstrate a warm build, idle retirement
+and rebuild with exclusion covering every helper and descendant. Go can return
+an export path that remains in use after helper exit. Verify delayed reads by
+name and account for backing, materialized outputs and native fallback bytes
+together before enabling scheduled removal.
+
+A nonzero exit means that the requested cleanup did not complete. The actuator
+checks the provisioned owner token, pinned repository, reciprocal Git pointers,
+current branch and selected HEAD. Every attempt needs a bound terminal native
+receipt and the original tidied Rex exit. A failed attempt can precede a
+collected recovery. Successful exits require collected results. One result must
+match the selected candidate and requirements, including a writer whose
+verified factory commit produced that candidate from its frozen input. The census
+reads Git objects locally with optional locks and all Trace2 destinations disabled
+from the first binding through final replay. Missing required objects retain the cache.
+A present sibling must match the checkout, Git admin and pointer inodes,
+repository, HEAD and provisioner marker recorded before Rex launch. The Rex wrapper checks
+the witness in its actual working directory before checkout normalization and again
+before native execution. A clean advance in the same physically bound reader allows
+Claude or Codex to collect the original approval. The advanced reader retains its
+dependent cache. Factory binds the writer
+checkout, admin and reciprocal pointer inodes when it creates the worktree.
+A provisioning retry or later collection cannot supply missing original identity.
+Legacy approval alone supplies no physical ownership evidence. Retire an eligible cache while its linked readers are still present.
+When a reader has gone, the owner receipt can confirm Git removal. Factory lacks
+independent evidence of direct-user exclusion at that release, so the census
+retains the dependent cache. The native worker's finalizer
+only covers its own disposable inner checkout. Original delivery receipts still
+undergo canonical approval replay in either case.
+A matching version-1 `delivered` receipt can coexist with the terminal native
+receipts. Only the native attempts supply execution evidence. A receipt
+with the newer PID witness also requires the owning runtime's process-scope
+check. Unfinished, lost, uncollected or conflicting
+evidence supplies a retain reason.
+
+The actuator holds the line, task, Git admin and cache inode locks during
+removal. Before publishing intent for a provisioned worktree, each launcher
+adds a `factory-launch-store-DEVICE-INODE` symlink to its state directory in
+the Git admin directory under the shared inode lock. The census verifies the
+directory identity and the link target. Additional stores can launch normally.
+Their durable references tell cleanup
+that the selected store alone cannot establish exclusive use of this tree.
+A busy admin lock before intent leaves the same job waiting with its attempt
+available. A saved intent still goes through ordinary reconciliation.
+
+A detached child can leave the worktree, close every cache file and later use
+its inherited GOCACHE. The original terminal receipt and Rex exit bound the
+period in which the worker could have passed on this cache. A later host boot
+ends those descendants. On the same boot, a user process young enough to be
+a descendant makes the cache ambiguous, even with an unrelated command and
+cwd. The observer also checks commands, working directories and open files.
+It reads process metadata without requesting process environments.
+
+The census checks the mount table before sizing. Its first pass measures leaf
+files from their metadata and checks each opened directory. The locked
+eligibility and removal passes verify each open entry is on the primary
+repository's mount before reading data or enumerating children. Cleanup removes validated Go
+build entries relative to their open parent directories. Go's recursive clean
+cannot enforce that boundary. The root inode and its sticky backup exclusion
+survive. After interruption, run a fresh census before retrying.
+
+Before scheduling, integrate #256's producer and PID witness on current main,
+then reconcile #257's original collector, launch attestation and delivery replay.
+Verify the combined runtime privately against released schema 11, imported schema
+12 with writer provenance, and ordinary schema 13. Conversion of standalone
+ordinary schema 12 requires producer provenance. Keep #257's attested runtime and
+original collector checks alongside the physical checkout checks. Replay Claude v5
+with its owning collector and delivery validator. Replay stored exits and exercise
+omitted readers, independent approval contexts, owner decisions and #261 reset.
+A starting receipt still retains the cache after reset. Verify the native PID
+witness on Mini. A witness from an unverifiable or different boot retains the cache. Drain older launchers and reconcile outstanding intents in
+previously used stores. Verify the reviewed shared source and interpreter for
+every launcher and the actuator. As the scheduler account, run the read-only
+command above for the ACR primary checkout. Compare all five historical writer
+rows and the stranded readers with the original census and ACR 242 pilot.
+Check current allocated KiB, exact owner, terminal and activity evidence, and
+retention of active, ambiguous and warm caches. Measure census duration and
+confirm the account can observe the required processes before selecting a
+schedule. [Acceptance and rollout](https://github.com/jbaruch/software-factory/issues/259)
 
 ## Sanitized native Claude authentication
 
@@ -554,6 +745,7 @@ when `git worktree remove` does. Each worktree otherwise wrote its own copy of e
 into the shared cache, which Go keeps five days, and filled the disk (#183). On macOS the
 directory gets Time Machine's sticky exclusion, the attribute `tmutil addexclusion` sets, as
 `~/Library/Caches` has by default. The main checkout keeps the user's cache.
+See the [linked cache policy](#linked-go-cache-retention) for the census and explicit retirement command.
 No native worker gets a GitHub identity. Readers lost it after a release judgment
 merged a PR and deployed it with the operator's, and writers need none: the factory
 commits their work and the line's foreman pushes it, so a writer misled by text it
@@ -821,7 +1013,7 @@ ends identical to the candidate fails: there is nothing to commit or verify, and
 with nothing to change reports `blocked` with its reasons (#166). A completed receipt requires a terminal commit state matching
 its frozen assignment, the candidate's actual tree equal to `staged_tree`, and,
 for a new commit, the actual Git parent. Collection revalidates the retained
-assigned checkout's repository marker and frozen worktree Git directory for both
+assigned checkout's repository marker and frozen worktree Git directory across
 receipt versions, and requires its exact HEAD to equal the candidate for every
 writer, including writers without a factory commit. Keep that checkout until
 collection completes.
@@ -829,11 +1021,11 @@ collection completes.
 The schema file beside the receipt requires only `outcome` and original
 `artifacts` from the specialist; runtime identity and Git facts are gathered by
 code. Explicit bounded coordination assignments additionally return the typed
-answer described in [bounded native answers](jev.md#bounded-native-answers) and
-use version-6 receipts. Generic reports remain unchanged. The frozen question
+answer described in [bounded native answers](jev.md#bounded-native-answers).
+Version 6 introduced these receipts. The frozen question
 and native event report must agree at execution and collection.
-Schema changes belong to the worker. Receipt readers accept versions 4, 5 and 6;
-version 4 has no factory-owned commit and remains collectable unchanged with its
+Schema changes belong to the worker. Receipt readers accept versions 4, 5, 6, 7 and 8.
+Version 4 has no factory-owned commit and remains collectable unchanged with its
 original command. Version 5 requires the nullable `commit` field. Neither version
 is migrated or rewritten by collection. Version 6 retains the version-5 metadata
 and nullable commit field and requires its bound read-only answer. Versions below 4 remain inspection-only:
@@ -900,13 +1092,14 @@ version-3 receipt carries it. Collected answers close their decision-inbox item.
 `native_claude.probe` before inference. Execution accepts Claude Code 2.1.319 or newer
 with claude.ai/firstParty sign-in only. Newer releases run until the strict decoder
 meets a shape it does not recognize, which refuses visibly rather than guessing. API/provider/auth environment overrides refuse even when
-empty. The private frozen brief goes to stdin with EOF. Safe mode; Read, Glob, Grep
-and Bash plus internal StructuredOutput for reviewers, which run in a disposable
-checkout and write version-4 receipts with its `checkout` path (version 1 reviewed
-in place with Read only and still collects); Read only for coordination answers;
-empty strict MCP configuration,
-disabled slash commands/Chrome, `bypassPermissions` and no session persistence
-are per-invocation controls. They do not establish subscription eligibility.
+empty. The private frozen brief goes to stdin with EOF. Reviewers run in safe
+mode with Read, Glob, Grep, Bash and internal StructuredOutput in a disposable
+checkout. The worker records its `checkout` path. Version 5 adds the `events_digest`
+used for [delivery verification](integration.md#retrying-a-delivery-across-python-installations).
+Version 4 retains the checkout path. Version 1 reviewed in place with Read only
+and still collects. Coordination answers use Read and internal StructuredOutput.
+Each invocation uses an empty strict MCP configuration, disabled slash commands
+and Chrome, `bypassPermissions` and no session persistence. They do not establish subscription eligibility.
 Claude Code 2.1.319 emits `system`/`ui_invalidate` rendering notices in bypass
 mode, sometimes before `init`; the decoder accepts them as inspection-only
 telemetry. After `init` it also accepts `system/api_retry` (the CLI retrying a

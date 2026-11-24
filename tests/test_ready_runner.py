@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -112,7 +113,7 @@ class ReadyRunner(unittest.TestCase):
             "{requirements}": request["inputs"]["requirements"],
             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)}
         argv = [replacements.get(part, part) for part in request["command"]]
-        args = codex_worker.parser().parse_args(argv[4:])
+        args = codex_worker.parser().parse_args(argv[4:] if argv[1:3] == ["-E", "-s"] else argv[2:])
         events = [dict(type="thread.started", thread_id="fixture-thread"), dict(type="turn.started"),
             dict(type="item.started", item=dict(id="command-1", type="command_execution", command="cat fixture/evidence.txt",
                                                 status="in_progress")),
@@ -462,8 +463,12 @@ class ReadyRunner(unittest.TestCase):
                 self.assertEqual({key: pending["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
                                  dict(launched=0, collected=0, tabs_closed=0))
                 self.assertEqual(pending["active_workers"], 1)
-                self.assertEqual(self.states(pending), {(task, "next"): "waiting"})
-                self.assertIn("owns this checkout", pending["jobs"][0]["reason"])
+                if task == "task":
+                    self.assertEqual(self.states(pending), {(task, "next"): "blocked"})
+                    self.assertIn("task/verify", pending["jobs"][0]["reason"])
+                else:
+                    self.assertEqual(self.states(pending), {(task, "next"): "waiting"})
+                    self.assertIn("owns this checkout", pending["jobs"][0]["reason"])
                 self.assertEqual(PlanRex.sessions, sessions)
                 self.assertEqual(self.launches(), launches)
                 self.assertEqual({item: item.read_bytes() for item in saved}, saved)
@@ -518,23 +523,29 @@ class ReadyRunner(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(PlanRex.calls, calls)
 
-    def test_off_plan_legacy_worker_survives_while_same_interpreter_peers_tidy(self):
-        original = self.controller(self.plan([self.job()]))
-        self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
-        self.finish("task", "first")
+    def test_incompatible_off_plan_worker_blocks_new_job_before_observation(self):
+        self.assertEqual(self.tick(self.controller(self.plan([self.job()])))["metrics"]["launched"], 1)
         path = self.directory / "task.json"
         record = factory.load_task(path)
-        protected = record["assignments"]["first"]
-        del protected["request"]["command"][1:3]  # Historical Codex used no -E/-s prefix.
+        saved = record["assignments"]["first"]["request"]["command"]
+        saved[3] += ".old"
         factory.save(path, record)
+        before, calls = path.read_bytes(), list(PlanRex.calls)
+        result = self.tick(self.controller(self.plan([self.job("next")])))
+        self.assertEqual(self.states(result), {("task", "next"): "blocked"})
+        self.assertIn("task/first", result["jobs"][0]["reason"])
+        self.assertEqual((path.read_bytes(), PlanRex.calls), (before, calls))
+        self.assertFalse((self.directory / "task.next.md").exists())
 
+    def test_off_plan_legacy_worker_survives_while_same_interpreter_peers_tidy(self):
+        original = self.controller(self.plan([self.job()]))
+        path = self.directory / "task.json"
         self.admit("other")
         peer = self.job("peer", task="other")
         alternate_plan = self.controller(self.plan([peer]))
         alternate = self.root / "alternate-python"
-        alternate.symlink_to(sys.executable)
+        shutil.copy2(sys.executable, alternate)
         with patch.object(sys, "executable", str(alternate)):
-            # The peers were already dispatched outside this plan's scheduler.
             for task in ("task", "other"):
                 with factory.task_lock(self.directory, task) as peer_path:
                     job = {**alternate_plan.plan["jobs"][0], "task": task}
@@ -542,12 +553,23 @@ class ReadyRunner(unittest.TestCase):
                                    cwd=job["cwd"], command=alternate_plan.command(peer_path, job),
                                    purpose=job["purpose"], binary=alternate_plan.rex, server=alternate_plan.server)
                 self.finish(task, "peer")
+            # Strictly collect the same-task peer before changing interpreters. Both panes are still open.
+            record = factory.load_task(path)
+            factory.collect_codex(path, "peer", factory.connect(record), record, record["assignments"]["peer"])
+        job = original.plan["jobs"][0]
+        legacy = original.command(path, job)
+        del legacy[1:3]  # Freeze the supported historical Codex spelling at admission.
+        factory.launch(path, task="task", assignment_id="first", role=job["role"], goal=job["goal"], cwd=job["cwd"],
+                       command=legacy, purpose=job["purpose"], binary=original.rex, server=original.server)
+        self.finish("task", "first")
+        protected = factory.load_task(path)["assignments"]["first"]
+        with patch.object(sys, "executable", str(alternate)):
             launches = self.launches()
             result = self.tick(alternate_plan)
 
         self.assertEqual(self.states(result), {("other", "peer"): "approved"})
         self.assertEqual({key: result["metrics"][key] for key in ("launched", "collected", "tabs_closed")},
-                         dict(launched=0, collected=2, tabs_closed=2))
+                         dict(launched=0, collected=1, tabs_closed=2))
         self.assertEqual(result["active_workers"], 1)
         self.assertEqual(result["tidy_issues"], [])
         self.assertEqual(factory.load_task(path)["assignments"]["first"], protected)
@@ -568,11 +590,16 @@ class ReadyRunner(unittest.TestCase):
         plan = self.plan([self.job(harness, harness=harness) for harness in factory.NATIVE_HARNESSES]
                          + [self.job("historical")], workers=5, reserve=0)
         binaries = dict(claude=original_python, grok=original_python, antigravity=original_python)
-        self.assertEqual(self.tick(self.controller(plan, **binaries))["metrics"]["launched"], 5)
+        original = self.controller(plan, **binaries)
+        build = original.command
+        def proposed(path, job):
+            command = build(path, job)
+            if job["id"] == "historical":
+                del command[1:3]  # Admit the original legacy spelling.
+            return command
+        with patch.object(original, "command", side_effect=proposed):
+            self.assertEqual(self.tick(original)["metrics"]["launched"], 5)
         path = self.directory / "task.json"
-        record = factory.load_task(path)
-        del record["assignments"]["historical"]["request"]["command"][1:3]
-        factory.save(path, record)
         saved, launches = path.read_bytes(), self.launches()
         changed = copy.deepcopy(plan)
         changed["jobs"][1]["seconds"] += 1
@@ -672,6 +699,26 @@ class ReadyRunner(unittest.TestCase):
         self.finish("task", "verify")
         self.assertEqual(self.handoff()["result"], "complete")
         self.assertEqual(factory.load_task(path)["hold"], "Operator hold")
+
+    def test_from_writer_checks_closed_historical_attempt_before_moving_inputs(self):
+        self.tick(self.controller(self.plan([self.job("earlier")])))
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        earlier = record["assignments"]["earlier"]
+        PlanRex.processes[record["session_id"], earlier["block_id"]] = "failed"
+        self.completed_writer()
+        record = factory.load_task(path)
+        earlier = record["assignments"]["earlier"]
+        self.assertEqual(earlier["closed"]["state"], "failed")
+        self.assertIsNone(earlier["result"])
+        # Model a pre-admission-guard task with an original writer and a different Python for the failed reader.
+        earlier["request"]["command"][0] = "/fixture/earlier-python"
+        factory.save(path, record)
+        before, launches = path.read_bytes(), self.launches()
+        with patch.object(factory, "connect", side_effect=AssertionError), \
+                self.assertRaisesRegex(factory.FactoryError, "task/earlier: original native evidence"):
+            self.handoff()
+        self.assertEqual((path.read_bytes(), self.launches()), (before, launches))
 
     def test_from_writer_other_process_must_be_observed_terminal_even_with_result(self):
         self.keep_tabs()
@@ -1239,6 +1286,93 @@ class ReadyRunner(unittest.TestCase):
         self.assertEqual(final["metrics"]["collected"], 2)
         self.assertEqual(self.probes, 1)
 
+    def test_released_first_collection_refusal_preserves_task_and_pane(self):
+        plan = self.plan([self.job()])
+        self.tick(self.controller(plan))
+        self.finish("task", "first")
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        record["schema_version"] = 11
+        del record["assignments"]["first"]["native_launch"]
+        factory.save(path, record)
+        before = path.read_bytes()
+        panes = copy.deepcopy(PlanRex.sessions)
+        result = self.tick(self.controller(plan))
+        self.assertIn("original native evidence", result["jobs"][0]["reason"])
+        self.assertEqual(result["metrics"]["collected"], 0)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(PlanRex.sessions, panes)
+
+    def test_changed_package_preserves_pending_collection_and_pane(self):
+        engine = self.root / "installed-runtime"
+        shutil.copytree(factory.ROOT, engine, ignore=shutil.ignore_patterns("__pycache__"))
+        plan = self.plan([self.job()])
+        with patch.object(factory, "ROOT", engine):
+            self.assertEqual(self.tick(self.controller(plan))["metrics"]["launched"], 1)
+            self.finish("task", "first")
+            (engine / "codex_worker.py").write_text("# replacement worker\n")
+            path = self.directory / "task.json"
+            before, sessions = path.read_bytes(), copy.deepcopy(PlanRex.sessions)
+            result = self.tick(self.controller(plan))
+            self.assertEqual((result["metrics"]["collected"], result["metrics"]["tabs_closed"]), (0, 0))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(PlanRex.sessions, sessions)
+
+    def test_empty_plan_preserves_uncollected_attempts_from_another_install_path(self):
+        plan = self.plan([self.job()])
+        self.tick(self.controller(plan))
+        self.finish("task", "first")
+        path = self.directory / "task.json"
+        record = factory.load_task(path)
+        other = self.root / "other-runtime"
+        shutil.copytree(factory.ROOT, other, ignore=shutil.ignore_patterns("__pycache__"))
+        sessions = copy.deepcopy(PlanRex.sessions)
+        for released in (False, True):
+            with self.subTest(released=released), patch.object(factory, "ROOT", other):
+                if released:
+                    record["schema_version"] = 11
+                    del record["assignments"]["first"]["native_launch"]
+                    factory.save(path, record)
+                before = {p: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
+                observed = self.tick(self.controller(self.plan([])))
+                self.assertEqual(observed["active_workers"], 1)
+                self.assertEqual((observed["metrics"]["collected"], observed["metrics"]["tabs_closed"]), (0, 0))
+                self.assertEqual(PlanRex.sessions, sessions)
+                self.assertEqual({p: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}, before)
+
+    def test_attested_alias_reader_shares_checkout_and_accepts_cancel(self):
+        alias = self.root / "admission-python"
+        alias.symlink_to(sys.executable)
+        with patch.object(sys, "executable", str(alias)):
+            self.tick(self.controller(self.plan([self.job()])))
+        path = self.directory / "task.json"
+        frozen = factory.load_task(path)["assignments"]["first"]["request"]
+        result = self.tick(self.controller(self.plan([self.job(), self.job("second")], reserve=0)))
+        self.assertEqual(self.states(result), {("task", "first"): "running", ("task", "second"): "running"})
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            self.assertEqual(factory.main(["--state-dir", str(self.directory), "cancel",
+                "--task", "task", "--id", "first"]), 0, errors.getvalue())
+        self.assertEqual(PlanRex.calls[-1][0], "send-key")
+        self.assertEqual(factory.load_task(path)["assignments"]["first"]["request"], frozen)
+
+    def test_alias_change_before_automatic_collection_keeps_frozen_request(self):
+        alias = self.root / "admission-python"
+        alias.symlink_to(sys.executable)
+        plan = self.plan([self.job()])
+        controller = self.controller(plan)
+        with patch.object(sys, "executable", str(alias)):
+            self.assertEqual(self.tick(controller)["metrics"]["launched"], 1)
+        self.finish("task", "first")
+        path = self.directory / "task.json"
+        original = factory.load_task(path)["assignments"]["first"]["request"]
+        self.assertEqual(original["command"][0], str(alias))
+        alias.unlink()
+        alias.symlink_to("/usr/bin/false")
+        observed = self.tick(self.controller(plan))
+        self.assertEqual(self.states(observed)[("task", "first")], "approved")
+        self.assertEqual(observed["metrics"]["collected"], 1)
+        self.assertEqual(factory.load_task(path)["assignments"]["first"]["request"], original)
+
     def test_restart_reuses_existing_effect_and_collects_it(self):
         plan = self.plan([self.job(), self.job("second", after=["first"])])
         self.tick(self.controller(plan))
@@ -1249,6 +1383,65 @@ class ReadyRunner(unittest.TestCase):
         result = self.tick(self.controller(plan))
         self.assertEqual(self.states(result)[("task", "second")], "running")
         self.assertEqual(self.launches(), 2)
+
+    def test_cache_maintenance_waits_without_spending_an_attempt(self):
+        import go_cache
+        work = self.root / "linked"
+        with factory.execution_lock(self.directory), factory.task_lock(self.directory, "task") as path:
+            factory.provision_worktree(path, worktree_id="writer", destination=str(work))
+        job = self.job(cwd=str(work), write=True, commit_message="Build the fixture")
+        controller = self.controller(self.plan([job]))
+        admin = factory.git_dir(work)
+        cache = admin / "go-build"
+        with go_cache.inode_lock(admin):
+            row = self.tick(controller)
+            self.assertEqual((row["result"], row["jobs"][0]["state"], self.launches()), ("pending", "waiting", 0))
+            self.assertEqual(factory.load_task(self.directory / "task.json")["assignments"], {})
+        self.assertEqual(self.tick(controller)["jobs"][0]["state"], "running")
+        self.assertEqual(self.launches(), 1)
+
+        def build():
+            subprocess.run(["go", "build", "library.go"], cwd=work, check=True, env={
+                "PATH": os.environ["PATH"], "HOME": str(self.root), "TMPDIR": str(self.root), "GOCACHE": str(cache),
+                "GO111MODULE": "off", "GOTOOLCHAIN": "local", "GOTELEMETRY": "off", "GOPROXY": "off"})
+
+        def edit():
+            cache.mkdir(mode=0o700, exist_ok=True)
+            (work / "library.go").write_text("package library\nconst Number = 7\n")
+            build()
+            active, = go_cache.census(self.directory, self.repo, "task")
+            self.assertIn("observed Rex process exit", active["reason"])
+
+        self.finish("task", "first", outcome="completed", edit=edit)
+        with patch.object(factory.time, "time", return_value=self.now):
+            self.assertEqual(self.tick(controller)["metrics"]["tabs_closed"], 1)
+        with factory.task_lock(self.directory, "task") as path:
+            selected = factory.set_inputs(path, candidate=factory.git_commit(work, "HEAD"), requirements="requirements-1")
+        self.assertTrue(factory.result_current(selected, selected["assignments"]["first"]["result"]))
+        # The fake transport has no native process. The scratch tests cover live and reaped PIDs.
+        gone = patch.object(factory, "process_proven_gone", return_value=True)
+        gone.start()
+        self.addCleanup(gone.stop)
+        for entry in (cache, *cache.rglob("*")):
+            os.utime(entry, (self.now, self.now))
+        pid = os.getpid()
+        ps = f"{pid} Thu Jan 1 00:00:00 1970 census\n".encode()
+        files = f"p{pid}\0\nfcwd\0tDIR\0n/elsewhere\0\n".encode()
+        size = sum(p.stat().st_blocks for p in (cache, *cache.rglob("*"))) // 2
+        with patch.object(go_cache, "MIN_KIB", size // 2), patch.object(go_cache.time, "time",
+                return_value=self.now + go_cache.IDLE_SECONDS), patch.object(go_cache, "boot_time", return_value=1100), \
+                patch.object(go_cache, "inventory", side_effect=[(7, ps, b""), (8, files, b"")] * 2):
+            entries = set(cache.rglob("*"))
+            idle, = go_cache.census(self.directory, self.repo)
+            self.assertEqual(idle["decision"], "eligible", idle)
+            self.assertEqual(set(cache.rglob("*")), entries)
+            # Only this fixture can build here, and build() resumes after retirement.
+            with patch.object(sys, "stdin", StringIO("task\n")) as terminal, patch.object(terminal, "isatty", return_value=True):
+                retired, = go_cache.census(self.directory, self.repo, "task")
+        self.assertEqual(retired["decision"], "cleaned", retired)
+        build()
+        warm, = go_cache.census(self.directory, self.repo, "task")
+        self.assertIn("size floor", warm["reason"])
 
     def test_uncertain_launch_reconciles_same_pane_and_reserves_a_slot(self):
         PlanRex.fail_after_create = True
@@ -1285,6 +1478,166 @@ class ReadyRunner(unittest.TestCase):
         with factory.task_lock(self.directory, "task") as path:
             factory.hold_task(path, None, clock=lambda: 1001.0)
         self.assertEqual(self.states(self.tick(controller))[("task", "second")], "running")
+
+    def test_tick_refreshes_observer_digest_and_verifies_each_launch(self):
+        path = self.directory / "task.json"
+        self.assertEqual(factory.load_task(path)["schema_version"], 11)
+        jobs = [self.job("reader-" + str(i)) for i in range(6)]
+        controller = self.controller(self.plan(jobs, workers=6, reserve=0))
+        with patch.object(factory, "native_runtime_digest", wraps=factory.native_runtime_digest) as measure:
+            self.assertEqual(self.tick(controller)["metrics"]["launched"], 6)
+            self.assertEqual(sum(bool(call.args) for call in measure.call_args_list), 6)
+            self.assertEqual(sum(not call.args for call in measure.call_args_list), 1)
+            measure.reset_mock()
+            record = factory.load_task(path)
+            self.assertEqual(record["schema_version"], 13)
+            self.assertTrue(all(factory.launch_runtime(a) for a in record["assignments"].values()))
+            before = path.read_bytes()
+            measure.return_value = "0" * 64
+            result = self.tick(controller)
+            measure.assert_called_once_with()
+            self.assertEqual([row["state"] for row in result["jobs"]], ["unknown"] * 6)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_observer_tick_holds_both_tasks_then_collects_with_fresh_measurements(self):
+        self.admit("other")
+        self.admit("independent")
+        independent = self.directory / "independent.json"
+        factory.hold_task(independent, "Waiting for this checkout")
+        checkout = self.root / "independent-checkout"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach", str(checkout),
+                        self.candidate], check=True)
+        jobs = [self.job(), self.job(task="other"), self.job(task="independent", cwd=str(checkout))]
+        controller = self.controller(self.plan(jobs, workers=3))
+        self.assertEqual(self.tick(controller)["metrics"]["launched"], 2)
+        self.finish("task", "first")
+        factory.set_inputs(self.directory / "task.json", candidate=self.candidate, requirements="requirements-2")
+        before = {path: path.read_bytes() for path in self.directory.iterdir()
+                  if path.is_file() and path.name.startswith(("task.", "other."))}
+        factory.hold_task(independent, None)
+        digest = factory.native_runtime_digest
+
+        def unavailable_to_observer(interpreter=None):
+            if interpreter is None:
+                raise factory.FactoryError("Runtime unreadable")
+            return digest(interpreter)
+
+        with patch.object(factory, "native_runtime_digest", side_effect=unavailable_to_observer) as measure:
+            result = self.tick(controller)
+            self.assertEqual([bool(call.args) for call in measure.call_args_list], [False, True])
+        self.assertEqual(result["result"], "pending")
+        self.assertEqual(result["active_workers"], 3)
+        self.assertEqual([(job["state"], job.get("reason")) for job in result["jobs"]],
+                         [("unknown", "Runtime unreadable"), ("unknown", "Runtime unreadable"), ("running", None)])
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        with patch.object(factory, "native_runtime_digest", wraps=factory.native_runtime_digest) as measure:
+            result = self.tick(controller)
+            self.assertEqual(measure.call_count, 2)  # One observer and one strict first collection.
+        self.assertEqual([job["state"] for job in result["jobs"]], ["stale", "running", "running"])
+        self.assertEqual((result["metrics"]["launched"], result["metrics"]["collected"]), (3, 1))
+
+    def test_first_collection_stat_failure_retries_without_holding_independent_work(self):
+        path = self.directory / "task.json"
+        checkout = self.root / "independent-checkout"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--quiet", "--detach", str(checkout),
+                        self.candidate], check=True)
+        first = self.job()
+        self.tick(self.controller(self.plan([first])))
+        self.finish("task", "first")
+        original = factory.load_task(path)["assignments"]["first"]
+        evidence = {p: p.read_bytes() for p in self.directory.glob("task.first.*")}
+        other = self.job("independent", cwd=str(checkout))
+        controller = self.controller(self.plan([first, other], workers=1, reserve=0))
+        collect, stat = factory.collect_codex, Path.stat
+
+        def deny_launcher(target, *args, **kwargs):
+            if target == Path(sys.executable):
+                raise PermissionError("Collector cannot stat the launcher")
+            return stat(target, *args, **kwargs)
+
+        def collect_with_denied_launcher(*args):
+            measure.assert_called_once_with()  # The shared observation already succeeded.
+            with patch.object(Path, "stat", deny_launcher):
+                return collect(*args)
+
+        with (patch.object(factory, "local_runtime_digest", wraps=factory.local_runtime_digest) as measure,
+              patch.object(factory, "collect_codex", side_effect=collect_with_denied_launcher)):
+            result = self.tick(controller)
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["result"], "pending")
+        self.assertEqual([(job["state"], job.get("reason")) for job in result["jobs"]],
+                         [("unknown", "Will retry runtime observation on the next tick: Collector cannot stat the launcher"),
+                          ("running", None)])
+        self.assertEqual((result["active_workers"], result["metrics"]["collected"]), (1, 0))
+        self.assertEqual(factory.load_task(path)["assignments"]["first"], original)
+        self.assertEqual({p: p.read_bytes() for p in self.directory.glob("task.first.*")}, evidence)
+        self.assertFalse(any(call[:2] == ("block", "close") for call in PlanRex.calls))
+
+        for _ in range(2):
+            recovered = self.tick(controller)
+            self.assertEqual([job["state"] for job in recovered["jobs"]], ["approved", "running"])
+            self.assertEqual((recovered["metrics"]["collected"], self.launches()), (1, 2))
+        saved = factory.load_task(path)["assignments"]["first"]
+        self.assertTrue(saved["native_collected"] and factory.valid_closed(saved))
+        self.assertEqual(saved["request"], original["request"])
+        self.assertEqual({p: p.read_bytes() for p in evidence}, evidence)
+
+    def test_launcher_stat_failure_keeps_closed_approval_and_retries_original_sibling(self):
+        path = self.directory / "task.json"
+        launcher = self.root / "observer-python"
+        launcher.symlink_to(sys.executable)
+        first, sibling = self.job(), self.job("sibling")
+        settled = self.controller(self.plan([first]))
+        pair = self.controller(self.plan([first, sibling]))
+        next_job = self.job("next", after=["first", "sibling"])
+        queue = self.controller(self.plan([first, sibling, next_job]))
+        with patch.object(sys, "executable", str(launcher)):
+            self.tick(settled)
+            self.finish("task", "first")
+            self.assertEqual(self.tick(settled)["result"], "complete")
+            closed = factory.load_task(path)["assignments"]["first"]
+            self.assertTrue(closed["native_collected"] and factory.valid_closed(closed))
+            stat = Path.stat
+            probes = []
+
+            def denied(path, *args, **kwargs):
+                if path == launcher:
+                    probes.append(path)
+                    raise PermissionError("Cannot stat the launcher")
+                return stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", denied):
+                result = self.tick(settled)
+                self.assertEqual((result["result"], result["active_workers"]), ("complete", 0))
+                self.assertEqual(probes, [])
+            self.assertEqual(self.states(self.tick(pair))[("task", "sibling")], "running")
+            self.finish("task", "sibling")
+            before = {p: p.read_bytes() for p in self.directory.glob("task.*") if p.is_file()}
+            sessions = copy.deepcopy(PlanRex.sessions)
+            with patch.object(Path, "stat", denied):
+                result = self.tick(queue)
+                self.assertEqual(probes, [launcher])
+                self.assertEqual(result["result"], "pending")
+                self.assertEqual([(row["state"], row.get("reason")) for row in result["jobs"]],
+                                 [("approved", None), ("unknown", "Cannot stat the launcher"),
+                                  ("unknown", "Cannot stat the launcher")])
+                self.assertEqual(result["active_workers"], 1)
+                changed = self.controller(self.plan([{**first, "goal": "Different brief"}, sibling, next_job]))
+                self.assertEqual(self.tick(changed)["jobs"][0]["state"], "conflict")
+                self.assertEqual(changed.metrics["launched"], 0)
+            self.assertEqual({p: p.read_bytes() for p in before}, before)
+            self.assertEqual(PlanRex.sessions, sessions)
+            with patch.object(factory, "native_runtime_digest", wraps=factory.native_runtime_digest) as measure:
+                recovered = self.tick(queue)
+                self.assertEqual([bool(call.args) for call in measure.call_args_list], [False, False, True])
+            self.assertEqual([job["state"] for job in recovered["jobs"]], ["approved", "approved", "running"])
+            self.assertEqual((recovered["metrics"]["collected"], recovered["metrics"]["launched"]), (1, 1))
+            self.assertEqual(factory.load_task(path)["assignments"]["first"], closed)
+            changed = self.controller(self.plan([{**first, "model": "changed-model"},
+                                                 self.job("dependent", after=["first"])]))
+            result = self.tick(changed)
+            self.assertEqual([job["state"] for job in result["jobs"]], ["conflict", "blocked"])
+            self.assertEqual(result["metrics"]["launched"], 0)
 
     def test_fairness_interleaves_tasks_and_verification_keeps_its_reserved_slot(self):
         self.admit("other")
@@ -1420,7 +1773,7 @@ class ReadyRunner(unittest.TestCase):
         earlier, newer = self.job("earlier"), self.job("newer")
         first = self.controller(self.plan([earlier]))
         alternate = self.root / "alternate-python"
-        alternate.symlink_to(sys.executable)
+        shutil.copy2(sys.executable, alternate)
         with patch.object(sys, "executable", str(alternate)):
             self.assertEqual(self.tick(first)["metrics"]["launched"], 1)
             self.finish("task", "earlier")
@@ -1476,7 +1829,7 @@ class ReadyRunner(unittest.TestCase):
         plan = self.plan([self.job()], workers=1, reserve=0)
         original = self.controller(plan)
         alternate = self.root / "alternate-python"
-        alternate.symlink_to(sys.executable)
+        shutil.copy2(sys.executable, alternate)
         with patch.object(sys, "executable", str(alternate)):
             self.assertEqual(self.tick(original)["metrics"]["launched"], 1)
             self.finish("task", "first")

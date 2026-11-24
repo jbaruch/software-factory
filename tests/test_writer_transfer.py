@@ -183,9 +183,19 @@ class TestTransferRequirements(TransferBase):
 
 
 class TestExport(TransferBase):
+    def test_export_retains_historical_abbreviated_writer_context(self):
+        record = self._src_record()
+        command = record["assignments"]["w1"]["request"]["command"]
+        command[command.index("--write")] = "--wri"
+        factory.save(self.src_path, record)
+        with self.source_unchanged():
+            out, _, _ = self._do_export()
+        self.assertEqual(json.loads(out.read_bytes())["contributors"], [dict(id="w1", context="context-w1")])
+
     def test_export_success_produces_valid_bundle(self):
         """Export produces a bundle with the correct digest and structure."""
         out_path, source_host, sha256 = self._do_export()
+        self.assertEqual(self._src_record()["schema_version"], 13)
         self.assertTrue(out_path.exists())
         raw = out_path.read_bytes()
         self.assertEqual(hashlib.sha256(raw).hexdigest(), sha256)
@@ -256,13 +266,13 @@ class TestExport(TransferBase):
 
     def test_export_refuses_unsupported_schema_without_saving(self):
         record = self._src_record()
-        record["schema_version"] = 13
+        record["schema_version"] = 14
         self.src_path.write_bytes(json.dumps(record).encode())
         with self.source_unchanged(), patch.object(factory, "save", wraps=factory.save) as save:
             self.assert_export_error("schema 11")
             save.assert_not_called()
 
-    def test_export_applies_owner_validation_to_schema_11(self):
+    def test_export_applies_owner_validation(self):
         record = self._src_record()
         record["session_label"] = "unrelated-session"
         self.src_path.write_bytes(json.dumps(record).encode())
@@ -745,17 +755,20 @@ class TestGatesAfterImport(TransferBase):
             record = factory.load_task(p)
             del record["writer_origin"]
             factory.save(p, record)
-        with self.assertRaisesRegex(factory.FactoryError, "writer_origin"):
+        before = self.dst_path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "original ordinary schema-12 producer"):
             self._dst_record()
+        self.assertEqual(self.dst_path.read_bytes(), before)
 
-    def test_load_task_refuses_writer_origin_at_schema_11(self):
-        """load_task refuses writer_origin on a schema-11 record."""
-        with factory.task_lock(self.dst_state, "dst-task") as p:
-            record = factory.load_task(p)
-            record["schema_version"] = 11
-            factory.save(p, record)
-        with self.assertRaisesRegex(factory.FactoryError, "writer_origin"):
-            self._dst_record()
+    def test_load_task_refuses_writer_origin_on_ordinary_schemas(self):
+        imported = self._dst_record()
+        for version in (11, 13):
+            with self.subTest(version=version), factory.task_lock(self.dst_state, "dst-task") as path:
+                factory.save(path, {**imported, "schema_version": version})
+                before = path.read_bytes()
+                with self.assertRaisesRegex(factory.FactoryError, "writer_origin"):
+                    factory.load_task(path)
+                self.assertEqual(path.read_bytes(), before)
 
     def launch(self, key="new", role="qa", purpose="work", dependencies=()):
         return factory.launch(self.dst_path, task="dst-task", assignment_id=key, role=role, goal="Verify",
@@ -824,7 +837,11 @@ class TestGatesAfterImport(TransferBase):
             self.launch(dependencies=["w1"])
 
     def test_schema_11_records_not_rewritten_by_load(self):
-        """Schema-11 source record stays at 11 (not migrated to 12) by load_task."""
+        legacy = self._src_record()
+        legacy["schema_version"] = 11
+        for assignment in legacy["assignments"].values():
+            assignment.pop("native_launch", None)
+        factory.save(self.src_path, legacy)
         before = self.src_path.read_bytes()
         record = self._src_record()
         self.assertEqual(self.src_path.read_bytes(), before)

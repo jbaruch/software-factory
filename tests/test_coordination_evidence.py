@@ -107,8 +107,12 @@ class BoundedAnswers(AnswerFixture):
     def test_selected_answer_is_retained_once_and_closes_only_the_bound_queue_item(self):
         self.start()
         original = (self.store / (self.decision["id"] + ".json")).read_bytes()
-        receipt = self.answer()
-        self.assertEqual((receipt["schema_version"], receipt["state"]), (6, "completed"))
+        with patch.object(factory, "remove_scratch", return_value=False):
+            receipt = self.answer()
+        with patch.object(factory.os, "getpgid", side_effect=ProcessLookupError):
+            self.assertEqual(factory.abandoned_scratch(self.tasks),
+                             [dict(scratch=receipt["scratch"], receipt=str(self.fixture.args.receipt))])
+        self.assertEqual((receipt["schema_version"], receipt["state"]), (8, "completed"))
         self.assertEqual(receipt["report"], self.report)
         self.collect()
         view = jev.pending_decisions(self.store, task_state_dir=self.tasks)
@@ -370,8 +374,12 @@ class ClaudeBoundedAnswers(AnswerFixture):
 
     def test_claude_standby_reasoner_answer_closes_the_bound_question(self):
         self.start_claude()
-        receipt = self.claude_answer(dict(decision=self.decision["id"], question=self.question, choice="routine", missing_input=None))
-        self.assertEqual((receipt["schema_version"], receipt["state"]), (3, "completed"), receipt["error"])
+        with patch.object(factory, "remove_scratch", return_value=False):
+            receipt = self.claude_answer(dict(decision=self.decision["id"], question=self.question, choice="routine", missing_input=None))
+        with patch.object(factory.os, "getpgid", side_effect=ProcessLookupError):
+            self.assertEqual(factory.abandoned_scratch(self.tasks),
+                             [dict(scratch=receipt["scratch"], receipt=str(self.claude_args.receipt))])
+        self.assertEqual((receipt["schema_version"], receipt["state"]), (8, "completed"), receipt["error"])
         command = self.spawned[-1]
         schema = json.loads(command[command.index("--json-schema") + 1])
         self.assertIn("answer", schema["required"])

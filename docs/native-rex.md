@@ -6,6 +6,16 @@
 
 In a project that installed the factory with ACR, run these commands from the realized skill. ACR rewrites the `skills/factory/...` paths in the skill's own instructions to that location, and the first command installs the per-user runtime it then runs from. Upgrade with `acr update` and `acr realize`; the next command upgrades the per-user runtime in place. Restart long-running controllers such as the ready runner or dashboard after an upgrade.
 
+Upgrades exchange the complete active and staged directories under the install lock and the active runtime's VERSION lock. The native worker, Factory CLI and ready runner hold VERSION from module loading through completion. Let active workers and collectors finish and stop idle ready runners before upgrading.
+
+If an older installer stopped with no active skill and a retired tree under `.installing-*/retired`, recover it before invoking an older bootstrap. Run this command from the corrected Factory's `runtime` directory, supplying the runtime path from the verified original ACR-realized package.
+
+```bash
+python3 -E -s -B -c 'import factory, sys; from pathlib import Path; factory.relocate("factory.py", [], root=Path(sys.argv[1]).resolve(), execv=lambda *_: None)' /absolute/path/to/skills/acr__jbaruch__software-factory__factory/runtime
+```
+
+Recovery compares file contents, modes and directory entries under both locks. After restoration, run the newer project normally to upgrade. Preserve multiple or unmatched retired trees for the installation owner. If neither copy survives, recover the verified original package from its source.
+
 Use Python 3.11+ on macOS/Linux with `fcntl` support. The first launch requires an existing absolute Rex binary and an explicit local Unix-socket endpoint. Commands also use absolute executable paths so the server's PATH cannot select another program. Working directories must exist. Supply an isolated writer worktree for implementation; admitted tasks can explicitly [provision one through the owner](task-state.md#writer-worktree-provisioning) before launch.
 
 ```sh

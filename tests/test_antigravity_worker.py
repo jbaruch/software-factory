@@ -1,7 +1,8 @@
 """Antigravity execution/collection uses fake native processes and fake Rex only."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
-from contextlib import nullcontext, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
+import hashlib
 from io import StringIO
 import json
 import os
@@ -19,6 +20,7 @@ import factory_commit
 import integration
 import native_antigravity
 from codex_worker import outcome_schema
+from test_abandoned_scratch import listing_cli
 from test_codex_worker import FakeProcess
 from test_rex_launcher import FakeRex
 
@@ -93,6 +95,7 @@ class AntigravityWorker(unittest.TestCase):
         os.chdir(self.repo)
         self.addCleanup(os.chdir, previous)
         self.spawns: list[tuple[tuple, dict]] = []
+        self.receipt_at_spawn: dict = {}
         self.rex = FakeRex(sys.executable, "unix:///test.sock")
         self.rex.instance_id = FakeRex.instance
 
@@ -106,11 +109,11 @@ class AntigravityWorker(unittest.TestCase):
         return factory.antigravity_command(self.path, **{**dict(task="task", assignment_id=identity, agy=sys.executable,
             model="gemini-3.8-flash-high", effort="high", cwd=str(self.repo), role="qa", seconds=30), **changes})
 
-    def launch(self, identity, **changes):
+    def launch(self, identity, *, goal=None, **changes):
         command = self.make_command(identity, **changes)
         with patch.object(factory, "Rex", FakeRex):
             factory.launch(self.path, task="task", assignment_id=identity, role=changes.get("role", "qa"),
-                goal="Fixture " + identity, cwd=str(self.repo), command=command, purpose="work",
+                goal=goal or "Fixture " + identity, cwd=str(self.repo), command=command, purpose="work",
                 binary=sys.executable, server="unix:///test.sock")
         actual = [call for call in FakeRex.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
         argv = actual[actual.index("--") + 1:]
@@ -119,6 +122,7 @@ class AntigravityWorker(unittest.TestCase):
 
     def execute(self, args, *, events=None, edit=False, exit_code=0, act=None):
         async def spawn(*command, **options):
+            self.receipt_at_spawn = json.loads(args.receipt.read_text())
             options["prompt"] = options["stdin"].read().decode()
             options["stdin"].seek(0)
             self.spawns.append((command, options))
@@ -137,11 +141,17 @@ class AntigravityWorker(unittest.TestCase):
             return factory.collect_antigravity(self.path, identity, self.rex, record, record["assignments"][identity])
 
     def test_reviewer_runs_unprompted_with_the_brief_on_stdin_and_collects(self):
-        receipt = self.execute(self.args)
+        with patch.object(factory, "native_start_time", return_value=123456):
+            receipt = self.execute(self.args)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual((receipt["schema_version"], receipt["conversation_id"], receipt["candidate"]),
-                         (3, CONVERSATION, self.candidate))
+                         (8, CONVERSATION, self.candidate))
         command, options = self.spawns[0]
+        self.assertEqual(self.receipt_at_spawn["scratch"], options["env"]["TMPDIR"])
+        self.assertIsNone(self.receipt_at_spawn["native_process"])
+        self.assertEqual(receipt["native_process"], dict(pid=FakeProcess.pid, start_time=123456, scope=factory.process_scope()))
+        self.assertIs(receipt["scratch_removed"], True)
+        self.assertFalse(Path(receipt["scratch"]).exists())
         checkout = factory.reader_checkout_path(self.args.receipt)
         self.assertEqual((options["cwd"], receipt["checkout"]), (str(checkout), str(checkout)))
         self.assertFalse(checkout.exists(), "the disposable reader checkout outlived its run")
@@ -171,14 +181,19 @@ class AntigravityWorker(unittest.TestCase):
         args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
         receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (4, True, "created"))
+        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (8, True, "created"))
         self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
         self.assertIn("do not stage or commit", json.loads(self.spawns[-1][1]["prompt"])["message"]["content"][0]["text"])
         result = self.collect("implement")["assignments"]["implement"]["result"]
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
-        factory.save(args.receipt, {**receipt, "schema_version": 2})
+        old = {key: value for key, value in receipt.items() if key not in factory.SCRATCH_RECEIPT_FIELDS | {"interpreter", "retained_files", "conversation_root"}}
+        factory.save(args.receipt, {**old, "schema_version": 2})
         legacy = args.receipt.read_bytes()
-        self.assertEqual(self.collect("implement")["assignments"]["implement"]["result"], result)
+        record = self.collect("implement")
+        self.assertEqual(record["assignments"]["implement"]["result"], result)
+        _, verified, _ = factory.antigravity_evidence("implement", record, record["assignments"]["implement"],
+                                                     collected=True, current=False)
+        self.assertEqual(verified["report"]["outcome"], "completed")
         self.assertEqual(args.receipt.read_bytes(), legacy)
 
     def test_failed_process_or_foreign_stream_cannot_supply_a_result(self):
@@ -302,6 +317,24 @@ class AntigravityWorker(unittest.TestCase):
         factory.check_checkout(str(self.base), str(self.repo), committed)
         self.assertEqual(self.git("-C", str(self.repo), "show", "HEAD:NOTES.md", directory=self.repo).stdout, "Notes\n")
 
+    def test_reconcile_interrupted_commit_against_its_original_tree(self):
+        args = self.launch("implement", role="backend", write=True, commit_message="Add fixture notes", sandbox=sys.executable)
+        git_run = factory.git_run
+        def interrupted(repository, *command, **options):
+            result = git_run(repository, *command, **options)
+            if "commit" in command and "--message" in command and result.returncode == 0:
+                raise factory.FactoryError("fixture lost commit response")
+            return result
+        with patch.object(factory, "git_run", side_effect=interrupted):
+            receipt = self.execute(args, events=stream(self.repo, outcome="completed"), edit=True)
+        self.assertEqual((receipt["state"], receipt["commit"]["state"]), ("failed", "committing"))
+        before = [p.read_bytes() for p in (args.receipt, args.events)]
+        head = factory.git_commit(".", "HEAD")
+        with self.assertRaisesRegex(factory.FactoryError, f"HEAD {head} matches the interrupted commit"):
+            factory.reset_writer(self.path, assignment_id="implement")
+        self.assertEqual([p.read_bytes() for p in (args.receipt, args.events)], before)
+        self.assertFalse(factory.reset_patch(args.receipt).exists())
+
     def test_reset_recovers_a_writer_lost_with_its_host(self):
         # Observed (#133): a reboot killed six writers mid-run; their receipts stayed "starting",
         # reset and collect both refused them, and the coordinator saved the patches by hand.
@@ -329,21 +362,348 @@ class AntigravityWorker(unittest.TestCase):
         # Observed (#74): Gemini returned only a path into agy's private brain directory.
         home = self.root / "home"
         brain = home / ".gemini" / "antigravity-cli" / "brain" / CONVERSATION
-        report_file = brain / "qa-verification-report.md"
+        report_file = brain / "nested/qa-verification-report.md"
         events = stream(self.repo)
-        report = dict(outcome="approved", artifacts=[str(report_file), "README.md:1 verified"])
+        report = dict(outcome="approved", artifacts=["File: nested/../nested/qa-verification-report.md",
+            "File: " + str(brain / "alias/qa-verification-report.md"), str(report_file)])
         cast(dict, events[-1]["result"]).update(structured_output=report, response=json.dumps(report))
         def write_report(cwd):
-            brain.mkdir(parents=True)
+            report_file.parent.mkdir(parents=True)
+            (brain / "alias").symlink_to(report_file.parent, target_is_directory=True)
             report_file.write_text("# QA\nAll six points verified.\n")
         with patch.dict(os.environ, HOME=str(home)):
-            receipt = self.execute(self.args, events=events, act=write_report)
+            with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE) as child:
+                with patch.object(FakeProcess, "pid", child.pid), patch.object(factory, "remove_scratch", return_value=False):
+                    receipt = self.execute(self.args, events=events, act=write_report)
+                child.communicate()
+            self.assertEqual(receipt["state"], "completed", receipt["error"])
+            self.assertEqual(receipt["report"], report)
+            self.collect("inspect")
+            brain.rename(brain.with_name("expired"))
+            kept = next(self.args.receipt.with_suffix(".artifacts").iterdir())
+            self.assertEqual(kept.read_text(), "# QA\nAll six points verified.\n")
+            self.assertEqual(kept.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(factory.abandoned_scratch(self.root),
+                             [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))])
+            with patch.dict(os.environ, HOME=str(self.root / "other-home")):
+                for entry in report["artifacts"]:
+                    binding = receipt["retained_files"][entry]
+                    self.assertEqual((binding["root"], binding["relative"], binding["conversation"]),
+                                     (str(brain), "nested/qa-verification-report.md", CONVERSATION))
+                self.assertTrue(factory.abandoned_scratch(self.root))
+            moved = kept.rename(kept.parent.parent / kept.name)
+            self.assertEqual(factory.abandoned_scratch(self.root), [])
+            factory.save(kept, "Different report, same name")
+            self.assertEqual(factory.abandoned_scratch(self.root), [])
+            kept.unlink()
+            os.link(moved, kept)
+            self.assertEqual(factory.abandoned_scratch(self.root), [])
+            kept.unlink()
+            kept.symlink_to(moved)
+            self.assertEqual(factory.abandoned_scratch(self.root), [])
+
+    def collect_report(self, args, entries, write_reports, *, conversation=CONVERSATION):
+        events = stream(self.repo, conversation=conversation)
+        report = dict(outcome="approved", artifacts=entries)
+        cast(dict, events[-1]["result"]).update(structured_output=report, response=json.dumps(report))
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE) as child:
+            with patch.object(FakeProcess, "pid", child.pid), patch.object(factory, "remove_scratch", return_value=False):
+                receipt = self.execute(args, events=events, act=write_reports)
+            child.communicate()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
-        self.assertEqual((kept / "qa-verification-report.md").read_text(), "# QA\nAll six points verified.\n")
-        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["qa-verification-report.md"])
-        self.assertEqual((kept / "qa-verification-report.md").stat().st_mode & 0o777, 0o600)
         self.assertEqual(receipt["report"], report)
+        identity = args.job.split("/")[1]
+        result = self.collect(identity)["assignments"][identity]["result"]
+        self.assertEqual(result["artifacts"], [str(args.receipt), *entries])
+        self.assertEqual(args.receipt.with_suffix(".report.txt").read_bytes(), ("\n".join(entries) + "\n").encode())
+        return receipt
+
+    def test_historical_brace_filenames_copy_without_granting_inline_proof(self):
+        generated = factory.brief
+        typed_line = factory.TYPED_REPORT_INSTRUCTION
+        def historical(role, goal, *, designs=False):
+            text = generated(role, goal, designs=designs)
+            # Preserve a quotation in the goal and append one after the generated instructions.
+            start = text.index(goal) + len(goal)
+            return text[:start] + text[start:].replace(typed_line, "Return the report verbatim.") + "\n" + typed_line
+        locator = '{"observation":"saved result"}'
+        with patch.object(factory, "brief", historical):
+            args = self.launch("historical", role="qa", goal="Inspect the saved result.\n" + typed_line)
+        entries = ["{proof.md", "{proof.md:12", locator]
+        def write_files(cwd):
+            for entry in ("{proof.md", locator):
+                (cwd / entry).write_text("Original bytes of " + entry)
+        receipt = self.collect_report(args, entries, write_files)
+        self.assertEqual(set(receipt["retained_files"]), set(entries))
+        for entry in entries:
+            copy = factory.report_copy_path(args.receipt, receipt, receipt["retained_files"][entry])
+            self.assertEqual(copy.read_text(), "Original bytes of " + entry.removesuffix(":12"))
+        self.assertEqual(listing_cli(self.root), [dict(scratch=receipt["scratch"], receipt=str(args.receipt))])
+
+        with patch.object(factory, "brief", historical):
+            args = self.launch("expired", role="qa", goal="Inspect this citation.\n" + typed_line)
+        expired = self.collect_report(args, [locator], lambda cwd: None)
+        self.assertEqual(expired["retained_files"], {})
+        self.assertNotIn(dict(scratch=expired["scratch"], receipt=str(args.receipt)), listing_cli(self.root))
+
+    def test_conversation_and_checkout_keep_distinct_reports_with_the_same_relative_path(self):
+        self.check_report_copies(self.root / "home")
+
+    def check_report_copies(self, home):
+        brain = home / factory.ANTIGRAVITY_BRAIN / CONVERSATION
+        checkout = factory.reader_checkout_path(self.args.receipt)
+        paths = [checkout / "nested/proof.md", brain / "nested/proof.md",
+                 checkout / "prefix", brain / "prefix/details", checkout / "reverse/details", brain / "reverse",
+                 checkout / "CASE/Proof.md", brain / "case/proof.md", brain / "case/Proof.md",
+                 brain / "alias.dat"]
+        entries = ["File: " + str(path) for path in paths]
+        originals = {}
+
+        def write_reports(cwd):
+            self.assertEqual(cwd, checkout)
+            for index, path in enumerate(paths):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path == paths[-1]:
+                    os.link(paths[1], path)
+                elif not path.exists():  # The source volume determines whether the case variant is an alias.
+                    path.write_bytes(bytes([index, 0, 255]) + b"\r\n")
+                originals[path] = (path.stat(), path.read_bytes())
+
+        with patch.dict(os.environ, HOME=str(home)):
+            receipt = self.collect_report(self.args, entries, write_reports)
+        self.assertFalse(checkout.exists())
+        brain.rename(brain.with_name("expired"))
+        copies = {}
+        scratch = Path(receipt["scratch"]).resolve()
+        scratch_root = Path(factory.SCRATCH_ROOT or "").absolute()
+        for path, entry in zip(paths, entries):
+            root = brain if path.is_relative_to(brain) else checkout
+            binding = receipt["retained_files"][entry]
+            self.assertEqual((binding["root"], binding["relative"], binding["conversation"]),
+                             (str(root), str(path.relative_to(root)), CONVERSATION if root == brain else None))
+            directory, name = binding["copy"].split("/")
+            self.assertEqual(directory, "artifacts" if root == brain else "checkout-artifacts")
+            copy = self.args.receipt.with_suffix("." + directory) / name
+            for unbound in (copy, copy.parent.with_name(copy.parent.name.upper()) / name):
+                self.assertFalse(factory.retained_scratch_evidence(str(unbound), checkout, receipt,
+                                 self.args.receipt, scratch, scratch_root, self.args, None, True,
+                                 factory.ReportHashBudget(128, 128 * 1024**2, 5)))
+            info, payload = originals[path]
+            key = (root, info.st_dev, info.st_ino)
+            self.assertEqual(copies.setdefault(key, copy), copy)
+            self.assertEqual(copy.read_bytes(), payload)
+            self.assertEqual(binding["sha256"], hashlib.sha256(payload).hexdigest())
+            dest = copy.stat()
+            self.assertEqual((binding["st_dev"], binding["st_ino"]), (dest.st_dev, dest.st_ino))
+            self.assertEqual((dest.st_mode & 0o777, dest.st_nlink, dest.st_uid), (0o600, 1, os.getuid()))
+        self.assertEqual(len(set(copies.values())), len(copies))
+        expected = [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))]
+        with patch.dict(os.environ, HOME=str(self.root / "observer")):
+            moved = [(copy, copy.rename(copy.with_suffix(".moved"))) for copy in copies.values()]
+            self.assertEqual(listing_cli(self.root), [])
+            for copy, parked in moved:
+                parked.rename(copy)
+                self.assertEqual(listing_cli(self.root), expected)
+                copy.rename(parked)
+
+    def test_checkout_citations_are_excluded_by_object_identity(self):
+        for index, name in enumerate(("README.md", "README.MD", "linked.md", "independent.md")):
+            with self.subTest(name=name):
+                args = self.args if index == 0 else self.launch(f"citation-{index}", role="qa")
+                eligible = False
+                def write_report(cwd):
+                    nonlocal eligible
+                    tracked = cwd / "README.md"
+                    target = cwd / name
+                    if name == "linked.md":
+                        os.link(tracked, target)
+                    elif not target.exists():
+                        target.write_bytes(tracked.read_bytes())
+                    eligible = not target.samefile(tracked)
+                receipt = self.collect_report(args, [name], write_report)
+                self.assertEqual(list(receipt["retained_files"]), [name] if eligible else [])
+                attempt = dict(scratch=receipt["scratch"], receipt=str(args.receipt))
+                self.assertEqual(attempt in listing_cli(self.root), eligible)
+
+    def test_conversation_copy_checks_the_execution_checkout_index(self):
+        home = self.root / "home"
+        brain = home / factory.ANTIGRAVITY_BRAIN / CONVERSATION
+        brain.mkdir(parents=True)
+        for write in (False, True):
+            for linked in (True, False):
+                with self.subTest(writer=write, linked=linked):
+                    role = "backend" if write else "qa"
+                    identity = role + ("-linked" if linked else "-independent")
+                    target = brain / (identity + ".md")
+                    entry = "File: " + str(target)
+                    options = dict(write=True, commit_message="Record fixture result", sandbox=sys.executable) if write else {}
+                    args = self.launch(identity, role=role, **options)
+
+                    def write_report(cwd):
+                        tracked = cwd / "README.md"
+                        if linked:
+                            os.link(tracked, target)
+                        else:
+                            target.write_bytes(tracked.read_bytes())
+
+                    with patch.dict(os.environ, HOME=str(home)):
+                        with patch.dict(os.environ, FakeRex.writer_environment() if write else {}):
+                            receipt = self.collect_report(args, [entry], write_report)
+                    target.unlink()
+                    self.assertEqual(list(receipt["retained_files"]), [] if linked else [entry])
+                    attempt = dict(scratch=receipt["scratch"], receipt=str(args.receipt))
+                    self.assertEqual(attempt in listing_cli(self.root), not linked)
+
+    def test_unresolvable_conversation_preserves_native_result_and_checkout_copy(self):
+        home = self.root / "home"
+        brain = home / factory.ANTIGRAVITY_BRAIN / CONVERSATION
+        entries = ["File: " + str(brain / "proof.md"), "checkout-proof.md"]
+        real_resolve = Path.resolve
+
+        def resolve(path, *, strict=False):
+            if path == brain:
+                raise RuntimeError("Symlink loop in the conversation directory")
+            return real_resolve(path, strict=strict)
+
+        def write_report(cwd):
+            (cwd / "checkout-proof.md").write_text("Independent checkout evidence")
+
+        diagnostics = StringIO()
+        with (patch.dict(os.environ, HOME=str(home)), patch.object(Path, "resolve", new=resolve),
+              redirect_stderr(diagnostics)):
+            receipt = self.collect_report(self.args, entries, write_report)
+        self.assertIsNone(receipt["conversation_root"])
+        self.assertEqual(list(receipt["retained_files"]), ["checkout-proof.md"])
+        self.assertIn("optional Antigravity conversation directory", diagnostics.getvalue())
+
+    def test_filesystem_invalid_conversation_id_preserves_the_native_verdict(self):
+        proof = "checkout-proof.md"
+
+        def write_report(cwd):
+            (cwd / proof).write_text("Independent checkout evidence")
+
+        receipt = self.collect_report(self.args, ["Original observation", proof], write_report,
+                                      conversation="invalid\0id")
+        self.assertIsNone(receipt["conversation_root"])
+        self.assertEqual(list(receipt["retained_files"]), [proof])
+
+    def test_unreadable_conversation_directory_keeps_checkout_evidence(self):
+        home = self.root / "home"
+        brain = home / factory.ANTIGRAVITY_BRAIN / CONVERSATION
+        proof = "checkout-proof.md"
+        real_is_dir = Path.is_dir
+
+        def is_dir(path):
+            if path == brain:
+                raise PermissionError("Conversation directory cannot be read")
+            return real_is_dir(path)
+
+        def write_report(cwd):
+            (cwd / proof).write_text("Independent checkout evidence")
+
+        with patch.dict(os.environ, HOME=str(home)), patch.object(Path, "is_dir", new=is_dir):
+            receipt = self.collect_report(self.args, [proof], write_report)
+        self.assertEqual(list(receipt["retained_files"]), [proof])
+        self.assertEqual(listing_cli(self.root), [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))])
+
+    def test_reader_retains_only_independent_reports_after_a_valid_index_change(self):
+        entries = ["README.md", "alias.md", "newly-indexed.md", "proof.md"]
+        report = dict(outcome="approved", artifacts=entries)
+        events = stream(self.repo)
+        cast(dict, events[-1]["result"]).update(structured_output=report, response=json.dumps(report))
+
+        def write_reports(cwd):
+            self.git("rm", "--cached", "README.md", directory=cwd)
+            os.link(cwd / "README.md", cwd / "alias.md")
+            (cwd / "newly-indexed.md").write_text("Final index entry")
+            self.git("add", "newly-indexed.md", directory=cwd)
+            (cwd / "proof.md").write_text("Independent reader observation")
+
+        receipt = self.execute(self.args, events=events, act=write_reports)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["report"], report)
+        self.assertEqual(list(receipt["retained_files"]), ["proof.md"])
+        kept = factory.report_copy_path(self.args.receipt, receipt, receipt["retained_files"]["proof.md"])
+        self.assertEqual(kept.read_text(), "Independent reader observation")
+
+    def test_damaged_reader_index_cannot_authorize_a_conversation_copy(self):
+        home = self.root / "home"
+        brain = home / factory.ANTIGRAVITY_BRAIN / CONVERSATION
+        brain.mkdir(parents=True)
+        target = brain / "proof.md"
+        target.write_text("Independent fixture report")
+        events = stream(self.repo)
+        report = dict(outcome="approved", artifacts=["File: " + str(target)])
+        cast(dict, events[-1]["result"]).update(structured_output=report, response=json.dumps(report))
+
+        check_evidence = factory.check_tool_evidence
+        for damaged in ("missing", "corrupt"):
+            for expired in (False, True):
+                with self.subTest(damaged=damaged, expired=expired):
+                    args = (self.args if damaged == "missing" and not expired else
+                            self.launch(f"{damaged}-reader-index-{expired}".lower(), role="qa"))
+                    now = 10
+
+                    def damage_index(cwd):
+                        index = factory.git_dir(cwd) / "index"
+                        if damaged == "missing":
+                            index.unlink()
+                        else:
+                            index.write_bytes(b"Invalid test index")
+
+                    def after_native(*values):
+                        nonlocal now
+                        if expired:
+                            now += args.seconds
+                        return check_evidence(*values)
+
+                    with (patch.dict(os.environ, HOME=str(home)),
+                          patch.object(factory, "native_clock", side_effect=lambda: now),
+                          patch.object(factory, "check_tool_evidence", side_effect=after_native)):
+                        receipt = self.execute(args, events=events, act=damage_index)
+                    self.assertEqual(receipt["state"], "failed")
+                    self.assertIn("checkout index", receipt["error"])
+                    self.assertEqual(receipt["retained_files"], {})
+                    self.assertFalse(args.receipt.with_suffix(".artifacts").exists())
+
+    def test_foreign_conversation_file_is_excluded_while_readable(self):
+        self.check_external_reports(self.root / "other-home")
+
+    def check_external_reports(self, other):
+        home = self.root / "worker-home"
+        namespace = factory.ANTIGRAVITY_BRAIN
+        denied = home / ".gemini"
+        denied.mkdir(parents=True)
+        for identity, target, eligible in (
+                ("inspect", home / namespace / "other-conversation/proof.md", False),
+                ("different-home", other / namespace / CONVERSATION / "proof.md", False),
+                ("ordinary", other / "brain" / CONVERSATION / "proof.md", True),
+                ("case-namespace", other / ".GEMINI/antigravity-cli/brain/independent/proof.md", True)):
+            with self.subTest(identity=identity):
+                target.parent.mkdir(parents=True)
+                target.write_text("Inert external evidence")
+                if identity == "case-namespace":
+                    denied = other / ".gemini"
+                    eligible = not denied.samefile(other / ".GEMINI")
+                spelling = other / str(namespace).upper() / CONVERSATION / "proof.md"
+                if identity == "different-home" and spelling.exists():
+                    target = spelling
+                args = self.args if identity == "inspect" else self.launch(identity, role="qa")
+                with patch.dict(os.environ, HOME=str(home)):
+                    receipt = self.collect_report(args, ["File: " + str(target)], None)
+                self.assertEqual(receipt["retained_files"], {})
+                attempt = dict(scratch=receipt["scratch"], receipt=str(args.receipt))
+                self.assertEqual(attempt in listing_cli(self.root), eligible)
+                denied.chmod(0)
+                try:
+                    if os.geteuid() != 0:
+                        with self.assertRaises(PermissionError):
+                            (denied / "antigravity-cli/brain").stat()
+                    if eligible or identity == "different-home":
+                        self.assertTrue(target.read_bytes())
+                    self.assertEqual(attempt in listing_cli(self.root), eligible)
+                finally:
+                    denied.chmod(0o700)
 
     def test_a_report_file_in_the_disposable_checkout_is_retained_but_cited_files_are_not(self):
         # Observed: a review approved with only `review-retire-service-pins.md`, which went with its checkout.
@@ -353,12 +713,21 @@ class AntigravityWorker(unittest.TestCase):
             response="Prose summary of the review." + json.dumps(report) + "\n")
         def write_report(cwd):
             (cwd / "review-retire-service-pins.md").write_text("# Review\nApproved.\n")
-        receipt = self.execute(self.args, events=events, act=write_report)
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE) as child:
+            with patch.object(FakeProcess, "pid", child.pid), patch.object(factory, "remove_scratch", return_value=False):
+                receipt = self.execute(self.args, events=events, act=write_report)
+            child.communicate()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
-        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["review-retire-service-pins.md"])
-        self.assertEqual((kept / "review-retire-service-pins.md").read_text(), "# Review\nApproved.\n")
+        kept, = self.args.receipt.with_suffix(".checkout-artifacts").iterdir()
+        self.assertEqual(set(receipt["retained_files"]), {"review-retire-service-pins.md"})
+        self.assertEqual(kept.read_text(), "# Review\nApproved.\n")
         self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
+        self.collect("inspect")
+        self.assertEqual(factory.abandoned_scratch(self.root),
+                         [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))])
+        kept.unlink()
+        self.assertEqual(self.args.receipt.with_suffix(".report.txt").read_text().splitlines(), report["artifacts"])
+        self.assertEqual(factory.abandoned_scratch(self.root), [])
 
     def test_a_bare_report_name_in_the_brain_directory_is_retained(self):
         # Observed: a Sonnet review wrote review-retire-service-pins.md into agy's brain directory
@@ -374,8 +743,8 @@ class AntigravityWorker(unittest.TestCase):
         with patch.dict(os.environ, HOME=str(home)):
             receipt = self.execute(self.args, events=events, act=write_report)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
-        self.assertEqual((kept / "review-retire-service-pins.md").read_text(), "# Review\nApproved.\n")
+        kept, = self.args.receipt.with_suffix(".artifacts").iterdir()
+        self.assertEqual(kept.read_text(), "# Review\nApproved.\n")
 
     def test_api_overrides_refuse_before_native_artifacts(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), self.assertRaisesRegex(factory.FactoryError, "Gemini API"):
@@ -469,7 +838,7 @@ class AntigravityApprovals(unittest.TestCase):
         failed = stream(f.repo, conversation=context)[:1] + [
             dict(event="result", result=dict(conversation_id=context, status="ERROR", error="fixture failure"))]
         _, assignment, receipt = self.run_agy("failed", "backend", context, write=True, exit_code=3, events=failed)
-        self.assertEqual((receipt["schema_version"], receipt["state"], receipt["conversation_id"]), (4, "failed", None))
+        self.assertEqual((receipt["schema_version"], receipt["state"], receipt["conversation_id"]), (8, "failed", None))
         f.release_skill_merges()
         self.assertIn("independent of contributors", f.delivered_cli(review="release", required="agy-qa")[2])
         select = dict(review="release", required="qa")
@@ -535,7 +904,7 @@ class AntigravityApprovals(unittest.TestCase):
         f.release_skill_merges()
         self.assertEqual(f.delivered_cli(review="release", required="qa")[0], 0)
         f.review("accept", "release", delivery="release")
-        for version in (4, 2):
+        for version in (8, 7, 4, 2):
             with self.subTest(version=version):
                 factory.save(path, {**receipt, "schema_version": version})
                 original = path.read_bytes()

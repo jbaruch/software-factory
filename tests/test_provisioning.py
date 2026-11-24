@@ -6,18 +6,18 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import go_cache
 import dashboard
 import factory
 
 
-class WorktreeProvisioning(unittest.TestCase):
+class ProvisionedRepository(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-provision-")
         self.addCleanup(temporary.cleanup)
@@ -61,6 +61,8 @@ class WorktreeProvisioning(unittest.TestCase):
             result = factory.main(["--state-dir", str(self.state), *args])
         return result, output.getvalue(), errors.getvalue()
 
+
+class WorktreeProvisioning(ProvisionedRepository):
     def filename_candidate(self, names):
         blob = subprocess.check_output([factory.git_binary(), "-C", str(self.repo),
             "hash-object", "-w", "--stdin"], input=b"filename fixture\n").decode().strip()
@@ -79,8 +81,11 @@ class WorktreeProvisioning(unittest.TestCase):
     def test_release_removes_the_provisioned_worktree_and_keeps_the_branch(self):
         # Observed (#78): after delivery the release skill could not remove the locked worktree.
         self.provision()
-        result, output, errors = self.cli("release-worktree", "--task", "fixture")
-        self.assertEqual((result, errors), (0, ""))
+        with patch.object(sys, "stdin", StringIO("fixture\n")) as terminal, patch.object(terminal, "isatty", return_value=True), \
+                patch.object(go_cache, "process_check", return_value={}):
+            result, output, errors = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(result, 0, errors)
+        self.assertIn("independent exclusion", errors)
         released = json.loads(output)
         self.assertEqual((released["worktree"], released["branch"]), (str(self.destination), "factory/fixture/backend"))
         self.assertFalse(self.destination.exists())
@@ -91,16 +96,231 @@ class WorktreeProvisioning(unittest.TestCase):
             again = factory.release_worktree(self.path)
         self.assertEqual((again["already_released"], again["head"], again["worktree"]), (True, None, str(self.destination)))
 
-    def test_release_names_the_cleanup_when_git_still_registers_a_missing_worktree(self):
+    def test_release_preserves_shared_user_files_on_refusal(self):
         self.provision()
-        shutil.rmtree(self.destination)
+        source = self.destination / "source.bin"
+        sibling = self.root / "user-file"
+        os.link(source, sibling)
+        original = source.read_bytes()
+        with patch.object(go_cache, "process_check", return_value={}), patch.object(go_cache, "confirm_window"):
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("shared source file", error)
+        self.assertTrue(source.samefile(sibling))
+        self.assertEqual(sibling.read_bytes(), original)
+        self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+
+    def test_release_requires_independently_excluded_checkout_users(self):
+        self.provision()
+        # The inventory is clear, but a direct user can enter after it returns.
+        with patch.object(go_cache, "process_check", return_value={}), patch.object(sys, "stdin", StringIO("fixture\n")):
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("attended exclusive maintenance window", error)
+        self.assertTrue((self.destination / "source.bin").is_file())
+        self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+
+    def test_invalid_recorded_identity_never_enters_attended_legacy_release(self):
+        record = self.provision()
+        for identity in (None, [], [[0, 0]] * 4):
+            with self.subTest(identity=identity):
+                record["provisioning"]["checkout_inodes"] = identity
+                factory.save(self.path, record)
+                raw = self.path.read_bytes()
+                with patch.object(go_cache, "confirm_window") as confirm:
+                    code, _, error = self.cli("release-worktree", "--task", "fixture")
+                self.assertEqual(code, 1)
+                self.assertIn("changed original provisioning identity", error)
+                confirm.assert_not_called()
+                self.assertTrue(self.destination.is_dir())
+                self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+                self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_legacy_release_requires_matching_registration_after_confirmation(self):
+        record = self.provision()
+        del record["provisioning"]["checkout_inodes"]
+        factory.save(self.path, record)
+        raw = self.path.read_bytes()
+        git = factory.provisioning_git
+        with patch.object(go_cache, "confirm_window") as confirm:
+            def inventory_after_confirmation(repo, *args, **kwargs):
+                if confirm.called and args == ("worktree", "list", "--porcelain", "-z"):
+                    return f"worktree {self.repo}\0\0"
+                return git(repo, *args, **kwargs)
+
+            with patch.object(factory, "provisioning_git", side_effect=inventory_after_confirmation), \
+                    patch.object(go_cache, "process_check", return_value={}):
+                code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("current legacy owner registration", error)
+        confirm.assert_called_once_with("fixture")
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+
+    def interrupt_release_publication(self):
+        receipt = self.path.with_suffix(".worktree-release.json")
+        unlink = Path.unlink
+
+        def interrupt_cleanup(name, **kwargs):
+            if receipt.exists() and name.samefile(receipt):
+                raise OSError("fixture interruption after publication")
+            unlink(name, **kwargs)
+
+        with patch.object(sys, "stdin", StringIO("fixture\n")) as terminal, patch.object(terminal, "isatty", return_value=True), \
+                patch.object(go_cache, "process_check", return_value={}), patch.object(Path, "unlink", interrupt_cleanup):
+            code, _, _ = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        payload = receipt.read_bytes()
+        alias = receipt.parent / json.loads(payload)["publication_alias"]
+        self.assertTrue(alias.samefile(receipt))
+        self.assertEqual(receipt.stat().st_nlink, 2)
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn(f"Interrupted private release publication at {receipt}", error)
+        self.assertIn(str(alias), error)
+        return receipt, alias, payload
+
+    def test_release_readback_names_only_the_original_private_publication_alias(self):
+        self.provision()
+        receipt, alias, payload = self.interrupt_release_publication()
+        other = alias.with_name(".saving-unrelated")
+        alias.rename(other)
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertNotIn("Remove only", error)
+        self.assertEqual(other.read_bytes(), payload)
+        other.rename(alias)
+        alias.unlink()
+        code, output, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        self.assertTrue(json.loads(output)["already_released"])
+        self.assertEqual(receipt.read_bytes(), payload)
+
+    def test_attended_legacy_release_reads_back_only_its_published_observation(self):
+        record = self.provision()
+        original_owner = copy.deepcopy(record)
+        del record["provisioning"]["checkout_inodes"]
+        record["schema_version"] = 10
+        record.pop("acceptance", None)
+        factory.save(self.path, record)
+        raw = self.path.read_bytes()
+        with patch.object(go_cache, "process_check", return_value={}), \
+                patch.object(go_cache, "confirm_window", side_effect=factory.FactoryError("fixture declined")):
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("fixture declined", error)
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.assertTrue(self.destination.is_dir())
+        receipt, alias, payload = self.interrupt_release_publication()
+        proof = json.loads(payload)
+        self.assertEqual(proof["schema_version"], 3)
+        self.assertIn("observed_checkout", proof)
+        self.assertNotIn("checkout", proof)
+        alias.unlink()
+        code, output, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        self.assertTrue(json.loads(output)["already_released"])
+        self.assertEqual(receipt.read_bytes(), payload)
+        self.assertEqual(self.path.read_bytes(), raw)
+        with self.assertRaisesRegex(factory.FactoryError, "original owner release outcome"):
+            factory.release_proof(receipt, original_owner)
+        receipt.write_text(json.dumps(dict(proof, schema_version=2)))
+        with self.assertRaisesRegex(factory.FactoryError, "original owner release outcome"):
+            factory.release_proof(receipt, record)
+
+    def test_legacy_receipt_readback_requires_a_single_published_name(self):
+        record = self.provision()
+        item = record["provisioning"]
+        witness = go_cache.checkout_binding(self.destination, Path(item["git_dir"]), record["admission"]["repository_identity"])
+        assert witness is not None
+        receipt = dict(schema_version=1, at=1000, checkout=witness, head=witness["head"],
+                       task=record["task"], worktree=str(self.destination), git_dir=item["git_dir"],
+                       owner_token=item["owner_token"], branch=item["request"]["branch"], already_released=False)
+        path = self.path.with_suffix(".worktree-release.json")
+        with patch.object(Path, "unlink", side_effect=OSError("fixture publication interrupted")), self.assertRaises(OSError):
+            factory.save(path, receipt, exclusive=True)
+        original = path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "Preserve both names") as error:
+            factory.release_proof(path, record)
+        self.assertNotIn("Remove", str(error.exception))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.stat().st_nlink, 2)
+        # An ordinary completed legacy publication carries the same payload.
+        completed = self.root / path.name
+        factory.save(completed, receipt, exclusive=True)
+        self.assertEqual(factory.release_proof(completed, record), (receipt, original))
+
+    def test_native_reader_uses_launch_identity_at_rex_entry(self):
+        from test_rex_launcher import FakeRex
+        import checkout_exec
+        from contextlib import chdir
+
+        self.provision()
+        case = self
+        class EntryRex(FakeRex):
+            def call(self, *args, **kwargs):
+                if args[0] == "new":
+                    assignment = factory.load_task(case.path)["assignments"]["qa"]
+                    witness = assignment["launch_checkout"]
+                    case.assertEqual(assignment["state"], "launching")
+                    case.assertEqual(witness["inodes"], factory.load_task(case.path)["provisioning"]["checkout_inodes"])
+                    offset = args.index(str(factory.ROOT / "checkout_exec.py")) + 1
+                    # This direct fixture observes the physical checkout checks. The runtime digest
+                    # is exercised with the real isolated Python flags in the launcher tests.
+                    if args[offset] == "--runtime-digest":
+                        offset += 2
+                    with chdir(case.destination / "nested"), patch.object(os, "execve") as execute:
+                        check = factory.check_checkout
+                        with patch.object(go_cache, "checkout_binding", wraps=go_cache.checkout_binding) as observe:
+                            def normalize(*args, **kwargs):
+                                case.assertEqual(observe.call_count, 1)
+                                return check(*args, **kwargs)
+                            with patch.object(factory, "check_checkout", side_effect=normalize):
+                                checkout_exec.main(args[offset:])
+                            case.assertEqual(observe.call_count, 2)
+                        execute.assert_called_once()
+                        execute.reset_mock()
+                        with patch.object(go_cache, "checkout_binding", return_value=None), \
+                                patch.object(factory, "check_checkout") as normalize_check:
+                            case.assertEqual(checkout_exec.main(args[offset:]), 1)
+                            normalize_check.assert_not_called()
+                        with patch.object(go_cache, "checkout_binding", side_effect=[witness, None]):
+                            case.assertEqual(checkout_exec.main(args[offset:]), 1)
+                        execute.assert_not_called()
+                return super().call(*args, **kwargs)
+
+        command = factory.codex_command(self.path, task="fixture", assignment_id="qa", codex=sys.executable,
+                                        model="fixture", effort="high", cwd=str(self.destination / "nested"), role="qa")
+        with patch.object(factory, "Rex", EntryRex), patch.object(EntryRex, "sessions", []), patch.object(EntryRex, "calls", []):
+            record, assignment = factory.launch(self.path, task="fixture", assignment_id="qa", role="qa", goal="Inspect",
+                purpose="work", cwd=str(self.destination / "nested"), command=command, binary=sys.executable, server="unix:///fixture")
+        self.assertEqual(assignment["request"]["command"], command)
+        self.assertEqual(assignment["request"]["inputs"], record["inputs"])
+
+    def test_existing_release_receipt_preserves_surviving_checkout(self):
+        self.provision()
+        path = self.path.with_suffix(".worktree-release.json")
+        factory.save(path, "original receipt")
         with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
-                self.assertRaisesRegex(factory.FactoryError, "git worktree prune"):
+                self.assertRaisesRegex(factory.FactoryError, "existing owner release receipt"):
             factory.release_worktree(self.path)
-        self.git("worktree", "unlock", str(self.destination))
-        self.git("worktree", "prune")
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
-            self.assertTrue(factory.release_worktree(self.path)["already_released"])
+        self.assertEqual(path.read_text(), "original receipt")
+        self.assertIn(str(self.destination), self.git("worktree", "list", "--porcelain"))
+        self.assertTrue(self.destination.is_dir())
+
+    def test_missing_checkout_identifies_exact_registration_without_repair(self):
+        target = self.root / "missing writer"
+        admin = self.repo / ".git/worktrees/writer"
+        inventory = f"worktree {self.repo}\0\0worktree {target}\0\0worktree {self.root}/sibling\0\0"
+        with patch.object(factory, "provisioning_git", return_value=inventory) as git, self.assertRaises(
+                factory.FactoryError) as error:
+            go_cache.checkout_binding(target, admin, factory.repository_identity(self.repo))
+        git.assert_called_once_with(self.repo, "worktree", "list", "--porcelain", "-z")
+        self.assertIn(str(target), str(error.exception))
+        self.assertIn(str(admin), str(error.exception))
+        self.assertNotIn("prune", str(error.exception))
+        self.assertNotIn("unlock", str(error.exception))
 
     def test_rebase_moves_the_worktree_onto_a_new_base_and_keeps_the_change_as_a_patch(self):
         # Owner decision: refresh a candidate whose base moved by replaying its change (patch rebase).
@@ -141,47 +361,45 @@ class WorktreeProvisioning(unittest.TestCase):
     def test_release_refuses_a_dirty_worktree_or_a_running_assignment(self):
         self.provision()
         (self.destination / "unfinished.txt").write_text("work in progress\n")
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+        with patch.object(go_cache, "confirm_window"), patch.object(go_cache, "process_check", return_value={}), factory.execution_lock(self.state), \
+                factory.task_lock(self.state, "fixture"), \
                 self.assertRaisesRegex(factory.FactoryError, "uncommitted inputs"):
             factory.release_worktree(self.path)
         (self.destination / "unfinished.txt").unlink()
         receipt = self.state / "fixture.reader.claude.json"
-        receipt.write_text(json.dumps(dict(state="starting")))
-        receipt.chmod(0o600)
-        record = factory.load_task(self.path)
-        running = copy.deepcopy(record)
-        running["assignments"]["reader"] = dict(state="launched", request=dict(
-            cwd=str(self.destination), command=[sys.executable, "worker.py", "--receipt", str(receipt)]))
-        with patch.object(factory, "load_task", return_value=running), factory.execution_lock(self.state), \
-                patch.object(factory, "connect", return_value="rex"), \
-                patch.object(factory, "status", return_value=dict(state="running")) as observed, \
-                factory.task_lock(self.state, "fixture"), self.assertRaisesRegex(factory.FactoryError, "still running"):
+        factory.save(receipt, dict(state="starting", cwd=str(self.destination),
+                                   worktree_git_dir=str(factory.git_dir(self.destination))))
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+                self.assertRaisesRegex(factory.FactoryError, "orphaned native receipt"):
             factory.release_worktree(self.path)
-        self.assertEqual(observed.call_args.args[2], running["assignments"]["reader"])
         self.assertTrue(self.destination.exists())
-        # A reset attempt stopped for good, though a reboot left its receipt unfinished (#133).
-        factory.reset_patch(receipt).write_text("")
-        with patch.object(factory, "load_task", return_value=running), factory.execution_lock(self.state), \
-                factory.task_lock(self.state, "fixture"):
-            factory.release_worktree(self.path)
-        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
 
-    def test_release_takes_a_worktree_whose_unfinished_writer_rex_reports_lost(self):
-        # #162: a Grok correction lost to a host reboot keeps a `starting` receipt and no reset patch, and reset
-        # refuses once the checkout moved on to the merged head; its closed, lost pane proves it stopped.
+    def test_release_obeys_physical_lock_and_published_foreign_store(self):
         self.provision()
-        receipt = self.state / "fixture.correction-1.grok.json"
-        receipt.write_text(json.dumps(dict(state="starting")))
-        receipt.chmod(0o600)
-        lost = copy.deepcopy(factory.load_task(self.path))
-        lost["assignments"]["correction-1"] = dict(state="launched", window_id="w", block_id="b", request=dict(
-            role="implementation", cwd=str(self.destination), command=[sys.executable, "worker.py", "--receipt", str(receipt)]),
-            closed=dict(state="lost", exit=None, session_id="s", capture=None, at=0.0,
-                        reason="Rex server restarted after launch; the original process ended without an observable exit status"))
-        with patch.object(factory, "load_task", return_value=lost), patch.object(factory, "connect", return_value="rex"), \
-                factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
-            factory.release_worktree(self.path)
-        self.assertFalse(self.destination.exists())
+        admin = factory.git_dir(self.destination)
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+            with go_cache.launch_lock(admin, foreign), self.assertRaisesRegex(factory.ExecutionBusy, "Busy lock"):
+                factory.release_worktree(self.path)
+            with self.assertRaisesRegex(factory.FactoryError, "state store"):
+                factory.release_worktree(self.path)
+        self.assertTrue(self.destination.exists())
+        self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+
+    def test_release_cannot_reconstruct_proof_after_publication_failure(self):
+        self.provision()
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+            with patch.object(sys, "stdin", StringIO("fixture\n")) as terminal, patch.object(terminal, "isatty", return_value=True), \
+                    patch.object(go_cache, "process_check", return_value={}), \
+                    patch.object(factory, "publish_record", side_effect=OSError("fixture storage full")), \
+                    self.assertRaisesRegex(factory.FactoryError, "saving the owner release outcome failed"):
+                factory.release_worktree(self.path)
+            self.assertFalse(self.destination.exists())
+            with self.assertRaisesRegex(factory.FactoryError, "Missing original owner release"):
+                factory.release_worktree(self.path)
+        self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
 
     def test_control_character_filenames_preserve_tree_index_and_disk_names(self):
         names = ["name\rsegment", "name\nsegment", "name\r\nsegment"]
@@ -557,8 +775,37 @@ class WorktreeProvisioning(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("restore state-store access/space", error)
         self.assertIn("same saved intent and existing worktree", error)
-        self.assertEqual(factory.load_task(self.path)["provisioning"]["state"], "provisioning")
-        self.assertEqual(self.provision()["provisioning"]["state"], "provisioned")
+        pending = factory.load_task(self.path)["provisioning"]
+        self.assertEqual(pending["state"], "provisioning")
+        reconciled = self.provision()["provisioning"]
+        self.assertEqual(reconciled["state"], "provisioned")
+        witness = go_cache.checkout_binding(self.destination, Path(reconciled["git_dir"]), factory.repository_identity(self.repo))
+        self.assertTrue(factory.original_checkout(reconciled, witness))
+        self.assertEqual(reconciled["checkout_inodes"], pending["checkout_inodes"])
+        with patch.object(sys, "stdin", StringIO("fixture\n")) as terminal, patch.object(terminal, "isatty", return_value=True), \
+                patch.object(go_cache, "process_check", return_value={}):
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        proof, _ = factory.release_proof(self.path.with_suffix(".worktree-release.json"), factory.load_task(self.path))
+        self.assertEqual(proof["checkout"], witness)
+        code, output, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        self.assertTrue(json.loads(output)["already_released"])
+
+    def test_unpublished_original_observation_preserves_pending_owner(self):
+        original = factory.save
+        def interrupted(path, record):
+            if "checkout_inodes" in record["provisioning"]:
+                raise OSError("interrupted observation publication")
+            original(path, record)
+        with patch.object(factory, "save", side_effect=interrupted), self.assertRaisesRegex(
+                factory.FactoryError, "original checkout identity save"):
+            self.provision()
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "Retain the worktree"):
+            self.provision()
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_hold_input_changes_and_request_changes_preserve_original_intent_and_limits(self):
         factory.hold_task(self.path, "Wait")
@@ -755,7 +1002,7 @@ class WorktreeProvisioning(unittest.TestCase):
                             save(path, value, **kwargs)
                         raise OSError("fixed migration storage failure")
                     with patch.object(factory, "save", side_effect=failed):
-                        code, _, error = self.cli("show", "--task", "fixture")
+                        code, _, error = self.cli("pause", "--task", "fixture", "--reason", "Hold fixture")
                     self.assertEqual(code, 1)
                     self.assertIn("task schema migration save", error)
                     self.assertIn("restore state-store access/space", error)

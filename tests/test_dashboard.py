@@ -389,6 +389,17 @@ class OperatorView(unittest.TestCase):
         self.assertIn("without retained output: Rex server restarted", detail["error"])
         self.assertIsNone(detail["output"])
 
+    def test_installed_worker_is_identified_through_xdg_directory_alias(self):
+        data = self.root.resolve() / "data"
+        installed = data / "software-factory/skill/runtime/claude_worker.py"
+        installed.parent.mkdir(parents=True)
+        installed.write_text("# fixture worker\n")
+        alias = self.root.resolve() / "xdg"
+        alias.symlink_to(data, target_is_directory=True)
+        with patch.dict(os.environ, XDG_DATA_HOME=str(alias)):
+            self.assertTrue(dashboard.application_worker(str(installed)))
+            self.assertTrue(dashboard.application_worker(str(alias / installed.relative_to(data))))
+
     def test_workers_from_registered_source_worktrees_are_application_workers(self):
         main, sibling, stray = self.root / "main", self.root / "sibling", self.root / "stray"
         for directory in (main, stray):
@@ -404,7 +415,15 @@ class OperatorView(unittest.TestCase):
         layout = Path("skills/factory/runtime/claude_worker.py")
         with patch.object(factory, "ROOT", (main / "skills/factory/runtime").resolve()):
             self.assertTrue(dashboard.application_worker(str((main / layout).resolve())))
-            self.assertTrue(dashboard.application_worker(str((sibling / layout).resolve())))
+            sibling_worker = (sibling / layout).resolve()
+            sibling_worker.write_text("# changed since registration\n")
+            sibling_worker.chmod(0o666)
+            self.assertTrue(dashboard.application_worker(str(sibling_worker)))
+            command = self.native_command("claude")
+            command[3] = str(sibling_worker)
+            self.record["assignments"]["backend"]["request"]["command"] = command
+            with self.assertRaisesRegex(factory.FactoryError, "fixture/backend: original native evidence"):
+                factory.check_native_history(self.record)
             self.assertFalse(dashboard.application_worker(str((stray / layout).resolve())))
             (sibling / "claude_worker.py").write_text("# outside the runtime layout\n")
             self.assertFalse(dashboard.application_worker(str((sibling / "claude_worker.py").resolve())))
@@ -429,8 +448,12 @@ class OperatorView(unittest.TestCase):
         self.assertNotIn("Read owned Rex pane", page)
 
     def test_owned_pane_read_revalidates_exact_scope_and_refresh_only_reads(self):
+        self.record["schema_version"] = 10
+        self.record.pop("acceptance", None)
+        factory.save(self.path, self.record)
         rex, _ = self.fake_rex()
         before = self.path.read_bytes()
+        self.snapshot()
         with patch.object(factory, "Rex", return_value=rex) as transport:
             for _ in range(2):
                 detail = dashboard.pane_detail(self.root, "fixture", "backend", clock=lambda: 900)
