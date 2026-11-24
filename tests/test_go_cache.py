@@ -239,6 +239,77 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
             with go_cache.inode_lock(path, directory=path.is_dir()):
                 pass
 
+    def test_stalled_compiler_after_parent_stop_releases_locks_by_deadline(self):
+        fixture = self.root / "disposable-stalled-go"
+        ready = self.root / "compiler-ready"
+        entry = next(self.cache.glob("*/*-d"))
+        fixture.write_text(f"""#!{sys.executable}
+import fcntl, os, signal, sys, time
+from pathlib import Path
+if sys.argv[1] == "env":
+    sys.stdout.write("\\n\\n")
+    sys.exit(0)
+keeper = os.getppid()
+compiler = os.fork()
+if compiler:
+    os.waitpid(compiler, 0)
+    sys.exit(0)
+os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open({str(entry)!r}, "ab", buffering=0) as cache:
+    fcntl.flock(cache, fcntl.LOCK_EX)
+    Path({str(ready)!r}).write_text(f"{{os.getpgid(keeper)}} {{os.getpgrp()}}")
+    # Self-limit this disposable writer even if supervision regresses.
+    until = time.monotonic() + 15
+    while time.monotonic() < until:
+        cache.write(b".")
+        time.sleep(0.02)
+""")
+        fixture.chmod(0o700)
+        paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
+                 self.path.with_suffix(".lock"), self.admin, self.cache)
+        # Shorten only the real build deadline in the disposable CLI process.
+        cli = [sys.executable, "-B", "-c",
+               "import factory, go_cache; go_cache.GO_BUILD_SECONDS = 2; raise SystemExit(factory.main())",
+               "--state-dir", str(self.state), "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)]
+        for hosted in (False, True):
+            with self.subTest(hosted=hosted), subprocess.Popen(
+                    cli, cwd=factory.ROOT, env={**os.environ, "TMPDIR": str(self.root)},
+                    start_new_session=hosted, stdout=subprocess.DEVNULL) as caller:
+                try:
+                    deadline = time.monotonic() + 10
+                    while not ready.exists() or not ready.stat().st_size:
+                        self.assertIsNone(caller.poll(), "Factory exited before the compiler wrote")
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    if hosted:
+                        self.assertEqual(ready.read_text().split(), [str(caller.pid)] * 2)
+                finally:
+                    caller.kill()
+                    caller.wait(timeout=5)
+                size = entry.stat().st_size
+                deadline = time.monotonic() + 6
+                while entry.stat().st_size == size:
+                    self.assertLess(time.monotonic(), deadline, "Expected a cache write after caller exit")
+                    time.sleep(0.01)
+                pending = set(paths)
+                with entry.open("rb") as mutation:
+                    for path in paths:
+                        with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
+                            self.fail(f"Acquired {path} during a compiler write")
+                    while pending:
+                        for path in pending.copy():
+                            try:
+                                with go_cache.inode_lock(path, directory=path.is_dir()):
+                                    # The writer holds this separate flock for its entire mutation loop.
+                                    fcntl.flock(mutation, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                                    pending.remove(path)
+                            except factory.ExecutionBusy:
+                                continue
+                        self.assertLess(time.monotonic(), deadline, f"Locks retained after timeout: {pending}")
+                        time.sleep(0.01)
+                ready.unlink()
+
     def test_native_aging_retains_cache_under_replaceable_ancestor(self):
         self.root.chmod(0o770)
         with patch.object(go_cache, "native_build") as build:
