@@ -2621,12 +2621,32 @@ def remove_scratch(directory, identity, fd):
             if (os.fstat(fd).st_mode & 0o077 or not directory.name.startswith("sf-")
                     or directory.parent.resolve() != Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve()):
                 raise
-            for _, _, _, descriptor in os.fwalk(".", dir_fd=fd, onerror=unreadable):
+            for _, children, _, descriptor in os.fwalk(".", topdown=True, dir_fd=fd, onerror=unreadable):
                 current = os.fstat(descriptor)
                 if current.st_uid != os.getuid() or current.st_dev != info.st_dev:
                     raise PermissionError("Scratch directory ownership or identity changed")
                 if current.st_mode & 0o700 != 0o700:
                     os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | 0o700)
+                if sys.platform != "darwin":
+                    continue
+                # fwalk opens each child before yielding its descriptor.
+                for name in children.copy():
+                    child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if stat.S_ISLNK(child.st_mode):
+                        children.remove(name)
+                        continue
+                    if not stat.S_ISDIR(child.st_mode):
+                        raise OSError(f"Scratch entry {name!r} changed before permission repair")
+                    if child.st_uid != os.getuid() or child.st_dev != info.st_dev:
+                        raise PermissionError("Scratch directory ownership or identity changed")
+                    if child.st_mode & 0o700 != 0o700:
+                        libc = ctypes.CDLL(None, use_errno=True)
+                        # A trailing slash requires a directory. Darwin's AT_SYMLINK_NOFOLLOW_ANY
+                        # (sys/fcntl.h) also rejects symlinks when resolving that slash.
+                        if libc.fchmodat(descriptor, os.fsencode(name) + b"/",
+                                         stat.S_IMODE(child.st_mode) | 0o700, 0x0800) != 0:
+                            error = ctypes.get_errno()
+                            raise OSError(error, f"Cannot repair scratch permissions: {os.strerror(error)}", name)
             remove_contents()
         check(directory.lstat())
         # rmdir has no expected-inode argument. Claim the last name in a private

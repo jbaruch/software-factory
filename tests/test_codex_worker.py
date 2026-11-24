@@ -341,16 +341,25 @@ class NativeResults(unittest.TestCase):
                          [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))])
 
     @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
-    def test_unreadable_native_scratch_preserves_codex_report_and_exit(self):
+    def test_mode_zero_native_scratch_cleanup_preserves_codex_report(self):
         spawn = self.spawn
+        outside = self.root / "outside-scratch"
+        outside.mkdir(mode=0o700)
+        marker = outside / "marker"
+        marker.write_text("keep")
+        outside.chmod(0o500)
+        self.addCleanup(outside.chmod, 0o700)
 
         async def with_unreadable_scratch(*command, **options):
             child = await spawn(*command, **options)
             unreadable = self.scratch_at_spawn / "nested" / "unreadable"
             unreadable.mkdir(parents=True)
             (unreadable / "report.txt").write_text("Fixture output\n")
+            (unreadable.parent / "outside-link").symlink_to(outside, target_is_directory=True)
             self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o700))
+            self.addCleanup(lambda: unreadable.parent.exists() and unreadable.parent.chmod(0o700))
             unreadable.chmod(0)
+            unreadable.parent.chmod(0)
             return child
 
         with patch.object(self, "spawn", with_unreadable_scratch):
@@ -358,8 +367,14 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["exit_code"], 0)
         self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
-        self.assertIs(receipt["scratch_removed"], False)
+        removed = sys.platform == "darwin"
+        self.assertIs(receipt["scratch_removed"], removed)
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
+        self.assertEqual(self.scratch_at_spawn.exists(), not removed)
+        if not removed:
+            self.assertEqual((self.scratch_at_spawn / "nested").stat().st_mode & 0o777, 0)
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
+        self.assertEqual(marker.read_text(), "keep")
 
     def test_large_prompt_uses_exact_private_stdin_and_eof_without_argv_payload(self):
         payload = ("Large frozen evidence: 雪\n" * 100000).encode()

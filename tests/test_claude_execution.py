@@ -3,6 +3,7 @@ import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
 from contextlib import ExitStack, nullcontext, redirect_stdout, redirect_stderr
+import errno
 from functools import partial
 import gc
 from io import StringIO
@@ -1079,9 +1080,21 @@ class ClaudeWorker(unittest.TestCase):
         (unreadable / "report.txt").write_text("Fixture output\n")
         self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o700))
         unreadable.chmod(0)
+
+        def fail_repair(*args):
+            factory.ctypes.set_errno(errno.EIO)
+            return -1
+
         with patch.object(factory, "new_scratch", return_value=scratch), \
+                ExitStack() as effects, \
                 redirect_stderr(StringIO()) as errors:
+            if sys.platform == "darwin":
+                libc = factory.ctypes.CDLL(None, use_errno=True)
+                effects.enter_context(patch.object(factory.ctypes, "CDLL", return_value=libc))
+                repair = effects.enter_context(patch.object(libc, "fchmodat", side_effect=fail_repair))
             receipt = self.execute()
+            if sys.platform == "darwin":
+                repair.assert_called_once()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["exit_code"], 0)
         self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["README.md"]))
@@ -1090,6 +1103,9 @@ class ClaudeWorker(unittest.TestCase):
         self.assertTrue(scratch.is_dir())
         self.assertFalse(Path(receipt["checkout"]).exists())
         self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
+        if sys.platform == "darwin":
+            self.assertIn(os.strerror(errno.EIO), errors.getvalue())
+            self.assertIn(repr(unreadable.name), errors.getvalue())
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_collection_writes_the_report_as_plain_text_lines(self):
