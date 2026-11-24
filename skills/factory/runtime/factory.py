@@ -1412,8 +1412,14 @@ def remember_writer_links(args, pending):
             return
         _, saved = scratch_worker_args(record, assignment, (runtime_home() / "skill/runtime").resolve())
         known = displaced_files(source, root)
+        def differs(key, value):
+            live = getattr(args, key, None)
+            if key == "sandbox" and isinstance(live, Path) and isinstance(value, Path):
+                # The factory commit holds the sandbox resolved before launch; the saved command may name it through a link.
+                return live.resolve() != value.resolve()
+            return live != value
         if (known is None or source.get("identity") != interpreter_identity(root) or Path.cwd() != args.cwd
-                or any(getattr(args, key, None) != value for key, value in vars(saved).items())):
+                or any(differs(key, value) for key, value in vars(saved).items())):
             raise FactoryError("Writer source differs from its original physical launch. Inspect the reserved checkout")
         source["displaced"] = sorted(known | set(pending.values()))
         save(path, record)

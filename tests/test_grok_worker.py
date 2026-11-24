@@ -120,9 +120,11 @@ class GrokWorker(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             return factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
 
-    def launch_writer(self, assignment_id="implement", **changes):
+    def launch_writer(self, assignment_id="implement", sandbox=None, **changes):
         command = self.make_command(**{**dict(assignment_id=assignment_id, role="backend", write=True,
                                               commit_message="Add fixture notes", sandbox=sys.executable), **changes})
+        if sandbox is not None:  # A hand-built launch command may name the sandbox through a link.
+            command[command.index("--sandbox") + 1] = sandbox
         with patch.object(factory, "Rex", FakeRex):
             factory.launch(self.path, task="task", assignment_id=assignment_id, role="backend", goal="Add fixture notes",
                 cwd=str(self.repo), command=command, purpose="work", binary=sys.executable, server="unix:///test.sock")
@@ -201,6 +203,22 @@ class GrokWorker(unittest.TestCase):
         root, indexed = pinned
         self.assertEqual(root, self.repo)
         self.assertTrue({(info.st_dev, info.st_ino) for info in (original, between, current)} <= indexed)
+
+    def test_linked_sandbox_writer_commits_hard_linked_output(self):
+        # A Homebrew-style bin link names the saved sandbox; the factory commit holds it resolved.
+        sandbox = self.root / "bin" / "codex"
+        sandbox.parent.mkdir()
+        sandbox.symlink_to(Path(sys.executable).resolve())
+        args = self.launch_writer(sandbox=str(sandbox))
+        notes = self.repo / "NOTES.md"
+        receipt = self.execute_writer(args, act=lambda: os.link(notes, self.root / "notes-copy"))
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "created")
+        self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
+        linked = (self.root / "notes-copy").stat()
+        self.assertEqual(notes.stat().st_nlink, 1)
+        source = factory.load_task(self.path)["assignments"]["implement"]["writer_source"]
+        self.assertIn([linked.st_dev, linked.st_ino], source["displaced"])
 
     def test_interrupted_writer_normalizations_keep_the_original_exclusions(self):
         source = self.repo / "README.md"
