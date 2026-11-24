@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import codex_worker as worker
 import factory
 import factory_commit
+from test_abandoned_scratch import record_attempt
 from test_rex_launcher import FakeRex
 
 
@@ -41,6 +42,8 @@ REAL_CONFIGURED_MCP_SERVERS = worker.configured_mcp_servers
 
 
 class FakeProcess:
+    pid = os.getpid()
+
     def __init__(self, payload, exit_code=0, timeout=False):
         self.lines = iter([json.dumps(event).encode() + b"\n" for event in payload])
         self.stdout = self
@@ -131,6 +134,9 @@ class NativeResults(unittest.TestCase):
         self.scan = lambda args, receipt, **kwargs: self.scans.append(receipt["commit"]["staged_tree"])
 
     async def spawn(self, *command, **options):
+        self.scratch_at_spawn = Path(options["env"]["TMPDIR"])
+        self.scratch_info_at_spawn = self.scratch_at_spawn.stat()
+        self.receipt_at_spawn = json.loads(self.args.receipt.read_text())
         self.spawns.append(command)
         self.check_shell_directory(command, options)
         return self.process
@@ -230,9 +236,17 @@ class NativeResults(unittest.TestCase):
             effective_mcp_servers(["codex", "exec", "-c", 'mcp_servers."tessl".enabled=false', "-"], ["tessl"])
 
     def test_completion_preserves_original_events_and_private_bound_receipt(self):
-        receipt = self.execute()
+        with patch.object(factory, "native_start_time", return_value=123456):
+            receipt = self.execute()
         self.assertEqual(receipt["state"], "completed")
-        self.assertEqual(receipt["schema_version"], 5)
+        self.assertEqual(receipt["schema_version"], 8)
+        self.assertEqual(self.receipt_at_spawn["scratch"], str(self.scratch_at_spawn))
+        self.assertEqual(self.receipt_at_spawn["scratch_identity"],
+                         dict(st_dev=self.scratch_info_at_spawn.st_dev, st_ino=self.scratch_info_at_spawn.st_ino))
+        self.assertIsNone(self.receipt_at_spawn["native_process"])
+        self.assertEqual(receipt["native_process"], dict(pid=self.process.pid, start_time=123456, scope=factory.process_scope()))
+        self.assertIs(receipt["scratch_removed"], True)
+        self.assertFalse(self.scratch_at_spawn.exists())
         self.assertEqual(receipt["repository_identity"], self.identity)
         self.assertEqual(receipt["worktree_git_dir"], str(factory.git_dir(str(self.repo))))
         self.assertEqual(receipt["candidate"], self.candidate)
@@ -261,6 +275,68 @@ class NativeResults(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.spawns), 1)
         self.assertEqual(self.args.receipt.read_bytes(), before)
+
+    def test_replaced_scratch_survives_codex_finalization(self):
+        spawn = self.spawn
+
+        async def with_replacement(*command, **options):
+            child = await spawn(*command, **options)
+            self.scratch_at_spawn.rename(self.root / "original-scratch")
+            self.scratch_at_spawn.mkdir(mode=0o700)
+            (self.scratch_at_spawn / "marker").write_text("keep")
+            return child
+
+        with patch.object(self, "spawn", with_replacement):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["report"]["outcome"], "approved")
+        self.assertIs(receipt["scratch_removed"], False)
+        self.assertEqual((self.scratch_at_spawn / "marker").read_text(), "keep")
+
+    def test_reaped_fast_child_leaves_proof_of_exit_in_retained_scratch_receipt(self):
+        self.args.receipt = self.root / "task.qa.codex.json"
+        record_attempt(self.args.receipt, "codex", dict(candidate=self.candidate, requirements=self.args.requirements))
+        self.args.brief = self.root / "task.qa.md"
+        self.args.brief_sha256 = hashlib.sha256(self.args.brief.read_bytes()).hexdigest()
+        recorded = events()
+        recorded[-2]["item"]["text"] = json.dumps(dict(outcome="approved", artifacts=['{"observation":"The fixture checks passed."}']))
+        payload = "".join(json.dumps(event) + "\n" for event in recorded)
+
+        async def spawn(*command, **options):
+            child = await asyncio.create_subprocess_exec(sys.executable, "-c", f"print({payload!r}, end='')",
+                                                         stdout=options["stdout"])
+            await child.wait()  # Force reaping before control returns to the worker's identity probe.
+            return child
+
+        with patch.object(self, "spawn", spawn), patch.object(factory, "remove_scratch", return_value=False):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed")
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertIsNone(receipt["native_process"]["start_time"])
+        self.assertIs(receipt["scratch_removed"], False)
+        self.assertEqual(factory.abandoned_scratch(self.root),
+                         [dict(scratch=receipt["scratch"], receipt=str(self.args.receipt))])
+
+    @unittest.skipIf(os.getuid() == 0, "Directory permissions are enforced for ordinary users")
+    def test_unreadable_native_scratch_preserves_codex_report_and_exit(self):
+        spawn = self.spawn
+
+        async def with_unreadable_scratch(*command, **options):
+            child = await spawn(*command, **options)
+            unreadable = self.scratch_at_spawn / "nested" / "unreadable"
+            unreadable.mkdir(parents=True)
+            (unreadable / "report.txt").write_text("Fixture output\n")
+            self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o700))
+            unreadable.chmod(0)
+            return child
+
+        with patch.object(self, "spawn", with_unreadable_scratch):
+            receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
+        self.assertIs(receipt["scratch_removed"], False)
+        self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_large_prompt_uses_exact_private_stdin_and_eof_without_argv_payload(self):
         payload = ("Large frozen evidence: 雪\n" * 100000).encode()
@@ -341,8 +417,9 @@ class NativeResults(unittest.TestCase):
                 return processes[index]
             other = copy.copy(self.args)
             other.events, other.receipt = self.root / "second.jsonl", self.root / "second.json"
+            # Both real reader checkouts share this deadline with the rendezvous.
             return await asyncio.wait_for(asyncio.gather(
-                *(worker.execute(args, spawn=spawn) for args in (self.args, other))), timeout=5)
+                *(worker.execute(args, spawn=spawn) for args in (self.args, other))), timeout=30)
         with redirect_stdout(StringIO()):
             receipts = asyncio.run(run())
         self.assertTrue(all(receipt["state"] == "completed" for receipt in receipts))
@@ -492,6 +569,9 @@ class NativeResults(unittest.TestCase):
                 self.assertIn("termination is unconfirmed", receipt["error"])
                 self.assertIn(repr(str(directory)), receipt["error"])
                 self.assertIsNone(receipt["exit_code"])
+                self.assertIs(receipt["scratch_removed"], False)
+                self.assertEqual(receipt["scratch"], str(self.scratch_at_spawn))
+                self.assertTrue(self.scratch_at_spawn.is_dir())
                 self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
     def test_unexpected_cleanup_errors_propagate_without_factory_git(self):
@@ -1901,7 +1981,8 @@ class NativeResults(unittest.TestCase):
         actual = next(call for call in FakeRex.calls if call[0] == "new")
         argv = actual[actual.index("--") + 1:]
         self.worker_argv = argv
-        self.assertEqual(argv[:4], (sys.executable, "-E", "-s", str(factory.ROOT / "checkout_exec.py")))
+        launcher = sys.executable if sys.prefix != sys.base_prefix else str(Path(sys.executable).resolve())
+        self.assertEqual(argv[:4], (launcher, "-E", "-s", str(factory.ROOT / "checkout_exec.py")))
         argv = argv[argv.index("--") + 1:]
         self.args = worker.parser().parse_args(argv[2:] if legacy else argv[4:])
         self.assertEqual(self.args.candidate, self.candidate)
@@ -2054,9 +2135,186 @@ class NativeResults(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             result = factory.collect_codex(path, "qa", FakeRex(sys.executable, "unix:///test.sock"), record, assignment)
         self.assertEqual(result["assignments"]["qa"]["result"]["outcome"], "approved")
+        _, verified, _ = factory.codex_evidence("qa", result, result["assignments"]["qa"], collected=True)
+        self.assertEqual(verified["report"], report)
         self.assertEqual(receipt.read_bytes(), original)
         self.assertEqual(stream.read_bytes(), original_stream)
         self.assertEqual(self.spawns, [])
+
+    def test_installed_worker_holds_measured_bytes_through_entry_and_rejects_a_late_upgrade(self):
+        project = self.root / "project" / "skills" / "acr__fixture"
+        shutil.copytree(factory.ROOT.parent, project, ignore=shutil.ignore_patterns("__pycache__"))
+        data = self.root / "data"
+        home = data / "software-factory"
+        installed = (home / "skill" / "runtime").resolve()
+        # A worker process tries the real install while it is executing, then exits.
+        (project / "runtime" / "codex_worker.py").write_text(
+            "import factory\nfrom pathlib import Path\n"
+            f"project = Path({str(project)!r}) / 'runtime'\n"
+            "def main():\n"
+            "    try:\n        factory.relocate('factory.py', [], root=project, execv=lambda *args: None)\n"
+            "    except factory.FactoryError as exc:\n        print(exc)\n"
+            "if __name__ == '__main__':\n    main()\n")
+        factory.relocate("factory.py", [], root=project / "runtime", home=home, execv=lambda *args: None)
+        with patch.dict(os.environ, XDG_DATA_HOME=str(data)), patch.object(factory, "ROOT", installed):
+            record, _ = self.launch_assignment(execute=False)
+            self.assertIn(record["assignments"]["qa"]["native_launch"]["runtime"], self.worker_argv)
+            (project / "runtime" / "VERSION").write_text("1.0.0\n")
+            (project / "runtime" / "codex_worker.py").write_text("raise AssertionError('replacement executed')\n")
+            first = subprocess.run(self.worker_argv, capture_output=True, text=True, check=True)
+            self.assertIn("retry the upgrade after active workers and controllers finish", first.stdout)
+            factory.relocate("factory.py", [], root=project / "runtime", home=home, execv=lambda *args: None)
+            changed = subprocess.run(self.worker_argv, capture_output=True, text=True)
+        self.assertEqual(changed.returncode, 1)
+        self.assertIn("Installed runtime changed after admission", changed.stderr)
+        self.assertFalse(self.args.receipt.exists())
+
+    def test_both_installed_collectors_exclude_upgrade_from_import_through_registration(self):
+        offer = self.root / "project" / "skills" / "acr__fixture" / "runtime"
+        home = self.root / "installation"
+        installed = (home / "skill" / "runtime").resolve()
+        shutil.copytree(factory.ROOT.parent, offer.parent, ignore=shutil.ignore_patterns("__pycache__"))
+        # The fixture implements only Rex observation. Collection reads the real
+        # brief, checkout, events and receipt and saves the normal result and report.
+        with (offer / "factory.py").open("a") as module:
+            module.write(f"""
+def check_upgrade(phase):
+    try:
+        relocate("factory.py", [], root=Path({str(offer)!r}), home=Path({str(home)!r}),
+                 execv=lambda *args: None)
+    except FactoryError as exc:
+        if "runtime is in use" not in str(exc):
+            raise
+        print(phase, file=sys.stderr)
+    else:
+        raise AssertionError("Upgrade completed during collection")
+
+check_upgrade("locked at import")
+connect = lambda *args: None
+status = lambda *args: dict(state="exited")
+tidy = lambda *args, **kwargs: dict(closed=[])
+original_save_report = save_report
+def save_report(receipt, report):
+    check_upgrade("locked at registration")
+    return original_save_report(receipt, report)
+""")
+        factory.relocate("factory.py", [], root=offer, home=home, execv=lambda *args: None)
+        (offer / "VERSION").write_text("1.0.0\n")
+        with patch.object(factory, "ROOT", installed):
+            _, assignment = self.launch_assignment()
+        pending = self.path.read_bytes()
+        plan = self.root / "empty-plan"
+        plan.write_text(json.dumps(dict(schema_version=1, jobs=[], limits=dict(tasks=1, workers=1,
+            reserve_workers=0, minimum_remaining_percent=10))))
+        commands = (
+            ("factory", ["codex-collect", "--task", "task", "--id", "qa"]),
+            ("ready_runner", ["--plan", str(plan), "--rex", sys.executable,
+                              "--server", "unix:///test.sock", "--codex", "/usr/bin/false", "--once"]),
+        )
+        for entry, args in commands:
+            with self.subTest(entry=entry):
+                self.path.write_bytes(pending)
+                process = subprocess.run([sys.executable, "-B", str(installed / (entry + ".py")),
+                    "--state-dir", str(self.root), *args], capture_output=True, text=True, timeout=30)
+                self.assertEqual(process.returncode, 0, process.stderr)
+                self.assertEqual(process.stderr.splitlines(), ["locked at import", "locked at registration"])
+                collected = factory.load_task(self.path)["assignments"]["qa"]
+                self.assertTrue(collected["native_collected"])
+                self.assertEqual(collected["result"]["outcome"], "approved")
+                self.assertEqual(collected["request"], assignment["request"])
+        factory.relocate("factory.py", [], root=offer, home=home, execv=lambda *args: None)
+        self.assertEqual((installed / "VERSION").read_text().strip(), "1.0.0")
+
+    def test_real_interpreter_aliases_have_one_admission_and_isolated_digest(self):
+        def isolated_digest(executable):
+            result = subprocess.run([str(executable), "-B", "-E", "-s", "-c",
+                "import factory; print(factory.native_runtime_digest())"], cwd=factory.ROOT,
+                capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+
+        launcher = Path(sys.executable)
+        prefix_alias = self.root / "prefix-alias"
+        prefix_alias.symlink_to(launcher.parent.parent, target_is_directory=True)
+        measured = factory.native_runtime_digest()
+        self.assertEqual(isolated_digest(prefix_alias / launcher.parent.name / launcher.name), measured)
+        self.assertEqual(isolated_digest(launcher), measured)
+        if sys.prefix == sys.base_prefix:
+            self.assertEqual(isolated_digest(launcher.resolve()), measured)
+
+    def test_linux_executable_provider_with_optional_development_library(self):
+        image, _ = factory.loaded_python_files()
+        configured = self.root / "libpython.so"
+        config = dict(Py_ENABLE_SHARED=1, LIBDIR=str(self.root), LDLIBRARY=configured.name)
+        with patch("sysconfig.get_config_var", side_effect=config.get), patch.object(sys, "platform", "linux"), \
+                patch.object(factory, "loaded_python_files", return_value=(image, image)):
+            runtime = factory.native_runtime_digest()
+            configured.write_bytes(b"fixture library")
+            self.assertNotEqual(factory.native_runtime_digest(), runtime)
+            configured.unlink()
+            self.assertEqual(factory.native_runtime_digest(), runtime)
+
+    def test_first_collection_measures_launcher_image_library_and_worker_content(self):
+        engine = self.root / "runtime"
+        shutil.copytree(factory.ROOT, engine, ignore=shutil.ignore_patterns("__pycache__"))
+        image, library = factory.loaded_python_files()
+        launcher = self.root / "python"
+        shutil.copy2(sys.executable, launcher)
+        copies = [self.root / "loaded-image", self.root / "loaded-library"]
+        for source, target in zip((image, library), copies):
+            shutil.copy2(source, target)
+        with patch.object(factory, "ROOT", engine), patch.object(sys, "executable", str(launcher)), \
+                patch.object(factory, "loaded_python_files", return_value=tuple(copies)):
+            record, assignment = self.launch_assignment()
+            before = self.path.read_bytes(), self.args.receipt.read_bytes()
+            for path in (launcher, *copies, engine / "codex_worker.py"):
+                with self.subTest(path=path.name), path.open("r+b") as file:
+                    original = file.read(1)
+                    file.seek(0)
+                    file.write(bytes([original[0] ^ 1]))
+                    file.flush()
+                    with self.assertRaisesRegex(factory.FactoryError, "not a native"):
+                        factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+                    self.assertEqual((self.path.read_bytes(), self.args.receipt.read_bytes()), before)
+                    file.seek(0)
+                    file.write(original)
+            copies[0].unlink()
+            with self.assertRaisesRegex(factory.FactoryError, "restore"):
+                factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            self.assertEqual((self.path.read_bytes(), self.args.receipt.read_bytes()), before)
+
+    def native_fixture(self, payload_events):
+        binary = self.root / "native-fixture"
+        payload = "\n".join(json.dumps(event) for event in payload_events)
+        binary.write_text("#!/bin/bash\nset -euo pipefail\n"
+                          # Answers the worker's MCP listing as real Codex would, then plays the run (#153).
+                          "case \" $* \" in *' mcp list '*) printf '[]\\n'; exit 0;;"
+                          " *' features list '*) printf 'apps stable false\\nplugins stable false\\n'; exit 0;; esac\n"
+                          "printf '%s\\n' " + shlex.quote(payload) + "\n")
+        binary.chmod(0o700)
+        return binary
+
+    def test_symlink_venv_reaches_worker_and_strict_collection_with_its_prefix(self):
+        venv = self.root / "venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", "--symlinks", str(venv)], check=True)
+        python = venv / "bin/python"
+        self.assertTrue(python.is_symlink())
+        engine = (self.root / "engine").resolve()
+        shutil.copytree(factory.ROOT, engine, ignore=shutil.ignore_patterns("__pycache__"))
+        with (engine / "factory.py").open("a") as module:
+            module.write(f"\nSCRATCH_ROOT = {factory.SCRATCH_ROOT!r}\n")
+        binary = self.native_fixture(events())
+        with patch.object(sys, "executable", str(python)), patch.object(sys, "prefix", str(venv)), \
+                patch.object(factory, "ROOT", engine):
+            record, assignment = self.launch_assignment(codex=str(binary), execute=False)
+            frozen = copy.deepcopy(assignment["request"])
+            self.assertEqual(frozen["command"][0], str(python))
+            result = subprocess.run(self.worker_argv, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with patch.object(factory, "status", return_value=dict(state="exited")):
+                factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+            collected = factory.load_task(self.path)["assignments"]["qa"]
+            self.assertTrue(collected["native_collected"])
+            self.assertEqual(collected["request"], frozen)
 
     def test_workspace_python_startup_code_cannot_run_in_the_host_worker(self):
         effect = self.root / "startup-effect"
@@ -2067,30 +2325,60 @@ class NativeResults(unittest.TestCase):
                                              "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
                                              "commit", "-m", "Add startup fixture").returncode, 0)
         self.candidate = factory.git_commit(".", "HEAD")
-        binary = self.root / "native-fixture"
         payload_events = events()
         payload_events.insert(2, dict(type="item.completed", item=dict(type="command_execution", aggregated_output="x" * 100000)))
-        payload = "\n".join(json.dumps(event) for event in payload_events)
-        binary.write_text("#!/bin/bash\nset -euo pipefail\n"
-                          # Answers the worker's MCP listing as real Codex would, then plays the run (#153).
-                          "case \" $* \" in *' mcp list '*) printf '[]\\n'; exit 0;;"
-                          " *' features list '*) printf 'apps stable false\\nplugins stable false\\n'; exit 0;; esac\n"
-                          "printf '%s\\n' " + shlex.quote(payload) + "\n")
-        binary.chmod(0o700)
-        self.launch_assignment(codex=str(binary), execute=False)
-        engine = self.root / "engine"
-        engine.mkdir()
-        for name in ("checkout_exec.py", "codex_worker.py", "factory.py", "factory_commit.py"):
-            (engine / name).write_bytes((factory.ROOT / name).read_bytes())
-        command = [str(engine / Path(arg).name) if arg in {
-            str(factory.ROOT / "checkout_exec.py"), str(factory.ROOT / "codex_worker.py")} else arg for arg in self.worker_argv]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=15,
-            env={**os.environ, "PYTHONPATH": str(self.repo), "PYTHONDONTWRITEBYTECODE": "1"})
+        binary = self.native_fixture(payload_events)
+        engine = (self.root / "engine").resolve()
+        shutil.copytree(factory.ROOT, engine, ignore=shutil.ignore_patterns("__pycache__"))
+        with (engine / "factory.py").open("a") as module:
+            module.write(f"\nSCRATCH_ROOT = {factory.SCRATCH_ROOT!r}\n")
+        # Move the admitted alias at the end of the wrapper's real checkout verification.
+        # The worker should keep running under the checked interpreter and sanitized environment.
+        launcher = Path(sys.executable)
+        relative = launcher.relative_to(launcher.parent.parent)
+        prefix_alias = self.root / "prefix-alias"
+        prefix_alias.symlink_to(launcher.parent.parent, target_is_directory=True)
+        alias = prefix_alias / relative
+        moved = self.root / "moved"
+        (moved / relative).parent.mkdir(parents=True)
+        (moved / relative).symlink_to("/usr/bin/false")
+        with (engine / "factory.py").open("a") as module:
+            module.write(f"""
+original_check = check_checkout
+def check_checkout(*args, **kwargs):
+    result = original_check(*args, **kwargs)
+    prefix_alias = Path({str(prefix_alias)!r})
+    prefix_alias.unlink()
+    prefix_alias.symlink_to({str(moved)!r}, target_is_directory=True)
+    return result
+""")
+        worker_script = engine / "codex_worker.py"
+        worker_script.write_text(worker_script.read_text().replace("def main(argv=None):",
+            "def main(argv=None):\n    assert not factory.ENVIRONMENT_TOKEN and factory.TOKEN_VARIABLE not in os.environ"
+            "\n    assert os.environ['GIT_NO_REPLACE_OBJECTS'] == '1' and sys.flags.ignore_environment and sys.flags.no_user_site"))
+        with patch.object(factory, "ROOT", engine), patch.object(sys, "executable", str(alias)):
+            record, assignment = self.launch_assignment(codex=str(binary), execute=False)
+        self.assertEqual(assignment["request"]["command"][0], str(alias))
+        other = self.root / "other-python"
+        subprocess.run([str(Path(sys.executable).resolve()), "-m", "venv", "--without-pip", "--copies", str(other)], check=True)
+        wrong = subprocess.run([str(other / "bin/python"), *self.worker_argv[1:]], capture_output=True, text=True)
+        self.assertEqual(wrong.returncode, 1, wrong.stderr)
+        self.assertIn("Installed runtime changed", wrong.stderr)
+        self.assertFalse(self.args.receipt.exists())
+        self.assertFalse(self.args.events.exists())
+        result = subprocess.run(self.worker_argv, capture_output=True, text=True, timeout=15,
+            env={**os.environ, "PYTHONPATH": str(self.repo), factory.TOKEN_VARIABLE: "fixture"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(effect.exists())
         self.assertFalse((engine / "__pycache__").exists())
         self.assertEqual(json.loads(self.args.receipt.read_text())["state"], "completed")
         self.assertEqual(worker.read_events(self.args.events), payload_events)
+        self.assertEqual(alias.resolve(), Path("/usr/bin/false").resolve())
+        frozen = copy.deepcopy(assignment["request"])
+        with patch.object(factory, "ROOT", engine), patch.object(factory, "status", return_value=dict(state="exited")):
+            collected = factory.collect_codex(self.path, "qa", self.rex, record, assignment)
+        self.assertTrue(collected["assignments"]["qa"]["native_collected"])
+        self.assertEqual(collected["assignments"]["qa"]["request"], frozen)
 
     def test_oversize_native_event_retains_failed_attempt_without_retry(self):
         with patch.object(self.process, "readline", side_effect=ValueError("Separator is found, but chunk is longer than limit")):
@@ -2239,6 +2527,7 @@ class NativeResults(unittest.TestCase):
         command = assignment["request"]["command"]
         index = command.index("--worktree-git-dir")
         del command[index:index + 2]
+        del assignment["native_launch"]  # This command predates both worktree binding and launch attestation.
         factory.save(self.path, record)
         frozen = factory.codex_command(self.path, task="task", assignment_id="qa", codex=sys.executable,
             model="fixture-model", effort="high", cwd=str(self.repo))
@@ -2288,7 +2577,8 @@ class NativeResults(unittest.TestCase):
         index = command.index("--repo-identity")
         del command[index:index + 2]
         record["schema_version"] = 2
-        del assignment["native_collected"]
+        del assignment["native_launch"]
+        del assignment["native_collected"], assignment["interpreter"]
         assignment.pop("rex_instance", None)
         del record["control_events"]
         del record["provisioning"]
@@ -2399,7 +2689,7 @@ class NativeResults(unittest.TestCase):
         record, assignment = self.launch_assignment()
         receipt = self.args.receipt.read_text()
         events_text = self.args.events.read_text()
-        duplicate_receipt = receipt.replace('"schema_version": 5', '"schema_version": 99, "schema_version": 5', 1)
+        duplicate_receipt = receipt.replace('"schema_version": 8', '"schema_version": 99, "schema_version": 8', 1)
         duplicate_event = events_text.replace('"schema_version": 1', '"schema_version": 99, "schema_version": 1', 1)
         for damaged_receipt, damaged_events, error in (
                 (duplicate_receipt, events_text, "Cannot read native receipt"),

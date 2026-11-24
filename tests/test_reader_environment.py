@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -550,6 +550,14 @@ class AppleGitShim(unittest.TestCase):
         self.assertEqual(factory.git_binary(), str(self.real))  # Cached: no second xcrun.
         self.assertEqual(run.call_count, 1)
 
+    def test_cold_git_discovery_shares_the_report_deadline(self):
+        now = 0
+        budget = factory.ReportHashBudget(1, 10, 5, clock=lambda: now)
+        now = 4.75
+        with budget.git_reads():
+            _, run = self.resolve(subprocess.CompletedProcess([], 0, stdout=str(self.real), stderr=""))
+        self.assertEqual(run.call_args.kwargs["timeout"], 0.25)
+
     def test_an_unresolvable_shim_refuses(self):
         for found in (subprocess.CompletedProcess([], 1, stdout="", stderr="xcrun: error"),
                       subprocess.CompletedProcess([], 0, stdout="relative/git\n", stderr=""),
@@ -563,8 +571,12 @@ class ManagedScratch(unittest.TestCase):
     """Each native attempt's TMPDIR is its own and goes when the attempt does (local-dev, 84 GB of temp)."""
 
     def test_scratch_is_short_private_and_removed_with_read_only_leftovers(self):
-        with factory.scratch_directory() as scratch:
+        receipt = {}
+        with tempfile.TemporaryDirectory() as state, factory.scratch_directory(Path(state) / "receipt.json", receipt) as scratch:
             self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+            outside = Path(state) / "outside"
+            outside.mkdir(mode=0o500)
+            (scratch / "outside-link").symlink_to(outside, target_is_directory=True)
             nested = scratch / "go-build123" / "pkg"
             nested.mkdir(parents=True)
             (nested / "a.o").write_text("object")
@@ -574,15 +586,87 @@ class ManagedScratch(unittest.TestCase):
                 subprocess.run([factory.git_binary(), "init", "-q", repository], check=True)
                 environment = factory.worker_environment({"PATH": os.defpath}, repository, scratch=scratch)
             self.assertEqual(environment["TMPDIR"], str(scratch))
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
         self.assertFalse(scratch.exists())
+        self.assertIs(receipt["scratch_removed"], True)
 
-    def test_a_leftover_is_reported_not_fatal(self):
-        from contextlib import redirect_stderr
-        from io import StringIO
-        from unittest.mock import patch
-        scratch = factory.new_scratch()
-        self.addCleanup(lambda: scratch.exists() and __import__("shutil").rmtree(scratch))
-        errors = StringIO()
-        with patch.object(factory.shutil, "rmtree", side_effect=PermissionError("busy")), redirect_stderr(errors):
-            factory.remove_scratch(scratch)
-        self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
+    def test_unverified_identity_leaves_scratch_intact(self):
+        with tempfile.TemporaryDirectory() as state:
+            scratch = Path(state) / "sf-fixture"
+            scratch.mkdir(mode=0o700)
+            marker = scratch / "marker"
+            marker.write_text("keep")
+            with ExitStack() as handles, redirect_stderr(io.StringIO()) as errors:
+                fd = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY)
+                handles.callback(os.close, fd)
+                self.assertIs(factory.remove_scratch(scratch, None, fd), False)
+            self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
+            self.assertEqual(marker.read_text(), "keep")
+
+    def test_cleanup_and_permission_retry_stay_with_the_recorded_directory(self):
+        rmtree = factory.shutil.rmtree
+        fwalk = os.fwalk
+        for moment in ("during removal", "before permission repair", "after permission repair"):
+            with self.subTest(moment=moment), tempfile.TemporaryDirectory() as state:
+                root = Path(state)
+                receipt = {}
+                with patch.object(factory, "SCRATCH_ROOT", state), redirect_stderr(io.StringIO()), ExitStack() as effects:
+                    with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                        (scratch / "nested").mkdir()
+
+                        def replace():
+                            scratch.rename(root / "original")
+                            scratch.mkdir(mode=0o700)
+                            (scratch / "nested").mkdir()
+                            (scratch / "nested/marker").write_text("keep")
+                            (scratch / "nested").chmod(0o500)
+
+                        def remove(name, **kwargs):
+                            if moment == "during removal":
+                                replace()
+                                return rmtree(name, **kwargs)
+                            if moment == "before permission repair":
+                                replace()
+                            raise PermissionError("fixture requires repair")
+
+                        def repair(*args, **kwargs):
+                            yield from fwalk(*args, **kwargs)
+                            if moment == "after permission repair":
+                                replace()
+
+                        effects.enter_context(patch.object(factory.shutil, "rmtree", side_effect=remove))
+                        effects.enter_context(patch.object(os, "fwalk", side_effect=repair))
+                self.assertIs(receipt["scratch_removed"], False)
+                self.assertEqual((scratch / "nested/marker").read_text(), "keep")
+                self.assertEqual((scratch / "nested").stat().st_mode & 0o777, 0o500)
+                (scratch / "nested").chmod(0o700)
+
+    def test_final_unlink_preserves_a_directory_swapped_at_the_last_name_check(self):
+        rename = Path.rename
+        for occupied in (False, True):
+            with self.subTest(occupied=occupied), tempfile.TemporaryDirectory() as state:
+                root = Path(state)
+                receipt = {}
+                replacements = []
+                with patch.object(factory, "SCRATCH_ROOT", state), redirect_stderr(io.StringIO()) as errors:
+                    def swap_before_claim(path, destination):
+                        rename(path, root / "original")
+                        path.mkdir()
+                        replacements.append(path.stat())
+                        rename(path, destination)
+                        if occupied:
+                            path.mkdir()
+                            replacements.append(path.stat())
+                        return destination
+
+                    with patch.object(Path, "rename", autospec=True, side_effect=swap_before_claim) as claim:
+                        with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                            pass
+                self.assertIs(receipt["scratch_removed"], False)
+                self.assertTrue(os.path.samestat(scratch.stat(), replacements[-1]))
+                held = claim.call_args.args[1]
+                if occupied:
+                    self.assertTrue(os.path.samestat(held.stat(), replacements[0]))
+                    self.assertIn(str(held), errors.getvalue())
+                else:
+                    self.assertFalse(held.parent.exists())

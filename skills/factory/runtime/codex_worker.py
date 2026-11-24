@@ -320,18 +320,17 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         raise factory.FactoryError("Invalid repository identity; inspect the original assignment before another attempt")
     if not args.worktree_git_dir.is_absolute():
         raise factory.FactoryError("Restore the saved absolute worktree Git directory before launching")
-    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
-                           expected_git_dir=args.worktree_git_dir)
+    report_source = factory.check_worker_cwd(args, identity)
     if args.write:
         factory_commit.prepare_writer(args, binary, (
             Path(factory.git_worktree(args.cwd)), factory.git_common_dir(args.cwd), args.worktree_git_dir))
     if args.commit_message is not None:
         factory_commit.prepare_commit(args, scan=scan)
-    factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
-                           expected_git_dir=args.worktree_git_dir)
     schema = args.receipt.with_suffix(".schema.json")
     # The receipt is this native effect's before-start intent, separate from the Rex launch.
-    receipt = dict(schema_version=6 if coordination else 5, kind="codex-execution", job=args.job, state="starting",
+    receipt: dict = dict(schema_version=factory.SCRATCH_RECEIPT_VERSION, kind="codex-execution", job=args.job, state="starting",
+                   scratch=None, scratch_identity=None, scratch_removed=None, native_process=None,
+                   interpreter=factory.interpreter_identity(sys.executable), retained_files={},
                    inputs=dict(candidate=args.candidate, requirements=args.requirements),
                    repository_identity=identity,
                    worktree_git_dir=str(args.worktree_git_dir),
@@ -349,16 +348,19 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
         os.close(fd)
         raise
     started, process = timer(), None
-    directory = scratch = None
+    directory = None
+    scratch_handles = contextlib.ExitStack()
     cleanup_errors = []
     events = []
     # Readers run unconfined, so they work in a disposable checkout of the candidate.
     checkouts, workdir = contextlib.ExitStack(), "."
+    reader_admin_stat = None
     try:
         try:
             if not args.write:
-                workdir = str(checkouts.enter_context(factory.reader_checkout(
-                    str(args.repo), args.candidate, factory.reader_checkout_path(args.receipt), identity=identity)))
+                reader_dir, reader_admin_stat, report_source = checkouts.enter_context(factory.reader_checkout(
+                    str(args.repo), args.candidate, factory.reader_checkout_path(args.receipt), identity=identity))
+                workdir = str(reader_dir)
             with os.fdopen(fd, "w") as stream:
                 if args.commit_message is not None:
                     instructions += "\n" + factory_commit.WRITER_CONTRACT + "\n"
@@ -368,7 +370,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                 except OSError:
                     raise factory.FactoryError("Cannot allocate the private native shell directory; restore temporary storage access/space and reconcile this attempt before another launch") from None
                 # Off the event loop: it runs Git, and xattr on macOS.
-                scratch = factory.new_scratch()
+                scratch = scratch_handles.enter_context(factory.scratch_directory(args.receipt, receipt))
                 environment = await asyncio.to_thread(factory.worker_environment,
                     {**native_environment(), "ZDOTDIR": str(directory)}, workdir, scratch=scratch)
                 # JSON basic-string escapes also fit TOML, except raw DEL;
@@ -403,6 +405,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                                           stdin=prompt, stdout=asyncio.subprocess.PIPE)
                 except OSError:
                     raise factory.FactoryError("Cannot start the saved native CLI; restore executable access/local process resources and inspect the retained attempt before authorizing another ID") from None
+                factory.record_native_process(args.receipt, receipt, process)
 
                 async def consume():
                     while True:
@@ -431,25 +434,29 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
                             receipt["thread_id"] = event["thread_id"]
                     return await process.wait()
 
-                receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
+                deadline = factory.native_clock() + args.seconds
+                receipt["exit_code"] = await factory.within_budget(consume(), deadline=deadline)
                 os.fsync(stream.fileno())
             if receipt["exit_code"] != 0:
                 raise factory.FactoryError(exit_diagnostic(events))
             receipt.update(parse_events(events, coordination))
             factory.check_tool_evidence("codex", events, args, coordination)
-            if not args.write:
-                factory.retain_checkout_reports(receipt["report"]["artifacts"], workdir, args.receipt)
+            factory.retain_report_files(receipt, args, workdir, deadline=deadline, source=report_source,
+                                        reader_admin_stat=reader_admin_stat)
         finally:
             # Retire native resources before any factory-owned Git callbacks.
             # mkdtemp has no finalizer: an unconfirmed child keeps its directory.
-            if process is not None:
-                try:
-                    await stop_child(process)
-                except OSError:
-                    cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
-                receipt["exit_code"] = process.returncode
-            if scratch is not None and (process is None or process.returncode is not None):
-                factory.remove_scratch(scratch)
+            try:
+                if process is not None:
+                    try:
+                        await stop_child(process)
+                    except OSError:
+                        cleanup_errors.append("Cannot stop the owned native child; inspect its process and reconcile this attempt before another launch")
+                    receipt["exit_code"] = process.returncode
+            finally:
+                if process is not None and process.returncode is None:
+                    receipt["scratch_removed"] = False
+                scratch_handles.close()
             if directory is not None:
                 if process is not None and process.returncode is None:
                     cleanup_errors.append(f"Native termination is unconfirmed; retain shell directory {str(directory)!r} until owned-child reconciliation confirms exit")
@@ -462,8 +469,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, clock=time.time
             raise factory.FactoryError("Native resource cleanup failed; factory Git was not started")
         candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": binary}),
                                                     receipt, identity, git_scope=git_scope, scan=scan)
-        if not args.write and candidate != args.candidate:
-            raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
+        if not args.write:
+            if candidate != args.candidate:
+                raise factory.FactoryError("Read-only assignment's candidate changed; do not reuse its verification")
+            factory.check_report_index(workdir, reader_admin_stat=reader_admin_stat)
         receipt.update(candidate=candidate, state="completed")
     except TimeoutError:
         receipt.update(state="failed", error="Native execution allowance expired; inspect the existing attempt")

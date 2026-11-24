@@ -237,10 +237,12 @@ def isolated_git(args, identity, *, signing=False, read_only=False, config_paths
                   "-c", "permissions={" + name + "=" + profile + "}", "--cd", str(root)]
         if agent and sys.platform == "darwin":
             prefix.extend(["--allow-unix-socket", agent])
-        digest = hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
-        runtime = json.dumps({key: environment[key] for key in ("PATH", "TMPDIR") if key in environment})
+        # A nested raw Git read keeps this sandbox and further restricts its environment.
+        effective = factory.GIT_EXECUTION.get()[1]
+        digest = hashlib.sha256(json.dumps(effective, sort_keys=True).encode()).hexdigest()
+        runtime = json.dumps({key: effective[key] for key in ("PATH", "TMPDIR") if key in effective})
         return [*prefix, "--", python, "-I", "-S", "-c", GIT_ENV_LAUNCHER,
-                runtime, json.dumps(sorted(environment)), digest]
+                runtime, json.dumps(sorted(effective)), digest]
     with tempfile.TemporaryDirectory(prefix="factory-git-", dir=args.worktree_git_dir) as temporary, ExitStack() as stack:
         environment["TMPDIR"] = temporary
         files[temporary] = "write"
@@ -590,6 +592,7 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     if paths.returncode:
         raise factory.FactoryError("Cannot inspect writer source paths; restore Git access before staging changes")
     check_filters([name for name in paths.stdout.split("\0") if name])
+    pending = {}
     for name in paths.stdout.split("\0"):
         if not name:
             continue
@@ -604,7 +607,9 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
             raise factory.FactoryError("Writer contains linked or non-regular source; inspect the retained changes and use independent regular files")
         if info.st_nlink > 1:
             # Materialize finished output without changing its other hard links.
-            factory.independent_source(source)
+            pending[source] = (info.st_dev, info.st_ino)
+    if pending:
+        factory.remember_writer_links(args, pending)
     def ignored():
         status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored", environment=environment)
         if status.returncode:
@@ -686,10 +691,9 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     if committed.returncode:
         raise factory.FactoryError("Writer commit failed" + git_said(committed) + "; inspect the retained commit intent, "
                                    "Git HEAD and configured hooks/signing before authorizing a correction. No commit was retried")
-    candidate = factory.git_commit(".", "HEAD")
-    parent = git("show", "-s", "--format=%P", candidate)
-    if parent.returncode or parent.stdout.strip() != args.candidate:
-        raise factory.FactoryError("Writer commit parent differs; inspect the original worktree and commit intent before continuing")
+    with factory.local_git_reads():
+        candidate = factory.git_commit(".", "HEAD")
+        check_commit_headers(".", candidate, args.candidate, receipt["commit"]["staged_tree"])
     receipt["commit"].update(state="created", candidate=candidate)
     factory.save(args.receipt, receipt)
     return hooked
@@ -733,12 +737,21 @@ def check_commit_receipt(receipt, args, repository, *, historical=False):
             or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit["staged_tree"])
             or (commit["state"] == "unchanged") != (commit["candidate"] == commit["parent"])):
         raise factory.FactoryError("Factory commit evidence differs from this assignment; inspect its original intent and Git history")
-    if commit["state"] == "created":
-        parent = factory.git_run(repository, "show", "-s", "--format=%P", commit["candidate"])
-        if parent.returncode or parent.stdout.strip() != commit["parent"]:
+    check_commit_headers(repository, commit["candidate"], commit["parent"] if commit["state"] == "created" else None,
+                         commit["staged_tree"])
+
+
+def check_commit_headers(repository, candidate, parent, tree):
+    raw = factory.git_run_bytes(repository, "cat-file", "commit", candidate)
+    end = raw.stdout.find(b"\n\n")
+    if raw.returncode or end < 0:
+        raise factory.FactoryError("Restore the original commit headers before validating provenance")
+    headers = raw.stdout[:end].split(b"\n")
+    if parent is not None:
+        parents = [line[7:] for line in headers if line.startswith(b"parent ")]
+        if parents != [parent.encode()]:
             raise factory.FactoryError("Factory commit parent differs from the assignment; inspect its original Git history before collection")
-    tree = factory.git_run(repository, "rev-parse", "--verify", commit["candidate"] + "^{tree}")
-    if tree.returncode or tree.stdout.strip() != commit["staged_tree"]:
+    if [line[5:] for line in headers if line.startswith(b"tree ")] != [tree.encode()]:
         raise factory.FactoryError("Factory commit staged tree differs from the candidate; inspect the original receipt and Git tree before collection")
 
 

@@ -1,6 +1,7 @@
 """Fixed GitHub/process transports and temporary Git only; no external services."""
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import copy
+from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import codex_capacity
@@ -86,6 +88,7 @@ class NativeReviewFixture(unittest.TestCase):
         self.native.setUp()
         self.addCleanup(self.native.doCleanups)
         self.root = self.native.root.resolve()
+        (self.root / "earlier").symlink_to(factory.ROOT, target_is_directory=True)
         self.repo = self.native.repo.resolve()
         catalog = patch.object(codex_capacity, "snapshot", self.codex_catalog)
         catalog.start()
@@ -315,10 +318,12 @@ class Integration(NativeReviewFixture):
         with self.assertRaisesRegex(factory.FactoryError, "differs from the recorded `delivered` receipt"):
             integration.delivered_accepted(self.path, "release", "accept")
 
-    def delivered_cli(self, acceptance=None, *, review="cleanup-release", required="cleanup-qa"):
+    def delivered_cli(self, acceptance=None, *, review="cleanup-release", required: Sequence[str] = "cleanup-qa"):
         command = ["--state-dir", str(self.tasks), "delivered", "--task", "deliver", "--pr", self.transport.identity["url"],
-            "--review", review, "--after", required, "--gh", "/installed/gh",
+            "--review", review, "--gh", "/installed/gh",
             "--release-scripts", "/installed/.tessl/plugins/jbaruch/coding-policy/skills/release"]
+        for approval in ([required] if isinstance(required, str) else required):
+            command.extend(["--after", approval])
         if acceptance is not None:
             command.extend(["--acceptance", acceptance])
         output, errors = StringIO(), StringIO()
@@ -327,6 +332,38 @@ class Integration(NativeReviewFixture):
         if code:
             self.assertEqual(output.getvalue(), "")
         return code, json.loads(output.getvalue()) if output.getvalue() else None, errors.getvalue()
+
+    def test_generic_codex_aliases_survive_collection_delivery_and_final_acceptance(self):
+        command = factory.codex_command(self.path, task="deliver", assignment_id="generic", codex=sys.executable,
+            model="fixture-model", effort="high", cwd=str(self.repo), role="qa")
+        for flag, spelling in (("--model", "--mod=fixture-model"), ("--effort", "--effort=high")):
+            index = command.index(flag)
+            command[index:index + 2] = [spelling]
+        index = command.index("--seconds")  # Generic start accepts the worker default.
+        del command[index:index + 2]
+        command[command.index("--requirements")] = "--requirem"
+        cli = ["--state-dir", str(self.tasks), "start", "--task", "deliver", "--id", "generic", "--role", "qa",
+               "--cwd", str(self.repo), "--goal", "Inspect", "--purpose", "work", "--", *command]
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+            before = self.path.read_bytes()
+            self.assertEqual(factory.main([*cli, "--model=fixture-model"]), 1)
+            self.assertIn("unambiguous", errors.getvalue())
+            self.assertEqual(self.path.read_bytes(), before)
+            self.assertEqual(factory.main(cli), 0, errors.getvalue())
+        record = factory.load_task(self.path)
+        launched = next(call for call in reversed(FakeRex.calls) if call[:2] == ("window", "new"))
+        self.assertIn("--mod=fixture-model", launched)
+        self.assertIn("--effort=high", launched)
+        self.finish_review("generic", record, record["assignments"]["generic"], self.repo)
+        self.release_skill_merges()
+        selection = dict(required="generic", review="release")
+        self.assertEqual(self.delivered_cli(**selection)[0], 0)
+        self.review("final", "release", delivery="release")
+        code, receipt, error = self.delivered_cli("final", **selection)
+        self.assertEqual((code, error), (0, ""))
+        assert receipt is not None
+        self.assertEqual(receipt["acceptance"]["outcome"], "approved")
+        self.assertEqual(factory.load_task(self.path)["assignments"]["generic"]["request"]["command"], command)
 
     def test_mixed_runtimes_deliver_writer_candidate_and_accept_frozen_receipt(self):
         # Strictly collect with three launch prefixes, leaving the saved requests untouched.
@@ -354,16 +391,21 @@ class Integration(NativeReviewFixture):
         python.unlink()
         runtime.unlink()
         self.release_skill_merges()
-        original = factory.load_task(self.path)["assignments"]
+        record = factory.load_task(self.path)
+        factory.tidy(self.path, factory.connect(record), record)
+        original = record["assignments"]
+        self.assertTrue(all(item["closed"]["state"] == "exited" for item in original.values()))
         artifacts = {}
         for assignment in original.values():
             command = assignment["request"]["command"]
             for name in (assignment["brief"], command[command.index("--receipt") + 1], command[command.index("--events") + 1]):
                 artifacts[Path(name)] = Path(name).read_bytes()
         select = dict(review="previous-release", required="previous-reader")
-        code, receipt, errors = self.delivered_cli(**select)
+        with patch.object(factory, "connect", side_effect=AssertionError("Historical replay contacted Rex")):
+            code, receipt, errors = self.delivered_cli(**select)
         self.assertEqual((code, errors), (0, ""))
         assert receipt is not None
+        self.assertEqual(set(receipt["approvals"]), {"previous-reader", "previous-release"})
         self.assertEqual((receipt["head"], receipt["merge_commit"]), (self.head, merge))
         self.assertEqual(self.delivered_cli(**select), (0, receipt, ""))
 
@@ -409,7 +451,7 @@ class Integration(NativeReviewFixture):
                 elif damage == "duplicate-option":
                     argv.extend(["--job", "deliver/previous"])
                 elif damage == "abbreviation":
-                    argv[argv.index("--requirements")] = "--requirem"
+                    argv[argv.index("--requirements")] = "--r"
                 elif damage == "bad-value":
                     argv[argv.index("--seconds") + 1] = "private-fixture-text"
                 elif damage == "help":
@@ -466,10 +508,10 @@ class Integration(NativeReviewFixture):
         factory.save(self.path, record)
         read_error = "Cannot read native receipt for this assignment; inspect or restore the original artifact before collection"
         binding_error = "Restore the original native command bound to this task, assignment and local artifacts"
-        for runtime, message in ((factory.ROOT, read_error), (self.root / "other-install", binding_error)):
+        for runtime in (factory.ROOT, self.root / "other-install"):
             with self.subTest(runtime=runtime), patch.object(factory, "ROOT", runtime):
                 code, output, error = self.delivered_cli(review="release", required="qa")
-                self.assertEqual((code, output, error), (1, None, f"factory: deliver/qa: {message}\n"))
+                self.assertEqual((code, output, error), (1, None, f"factory: deliver/qa: {binding_error}\n"))
                 self.assertNotIn(marker, error)
 
         argv[index] = str(receipt)
@@ -484,6 +526,12 @@ class Integration(NativeReviewFixture):
     def test_mixed_writer_context_refuses_release_and_final_self_review(self):
         with patch.object(factory, "ROOT", self.root / "earlier"):
             self.review("writer", "backend", writer=True, frozen=False, outcome="completed", context="writer-session")
+        record = factory.load_task(self.path)
+        writer = record["assignments"]["writer"]
+        writer.pop("native_launch")  # The strict original collection predates launcher attestations.
+        command = writer["request"]["command"]
+        command[command.index("--write")] = "--writ"
+        factory.save(self.path, record)
         self.review("self-review", "release", context="writer-session")
         self.review("duplicate", "qa", frozen=False, context="context-release")
         self.release_skill_merges()
@@ -514,8 +562,11 @@ class Integration(NativeReviewFixture):
         with patch.object(factory, "ROOT", self.root / "earlier"):
             code, output, error = self.delivered_cli(review="release", required="qa")
             self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
-            self.assertIn("deliver/failed: cannot verify the historical writer's original contributor identity", error)
-            self.assertIn("preserve the recorded attempt and ask the task owner", error)
+            self.assertIn("independent of contributors", error)
+            record = factory.load_task(self.path)
+            record["assignments"]["failed"].pop("native_launch")
+            factory.save(self.path, record)
+            self.assertIn("cannot verify the historical writer", self.delivered_cli(review="release", required="qa")[2])
             with self.assertRaisesRegex(factory.FactoryError, "deliver/failed: not a native Codex worker.*inspect its original"):
                 factory.collect_codex(self.path, "failed", None, factory.load_task(self.path), failed)
 
@@ -527,11 +578,12 @@ class Integration(NativeReviewFixture):
         with patch.object(factory, "ROOT", self.root / "earlier"):
             code, output, error = self.delivered_cli(review="release", required="manual")
             self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
-            self.assertIn("deliver/manual: missing native result; use codex-collect", error)
+            self.assertIn("deliver/manual: missing native result; preserve the attempt", error)
+            original_error = error
         code, output, error = self.delivered_cli(review="release", required="manual")
         self.assertEqual((code, output, len(error.splitlines())), (1, None, 1))
         self.assertIn("deliver/manual: missing native result; preserve the attempt", error)
-        self.assertNotIn("codex-collect", error)
+        self.assertEqual(error, original_error)
         receipt_path = command[command.index("--receipt") + 1]
         receipt = json.loads(Path(receipt_path).read_text())
         record = factory.record_result(self.path, assignment_id="manual", candidate=receipt["candidate"],
@@ -675,7 +727,8 @@ class Integration(NativeReviewFixture):
         self.assertIn("Original delivery differs", errors.getvalue())
         record = factory.load_task(self.path)
         frozen = release_evidence.from_delivery_assignment(record, record["assignments"]["accept-cli"])
-        self.assertEqual(frozen, release_evidence.delivered_receipt(record, "release"))
+        self.finish_review("accept-cli", record, record["assignments"]["accept-cli"], self.repo)
+        self.assertEqual(frozen, release_evidence.delivered_receipt(factory.load_task(self.path), "release"))
 
     def test_failed_writer_recovers_thread_from_supported_original_partial_events(self):
         failed = self.review("failed-writer", "backend", writer=True, frozen=False, failed=True)
@@ -713,14 +766,37 @@ class Integration(NativeReviewFixture):
                     release_evidence.capture(factory.load_task(self.path), self.transport.identity["url"], transport, cwd=str(cwd))
 
     def test_failed_writer_cannot_review_itself_and_unknown_identity_refuses(self):
-        failed = self.review("failed-writer", "backend", context="context-qa", writer=True, frozen=False, failed=True)
+        self.review("failed-writer", "backend", context="context-qa", writer=True, frozen=False, failed=True)
         with self.assertRaisesRegex(factory.FactoryError, "independent of contributors"):
             self.confirm()
-        command = failed["request"]["command"]
+        # A generic Codex start could spell the same worker option as an argparse prefix.
+        record = factory.load_task(self.path)
+        command = record["assignments"]["failed-writer"]["request"]["command"]
+        command[command.index("--write")] = "--writ"
+        self.assertTrue(codex_worker.parser().parse_args(command[4:]).write)
+        factory.save(self.path, record)
+        with self.assertRaisesRegex(factory.FactoryError, "independent of contributors"):
+            self.confirm()
         events = Path(command[command.index("--events") + 1])
         events.write_text("")
         with self.assertRaisesRegex(factory.FactoryError, "Unknown or ambiguous"):
             self.confirm()
+
+    def test_legacy_failed_writer_context_is_excluded_from_final_acceptance(self):
+        self.review("failed-writer", "backend", writer=True, failed=True, frozen=False, context="writer-thread")
+        self.release_skill_merges()
+        self.confirm()
+        self.review("final", "release", delivery="release", context="writer-thread")
+        record = factory.load_task(self.path)
+        command = record["assignments"]["failed-writer"]["request"]["command"]
+        index = command.index("--write")
+        for flag in ("--wr", "--wri", "--writ"):
+            command[index] = flag
+            factory.save(self.path, record)
+            with self.subTest(flag=flag):
+                self.assertEqual(self.confirm()["head"], self.head)
+                with self.assertRaisesRegex(factory.FactoryError, "contributor cannot judge"):
+                    integration.delivered_accepted(self.path, "release", "final")
 
     def test_prior_ordinary_qa_does_not_require_new_external_review_prose(self):
         qa = copy.deepcopy(factory.load_task(self.path)["assignments"]["qa"])
@@ -938,34 +1014,38 @@ class Integration(NativeReviewFixture):
         with self.assertRaises(factory.FactoryError):
             integration.delivered_accepted(self.path, "cleanup-release", "cleanup-accept")
 
-    def test_manual_native_result_cannot_supply_historical_approval_or_acceptance(self):
-        for final in (False, True):
-            with self.subTest(final_acceptance=final):
-                checkout = self.root / ("manual-final" if final else "manual-release")
-                added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
-                self.assertEqual(added.returncode, 0, added.stderr)
-                if final:
-                    self.release_skill_merges()
-                    self.confirm()
-                key = "manual-final" if final else "manual-release"
-                assignment = self.review(key, "release", delivery="release" if final else None,
-                    cwd=checkout, collect=False)
-                command = assignment["request"]["command"]
-                receipt_path = command[command.index("--receipt") + 1]
-                receipt = json.loads(Path(receipt_path).read_text())
-                report = receipt["report"]
-                record = factory.record_result(self.path, assignment_id=key, candidate=receipt["candidate"],
-                    requirements=receipt["inputs"]["requirements"], outcome=report["outcome"],
-                    artifacts=list(dict.fromkeys([receipt_path, *report["artifacts"]])))
-                removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
-                self.assertEqual(removed.returncode, 0, removed.stderr)
-                before = self.path.read_bytes()
-                with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
-                    if final:
-                        integration.delivered_accepted(self.path, "release", key)
-                    else:
-                        integration.approvals(record, key, ["qa"])
-                self.assertEqual(self.path.read_bytes(), before)
+    def test_manual_native_result_cannot_supply_historical_approval(self):
+        self.assert_manual_result_refused(final=False)
+
+    def test_manual_native_result_cannot_supply_final_acceptance(self):
+        self.assert_manual_result_refused(final=True)
+
+    def assert_manual_result_refused(self, *, final):
+        checkout = self.root / ("manual-final" if final else "manual-release")
+        added = factory.git_run(str(self.repo), "worktree", "add", "--detach", str(checkout), self.head)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        if final:
+            self.release_skill_merges()
+            self.confirm()
+        key = "manual-final" if final else "manual-release"
+        assignment = self.review(key, "release", delivery="release" if final else None,
+            cwd=checkout, collect=False)
+        command = assignment["request"]["command"]
+        receipt_path = command[command.index("--receipt") + 1]
+        receipt = json.loads(Path(receipt_path).read_text())
+        report = receipt["report"]
+        record = factory.record_result(self.path, assignment_id=key, candidate=receipt["candidate"],
+            requirements=receipt["inputs"]["requirements"], outcome=report["outcome"],
+            artifacts=list(dict.fromkeys([receipt_path, *report["artifacts"]])))
+        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
+            if final:
+                integration.delivered_accepted(self.path, "release", key)
+            else:
+                integration.approvals(record, key, ["qa"])
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_legacy_collection_needs_explicit_strict_recollection(self):
         checkout = self.root / "legacy-worktree"
@@ -977,7 +1057,8 @@ class Integration(NativeReviewFixture):
         legacy = copy.deepcopy(original)
         legacy["schema_version"] = 8
         for assignment in legacy["assignments"].values():
-            del assignment["native_collected"]
+            del assignment["native_launch"]
+            del assignment["native_collected"], assignment["interpreter"]
             assignment.pop("rex_instance", None)
         factory.save(self.path, legacy)
         artifacts = {}
@@ -998,23 +1079,29 @@ class Integration(NativeReviewFixture):
         with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
             integration.collected_native("legacy-recollected", migrated, migrated["assignments"]["legacy-recollected"])
         with patch.object(factory, "status", return_value=dict(state="exited")):
-            recollected = factory.collect_codex(self.path, "legacy-recollected", None, migrated,
-                migrated["assignments"]["legacy-recollected"])
-        self.assertEqual(recollected["assignments"]["legacy-recollected"],
-            {key: value for key, value in original["assignments"]["legacy-recollected"].items() if key != "rex_instance"})
-        removed = factory.git_run(str(self.repo), "worktree", "remove", str(checkout))
-        self.assertEqual(removed.returncode, 0, removed.stderr)
-        integration.collected_native("legacy-recollected", recollected, recollected["assignments"]["legacy-recollected"])
-        with self.assertRaisesRegex(factory.FactoryError, "strict collection"):
-            integration.collected_native("legacy-unproven", recollected, recollected["assignments"]["legacy-unproven"])
-        before = self.path.read_bytes()
-        with patch.object(factory, "status", return_value=dict(state="exited")):
-            with self.assertRaises(factory.FactoryError):
-                factory.collect_codex(self.path, "legacy-unproven", None, recollected,
-                    recollected["assignments"]["legacy-unproven"])
-        self.assertEqual(self.path.read_bytes(), before)
+            with self.assertRaisesRegex(factory.FactoryError, "original released"):
+                factory.collect_codex(self.path, "legacy-recollected", None, migrated,
+                                      migrated["assignments"]["legacy-recollected"])
         for path, content in artifacts.items():
             self.assertEqual(path.read_bytes(), content)
+
+    def test_successor_refuses_first_collection_without_a_launch_digest(self):
+        self.review("pending", "qa", frozen=False, collect=False)
+        legacy = factory.load_task(self.path)
+        legacy["schema_version"] = 11
+        for assignment in legacy["assignments"].values():
+            del assignment["native_launch"]
+        pending = legacy["assignments"]["pending"]
+        pending["state"] = "launching"  # The pane exists but Rex's launch reply was lost.
+        del pending["window_id"], pending["block_id"]
+        factory.save(self.path, legacy)
+        cli = ["--state-dir", str(self.tasks), "codex-collect", "--task", "deliver", "--id", "pending"]
+        original = {p: p.read_bytes() for p in self.tasks.iterdir() if p.is_file() and p.suffix != ".lock"}
+        with redirect_stderr(StringIO()) as errors, redirect_stdout(StringIO()):
+            self.assertEqual(factory.main(cli), 1)
+            self.assertIn("first collection requires the original released", errors.getvalue())
+        self.assertEqual({p: p.read_bytes() for p in self.tasks.iterdir() if p.is_file() and p.suffix != ".lock"},
+                         original)
 
     def test_first_collection_refuses_removed_original_checkout(self):
         checkout = self.root / "uncollected-worktree"
@@ -1063,6 +1150,13 @@ class Integration(NativeReviewFixture):
 
 
 class CommandAuthority(unittest.TestCase):
+    def setUp(self):
+        # Mocking the release helper must leave the owner's Git/environment checks on real local Git.
+        commands = SimpleNamespace(run=subprocess.run, TimeoutExpired=subprocess.TimeoutExpired)
+        transport = patch.object(release_evidence, "subprocess", commands)
+        transport.start()
+        self.addCleanup(transport.stop)
+
     def installed_transport(self, root):
         repo = root / "repo"
         repo.mkdir()

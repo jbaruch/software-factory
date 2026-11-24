@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 import time
@@ -62,29 +61,6 @@ def failure_reason(lines):
     return ""
 
 
-def retain_artifacts(artifacts, conversation, receipt):
-    """Copy report files from agy's private brain directory beside the receipt.
-
-    Gemini tends to return a path to a report it wrote in agy's per-conversation brain
-    directory instead of self-contained evidence; agy does not keep that directory for us.
-    """
-    base = Path.home() / ".gemini" / "antigravity-cli" / "brain"
-    brain = base / conversation
-    if brain.parent != base or not brain.is_dir() or brain.is_symlink():
-        return
-    brain, kept = brain.resolve(strict=True), receipt.with_name(receipt.name.removesuffix(".json") + ".artifacts")
-    for artifact in artifacts:
-        # A Sonnet review wrote its report into the brain directory and named it by a bare file name.
-        path = Path(artifact) if Path(artifact).is_absolute() else brain / artifact
-        if path.is_symlink() or not path.is_file() or not path.resolve(strict=True).is_relative_to(brain):
-            continue  # An ordinary reference, not a brain-directory report file.
-        target = kept / path.resolve(strict=True).relative_to(brain)
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        kept.chmod(0o700)
-        shutil.copyfile(path, target)
-        target.chmod(0o600)
-
-
 def message(text):
     return json.dumps(dict(event="user", message=dict(role="user", content=[dict(type="text", text=text)]))) + "\n"
 
@@ -124,9 +100,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
     else:
         review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
                                  base=args.base, role=args.role)
-    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
-                           expected_git_dir=args.worktree_git_dir)
-    factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
+    report_source = factory.check_worker_cwd(args, identity)
     if any(binary.is_relative_to(root) for root in (
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Antigravity installation outside the assigned checkout and Git metadata")
@@ -143,12 +117,14 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         native_antigravity.validate_usage(observation, binary)
     except native_antigravity.UsageError as exc:
         raise factory.FactoryError(str(exc)) from None
-    receipt = dict(schema_version=4 if args.write else 3, kind="antigravity-execution", state="starting", job=args.job,
+    receipt: dict = dict(schema_version=factory.SCRATCH_RECEIPT_VERSION, kind="antigravity-execution", state="starting", job=args.job,
+        scratch=None, scratch_identity=None, scratch_removed=None, native_process=None,
+        interpreter=factory.interpreter_identity(sys.executable), retained_files={},
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort, discovery=observation,
         seconds=args.seconds, created_at=clock(), finished_at=None, elapsed_seconds=None, exit_code=None,
-        report=None, conversation_id=None, usage=None, duration_seconds=None, turns=None,
+        report=None, conversation_id=None, conversation_root=None, usage=None, duration_seconds=None, turns=None,
         candidate=None, events=str(args.events), error=None)
     if args.write:
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
@@ -163,9 +139,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         raise
     started, process, lines = timer(), None, []
     checkouts, workdir = contextlib.ExitStack(), Path(".")
+    reader_admin_stat = None
     try:
         if not args.write:
-            workdir = checkouts.enter_context(factory.reader_checkout(
+            workdir, reader_admin_stat, report_source = checkouts.enter_context(factory.reader_checkout(
                 args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
             prompt_text = instructions + ("\n" + factory_commit.WRITER_CONTRACT + "\n" if args.write else "")
@@ -174,9 +151,10 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
                 prompt.write(message(prompt_text).encode("utf-8"))
                 prompt.seek(0)
                 environment = factory.worker_environment(native_environment(), workdir,
-                scratch=checkouts.enter_context(factory.scratch_directory()))
+                    scratch=checkouts.enter_context(factory.scratch_directory(args.receipt, receipt)))
                 process = await spawn(*command(binary, args.model, args.effort), cwd=str(workdir), env=environment,
                                       limit=NATIVE_LINE_LIMIT, stdin=prompt, stdout=asyncio.subprocess.PIPE)
+                factory.record_native_process(args.receipt, receipt, process)
             async def consume():
                 while True:
                     try:
@@ -197,7 +175,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
                     if shown is not None:
                         print(shown, flush=True)
                 return await process.wait()
-            receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
+            deadline = factory.native_clock() + args.seconds
+            receipt["exit_code"] = await factory.within_budget(consume(), deadline=deadline)
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Antigravity exited unsuccessfully" + failure_reason(lines)
@@ -208,9 +187,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
         receipt.update(report=native["report"], conversation_id=native["conversation_id"], usage=native["usage"],
                        duration_seconds=native["duration_seconds"], turns=native["turns"])
         factory.check_tool_evidence("antigravity", lines, args)
-        retain_artifacts(native["report"]["artifacts"], native["conversation_id"], args.receipt)
-        if not args.write:
-            factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
+        factory.retain_report_files(receipt, args, workdir, deadline=deadline, source=report_source,
+                                    reader_admin_stat=reader_admin_stat)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
@@ -219,6 +197,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_an
             factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
             if factory.git_commit(".", "HEAD") != args.candidate:
                 raise factory.FactoryError("Read-only Antigravity candidate changed; inspect its original checkout without reusing the report")
+            factory.check_report_index(workdir, reader_admin_stat=reader_admin_stat)
             candidate = args.candidate
         receipt.update(state="completed", candidate=candidate)
     except TimeoutError:

@@ -1,4 +1,5 @@
 """Delivery confirmation: the repository's release skill merges; the factory confirms what merged."""
+import importlib
 import os
 from pathlib import Path
 import re
@@ -7,15 +8,18 @@ import factory
 import release_evidence as evidence
 
 
-def collected_native(assignment_id, record, assignment, *, current=True, captured=None):
+def original_status(record, assignment):
+    rex = None if assignment.get("closed") is not None else factory.connect(record)
+    return factory.status(rex, record, assignment)
+
+
+def collected_native(assignment_id, record, assignment, *, current=True, observe_exit=True, captured=None):
     label = record["task"] + "/" + assignment_id
     command = assignment["request"]["command"]
     result = assignment["result"]
     if result is None:
-        original = factory.native_harness(command)
-        action = (f"use {original}-collect if the original worker exited successfully and its checkout is available" if original else
-                  "preserve the attempt and ask the task owner to inspect its original collection evidence")
-        raise factory.FactoryError(f"{label}: missing native result; {action} before delivery")
+        raise factory.FactoryError(f"{label}: missing native result; preserve the attempt and use its original "
+                                   "native collector and checkout only if its worker exited successfully")
     if current and not factory.result_current(record, result):
         changed = [key for key, value in (("candidate", result["candidate"]), ("requirements", result["inputs"]["requirements"]))
                    if record["inputs"][key] != value]
@@ -26,10 +30,12 @@ def collected_native(assignment_id, record, assignment, *, current=True, capture
         if harness is None:
             raise factory.FactoryError("Cannot establish contributor independence for an unverified command adapter; "
                                        "ask the task owner to inspect the original worker command")
-        rex = factory.connect(record)
+        def observe():
+            return original_status(record, assignment)
         args, receipt, native = factory.evidence_reader(harness)(assignment_id, record, assignment,
-            collected=True, delivery=True, current=current, captured=captured,
-            observe=lambda: factory.status(rex, record, assignment))
+            collected=True, delivery=True, current=current, captured=captured, observe=observe if observe_exit or assignment.get("closed") is not None else None)
+        if "native_launch" in assignment and factory.launch_runtime(assignment) is None:
+            raise factory.FactoryError("Original request differs from its native launch attestation")
         return harness, args, receipt, native
     except (factory.FactoryError, ValueError) as exc:
         raise factory.FactoryError(f"{label}: {exc}") from None
@@ -41,6 +47,10 @@ def native_context(harness, receipt):
     """The independent native identity a receipt carries."""
     key = dict(codex="thread_id", antigravity="conversation_id").get(harness, "native_session")
     return receipt.get(key) if isinstance(receipt, dict) else None
+
+
+def approval_record(harness, receipt, result):
+    return dict(context=native_context(harness, receipt), receipt=evidence.digest(receipt), result=evidence.digest(result))
 
 
 # A Claude or Grok writer's starting receipt, field for field, as its worker writes it before the native run.
@@ -58,42 +68,49 @@ UNFINISHED_FIELDS = ("finished_at", "elapsed_seconds", "exit_code", "report", "u
                      "candidate", "error", "commit")
 
 
-def unfinished_writer(harness, receipt, args, assignment, record):
-    """A Claude or Grok writer receipt exactly as its worker wrote it at start: bound to this assignment, never finished."""
+def bound_writer(harness, receipt, args, assignment, record):
+    """Bindings a Claude or Grok writer records before starting its native session."""
     request = assignment["request"]
-    late = UNFINISHED_FIELDS + (("rate_limits",) if harness == "claude" else ("request_id",))
-    return (isinstance(receipt, dict) and set(receipt) == STARTING_FIELDS[harness]
-            and receipt["kind"] == harness + "-execution" and receipt["schema_version"] == (2 if harness == "claude" else 3)
-            and receipt["state"] == "starting" and receipt["writer"] is True
+    if not isinstance(receipt, dict):
+        return False
+    version = receipt.get("schema_version")
+    fields = STARTING_FIELDS[harness]
+    if version in (7, factory.SCRATCH_RECEIPT_VERSION):
+        fields = fields | factory.SCRATCH_RECEIPT_FIELDS
+    if version == factory.SCRATCH_RECEIPT_VERSION:
+        fields = fields | {"interpreter", "retained_files"}
+    return (fields.issubset(receipt)
+            and receipt["kind"] == harness + "-execution"
+            and version in (2 if harness == "claude" else 3, 7, factory.SCRATCH_RECEIPT_VERSION)
+            and receipt["writer"] is True and args.write
             and receipt["job"] == args.job and receipt["inputs"] == request.get("inputs")
             and receipt["brief_sha256"] == request.get("instructions_sha256")
             and receipt["repository_identity"] == record["admission"]["repository_identity"]
-            and receipt["role"] == args.role and receipt["cwd"] == request.get("cwd")
+            and receipt["role"] == args.role == request["role"] and receipt["cwd"] == request.get("cwd")
             and receipt["worktree_git_dir"] == str(args.worktree_git_dir)
             and receipt["requested_model"] == args.model and receipt["requested_effort"] == args.effort
             and receipt["seconds"] == args.seconds and receipt["max_turns"] == args.turns
             and receipt["sandbox"] == str(args.sandbox) and receipt["events"] == str(args.events)
             and isinstance(receipt["binary"], str) and isinstance(receipt["discovery"], dict)
             and (harness == "claude" or isinstance(receipt["configuration"], dict))
-            and type(receipt["created_at"]) in (int, float)
-            and all(receipt[field] is None for field in late))
+            and type(receipt["created_at"]) in (int, float))
 
 
 def contributor_context(key, record, assignment):
     # A failed writer remains a contributor; never require or invent a success.
-    import importlib
     command = assignment["request"]["command"]
-    harness = factory.native_harness(command)
+    harness = factory.worker_hint(command)
     if assignment.get("native_collected") is True:
         proven, _, receipt, _ = collected_native(key, record, assignment, current=False)
         return native_context(proven, receipt)
     label = record["task"] + "/" + key
-    if harness is None:
+    if harness is None or (factory.launch_runtime(assignment) is None
+            and ("native_launch" in assignment or factory.native_harness(command) != harness)):
         raise factory.FactoryError(f"{label}: cannot verify the historical writer's original contributor identity; "
                                    "preserve the recorded attempt and ask the task owner to inspect its original evidence")
     worker = importlib.import_module(harness + "_worker")
     try:
-        args = factory.parse_saved_args(worker.parser(), command[4:] if command[1:3] == ["-E", "-s"] else command[2:])
+        args = factory.evidence_worker_args(harness, worker.parser(), key, record, assignment, replay=True)
     except factory.FactoryError as exc:
         raise factory.FactoryError(f"{label}: {exc}") from None
     try:
@@ -107,18 +124,25 @@ def contributor_context(key, record, assignment):
         # a failed writer keeps the identity its receipt and events must carry.
         if not isinstance(receipt, dict) or receipt.get("native_session") != args.native_session:
             raise factory.FactoryError(f"{label}: contributor receipt differs from its frozen native session; inspect the original writer receipt")
-        if unfinished_writer(harness, receipt, args, assignment, record) and assignment["result"] is None and \
-                factory.status(factory.connect(record), record, assignment)["state"] == "lost":
-            # A writer lost with its host never finished its receipt or produced a result a reviewer could
-            # share; like a failed writer, its frozen session is its identity (#156).
-            return args.native_session
-        if receipt.get("state") == "failed":
+        if not bound_writer(harness, receipt, args, assignment, record):
+            raise factory.FactoryError(f"{label}: restore the original writer receipt and command")
+        late = UNFINISHED_FIELDS + (("rate_limits",) if harness == "claude" else ("request_id",))
+        version = receipt["schema_version"]
+        fields = STARTING_FIELDS[harness]
+        if version in (7, factory.SCRATCH_RECEIPT_VERSION):
+            fields = fields | factory.SCRATCH_RECEIPT_FIELDS
+        if version == factory.SCRATCH_RECEIPT_VERSION:
+            fields = fields | {"interpreter", "retained_files"}
+        interrupted = (assignment["result"] is None and receipt["state"] == "starting"
+                       and set(receipt) == fields and all(receipt[field] is None for field in late))
+        if assignment["state"] == "launched" and (interrupted or receipt["state"] == "failed"):
+            if original_status(record, assignment)["state"] not in {"failed", "lost"}:
+                raise factory.FactoryError(f"{label}: confirm the original writer failed or was lost before recovery")
             return args.native_session
     elif isinstance(receipt, dict) and receipt.get("state") == "failed":
-        rex = factory.connect(record)
         try:
-            _, _, native = factory.codex_evidence(key, record, assignment, failed_identity=True,
-                observe=lambda: factory.status(rex, record, assignment))
+            _, _, native = factory.codex_evidence(key, record, assignment, failed_identity=True, delivery=True,
+                observe=lambda: original_status(record, assignment))
         except (factory.FactoryError, ValueError) as exc:
             raise factory.FactoryError(f"{label}: {exc}") from None
         return native["thread_id"]
@@ -131,7 +155,8 @@ def antigravity_contributor(label, assignment, args, receipt):
     import native_antigravity
     request = assignment["request"]
     brief = Path(assignment["brief"])
-    if (type(receipt.get("schema_version")) is not int or receipt["schema_version"] not in (2, 4)
+    if (type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] not in (2, 4, 7, factory.SCRATCH_RECEIPT_VERSION)
             or receipt.get("kind") != "antigravity-execution" or receipt.get("writer") is not True
             or not isinstance(receipt.get("error"), str)
             or receipt.get("job") != label or args.job != label or receipt.get("events") != str(args.events)
@@ -144,7 +169,7 @@ def antigravity_contributor(label, assignment, args, receipt):
                                    "preserve the attempt for the task owner")
     try:
         lines = antigravity_worker.read_events(args.events)
-        if receipt["schema_version"] == 4 or "events_digest" in receipt:
+        if receipt["schema_version"] != 2 or "events_digest" in receipt:
             if evidence.digest(lines) != receipt.get("events_digest"):
                 raise native_antigravity.ExecutionError("stream differs from the failed writer receipt")
             if not lines and receipt["conversation_id"] is None:
@@ -165,7 +190,7 @@ def _all_contributors(record):
     contributors = set()
     for key, assignment in record["assignments"].items():
         command = assignment["request"]["command"]
-        if "--write" in command:
+        if factory.native_write_option(command):
             contributors.add(contributor_context(key, record, assignment))
     if record.get("schema_version") == 12 or "writer_origin" in record:
         origin = writer_transfer.verified_origin(record)
@@ -173,7 +198,34 @@ def _all_contributors(record):
     return contributors
 
 
-def approvals(record, review, required):
+def verify_omitted_reader(key, record, assignment):
+    """Check an omitted attempt against its own authenticated launch and terminal evidence."""
+    if factory.launch_runtime(assignment) is None or assignment.get("native_collected") is True:
+        collected_native(key, record, assignment, current=False)
+        return
+    harness = factory.worker_hint(assignment["request"]["command"])
+    if harness is None:
+        raise factory.FactoryError(f"{record['task']}/{key}: cannot verify the original native reader")
+    if assignment["state"] == "abandoned":
+        # No receipt can exist for a rejected launch. Re-read the bound request and brief.
+        worker = importlib.import_module(harness + "_worker")
+        args = factory.evidence_worker_args(harness, worker.parser(), key, record, assignment, replay=True)
+        if args.write or assignment["result"] is not None or os.path.lexists(args.receipt) or os.path.lexists(args.events):
+            raise factory.FactoryError(f"{record['task']}/{key}: native evidence conflicts with the abandoned reader")
+        return
+    if harness != "claude":
+        collected_native(key, record, assignment, current=False)
+        return
+    if assignment["state"] != "launched":
+        raise factory.FactoryError(f"{record['task']}/{key}: reconcile the pending reader before delivery")
+    observed = original_status(record, assignment)
+    try:
+        factory.claude_evidence(key, record, assignment, delivery=True, current=False, observe=lambda: observed)
+    except (factory.FactoryError, OSError, ValueError) as exc:
+        raise factory.FactoryError(f"{record['task']}/{key}: cannot omit the uncollected reader: {exc}") from None
+
+
+def approvals(record, review, required, *, assessing=None):
     """Re-read collected original native reports/events, never generic dependencies."""
     if (not required or len(set(required)) != len(required) or review in required
             or any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item) for item in [review, *required])):
@@ -181,9 +233,8 @@ def approvals(record, review, required):
     contributors = _all_contributors(record)
     for key, assignment in record["assignments"].items():
         command = assignment["request"]["command"]
-        if "--write" not in command and factory.native_harness(command) is None and key not in required and key != review:
-            # An omitted off-runtime reader still needs proof of what ran.
-            collected_native(key, record, assignment, current=False)
+        if not factory.native_write_option(command) and key not in required and key != review and assignment is not assessing:
+            verify_omitted_reader(key, record, assignment)
     selected = {}
     contexts = set()
     for key in [*required, review]:
@@ -198,13 +249,13 @@ def approvals(record, review, required):
             raise factory.FactoryError(f"Selected approval {key} (role {args.role}, outcome {native['report']['outcome']}) must be a "
                 "read-only approved report from " + ", ".join(sorted(factory.VERIFIER_ROLES | {"release"}))
                 + ", and the review a release judgment")
-        context = native_context(harness, receipt)
+        approval = approval_record(harness, receipt, assignment["result"])
+        context = approval["context"]
         if not isinstance(context, str) or not context or context in contributors or context in contexts:
             raise factory.FactoryError("Selected approvals need distinct original native contexts independent of contributors")
         contexts.add(context)
         frozen = evidence.from_assignment(record, assignment) if key == review else None
-        selected[key] = dict(context=context, receipt=evidence.digest(receipt),
-                             result=evidence.digest(assignment["result"]), evidence=frozen)
+        selected[key] = dict(approval, evidence=frozen)
     return selected
 
 
@@ -244,7 +295,7 @@ def target_contains(pr, merge, transport):
 
 def read_owner(path):
     with factory.task_lock(path.parent, path.stem, wait=True):
-        return factory.load_task(path)
+        return factory.load_task(path, persist_migration=False)
 
 
 def delivered(path, *, pr, review, required, transport) -> dict:
@@ -276,7 +327,7 @@ def delivered(path, *, pr, review, required, transport) -> dict:
         approvals={key: {k: v for k, v in item.items() if k != "evidence"} for key, item in selected.items()})
     receipt_path = path.parent / (record["task"] + "." + review + ".delivered.json")
     with factory.task_lock(path.parent, record["task"], wait=True):
-        if factory.load_task(path) != record:
+        if factory.load_task(path, persist_migration=False) != record:
             raise factory.FactoryError(f"{record['task']}/{review}: task changed during delivery observation; reload current controls/inputs")
         if os.path.lexists(receipt_path):
             if factory.decode_json(factory.read_record(receipt_path, private=True)) != receipt:

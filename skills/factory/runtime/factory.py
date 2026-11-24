@@ -1,10 +1,13 @@
 """Task admission and explicit native Rex launches."""
 import argparse
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
+import errno
+import ctypes
 import fcntl
 import functools
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -22,9 +25,11 @@ from typing import Any
 import uuid
 
 if __name__ == "__main__":
-    sys.modules.setdefault("factory", sys.modules[__name__])
+    from runtime_entry import locked_main
+    sys.exit(locked_main("factory"))
 
 ROOT = Path(__file__).resolve().parent
+ANTIGRAVITY_BRAIN = Path(".gemini/antigravity-cli/brain")
 # The runtime ships inside the factory skill; its role catalog sits beside it.
 ROLES_PATH = ROOT.parent / "references" / "roles.json"
 GIT_EXECUTION: ContextVar[Any] = ContextVar("factory_git_execution", default=None)
@@ -48,6 +53,14 @@ GIT_SOURCE_CONFIG_KEYS = {"core.worktree", "core.bare", "core.repositoryformatve
 
 class FactoryError(Exception):
     pass
+
+
+class RuntimeObservationError(FactoryError):
+    """The current launcher or Factory installation could not be measured."""
+
+
+class ReportDeadlineExpired(FactoryError):
+    """The optional report deadline expired during a nested Git read."""
 
 
 class ControlConflict(FactoryError):
@@ -114,27 +127,32 @@ class Rex:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 
-def save(path, value, *, exclusive=False):
-    """Save intent before launch, atomically; files are private to this user."""
-    content = value if isinstance(value, str) else json.dumps(value, indent=2) + "\n"
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".saving-")
-    try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(content)
+@contextmanager
+def publish_record(path, *, exclusive=False):
+    """Publish the completed private file. The stream name is its original temporary alias."""
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".saving-", delete=False) as stream:
+        name = Path(stream.name)
+        try:
+            yield stream
             stream.flush()
             os.fsync(stream.fileno())
-        if exclusive:
-            os.link(name, path)
-        else:
-            os.replace(name, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
+            if exclusive:
+                os.link(name, path)
+            else:
+                os.replace(name, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+            name.unlink(missing_ok=True)
+
+
+def save(path, value, *, exclusive=False):
+    """Save intent before launch, atomically; files are private to this user."""
+    with publish_record(path, exclusive=exclusive) as stream:
+        stream.write(value if isinstance(value, str) else json.dumps(value, indent=2) + "\n")
 
 
 # A factory line is one coordinator's stream of work, such as nanoclaw or ACR. Its tasks share one Rex session
@@ -157,7 +175,6 @@ EXIT_BUSY = 75
 
 
 def execution_lock_path(directory, line):
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     # The default line keeps the original lock file, so runners from before lines still exclude each other.
     return directory / (".execution.lock" if line == DEFAULT_LINE else ".execution." + check_line(line) + ".lock")
 
@@ -165,6 +182,7 @@ def execution_lock_path(directory, line):
 @contextmanager
 def try_execution_lock(directory, line=DEFAULT_LINE):
     """The line's execution lock if it is free right now; yields whether it is held."""
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(execution_lock_path(directory, line), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
@@ -180,6 +198,7 @@ def try_execution_lock(directory, line=DEFAULT_LINE):
 @contextmanager
 def execution_lock(directory, line=DEFAULT_LINE):
     """Serialize one line's controller/CLI launch decisions; other lines launch in parallel."""
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(execution_lock_path(directory, line), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
@@ -231,15 +250,47 @@ def version_key(text):
     return tuple(int(part) for part in text.split("."))
 
 
-def relocate(entry, argv, *, root=None, home=None, execv=os.execv):
-    """Run an ACR-installed project copy from the one per-user runtime.
+def exchange_installation(staged, installed):
+    """Publish both directory names atomically, including across installer process death."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    src, dst = os.fsencode(staged), os.fsencode(installed)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        result = libc.renamex_np(src, dst, 2)  # RENAME_SWAP
+    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
+        result = libc.renameat2(-100, src, -100, dst, 2)  # AT_FDCWD, RENAME_EXCHANGE
+    else:
+        raise FactoryError("Atomic directory exchange unavailable; keep the installed runtime and use a supported host")
+    if result:
+        raise FactoryError("Cannot exchange the staged and installed Factory trees: " + os.strerror(ctypes.get_errno())
+                           + "; check filesystem support and free space before retrying")
 
-    Tasks are shared per user and freeze absolute worker paths, so every project must
-    run the same installed files. The per-user copy is upgraded in place to the newest
-    version any project brings and never downgraded. A source checkout runs in place.
-    """
+
+def package_contents(skill, *, offered=False):
+    """Verify the old install against the original offer, including file kinds and modes."""
+    entries = {}
+    directories = [skill]
+    while directories:
+        for path in directories.pop().iterdir():
+            mode = path.lstat().st_mode
+            if offered and path.name == "__pycache__":
+                continue  # copytree excludes generated bytecode from the offer.
+            if stat.S_ISDIR(mode):
+                directories.append(path)
+                content = None
+            elif stat.S_ISREG(mode):
+                content = hashlib.sha256(path.read_bytes()).digest()
+            else:
+                raise FactoryError("Cannot verify a retired package with links or special files; inspect its original tree")
+            entries[path.relative_to(skill)] = mode, content
+    return entries
+
+
+def relocate(entry, argv, *, root=None, home=None, execv=os.execv):
+    """Run an installed skill from the one per-user runtime."""
     skill = (root or ROOT).parent
-    if not (skill.name.startswith("acr__") and skill.parent.name == "skills"):
+    acr = skill.name.startswith("acr__") and skill.parent.name == "skills"
+    tessl = skill.parts[-6:] == (".tessl", "plugins", "jbaruch", "software-factory", "skills", "factory")
+    if not (acr or tessl):
         return
     home = home or runtime_home()
     installed = home / "skill"
@@ -251,17 +302,38 @@ def relocate(entry, argv, *, root=None, home=None, execv=os.execv):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
         offered = version_key((skill / "runtime" / "VERSION").read_text().strip())
-        current = installed / "runtime" / "VERSION"
-        if not current.exists() or version_key(current.read_text().strip()) < offered:
-            staging = Path(tempfile.mkdtemp(prefix=".installing-", dir=home))
-            try:
-                # Generated bytecode is never part of an installed runtime.
-                shutil.copytree(skill, staging / "skill", ignore=shutil.ignore_patterns("__pycache__"))
-                if installed.exists():
-                    os.rename(installed, staging / "retired")
-                os.rename(staging / "skill", installed)
-            finally:
-                shutil.rmtree(staging)
+        # Old installers could die between two renames. Only the original, byte-matching
+        # offer can authenticate the retired tree. An older bootstrap ignores this debris.
+        retired = [] if os.path.lexists(installed) else list(home.glob(".installing-*/retired"))
+        if len(retired) > 1:
+            raise FactoryError("Several retired Factory trees need inspection; preserve them and restore the verified original")
+        previous = retired[0] if retired else installed
+        current = previous / "runtime" / "VERSION"
+        if retired and (any(path.is_symlink() for path in (previous.parent, previous, current.parent))
+                        or not stat.S_ISREG(current.lstat().st_mode)):
+            raise FactoryError("Cannot verify the retired Factory tree; inspect the original installation")
+        if retired or not os.path.lexists(previous) or version_key(current.read_text().strip()) < offered:
+            with current.open("rb") if previous.exists() else nullcontext() as active:
+                if active is not None:
+                    try:
+                        fcntl.flock(active, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        raise FactoryError("Factory runtime is in use; retry the upgrade after active workers and controllers finish") from None
+                if retired:
+                    if package_contents(retired[0]) != package_contents(skill, offered=True):
+                        raise FactoryError("Retired Factory tree differs from this offer; restore with the original matching package before upgrading")
+                    os.rename(retired[0], installed)
+                else:
+                    staging = Path(tempfile.mkdtemp(prefix=".installing-", dir=home))
+                    try:
+                        # Generated bytecode is never part of an installed runtime.
+                        shutil.copytree(skill, staging / "skill", ignore=shutil.ignore_patterns("__pycache__"))
+                        if installed.exists():
+                            exchange_installation(staging / "skill", installed)
+                        else:
+                            os.rename(staging / "skill", installed)
+                    finally:
+                        shutil.rmtree(staging)
     except OSError:
         raise FactoryError(f"Cannot install the per-user factory runtime in {home}; restore access/space and retry") from None
     finally:
@@ -304,39 +376,49 @@ def new_task(task, line=DEFAULT_LINE) -> dict:
                 provisioning=None, rex=None, session_label=line_session_label(line), session_id=None, assignments={})
 
 
-def read_record(path, *, private=False, max_bytes=None, exact=False):
-    """Read a regular gate record. Exact and byte-limited reads preserve UTF-8 line endings."""
+def read_record_bytes(path, *, private=False, max_bytes=None):
+    """Read a regular gate record without following links or blocking on FIFOs."""
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise ValueError("Record byte limit must be a nonnegative integer")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb" if exact or max_bytes is not None else "r") as stream:
+    with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or (private and (
                 info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077)):
             raise OSError("Gate record must be a regular file with its required ownership and permissions")
         if max_bytes is None:
-            return stream.read().decode("utf-8") if exact else stream.read()
+            return stream.read()
         content = stream.read(max_bytes + 1)
         if len(content) > max_bytes:
             raise OSError("Record exceeds its byte limit; inspect the original without rewriting it")
-        return content.decode("utf-8")
+        return content
 
 
-def load_task(path) -> dict:
-    """Factory owns migration of its gate store; unknown formats cannot launch."""
+def read_record(path, *, private=False, max_bytes=None, exact=False):
+    content = read_record_bytes(path, private=private, max_bytes=max_bytes).decode("utf-8")
+    return content if exact or max_bytes is not None else content.replace("\r\n", "\n").replace("\r", "\n")
+
+
+
+def load_task(path, *, persist_migration=True, private=False) -> dict:
+    """Validate a task and upgrade older records in memory, saving by default."""
     try:
-        record = json.loads(read_record(path), object_pairs_hook=unique_object)
+        record = json.loads(read_record(path, private=private), object_pairs_hook=unique_object)
     except FileNotFoundError:
         raise FactoryError(f"Unknown task {path.stem!r}; correct its ID or create it with admit/start") from None
     except (ValueError, UnicodeDecodeError):
         raise FactoryError(f"Cannot decode task {path.stem!r}; restore the original task record before continuing") from None
     except OSError:
         raise FactoryError(f"Cannot read task {path.stem!r}; restore access to its original state file") from None
+    return validate_task(path, record, persist_migration=persist_migration)
+
+
+def validate_task(path, record, *, persist_migration=False):
     if not isinstance(record, dict):
         raise FactoryError("Invalid task record; restore the original state before continuing")
     original_version = record.get("schema_version", 0)
     validate_task_record(path, record)
-    if original_version != record["schema_version"]:
+    if persist_migration and original_version != record["schema_version"]:
         try:
             save(path, record)
         except OSError:
@@ -347,13 +429,16 @@ def load_task(path) -> dict:
 def validate_task_record(path, record):
     """Check the owner's full schema, upgrading legacy fields in memory."""
     version = record.get("schema_version", 0)
-    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
+    if type(version) is not int or version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
         raise FactoryError("Unsupported task schema; update the factory before continuing")
     if version == 12:
         import writer_transfer
+        if "writer_origin" not in record:
+            raise FactoryError("Schema 12 requires writer_origin. Restore the original imported record, or verify the "
+                               "original ordinary schema-12 producer before offline conversion to schema 13")
         writer_transfer.validate_origin(record.get("writer_origin"), path)
-    if version < 12 and "writer_origin" in record:
-        raise FactoryError("Task has writer_origin at schema below 12; restore the original task record")
+    if version != 12 and "writer_origin" in record:
+        raise FactoryError("Task has writer_origin at schema other than 12; restore the original task record")
     if (version < 6 or version == 7) and "provisioning" in record:
         raise FactoryError("Legacy task has newer fields; restore its schema version before continuing")
     if version < 11 and "acceptance" in record:
@@ -430,6 +515,12 @@ def validate_task_record(path, record):
                     not in ("work", "correction", "investigation"))):
             raise FactoryError("Invalid assignment record; restore the original state before continuing")
         request = assignment["request"]
+        if "native_launch" in assignment:
+            launch = assignment["native_launch"]
+            if (version < 12 or not isinstance(launch, dict) or launch.keys() != {"runtime", "request"}
+                    or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                           for value in launch.values())):
+                raise FactoryError("Invalid native launch provenance; restore the original assignment")
         if admission is None and any(key in request for key in ("purpose", "inputs", "dependencies")):
             raise FactoryError("Invalid unadmitted assignment; restore its original task scope before continuing")
         if admission is not None and ((request.get("role") == "investigator")
@@ -447,6 +538,8 @@ def validate_task_record(path, record):
                        for key in ("brief", "window_label"))
                 or not Path(assignment["brief"]).is_absolute()):
             raise FactoryError("Invalid assignment identity or request; restore the original task record")
+        if version < 11 and "interpreter" in assignment:
+            raise FactoryError("Legacy assignment has a newer interpreter observation; restore its schema version")
         # The task prefix tells tabs apart in the shared session; earlier tabs carry role and ID only.
         if not re.fullmatch("(?:" + re.escape(record["task"] + ":") + ")?" + re.escape(request["role"] + "-" + assignment_id)
                             + r"-[0-9a-f]{8}", assignment["window_label"]):
@@ -561,6 +654,7 @@ def valid_closed(assignment):
             and (closed["exit"] is None or (isinstance(closed["exit"], dict)
                                             and type(closed["exit"].get("exit_code")) is int))
             and (closed["exit"] is not None) == (closed["state"] != "lost")
+            and (closed["exit"] is None or (closed["exit"]["exit_code"] == 0) == (closed["state"] == "exited"))
             and (closed["reason"] is None if closed["state"] != "lost"
                  else isinstance(closed["reason"], str) and bool(closed["reason"].strip()))
             and isinstance(closed["session_id"], str) and bool(closed["session_id"])
@@ -646,6 +740,22 @@ def git_environment():
             if not key.startswith("GIT_") or key in GIT_IDENTITY_VARIABLES}
 
 
+def report_timed_run(command, *, timeout, **options):
+    """Nested Git reads, including executable discovery, share the active file proof deadline."""
+    budget = REPORT_GIT_BUDGET.get()
+    if budget is not None:
+        timeout = min(timeout, budget.time_left())
+        if timeout <= 0:
+            raise ReportDeadlineExpired("Report file verification deadline expired")
+    try:
+        return subprocess.run(command, timeout=timeout, **options)
+    except subprocess.TimeoutExpired as exc:
+        if budget is None:
+            raise
+        budget.incomplete = True
+        raise ReportDeadlineExpired("Report file verification deadline expired") from exc
+
+
 @functools.cache
 def git_binary():
     binary = shutil.which("git", path=os.defpath)
@@ -655,7 +765,7 @@ def git_binary():
         # Apple's shim: every call runs xcrun to find the developer directory, and in the Codex sandbox, which can't
         # reach xcrun's cache, each one spawned xcodebuild (nanoclaw's load hit 172 on 16 cores). Resolve it once.
         try:
-            found = subprocess.run(["/usr/bin/xcrun", "--find", "git"], capture_output=True, text=True, timeout=60,
+            found = report_timed_run(["/usr/bin/xcrun", "--find", "git"], capture_output=True, text=True, timeout=60,
                                    check=False)
         except (OSError, subprocess.TimeoutExpired):
             found = None
@@ -713,22 +823,28 @@ GIT_SECONDS = 600
 
 
 def git_run(repository, *args, environment=None):
+    try:
+        result = git_run_bytes(repository, *args, environment=environment)
+        return subprocess.CompletedProcess(result.args, result.returncode,
+            result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
+
+
+def git_run_bytes(repository, *args, environment=None):
     scope, seconds = GIT_EXECUTION.get(), GIT_SECONDS
     try:
         worktree = git_worktree(repository)
         prefix = [] if scope is None else scope[0]()
         if scope is not None:
             environment = scope[1]
-        result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
+        result = report_timed_run([*prefix, git_binary(), "--no-replace-objects", "-C", worktree,
                               "--work-tree=" + worktree, *args], capture_output=True,
                               timeout=seconds, check=False,
                               env=git_environment() if environment is None else environment)
         if scope is not None and result.returncode == 125:
             raise FactoryError("Native sandbox rewrote protected Git environment; inspect its environment settings before another attempt")
-        return subprocess.CompletedProcess(result.args, result.returncode,
-            result.stdout.decode("utf-8"), result.stderr.decode("utf-8"))
-    except UnicodeDecodeError:
-        raise FactoryError("Cannot decode Git output; inspect Git/checkout filename encoding and repair it before retrying") from None
+        return result
     except subprocess.TimeoutExpired:
         verb = next((arg for index, arg in enumerate(args)
                      if not arg.startswith("-") and (index == 0 or args[index - 1] != "-c")), "")
@@ -799,7 +915,7 @@ def pinned_commit(repository, revision, identity):
     return candidate
 
 
-def check_checkout(repository, cwd, candidate, *, expected_identity=None, expected_git_dir=None):
+def check_checkout(repository, cwd, candidate, *, expected_identity=None, expected_git_dir=None, pending_links=None, read_only=False):
     if expected_identity is not None and (not valid_repository_identity(expected_identity)
             or repository_identity(repository) != expected_identity):
         raise FactoryError("Assignment repository identity differs; restore the original Git-local marker and common directory")
@@ -829,7 +945,7 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None, expect
         raise FactoryError("Cannot inspect assignment checkout; repair Git access before launching")
     if changed.returncode:
         raise FactoryError("Assignment checkout has uncommitted inputs (including ignored files); use a clean worktree and keep runtime state/output outside it")
-    check_tracked_bytes(cwd, candidate)
+    identities = check_tracked_bytes(cwd, candidate, pending_links, read_only=read_only)
     configured = git_run(cwd, "config", "--path", "--get", "core.worktree")
     if configured.returncode not in (0, 1):
         raise FactoryError("Cannot inspect worktree configuration; restore Git config access before launching")
@@ -843,6 +959,8 @@ def check_checkout(repository, cwd, candidate, *, expected_identity=None, expect
     if expected_git_dir is not None and git_dir(cwd) != Path(expected_git_dir):
         raise FactoryError("Assignment worktree differs; restore its original Git directory and use the assigned checkout")
 
+    return identities
+
 
 def independent_source(path):
     """Copy a shared regular source file without changing any of its aliases."""
@@ -852,14 +970,14 @@ def independent_source(path):
         os.replace(independent, path)
 
 
-def check_tracked_bytes(cwd, candidate):
+def check_tracked_bytes(cwd, candidate, pending_links=None, *, read_only=False):
     """Check source bytes/modes against the commit without trusting index stat hints."""
     tree = git_run(cwd, "ls-tree", "-r", "-z", "--full-tree", candidate)
     if tree.returncode:
         raise FactoryError("Cannot read candidate tree; restore Git object access before launching")
     root = Path(git_worktree(cwd))
     try:
-        allowed, identities = set(), set()
+        allowed, identities, displaced = set(), set(), set()
         for entry in tree.stdout.split("\0"):
             if not entry:
                 continue
@@ -876,10 +994,16 @@ def check_tracked_bytes(cwd, candidate):
                 raise FactoryError("Assignment source contains symlinks; use a full checkout of independent regular files before launching")
             elif stat.S_ISREG(info.st_mode):
                 if info.st_nlink > 1:
-                    independent_source(path)
-                    info = path.lstat()
+                    if read_only:
+                        raise FactoryError(f"Inspect the shared source file before release: {path}")
+                    displaced.add((info.st_dev, info.st_ino))
+                    if pending_links is None:
+                        independent_source(path)
+                        info = path.lstat()
+                    else:
+                        pending_links[path] = (info.st_dev, info.st_ino)
                 identity = (info.st_dev, info.st_ino)
-                if identity in identities:
+                if identity in identities and (pending_links is None or path not in pending_links):
                     raise FactoryError("Candidate paths alias the same source file; use filenames distinct on this filesystem before launching")
                 identities.add(identity)
                 actual_mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
@@ -900,6 +1024,7 @@ def check_tracked_bytes(cwd, candidate):
                     raise FactoryError("Assignment checkout has uncommitted inputs (including empty directories); use a clean full worktree before launching")
                 if path.is_dir() and not path.is_symlink():
                     pending.append(path)
+        return identities | displaced
     except OSError:
         raise FactoryError("Cannot read assignment source; restore candidate files and access before launching") from None
 
@@ -972,6 +1097,17 @@ def result_current(record, result):
         candidate=result["candidate"], requirements=result["inputs"]["requirements"])
 
 
+def valid_checkout_inodes(value):
+    return (isinstance(value, list) and len(value) == 4
+            and all(isinstance(pair, list) and len(pair) == 2 and all(type(n) is int and n >= 0 for n in pair)
+                    for pair in value))
+
+
+def original_checkout(item, witness):
+    saved = item.get("checkout_inodes")
+    return isinstance(witness, dict) and valid_checkout_inodes(saved) and witness.get("inodes") == saved
+
+
 def validate_provisioning(record):
     item = record.get("provisioning")
     if "provisioning" not in record:
@@ -979,7 +1115,7 @@ def validate_provisioning(record):
     if item is None:
         return
     if (record["admission"] is None or not isinstance(item, dict)
-            or set(item) != {"id", "request", "owner_token", "state", "git_dir"}
+            or set(item) - {"checkout_inodes"} != {"id", "request", "owner_token", "state", "git_dir"}
             or not isinstance(item["id"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", item["id"])
             or not isinstance(item["owner_token"], str) or not re.fullmatch(r"[0-9a-f]{32}", item["owner_token"])
             or item["state"] not in ("provisioning", "provisioned")):
@@ -997,9 +1133,14 @@ def validate_provisioning(record):
 
 def provisioning_git(repository, *args, output=None, timeout=30):
     """Metadata/index operations and raw blobs only; never checkout callbacks."""
-    environment = {**git_environment(), "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+    scope = GIT_EXECUTION.get()
+    environment = git_environment() if scope is None else scope[1]
+    local = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"}
+    if any(environment.get(key) != value for key, value in local.items()):
+        environment = {**environment, **local}
+    prefix = [] if scope is None else scope[0]()
     try:
-        result = subprocess.run([git_binary(), "--no-replace-objects", "-C", str(repository),
+        result = subprocess.run([*prefix, git_binary(), "--no-replace-objects", "-C", str(repository),
             "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
             env=environment, stdout=subprocess.PIPE if output is None else output,
@@ -1080,7 +1221,7 @@ def provisioning_owned(record, item):
         marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
         if (directory.parent != common / "worktrees"
                 or directory.is_symlink()
-                or read_record(directory / "locked").strip() != marker
+                or read_record(directory / "locked") != marker + "\n"
                 or read_record(directory / "gitdir").strip() != str(destination / ".git")
                 or repository_identity(destination) != record["admission"]["repository_identity"]
                 or item["state"] == "provisioning" and provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]
@@ -1155,39 +1296,350 @@ def reader_checkout(repository, candidate, destination, *, identity):
             write_candidate(repository, destination, candidate, entries)
         except OSError:
             raise FactoryError("Reader checkout writes failed; restore filesystem access/space before another attempt") from None
-        check_checkout(repository, str(destination), candidate, expected_identity=identity,
-                       expected_git_dir=git_dir(destination))
-        yield destination
+        admin = git_dir(destination)
+        indexed = check_checkout(repository, str(destination), candidate, expected_identity=identity, expected_git_dir=admin)
+        yield destination, admin.stat(), (None, indexed)
     finally:
         # Two --force flags remove a locked worktree with every untracked and ignored file;
         # a reader's node_modules can take minutes on slow storage.
         provisioning_git(repository, "worktree", "remove", "--force", "--force", str(destination), timeout=600)
 
 
-def retain_checkout_reports(artifacts, checkout, receipt):
-    """Copy report files a reader wrote in its disposable checkout beside its receipt before the checkout goes.
+def report_copy_path(receipt_path, receipt, copy):
+    """Resolve exactly one private destination, including the two historical v8 layouts."""
+    stem = receipt_path.name.removesuffix(".json")
+    if "copy" in copy:
+        # The writer constructs this mapping; the reader validates it against the bound root.
+        return receipt_path.parent / (stem + "." + copy["copy"])
+    relative, conversation = copy["relative"], copy.get("conversation")
+    suffix = ".artifacts"
+    if conversation is None and any(
+        isinstance(copy, dict) and copy.get("conversation") is not None
+        and copy.get("conversation") == receipt.get("conversation_id")
+        and copy.get("root") == receipt.get("conversation_root") and copy.get("relative") == str(relative)
+        for copy in receipt["retained_files"].values()
+    ):
+        suffix = ".checkout-artifacts"
+    return receipt_path.with_name(stem + suffix) / relative
 
-    Readers asked to keep findings in their artifacts still write a report file and name it; an
-    Antigravity review approved with only `review-retire-service-pins.md`, which went with its
-    checkout. Files of the candidate itself are cited evidence and stay where they are.
-    """
-    checkout = Path(checkout).resolve(strict=True)
-    kept = receipt.with_name(receipt.name.removesuffix(".json") + ".artifacts")
-    for artifact in artifacts:
-        path = Path(artifact) if Path(artifact).is_absolute() else checkout / artifact
+
+def check_report_index(workdir, *, expected_git_dir=None, reader_admin_stat=None, include_paths=False):
+    # Git treats an absent index as empty, which cannot establish source identity.
+    directory = git_dir(str(workdir))
+    index = directory / "index"
+    if ((expected_git_dir is not None and expected_git_dir != directory)
+            or (reader_admin_stat is not None and (
+                not os.path.samestat(directory.stat(), reader_admin_stat) or index.is_symlink()))
+            or not index.is_file()):
+        raise FactoryError("Cannot identify tracked report citations; restore the checkout index")
+    # Git parses the index even when the pathspec selects no tracked files.
+    pathspec = () if include_paths else ("--", ".git")
+    result = git_run(str(workdir), "-c", "core.fsmonitor=false", "ls-files", "--cached", "-z", *pathspec)
+    if result.returncode:
+        raise FactoryError("Cannot identify tracked report citations; restore access to the checkout index")
+    return result.stdout
+
+
+def tracked_files(workdir, *, expected_git_dir=None, reader_admin_stat=None):
+    paths = check_report_index(workdir, expected_git_dir=expected_git_dir, reader_admin_stat=reader_admin_stat,
+                               include_paths=True)
+    root = Path(git_worktree(workdir))
+    tracked = set()
+    budget = REPORT_GIT_BUDGET.get()
+    for name in paths.split("\0"):
+        if budget is not None and budget.time_left() <= 0:
+            raise ReportDeadlineExpired("Report file verification deadline expired")
+        if name:
+            try:
+                indexed = (root / name).lstat()
+            except FileNotFoundError:
+                continue
+            tracked.add((indexed.st_dev, indexed.st_ino))
+    return tracked
+
+
+WRITER_SOURCE_ENV = "SOFTWARE_FACTORY_WRITER_SOURCE"
+
+
+def displaced_files(source, root):
+    if (not isinstance(source, dict) or source.get("root") != str(root)
+            or not isinstance(source.get("displaced"), list)):
+        return None
+    displaced = set()
+    for pair in source["displaced"]:
+        if (not isinstance(pair, list) or len(pair) != 2 or any(type(n) is not int for n in pair)
+                or pair[0] < 0 or pair[1] <= 0):
+            return None
+        displaced.add(tuple(pair))
+    return displaced
+
+
+def worker_assignment(args, *, private=False):
+    task, _, identity = args.job.partition("/")
+    if args.brief.name != f"{task}.{identity}.md":
+        return None, None
+    record = load_task(args.brief.with_name(task + ".json"), persist_migration=False, private=private)
+    return record, record["assignments"].get(identity)
+
+
+def normalize_links(pending):
+    for path, pair in pending.items():
+        info = path.lstat()
+        if (info.st_dev, info.st_ino) != pair or path.resolve(strict=True) != path:
+            raise FactoryError("Writer source changed during normalization. Inspect the original checkout")
+        if info.st_nlink > 1:
+            independent_source(path)
+
+
+def remember_writer_links(args, pending):
+    """Persist displaced identities on the reserved assignment before changing the checkout."""
+    if not pending:
+        return
+    root = Path(git_worktree("."))
+    task, _, key = args.job.partition("/")
+    if args.brief.name != f"{task}.{key}.md":
+        # Standalone workers have no assignment from which a census could claim provenance.
+        normalize_links(pending)
+        return
+    with task_lock(args.brief.parent, task, wait=True) as path:
+        record, assignment = worker_assignment(args, private=True)
+        if assignment is None or assignment["state"] not in ("launching", "launched"):
+            raise FactoryError("Restore the reserved writer assignment before normalizing its source")
+        source = assignment.get("writer_source")
+        if source is None:
+            # Reuse of an older launch without this observation suppresses external bindings.
+            normalize_links(pending)
+            return
+        _, saved = scratch_worker_args(record, assignment, (runtime_home() / "skill/runtime").resolve())
+        known = displaced_files(source, root)
+        def differs(key, value):
+            live = getattr(args, key, None)
+            if key == "sandbox" and isinstance(live, Path) and isinstance(value, Path):
+                # The factory commit holds the sandbox resolved before launch; the saved command may name it through a link.
+                return live.resolve() != value.resolve()
+            return live != value
+        if (known is None or source.get("identity") != interpreter_identity(root) or Path.cwd() != args.cwd
+                or any(differs(key, value) for key, value in vars(saved).items())):
+            raise FactoryError("Writer source differs from its original physical launch. Inspect the reserved checkout")
+        source["displaced"] = sorted(known | set(pending.values()))
+        save(path, record)
+    normalize_links(pending)
+
+
+def check_worker_cwd(args, identity):
+    """Check the actual cwd and retain source identities through native report processing."""
+    pending = {} if args.write else None
+    indexed = check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
+                             expected_git_dir=args.worktree_git_dir, pending_links=pending)
+    indexed.update(check_checkout(".", ".", args.candidate, expected_identity=identity,
+                                  expected_git_dir=args.worktree_git_dir, pending_links=pending))
+    if pending:
+        remember_writer_links(args, pending)
+        indexed.update(tracked_files(args.cwd, expected_git_dir=args.worktree_git_dir))
+    handoff = os.environ.pop(WRITER_SOURCE_ENV, None)
+    if args.write and handoff is not None and Path.cwd() == args.cwd:
+        root = Path(git_worktree(args.cwd))
         try:
-            if path.is_symlink() or not path.is_file() or not path.resolve(strict=True).is_relative_to(checkout):
-                continue  # Not a file the reader left in its checkout.
-        except (OSError, ValueError):
-            continue
-        relative = path.resolve(strict=True).relative_to(checkout)
-        if git_run(str(checkout), "ls-files", "--error-unmatch", "--", str(relative)).returncode == 0:
-            continue  # Part of the candidate: cited evidence, not a report.
-        target = kept / relative
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        kept.chmod(0o700)
-        shutil.copyfile(path, target)
-        target.chmod(0o600)
+            record, assignment = worker_assignment(args, private=True)
+            if assignment is None or assignment["state"] not in ("launching", "launched"):
+                return None
+            _, saved = scratch_worker_args(record, assignment, (runtime_home() / "skill/runtime").resolve())
+            if any(getattr(args, key, None) != value for key, value in vars(saved).items()):
+                return None
+            source = assignment.get("writer_source")
+            launch = displaced_files(source, root)
+            if not isinstance(source, dict) or source.get("incomplete") or source.get("identity") != interpreter_identity(root):
+                return None
+            actual = displaced_files(decode_json(handoff), root)
+        except (FactoryError, OSError, ValueError, RecursionError):
+            return None  # Uncertain handoff leaves the immutable checkout proof available.
+        if launch is not None and actual is not None:
+            return root, launch | actual | indexed
+    return None
+
+
+class ReportHashBudget:
+    """Share optional file verification limits across one publication or census."""
+
+    def __init__(self, files, byte_limit, seconds, *, clock=None):
+        self.files = files
+        self.remaining = byte_limit
+        self.clock = clock or time.monotonic
+        self.deadline = self.clock() + seconds
+        self.incomplete = False
+
+    @contextmanager
+    def git_reads(self):
+        token = REPORT_GIT_BUDGET.set(self)
+        try:
+            yield
+        finally:
+            REPORT_GIT_BUDGET.reset(token)
+
+    def time_left(self):
+        left = self.deadline - self.clock()
+        if left <= 0:
+            self.incomplete = True
+        return left
+
+    def fits(self, size):
+        if size > min(16 * 1024**2, self.remaining):
+            self.incomplete = True
+            return False
+        return size > 0
+
+    def attempt(self):
+        if self.files <= 0 or self.remaining <= 0 or self.time_left() <= 0:
+            self.incomplete = True
+            return False
+        self.files -= 1
+        return True
+
+    def digest(self, descriptor, info, path, payload=None):
+        size = info.st_size
+        if not self.fits(size):
+            return None
+        digest = hashlib.sha256()
+        while size:
+            if self.time_left() <= 0:
+                return None
+            chunk = os.read(descriptor, min(size, 256 * 1024))
+            self.remaining -= len(chunk)
+            if not chunk:
+                return None
+            size -= len(chunk)
+            digest.update(chunk)
+            if payload is not None:
+                payload.extend(chunk)
+        after = path.lstat()
+        if (not os.path.samestat(info, after) or info.st_size != after.st_size
+                or info.st_ctime_ns != after.st_ctime_ns or path.resolve(strict=True) != path
+                or self.time_left() <= 0):
+            return None
+        return digest.hexdigest()
+
+
+REPORT_GIT_BUDGET: ContextVar[ReportHashBudget | None] = ContextVar("report_git_budget", default=None)
+
+
+def retain_report_files(receipt, args, workdir, *, deadline, source, reader_admin_stat=None):
+    """Bind optional files while the native attempt still has time and identifiable sources."""
+    budget = ReportHashBudget(32, 32 * 1024**2, 2, clock=native_clock)
+    budget.deadline = min(budget.deadline, deadline)
+    if budget.time_left() <= 0 or source is None:
+        return
+    root, before = source
+
+    @functools.cache
+    def indexed():
+        return before | tracked_files(workdir, expected_git_dir=args.worktree_git_dir if root is not None else None,
+                                      reader_admin_stat=reader_admin_stat)
+
+    brain = None
+    if receipt["kind"] == "antigravity-execution":
+        conversation = receipt.get("conversation_id")
+        if (isinstance(conversation, str) and conversation not in ("", ".", "..")
+                and Path(conversation).name == conversation):
+            try:
+                directory = Path.home() / ANTIGRAVITY_BRAIN / conversation
+                receipt["conversation_root"] = str(directory.resolve())
+                if directory.is_dir():
+                    brain = directory
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(f"factory: cannot resolve optional Antigravity conversation directory: {exc}", file=sys.stderr)
+
+    copies = receipt["retained_files"]
+    by_object = {}
+    typed = typed_report_attempt(args, receipt)
+    with budget.git_reads():
+        for entry in receipt["report"]["artifacts"]:
+            if budget.time_left() <= 0 or budget.files <= 0 or budget.remaining <= 0:
+                break
+            _, target = decode_report_entry(entry, typed)
+            if not target or entry in copies:
+                continue
+            try:
+                receipt_path = args.receipt.parent.resolve(strict=True) / args.receipt.name
+                if brain is not None:
+                    try:
+                        copy_report_file(receipt, receipt_path, brain, indexed, entry, target, budget, by_object,
+                                         conversation=receipt["conversation_id"])
+                    except (OSError, ReportDeadlineExpired, ValueError, RuntimeError) as exc:
+                        print(f"factory: cannot retain optional Antigravity conversation file {target!r}: {exc}",
+                              file=sys.stderr)
+                if entry in copies:
+                    continue
+                if root is None:
+                    copy_report_file(receipt, receipt_path, workdir, indexed, entry, target, budget, by_object)
+                elif not (args.cwd / target).is_relative_to(root):
+                    scratch = Path(receipt["scratch"]).resolve()
+                    scratch_root = Path(SCRATCH_ROOT or tempfile.gettempdir()).absolute()
+                    binding = external_report_file(args.cwd / target, receipt, receipt_path, scratch, scratch_root,
+                                                   budget, root=root, indexed=indexed)
+                    if isinstance(binding, dict) and budget.time_left() > 0:
+                        copies[entry] = binding
+            except (OSError, ReportDeadlineExpired, ValueError, RuntimeError) as exc:
+                print(f"factory: cannot retain optional report file {target!r}: {exc}", file=sys.stderr)
+
+
+def copy_report_file(receipt, receipt_path, root, indexed, entry, target, budget, by_object, *, conversation=None):
+    root = Path(root)
+    if not budget.attempt() or root.is_symlink():
+        return
+    root = root.resolve(strict=True)
+    if conversation is None:
+        if root != reader_checkout_path(receipt_path):
+            return
+        directory = "checkout-artifacts"
+    else:
+        if (receipt.get("kind") != "antigravity-execution" or conversation != receipt.get("conversation_id")
+                or conversation != root.name or str(root) != receipt.get("conversation_root")):
+            return
+        directory = "artifacts"
+    root_info = root.stat()
+    path = root / target
+    if path.is_symlink():
+        return
+    try:
+        source = path.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        return  # The locator may belong to another source root.
+    info = source.stat()
+    if not stat.S_ISREG(info.st_mode):
+        return
+    # On a case-insensitive volume even the spelling of the root may differ.
+    parent = next((p for p in source.parents if os.path.samestat(p.stat(), root_info)), None)
+    if parent is None:
+        return
+    relative = source.relative_to(parent)
+    descriptor = os.open(root / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as original:
+        opened = os.fstat(descriptor)
+        identity = (opened.st_dev, opened.st_ino)
+        if not os.path.samestat(opened, info) or identity in indexed():
+            return
+        name = f"{root_info.st_dev}-{root_info.st_ino}-{opened.st_dev}-{opened.st_ino}"
+        mapping = dict(copy=f"{directory}/{name}")
+        destination = report_copy_path(receipt_path, receipt, mapping)
+        if destination not in by_object:
+            payload = bytearray()
+            digest = budget.digest(descriptor, opened, source, payload)
+            if digest is None or path.resolve(strict=True) != source or budget.time_left() <= 0:
+                return
+            kept = destination.parent
+            kept.mkdir(mode=0o700, exist_ok=True)
+            private = kept.lstat()
+            if not stat.S_ISDIR(private.st_mode) or private.st_uid != os.getuid() or private.st_mode & 0o077:
+                raise PermissionError("Restore the owned private artifact directory before retaining a native report")
+            with provisioning_file(kept, destination.name) as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+                dest = os.fstat(output.fileno())
+            by_object[destination] = dict(**mapping, st_dev=dest.st_dev, st_ino=dest.st_ino, sha256=digest)
+    if budget.time_left() > 0:
+        receipt["retained_files"][entry] = dict(root=str(root), relative=str(relative), conversation=conversation,
+                                                **by_object[destination])
 
 
 def reset_patch(receipt):
@@ -1211,6 +1663,7 @@ def reset_writer(path, *, assignment_id):
         raise FactoryError("Reset needs an admitted task and an existing assignment")
     command = assignment["request"]["command"]
     # A failed reader can be reset too: a Grok reader that ran in place left MCP output in a shared checkout (#85).
+    command = native_argument_view(command)
     if native_harness(command) is None or "--receipt" not in command:
         raise FactoryError("Only a native assignment's checkout can be reset")
     receipt = Path(command[command.index("--receipt") + 1])
@@ -1232,6 +1685,17 @@ def reset_writer(path, *, assignment_id):
     directory, head = git_dir(cwd), git_commit(cwd, "HEAD")
     committed = (commit.get("candidate") if isinstance(commit, dict) and commit.get("state") == "created"
                  and commit.get("parent") == candidate else None)
+    if (isinstance(commit, dict) and commit.get("state") == "committing" and head != candidate
+            and commit.get("parent") == candidate and saved.get("inputs") == assignment["request"]["inputs"]
+            and saved.get("job") == record["task"] + "/" + assignment_id
+            and str(directory) == saved.get("worktree_git_dir") and saved.get("cwd") == cwd
+            and repository_identity(cwd) == saved.get("repository_identity") == record["admission"]["repository_identity"]
+            and isinstance(commit.get("staged_tree"), str)):
+        from factory_commit import check_commit_headers
+        with local_git_reads():
+            check_commit_headers(cwd, head, candidate, commit["staged_tree"])
+        raise FactoryError(f"Original HEAD {head} matches the interrupted commit parent and staged tree. "
+                           "Preserve the receipt and inspect the commit before selecting a candidate")
     if repository_identity(cwd) != record["admission"]["repository_identity"] or head != candidate and head != committed:
         raise FactoryError("Writer checkout moved off its input candidate and its own factory commit; inspect it by hand")
     # A writer that failed after its factory commit keeps that commit; only leftovers are reset.
@@ -1295,6 +1759,7 @@ def owned_quiet_worktree(record):
             here = False  # A checkout that no longer exists cannot be this worktree.
         if not here:
             continue
+        command = native_argument_view(command)
         if assignment["state"] == "launching" or "--receipt" not in command:
             raise FactoryError(f"Cannot confirm assignment {identity} stopped; reconcile it before releasing the worktree")
         try:
@@ -1309,36 +1774,179 @@ def owned_quiet_worktree(record):
     return item, directory
 
 
-def release_worktree(path):
-    """Remove a task's provisioned worktree once its work is done; the branch stays.
+def check_deregistered(repository, destination, admin):
+    # NUL delimiters preserve Git paths containing tabs, quotes or newlines.
+    entries = provisioning_git(repository, "worktree", "list", "--porcelain", "-z").split("\0")
+    registered = [Path(entry.removeprefix("worktree ")) for entry in entries if entry.startswith("worktree ")]
+    if not registered or any(not path.is_absolute() for path in registered):
+        raise FactoryError("Inspect the incomplete Git worktree inventory before relying on deregistration")
+    target = Path(destination).resolve()
+    for path in registered:
+        if path == target or path.resolve() == target:
+            raise FactoryError(f"Git still registers missing checkout {path} in {repository}. Inspect its entry "
+                               f"in the git worktree list --porcelain -z inventory, original admin directory {admin} "
+                               "and owner release receipt. Preserve the registration and retain dependent caches.")
 
-    The worktree is locked while the factory owns it, so ordinary cleanup cannot remove
-    it. Caller holds the owner's execution and task locks.
-    """
-    record = load_task(path)
+
+def check_legacy_registration(record, witness):
+    """Match the attended observation to one currently registered, owner-locked checkout."""
+    item = record["provisioning"]
+    request = item["request"]
+    marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
+    inventory = provisioning_git(record["admission"]["repository"], "worktree", "list", "--porcelain", "-z")
+    target = "worktree " + request["path"]
+    branch = "branch refs/heads/" + request["branch"]
+    entries = [entry.split("\0") for entry in inventory.split("\0\0") if entry]
+    matches = [fields for fields in entries if fields[0] == target or branch in fields]
+    expected = [target, "HEAD " + witness["head"], branch, "locked " + marker]
+    if witness["marker"] != marker or matches != [expected] or entries[0] == expected:
+        raise FactoryError("Cannot confirm the current legacy owner registration. Preserve the checkout, "
+                           "branch and dependent caches for owner inspection.")
+
+
+def release_proof(path, record):
+    """Only the locked release producer binds the removed physical checkout to its receipt."""
+    item = record["provisioning"]
+    destination = item["request"]["path"]
+    alias = None
+    try:
+        raw = read_record_bytes(path, private=True)
+    except FileNotFoundError:
+        raise FactoryError(f"Missing original owner release outcome for deregistered checkout {destination}") from None
+    except OSError:
+        # save(exclusive=True) can stop after link() and before unlinking its temporary name.
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_nlink != 2):
+            raise
+        aliases = [entry for entry in path.parent.glob(".saving-*") if os.path.samestat(entry.lstat(), info)]
+        if len(aliases) != 1:
+            raise
+        alias, = aliases
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            current = os.fstat(stream.fileno())
+            if (not os.path.samestat(info, current) or current.st_nlink != 2 or current.st_mode != info.st_mode
+                    or current.st_uid != os.getuid()):
+                raise FactoryError(f"Release publication changed at {path}; preserve both names")
+            raw = stream.read()
+        if not all(os.path.samestat(entry.lstat(), info) for entry in (path, alias)):
+            raise FactoryError(f"Release publication changed during inspection at {path}; preserve both names")
+    proof = decode_json(raw)
+    marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
+    version = proof.get("schema_version") if isinstance(proof, dict) else None
+    # Only a completed owner with no original observation can replay an attended observation.
+    legacy = version == 3
+    if legacy and (item["state"] != "provisioned" or "checkout_inodes" in item):
+        raise FactoryError(f"Restore the original owner release outcome for deregistered checkout {destination}")
+    field = "observed_checkout" if legacy else "checkout"
+    witness = proof.get(field) if isinstance(proof, dict) else None
+    extra = {field: witness}
+    if version in (2, 3):
+        if (not isinstance(proof.get("publication_alias"), str)
+                or not re.fullmatch(r"\.saving-[a-z0-9_]+", proof["publication_alias"])
+                or alias is not None and proof["publication_alias"] != alias.name
+                or not legacy and not original_checkout(item, witness)):
+            raise FactoryError(f"Restore the original owner release outcome for deregistered checkout {destination}")
+        extra["publication_alias"] = proof["publication_alias"]
+    if (not isinstance(witness, dict) or witness.get("marker") != marker
+            or witness.get("repository") != record["admission"]["repository_identity"]
+            or witness.get("cwd") != destination or witness.get("git_dir") != item["git_dir"]
+            or not isinstance(witness.get("head"), str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", witness["head"])
+            or not valid_checkout_inodes(witness.get("inodes"))
+            or type(version) is not int or version not in (1, 2, 3) or proof.get("already_released") is not False
+            or type(proof.get("at")) not in (int, float) or not 0 < proof["at"] <= time.time()
+            or proof != dict(**extra, schema_version=version, at=proof["at"], owner_token=item["owner_token"],
+                             git_dir=item["git_dir"], task=record["task"], branch=item["request"]["branch"],
+                             worktree=destination, head=witness["head"], already_released=False)):
+        raise FactoryError(f"Restore the original owner release outcome for deregistered checkout {destination}")
+    if alias is not None:
+        if version == 1:
+            raise FactoryError(f"Legacy release receipt at {path} has two links and no recorded publication alias. "
+                               "Preserve both names for owner inspection.")
+        raise FactoryError(f"Interrupted private release publication at {path} shares its inode with {alias}. "
+                           "Verify the publisher has stopped, Git deregistration, owner binding and both private names "
+                           "under the owner locks. Remove only the verified temporary alias under operator authority, "
+                           "then retry release readback and rerun the census.")
+    return proof, raw
+
+
+def release_worktree(path):
+    """Caller holds the owner's execution and task locks. Keep launch exclusion through publication."""
+    import go_cache
+
+    raw = read_record_bytes(path, private=True)
+    record = validate_task(path, decode_json(raw.decode("utf-8")))
     item, admission = record["provisioning"], record["admission"]
-    if (admission is not None and item is not None and item["state"] == "provisioned"
-            and not os.path.lexists(item["request"]["path"])):
-        # acr-226 under load: the removal succeeded but its reply was lost, and the retry called the missing
-        # worktree uncertain. Once Git no longer registers it either, the release is already done.
-        destination = item["request"]["path"]
-        listed = provisioning_git(admission["repository"], "worktree", "list", "--porcelain").splitlines()
-        if {"worktree " + destination, "worktree " + str(Path(destination).resolve())} & set(listed):
-            raise FactoryError(f"The worktree directory is gone but Git still registers it; run `git worktree unlock "
-                               f"{destination}` and `git worktree prune` in the repository, then release again")
-        return dict(task=record["task"], worktree=destination, branch=item["request"]["branch"], head=None,
-                    already_released=True)
-    item, directory = owned_quiet_worktree(record)
+    if admission is None or item is None or item["state"] != "provisioned":
+        raise FactoryError("Task has no provisioned worktree")
     destination = Path(item["request"]["path"])
-    head = git_commit(str(destination), "HEAD")
-    check_checkout(record["admission"]["repository"], str(destination), head,
-                   expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
-    # Removing the still-locked worktree in one step keeps the ownership marker until it is gone,
-    # so a failed removal can be retried; it was verified clean above.
-    provisioning_git(record["admission"]["repository"], "worktree", "remove", "--force", "--force",
-                     str(destination), timeout=600)
-    return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=head,
-                already_released=False)
+    directory = Path(item["git_dir"])
+    receipt_path = path.with_suffix(".worktree-release.json")
+    if not os.path.lexists(destination):
+        check_repository(admission)
+        if go_cache.checkout_binding(destination, directory, admission["repository_identity"]) is not None:
+            raise FactoryError("Checkout reappeared during release readback; inspect incomplete teardown")
+        proof, _ = release_proof(receipt_path, record)
+        if "observed_checkout" in proof and (read_record_bytes(path, private=True) != raw
+                or go_cache.checkout_binding(destination, directory, admission["repository_identity"]) is not None):
+            raise FactoryError("Legacy release readback changed. Inspect the owner record and retain dependent caches.")
+        return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=None,
+                    already_released=True)
+    with go_cache.inode_lock(directory) as fd:
+        if os.path.lexists(receipt_path):
+            raise FactoryError("Inspect the existing owner release receipt before removing a surviving worktree")
+        provisioning_owned(record, item)
+        repo = admission["repository_identity"]
+        witness = go_cache.checkout_binding(destination, directory, repo)
+        legacy = "checkout_inodes" not in item
+        if not witness:
+            raise FactoryError("Missing current checkout. Preserve the registration and inspect the owner record.")
+        if legacy:
+            check_legacy_registration(record, witness)
+        elif not original_checkout(item, witness):
+            raise FactoryError("Invalid or changed original provisioning identity. Preserve the checkout for inspection.")
+        head = witness["head"]
+        user_records = go_cache.check_release_users(path.parent, record, destination, directory, witness)
+        if legacy:
+            print(f"Legacy provisioning never recorded checkout_inodes. Confirm Git removal of the current "
+                  f"owner-registered checkout {destination} and its admin directory {directory} "
+                  f"on {item['request']['branch']}. Dependent caches stay retained.", file=sys.stderr)
+        go_cache.confirm_window(record["task"])
+        check_checkout(admission["repository"], str(destination), head, expected_identity=repo,
+                       expected_git_dir=directory, read_only=True)
+        if legacy:
+            check_legacy_registration(record, witness)
+        for user_path, saved in user_records.items():
+            if read_record_bytes(user_path, private=True) != saved:
+                raise FactoryError(f"Checkout user changed before release at {user_path}; inspect before retrying")
+        if (read_record_bytes(path, private=True) != raw or not os.path.samestat(os.fstat(fd), directory.lstat())
+                or provisioning_owned(record, item) != directory
+                or go_cache.checkout_binding(destination, directory, repo) != witness):
+            raise FactoryError("Checkout changed during release; inspect ownership before retrying")
+        if provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]:
+            raise FactoryError("Restore the original provisioned branch before release")
+        provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination), timeout=600)
+        if go_cache.checkout_binding(destination, directory, repo) is not None:
+            raise FactoryError("Git removal left a checkout endpoint; inspect incomplete teardown")
+        outcome = dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"],
+                       head=head, already_released=False)
+        receipt: dict[str, object] = dict(outcome, schema_version=3 if legacy else 2, at=time.time(), git_dir=str(directory),
+                                          owner_token=item["owner_token"])
+        receipt["observed_checkout" if legacy else "checkout"] = witness
+        try:
+            with publish_record(receipt_path, exclusive=True) as stream:
+                receipt["publication_alias"] = Path(stream.name).name
+                published = json.dumps(receipt, indent=2) + "\n"
+                stream.write(published)
+        except OSError as exc:
+            raise FactoryError("Git removed the worktree but saving the owner release outcome failed; "
+                               "inspect the owner store before relying on teardown evidence") from exc
+        _, readback = release_proof(receipt_path, record)
+        if (readback != published.encode() or read_record_bytes(path, private=True) != raw
+                or go_cache.checkout_binding(destination, directory, repo) is not None):
+            raise FactoryError(f"Release receipt readback differs at {receipt_path}; inspect the owner store")
+        return outcome
 
 
 def rebase_worktree(path, *, onto):
@@ -1403,6 +2011,8 @@ def rebase_worktree(path, *, onto):
 
 def provision_worktree(path, *, worktree_id, destination):
     """Caller holds the owner's execution/task locks, as for explicit launches."""
+    import go_cache
+
     record = load_task(path)
     if record["admission"] is None:
         raise FactoryError("Admit a task before provisioning a writer worktree")
@@ -1422,13 +2032,16 @@ def provision_worktree(path, *, worktree_id, destination):
     request: dict = dict(path=str(destination), branch=f'factory/{record["task"]}/{worktree_id}',
                          inputs=dict(record["inputs"]))
     check_repository(record["admission"])
-    existing = record["provisioning"]
+    existing: dict | None = record["provisioning"]
     if existing is not None:
         if existing["id"] != worktree_id or existing["request"] != request:
             raise FactoryError("Task already has a different provisioning request; inspect its original intent")
         directory = provisioning_owned(record, existing)
         if existing["state"] == "provisioned":
             return record  # Historical completion: writers may now have edited this checkout.
+        if not valid_checkout_inodes(existing.get("checkout_inodes")):
+            raise FactoryError("Original checkout identity was never recorded. Retain the worktree, cache and "
+                               "pending provisioning intent for owner inspection.")
         # Reconciliation is read-only, including while held. Never repair shared files.
         try:
             for root, _, files in os.walk(destination, followlinks=False):
@@ -1436,7 +2049,8 @@ def provision_worktree(path, *, worktree_id, destination):
                     if (Path(root) / name).lstat().st_nlink != 1:
                         raise FactoryError("Provisioning outcome uncertain: shared files require inspection")
             check_checkout(record["admission"]["repository"], str(destination), request["inputs"]["candidate"],
-                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
+                           expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory,
+                           read_only=True)
         except OSError:
             raise FactoryError("Cannot inspect retained provisioning resources; restore filesystem access and inspect the existing intent/worktree without retrying, resetting or deleting them") from None
     else:
@@ -1474,11 +2088,19 @@ def provision_worktree(path, *, worktree_id, destination):
                          "-b", request["branch"], str(destination), request["inputs"]["candidate"])
         directory = provisioning_owned(record, existing)
         try:
+            existing["checkout_inodes"] = go_cache.checkout_inodes(destination, directory)
+            save(path, record)  # Preserve the producer's observation even if completion cannot be published.
+        except OSError:
+            raise FactoryError("Cannot confirm the original checkout identity save. Retain the worktree and "
+                               "inspect the pending owner record before reconciling.") from None
+        try:
             write_candidate(repository, destination, request["inputs"]["candidate"], entries)
             check_checkout(repository, str(destination), request["inputs"]["candidate"],
                            expected_identity=record["admission"]["repository_identity"], expected_git_dir=directory)
         except OSError:
             raise FactoryError("Provisioning resource writes failed; restore filesystem access/space and inspect the retained intent/worktree without retrying, resetting or deleting them") from None
+    if go_cache.checkout_inodes(destination, directory) != existing["checkout_inodes"]:
+        raise FactoryError("Checkout changed during provisioning; retain the original worktree for inspection")
     existing.update(state="provisioned", git_dir=str(directory))
     try:
         save(path, record)
@@ -1505,7 +2127,13 @@ def set_inputs(path, *, candidate, requirements, acceptance=None):
 
 
 def record_result(path, *, assignment_id, candidate, requirements, outcome, artifacts):
-    record = load_task(path)
+    record = load_task(path, persist_migration=False)
+    set_result(record, assignment_id, candidate, requirements, outcome, artifacts)
+    save(path, record)
+    return record
+
+
+def set_result(record, assignment_id, candidate, requirements, outcome, artifacts):
     if assignment_id not in record["assignments"]:
         raise FactoryError(f"Unknown assignment {assignment_id!r}; use show --task {record['task']} to find its ID")
     assignment = record["assignments"][assignment_id]
@@ -1526,8 +2154,6 @@ def record_result(path, *, assignment_id, candidate, requirements, outcome, arti
     if assignment["result"] is not None and assignment["result"] != result:
         raise FactoryError("Assignment already has a different result; use a new explicit assignment ID")
     assignment["result"] = result
-    save(path, record)
-    return record
 
 
 def hold_task(path, reason, *, request_id=None, expected_revision=None, clock=time.time):
@@ -1929,6 +2555,9 @@ TIME_MACHINE_EXCLUSION = ("com.apple.metadata:com_apple_backup_excludeItem",
 
 
 SCRATCH_ROOT = "/tmp" if os.path.isdir("/tmp") else None  # The test bootstrap points it at a per-run directory.
+SCRATCH_RECEIPT_VERSION = 8
+SCRATCH_RECEIPT_FIELDS = {"scratch", "scratch_identity", "scratch_removed", "native_process"}
+ABANDONED_SCRATCH_COMMAND = "abandoned-scratch"
 
 
 def new_scratch():
@@ -1941,27 +2570,662 @@ def new_scratch():
     return Path(tempfile.mkdtemp(prefix="sf-", dir=SCRATCH_ROOT or tempfile.gettempdir()))
 
 
-def remove_scratch(directory):
-    """Remove an attempt's scratch once its native process has stopped; leftovers are reported, never fatal."""
-    def writable(function, path, _):
-        # Go and package managers leave read-only files and directories; unlinking needs the parent writable.
-        os.chmod(os.path.dirname(path), 0o700)
-        if os.path.lexists(path) and not os.path.islink(path):
-            os.chmod(path, 0o700)
-        function(path)
+def owned_scratch(info, identity):
+    return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and isinstance(identity, dict)
+            and type(identity.get("st_dev")) is int and type(identity.get("st_ino")) is int
+            and (info.st_dev, info.st_ino) == (identity["st_dev"], identity["st_ino"]))
+
+
+def restore_scratch_name(held, directory):
+    # Another directory may already occupy the public name. Never overwrite it on recovery.
+    libc = ctypes.CDLL(None, use_errno=True)
+    src, dst = os.fsencode(held), os.fsencode(directory)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        result = libc.renamex_np(src, dst, 4)  # RENAME_EXCL
+    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
+        result = libc.renameat2(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    else:
+        raise OSError(f"Exclusive rename unavailable; inspect the preserved directory at {held}")
+    if result:
+        raise OSError(f"Inspect the preserved directory at {held}: {os.strerror(ctypes.get_errno())}")
+
+
+def remove_scratch(directory, identity, fd):
+    """Return whether removal succeeded. A leftover is reported and remains nonfatal."""
+    def unreadable(error):
+        raise error
+
+    def check(info):
+        if not owned_scratch(info, identity):
+            raise OSError("Scratch directory ownership or identity changed")
+
+    def remove_contents():
+        check(directory.lstat())
+        for name in os.listdir(fd):
+            if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                shutil.rmtree(name, dir_fd=fd)
+            else:
+                os.unlink(name, dir_fd=fd)
+
     try:
-        shutil.rmtree(directory, onerror=writable)
+        if fd is None:
+            raise OSError("Original scratch directory was not recorded")
+        info = os.fstat(fd)
+        check(info)
+        try:
+            remove_contents()
+        except PermissionError:
+            # Repair and retry only through the original, still-open directory.
+            check(directory.lstat())
+            if (os.fstat(fd).st_mode & 0o077 or not directory.name.startswith("sf-")
+                    or directory.parent.resolve() != Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve()):
+                raise
+            for _, _, _, descriptor in os.fwalk(".", dir_fd=fd, onerror=unreadable):
+                current = os.fstat(descriptor)
+                if current.st_uid != os.getuid() or current.st_dev != info.st_dev:
+                    raise PermissionError("Scratch directory ownership or identity changed")
+                if current.st_mode & 0o700 != 0o700:
+                    os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | 0o700)
+            remove_contents()
+        check(directory.lstat())
+        # rmdir has no expected-inode argument. Claim the last name in a private
+        # directory, then verify which inode actually moved before unlinking it.
+        holder = Path(tempfile.mkdtemp(prefix=".sf-cleanup-", dir=directory.parent))
+        held = holder / directory.name
+        try:
+            directory.rename(held)
+            try:
+                check(held.lstat())
+                held.rmdir()
+            except OSError:
+                restore_scratch_name(held, directory)
+                raise
+        finally:
+            if not os.path.lexists(held):
+                holder.rmdir()
     except OSError as exc:
-        print(f"factory: scratch {directory} was not fully removed ({exc}); remove it by hand", file=sys.stderr, flush=True)
+        print(f"factory: scratch {directory} was not fully removed ({exc}); inspect it before cleanup", file=sys.stderr, flush=True)
+        return False
+    return True
 
 
 @contextmanager
-def scratch_directory():
+def scratch_directory(path, receipt):
     directory = new_scratch()
+    with ExitStack() as handles:
+        fd = None
+        try:
+            # Keep the recorded inode allocated even if native code unlinks its name.
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            handles.callback(os.close, fd)
+            info = os.fstat(fd)
+            receipt.update(scratch=str(directory), scratch_identity=dict(st_dev=info.st_dev, st_ino=info.st_ino))
+            save(path, receipt)
+            yield directory
+        finally:
+            # Codex records False when it cannot confirm the native child's exit.
+            if receipt.get("scratch_removed") is None:
+                receipt["scratch_removed"] = remove_scratch(directory, receipt.get("scratch_identity"), fd)
+
+
+def process_scope():
+    """Identify the boot and PID namespace in which a PID can be checked."""
+    if sys.platform == "darwin":
+        boot = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+                              check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        return f"darwin:{uuid.UUID(boot)}"
+    if sys.platform == "linux":
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        namespace = os.readlink("/proc/self/ns/pid")
+        return f"linux:{uuid.UUID(boot)}:{namespace}"
+    raise OSError("No native process identity probe for this platform")
+
+
+def native_start_time(pid):
+    """Return the owned child's kernel start time, or None if it already exited."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        # sys/proc_info.h: proc_bsdinfo and PROC_PIDTBSDINFO.
+        class BSDInfo(ctypes.Structure):
+            _fields_ = [("status_and_pid", ctypes.c_uint32 * 4), ("ppid", ctypes.c_uint32),
+                        ("ids_and_reserved", ctypes.c_uint32 * 7), ("names", ctypes.c_char * 48),
+                        ("file_and_tty_info", ctypes.c_uint32 * 6),
+                        ("start_seconds", ctypes.c_uint64), ("start_microseconds", ctypes.c_uint64)]
+
+        info = BSDInfo()
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        size = ctypes.sizeof(info)
+        if libproc.proc_pidinfo(pid, 3, ctypes.c_uint64(0), ctypes.byref(info), size) != size:
+            error = ctypes.get_errno()
+            if error == errno.ESRCH:
+                return None
+            raise OSError("Cannot read the native child's process information")
+        if info.ppid == os.getpid():
+            return info.start_seconds * 1_000_000 + info.start_microseconds
+    elif sys.platform == "linux":
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+        except FileNotFoundError:
+            return None
+        # The command can include parentheses. The fields after it start at field 3.
+        if int(fields[1]) == os.getpid():
+            return int(fields[19])
+    return None
+
+
+def record_native_process(path, receipt, process):
     try:
-        yield directory
-    finally:
-        remove_scratch(directory)
+        start = native_start_time(process.pid)
+    except (OSError, ValueError, IndexError):
+        start = None
+        print("factory: native start identity unavailable; inspect local process access before classifying this scratch",
+              file=sys.stderr, flush=True)
+    if process.returncode is not None:
+        start = None
+    try:
+        scope = process_scope()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        scope = None
+        print("factory: native process scope unavailable; restore access to OS process metadata before classifying this scratch",
+              file=sys.stderr, flush=True)
+    receipt["native_process"] = dict(pid=process.pid, start_time=start, scope=scope)
+    save(path, receipt)
+
+
+def process_proven_gone(identity, scope, exit_code):
+    if (not isinstance(scope, str) or not scope or not isinstance(identity, dict) or identity.get("scope") != scope
+            or "start_time" not in identity
+            or type(identity.get("pid")) is not int or not 1 <= identity["pid"] <= 2**31 - 1):
+        return False
+    start = identity["start_time"]
+    # If the child was reaped before the probe, the worker's exit code is proof of observation.
+    if not ((type(start) is int and start > 0) or (start is None and type(exit_code) is int)):
+        return False
+    try:
+        # A PID with any occupant, including a different start time, is excluded.
+        os.getpgid(identity["pid"])
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False  # Permission or inspection failure is insufficient evidence.
+    return False
+
+
+def interpreter_identity(executable):
+    info = Path(executable).stat()
+    return dict(st_dev=info.st_dev, st_ino=info.st_ino)
+
+
+def scratch_worker(command, installed_root):
+    index = 3 if command[1:3] == ["-E", "-s"] else 1
+    if len(command) > index:
+        worker = Path(command[index])
+        if worker.is_absolute() and str(worker) == command[index] and ".." not in worker.parts:
+            for harness in NATIVE_HARNESSES if index == 3 else ("codex",):
+                expected = (root / (harness + "_worker.py") for root in (ROOT, installed_root))
+                if any(worker == path or worker.exists() and path.exists() and worker.samefile(path) for path in expected):
+                    return harness, index
+    return None, index
+
+
+def scratch_worker_args(record, assignment, installed_root):
+    """Read the launched worker's saved command without executing it or contacting Rex."""
+    import importlib
+
+    request = assignment["request"]
+    command = request["command"]
+    interpreter = assignment.get("interpreter")
+    if (not isinstance(interpreter, dict) or interpreter.get("invocation") != command[0]
+            or not isinstance(interpreter.get("file"), dict)
+            or any(type(interpreter["file"].get(key)) is not int for key in ("st_dev", "st_ino"))):
+        raise FactoryError("Scratch receipt needs a launch-time interpreter observation")
+    try:
+        current = interpreter_identity(command[0])
+    except FileNotFoundError:
+        if os.path.lexists(command[0]):
+            raise FactoryError("Saved interpreter alias no longer resolves") from None
+    else:
+        if current != interpreter.get("file"):
+            raise FactoryError("Saved interpreter now resolves to a different file")
+    harness, index = scratch_worker(command, installed_root)
+    if harness is None:
+        raise FactoryError("Scratch receipt needs the source or installed native worker")
+    replacements = launch_replacements(record, request, assignment["brief"])
+    tail = [replacements.get(part, part) for part in command[index + 1:]]
+    options = [part.partition("=")[0] for part in tail if part.startswith("--")]
+    if len(options) != len(set(options)) or "{instructions}" in tail:
+        raise FactoryError("Scratch receipt needs unambiguous original native worker arguments")
+    parser = importlib.import_module(harness + "_worker").parser()
+    parser.allow_abbrev = False
+    return harness, parse_saved_args(parser, tail)
+
+
+def report_file_evidence(path, scratch, budget, *, binding=None, excluded=(), namespaces=(), indexed=None):
+    """Fingerprint an opened producer file, verify a binding, or check a legacy reader locator."""
+    if not budget.attempt():
+        return False
+    try:
+        # Aliases and traversal can depend on scratch even if the final target is elsewhere.
+        if path.is_relative_to(scratch) or path.resolve(strict=True) != path or not path.is_file():
+            return False
+        # Match reserved paths by identity, including case aliases on a case-insensitive volume.
+        reserved = [scratch.stat()]
+        for location in (*excluded, *namespaces):
+            # For a denied namespace, excluding its nearest identifiable ancestor is sufficient.
+            ancestors = (location, *location.parents) if location in namespaces else (location,)
+            for ancestor in ancestors:
+                try:
+                    reserved.append(ancestor.stat())
+                    break
+                except PermissionError:
+                    continue
+                except (FileNotFoundError, NotADirectoryError):
+                    break  # A disposed checkout or expired conversation is common.
+            else:
+                return False
+        directory_flags = getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY)) | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory = os.open(path.anchor, directory_flags)
+        try:
+            anchor = os.fstat(directory)
+            if any(os.path.samestat(anchor, other) for other in reserved):
+                return False
+            for component in path.parts[1:-1]:
+                child = os.open(component, directory_flags, dir_fd=directory)
+                os.close(directory)
+                directory = child
+                parent = os.fstat(directory)
+                if any(os.path.samestat(parent, other) for other in reserved):
+                    return False
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or any(os.path.samestat(info, other) for other in reserved):
+                return False
+            if binding is None and indexed is None:
+                # A historical reader locator needs only surviving bytes.
+                if budget.time_left() <= 0:
+                    return False
+                witness = os.read(descriptor, 1)
+                budget.remaining -= len(witness)
+                return bool(witness) and budget.time_left() > 0
+            if not info.st_size or indexed is not None and (info.st_dev, info.st_ino) in indexed():
+                return False
+            if binding is not None:
+                if ((info.st_dev, info.st_ino) != (binding.get("st_dev"), binding.get("st_ino"))
+                        or any(type(binding.get(k)) is not int for k in ("st_dev", "st_ino"))):
+                    return False
+                if "external" in binding:
+                    if binding["external"] != str(path):
+                        return False
+                elif info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077:
+                    return False
+            digest = budget.digest(descriptor, info, path)
+            if digest is None:
+                return False
+            if binding is not None:
+                return digest == binding.get("sha256")
+            return dict(external=str(path), st_dev=info.st_dev, st_ino=info.st_ino, sha256=digest)
+        finally:
+            os.close(descriptor)
+    except (FactoryError, OSError, ValueError, RuntimeError) as exc:
+        if indexed is not None:
+            print(f"factory: cannot retain optional report file {str(path)!r}: {exc}", file=sys.stderr)
+        return False
+
+
+TYPED_REPORT_INSTRUCTION = (
+    "Your structured report is the only output the factory collects: put each finding, or each verified"
+    " point behind an approval, in its artifacts as a self-contained string with path:line."
+    ' For each ordinary finding, encode a JSON object as one artifact string, such as'
+    ' {"observation":"The complete finding","citations":["worker.py:12"]}. Citations are optional.'
+    " When the report is stored elsewhere, use 'File: ' followed by its exact path."
+    " Keep prescribed judge and release lines verbatim and return any required coordination answer.")
+
+
+def typed_report_attempt(args, receipt, assignment=None):
+    """Only the report instruction in the original, hash-bound factory paragraph declares inline observations."""
+    if not any(entry.lstrip().startswith("{") for entry in receipt["report"]["artifacts"]):
+        return False
+    try:
+        if assignment is None:  # Workers have the launched brief and job; listing already has their assignment.
+            _, assignment = worker_assignment(args)
+            if assignment is None:
+                return False
+        request = assignment["request"]
+        if (str(args.brief) != assignment["brief"] or args.brief_sha256 != request["instructions_sha256"]
+                or receipt.get("brief_sha256") != args.brief_sha256):
+            return False
+        # The bounded binary read preserves the exact bytes, including line endings.
+        instructions = read_record(args.brief, private=True, max_bytes=args.brief.stat().st_size)
+    except (FactoryError, OSError, ValueError, RecursionError):
+        return False
+    prefix = f"# Assignment: {request['role']}\n\n{request['goal']}\n\n"
+    if hashlib.sha256(instructions.encode()).hexdigest() != args.brief_sha256 or not instructions.startswith(prefix):
+        return False
+    # Skip the goal and role bullets. Appended acceptance text can also quote the instruction.
+    paragraphs = instructions[len(prefix):].split("\n\n", 2)
+    if len(paragraphs) < 2 or not paragraphs[1].startswith("Authority: "):
+        return False
+    report, footer, _ = paragraphs[1].partition("\nKeep each command's output small:")
+    return bool(footer) and report.endswith("\n" + TYPED_REPORT_INSTRUCTION)
+
+
+def decode_report_entry(entry, typed) -> tuple[str | None, str | None]:
+    """Return the declared observation or a file target requiring independent evidence."""
+    if typed and entry.lstrip().startswith("{"):
+        try:
+            declaration = decode_json(entry)
+        except ValueError:
+            return None, None
+        if not isinstance(declaration, dict) or declaration.keys() - {"observation", "citations"}:
+            return None, None
+        observation = declaration.get("observation")
+        citations = declaration.get("citations", [])
+        if (isinstance(observation, str) and observation.strip() and isinstance(citations, list)
+                and all(isinstance(cite, str) and cite.strip() for cite in citations)):
+            return observation, None
+        return None, None
+
+    # Historical spellings can identify a file. Free text alone supplies no payload.
+    legacy_result = entry.startswith("Result: ")
+    text = entry.removeprefix("Result: ").strip() if legacy_result else entry
+    if legacy_result:
+        text = re.sub(r"^\[(?:defect|advisory|policy mismatch|optional hardening)\]\s+", "", text)
+        if len(text) >= 2 and (text[0], text[-1]) in (("`", "`"), ("<", ">"), ('"', '"'), ("'", "'")):
+            text = text[1:-1]
+    if text.startswith("File: "):
+        return None, text.removeprefix("File: ")
+    link = re.fullmatch(r"(?:[-*+]\s+)?\[[^]\n]*\]\((<[^>]+>|[^()]+)\)", text)
+    locator = re.fullmatch(r"(?:The report is at |Consult the original at )(.+)\.", text)
+    direction = re.fullmatch(r"Read (.+) for the full report", text)
+    match = link or locator or direction
+    if match:
+        text = match[1].removeprefix("<").removesuffix(">")
+    elif legacy_result and not text.startswith(("/", "./", "../", "~/")):
+        # Preserve the locator spellings recognized by the historical Result format.
+        annotations = r"\[[^]\n]*\](?:\([^()]*\))?|`[^`]+:\d+`|(?<!\S)\S+:\d+(?=\s|$)"
+        body = re.sub(annotations, "", text).strip()
+        if not re.search(r"\w", body):
+            return None, None
+        if not re.fullmatch(r"[^\s/]+/.*|\S+|[^\n]+\.\w+", body):
+            return None, None
+    return None, re.sub(r":\d+$", "", text)
+
+
+def writer_report_blob(relative, receipt, args, repository, budget):
+    from factory_commit import check_commit_receipt
+
+    commit = receipt.get("commit")
+    if (not relative.parts or ".." in relative.parts or not isinstance(commit, dict)
+            or commit.get("state") != "created" or not isinstance(receipt.get("candidate"), str)
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])):
+        return False
+    try:
+        check_commit_receipt(receipt, args, repository, historical=True)
+        # Use exact tree entry names, even for filenames containing Git pathspec syntax.
+        def tree_entry(revision):
+            row = git_run(repository, "--literal-pathspecs", "ls-tree", "-lz", "--full-tree", revision, "--", str(relative))
+            if row.returncode:
+                raise FactoryError("Cannot read the original writer tree")
+            if not row.stdout:
+                return None
+            metadata, _, name = row.stdout.partition("\t")
+            if name != str(relative) + "\0":
+                raise FactoryError("Writer tree entry differs from the literal report path")
+            return metadata.split()
+
+        output = tree_entry(receipt["candidate"])
+        if not output or output[0] not in ("100644", "100755") or output[1] != "blob" or not budget.fits(int(output[3])):
+            return False
+        parent = tree_entry(args.candidate)
+        if parent and parent[2] == output[2]:
+            return False
+        # The literal tree entry pins this raw object's size before Git reads it.
+        try:
+            blob = git_run_bytes(repository, "cat-file", "blob", output[2])
+        except ReportDeadlineExpired as exc:
+            if isinstance(exc.__cause__, subprocess.TimeoutExpired):
+                budget.remaining -= len(exc.__cause__.output or b"")
+            return False
+        budget.remaining -= len(blob.stdout)
+        return blob.returncode == 0 and len(blob.stdout) == int(output[3]) and budget.time_left() > 0
+    except (FactoryError, OSError, ValueError):
+        return False  # A missing commit, tree or blob cannot prove retention.
+
+
+def external_report_file(original, receipt, path, scratch, scratch_root, budget, *, root=None, binding=None, indexed=None):
+    if original.is_relative_to(scratch_root):
+        original = scratch.parent / original.relative_to(scratch_root)
+    stem = path.name.removesuffix(".json")
+    excluded = [path, path.with_suffix(".report.txt"), reader_checkout_path(path),
+                path.with_name(stem + ".artifacts"), path.with_name(stem + ".checkout-artifacts")]
+    namespaces = []
+    if receipt["kind"] == "antigravity-execution":
+        brain = receipt.get("conversation_root")
+        if (not isinstance(brain, str) or not Path(brain).is_absolute()
+                or Path(brain).name != receipt.get("conversation_id")):
+            return False
+        namespaces.append(Path(brain).parent)
+    for directory in original.parents[1:]:  # Leave room for the conversation directory.
+        if tuple(part.casefold() for part in directory.parts[-3:]) == ANTIGRAVITY_BRAIN.parts:
+            namespaces.append(directory.parents[2] / ANTIGRAVITY_BRAIN)
+    if root is not None:
+        if original.is_relative_to(root):
+            return False
+        excluded.append(root)
+    return report_file_evidence(original, scratch, budget, excluded=excluded, namespaces=namespaces,
+                                indexed=indexed, binding=binding)
+
+
+def retained_scratch_evidence(entry, workdir, receipt, path, scratch, scratch_root, args, record, typed, budget, writer_source=None):
+    copies = receipt.get("retained_files")
+    copy = copies.get(entry) if isinstance(copies, dict) else None
+    if isinstance(copies, dict) and entry in copies and not (isinstance(copy, dict) and "external" in copy):
+        if not isinstance(copy, dict) or not all(isinstance(copy.get(k), str) for k in ("root", "relative")):
+            return False
+        relative, root = Path(copy["relative"]), Path(copy["root"])
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts or not root.is_absolute():
+            return False
+        conversation = copy.get("conversation")
+        if conversation is None:
+            if root != reader_checkout_path(path) or workdir != root:
+                return False
+        elif (receipt["kind"] != "antigravity-execution" or conversation != receipt.get("conversation_id")
+              or root.name != conversation or str(root) != receipt.get("conversation_root")):
+            return False
+        if "copy" in copy:
+            directory = "checkout-artifacts" if conversation is None else "artifacts"
+            if not isinstance(copy["copy"], str) or not re.fullmatch(directory + r"/[0-9]+(?:-[0-9]+){3}", copy["copy"]):
+                return False
+        kept = report_copy_path(path, receipt, copy)
+        if kept.is_relative_to(scratch_root):
+            kept = scratch.parent / kept.relative_to(scratch_root)
+        return report_file_evidence(kept, scratch, budget, binding=copy)
+
+    observation, target = decode_report_entry(entry, typed)
+    if observation is not None:
+        return copy is None
+    if not isinstance(copies, dict) or not target or not target.strip():
+        return False
+    original = workdir / target
+    if original.is_relative_to(scratch_root):
+        original = scratch.parent / original.relative_to(scratch_root)
+    if not args.write:
+        return copy is None and external_report_file(original, receipt, path, scratch, scratch_root, budget)
+    admission = record.get("admission") if record else None
+    if (args.cwd != workdir or receipt.get("writer") is not True or receipt.get("cwd") != str(workdir)
+            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or receipt.get("brief_sha256") != args.brief_sha256 or not admission or str(args.repo) != admission["repository"]
+            or not valid_repository_identity(receipt.get("repository_identity"))
+            or receipt["repository_identity"] != admission["repository_identity"]):
+        return False
+    try:
+        if decode_json(args.repo_identity) != admission["repository_identity"]:
+            return False
+    except ValueError:
+        return False
+    if copy is None and not budget.attempt():
+        return False
+    if writer_source is not None:
+        if not isinstance(writer_source, dict) or not isinstance(writer_source.get("root"), str):
+            return False
+        root = Path(writer_source["root"])
+        if not root.is_absolute() or ".." in root.parts or displaced_files(writer_source, root) is None:
+            return False
+    else:
+        # An older linked checkout may have expired while its original registration survives.
+        provisioned = record.get("provisioning")
+        if (provisioned and provisioned["git_dir"] == str(args.worktree_git_dir)
+                and provisioned["request"]["inputs"] == receipt["inputs"]):
+            root = Path(provisioned["request"]["path"])
+        elif args.worktree_git_dir.name == ".git":
+            root = args.worktree_git_dir.parent
+        else:
+            try:
+                registration = args.worktree_git_dir / "gitdir"
+                marker = Path(read_record(registration).removesuffix("\n"))
+                # A worktree move rewrites this registration. Its new location cannot attest the old root.
+                if registration.lstat().st_ctime > receipt["created_at"]:
+                    return False
+            except (OSError, ValueError):
+                return False
+            if not marker.is_absolute() or marker.name != ".git" or ".." in marker.parts:
+                return False
+            root = marker.parent
+    if not workdir.is_relative_to(root):
+        return False
+    if copy is None:
+        return original.is_relative_to(root) and writer_report_blob(original.relative_to(root), receipt, args, admission["repository"], budget)
+    if writer_source is None or writer_source.get("incomplete") or set(copy) != {"external", "st_dev", "st_ino", "sha256"}:
+        return False
+    return external_report_file(original, receipt, path, scratch, scratch_root, budget, root=root, binding=copy)
+
+
+def abandoned_scratch(state_dir):
+    """List existing private scratch directories with terminal, retained local evidence."""
+    budget = ReportHashBudget(128, 128 * 1024**2, 5)
+    with local_git_reads(), budget.git_reads():
+        rows = _abandoned_scratch(state_dir, budget)
+    if budget.incomplete:
+        print("factory: abandoned-scratch census incomplete: report file verification limit reached", file=sys.stderr)
+    return rows
+
+
+@contextmanager
+def local_git_reads():
+    scope = GIT_EXECUTION.get()
+    environment = dict(scope[1] if scope else git_environment(), GIT_NO_LAZY_FETCH="1",
+                       GIT_OPTIONAL_LOCKS="0", GIT_ALLOW_PROTOCOL="", GIT_TERMINAL_PROMPT="0",
+                       GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
+    with git_execution(scope[0] if scope else lambda: [], environment):
+        yield
+
+
+def _abandoned_scratch(state_dir, budget):
+    if SCRATCH_ROOT is None:
+        raise FactoryError("Scratch root is unavailable; restore the local scratch directory before listing")
+    scratch_root = Path(SCRATCH_ROOT).absolute()
+    resolved_root = scratch_root.resolve()
+    state_dir = state_dir.resolve()
+    try:
+        scope = process_scope()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise FactoryError("Cannot identify the local process scope; restore access to OS process metadata and retry") from None
+    found = {}
+    installed_root = (runtime_home() / "skill" / "runtime").resolve()
+    for task_path in sorted(state_dir.glob("*.json")):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", task_path.stem):
+            continue
+        try:
+            record = load_task(task_path, persist_migration=False, private=True)
+        except (FactoryError, RecursionError):
+            continue  # An unreadable task cannot establish eligibility.
+        for assignment_id, assignment in record["assignments"].items():
+            if assignment["state"] != "launched":
+                continue
+            try:
+                harness, args = scratch_worker_args(record, assignment, installed_root)
+                if args.job != f"{record['task']}/{assignment_id}":
+                    continue
+                cwd = Path(assignment["request"]["cwd"])
+                nominal_path = cwd / args.receipt
+                path = nominal_path.parent.resolve(strict=True) / nominal_path.name
+                events, canonical = native_output_paths(task_path, record["task"], assignment_id, harness)
+                event_path = cwd / args.events
+                brief_path = Path(assignment["brief"])
+                if (path != canonical or event_path.parent.resolve(strict=True) / event_path.name != events
+                        or brief_path.parent.resolve(strict=True) != state_dir
+                        or brief_path.name != f"{record['task']}.{assignment_id}.md"):
+                    continue
+                receipt = decode_json(read_record(path, private=True))
+            except (FactoryError, OSError, ValueError, RuntimeError):
+                continue  # An ambiguous launch or unreadable receipt cannot establish eligibility.
+            pins = dict(candidate=args.candidate, requirements=args.requirements)
+            if (not isinstance(receipt, dict) or receipt.get("kind") != f"{harness}-execution"
+                    or receipt.get("interpreter") != assignment["interpreter"]["file"]
+                    or receipt.get("job") != args.job or receipt.get("inputs") != pins
+                    or assignment["request"].get("inputs") != pins
+                    or type(receipt.get("schema_version")) is not int
+                    or receipt["schema_version"] != SCRATCH_RECEIPT_VERSION
+                    or receipt.get("state") not in ("completed", "failed", "lost")
+                    or any(type(receipt.get(key)) not in (int, float)
+                           or not 0 <= receipt[key] <= sys.float_info.max for key in ("created_at", "finished_at"))
+                    or receipt["finished_at"] < receipt["created_at"]
+                    or receipt.get("scratch_removed") is not False
+                    or not isinstance(receipt.get("scratch"), str)):
+                continue
+            scratch = Path(receipt["scratch"])
+            identity = receipt.get("scratch_identity")
+            if (scratch.parent not in (scratch_root, resolved_root)
+                    or not scratch.name.startswith("sf-")
+                    or path.is_relative_to(resolved_root / scratch.name)):
+                continue
+            try:
+                info = scratch.lstat()
+            except (OSError, ValueError):
+                continue
+            if (not owned_scratch(info, identity)
+                    or not process_proven_gone(receipt.get("native_process"), scope, receipt.get("exit_code"))):
+                continue
+            report = receipt.get("report")
+            coordination = any(getattr(args, flag, None) is not None for flag in ("decision_store", "decision", "question"))
+            fields = {"outcome", "artifacts", "answer"} if coordination else {"outcome", "artifacts"}
+            if not (isinstance(report, dict) and isinstance(report.get("outcome"), str)
+                    and set(report) == fields
+                    and report["outcome"] in RESULT_OUTCOMES
+                    and isinstance(report.get("artifacts"), list)
+                    and all(isinstance(ref, str) and ref.strip() for ref in report["artifacts"])):
+                continue
+            artifacts = report["artifacts"]
+            workdir = cwd if args.write or (harness == "claude" and coordination) else reader_checkout_path(path)
+            if coordination:
+                import coordination_evidence
+                try:
+                    brief = read_record(Path(assignment["brief"]), private=True)
+                    if hashlib.sha256(brief.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
+                        continue
+                    evidence = coordination_evidence.read(brief, args.decision, args.question, args.role, pins, write=args.write)
+                    if evidence is None or not artifacts:
+                        continue
+                    coordination_evidence.validate_answer(report["answer"], evidence, report["outcome"])
+                except (FactoryError, OSError, ValueError):
+                    continue
+            elif artifacts:
+                typed = typed_report_attempt(args, receipt, assignment)
+                writer_source = assignment.get("writer_source")
+                if (writer_source is not None and (str(args.brief) != assignment["brief"]
+                        or args.brief_sha256 != assignment["request"]["instructions_sha256"])):
+                    writer_source = {}  # No file provenance from a mismatched launch.
+                if not any(retained_scratch_evidence(ref, workdir, receipt, path, resolved_root / scratch.name,
+                                                     scratch_root, args, record, typed, budget, writer_source) for ref in artifacts):
+                    continue
+            elif harness not in ("grok", "antigravity"):
+                continue
+            found.setdefault(resolved_root / scratch.name, dict(scratch=str(scratch), receipt=str(nominal_path)))
+    return [found[path] for path in sorted(found)]
 
 
 def worker_environment(environment, cwd, *, scratch=None):
@@ -2012,11 +3276,14 @@ BUDGET_CLOCK = getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC)
 BUDGET_CHECK_SECONDS = 5
 
 
-async def within_budget(coroutine, seconds, *, clock=None):
-    """Await a native worker's coroutine until `seconds` pass on a clock that counts sleep, then raise TimeoutError."""
+def native_clock():
+    return time.clock_gettime(BUDGET_CLOCK)
+
+
+async def within_budget(coroutine, *, deadline, clock=None):
+    """Await a native worker's coroutine until the deadline on a clock that counts sleep, then raise TimeoutError."""
     import asyncio
-    clock = clock or (lambda: time.clock_gettime(BUDGET_CLOCK))
-    deadline = clock() + seconds
+    clock = clock or native_clock
     task = asyncio.ensure_future(coroutine)
     try:
         while not task.done():
@@ -2068,9 +3335,7 @@ def brief(role_id, goal, *, designs=False):
             + "\nKeep scratch files in $TMPDIR, which is yours alone and removed when you finish; never write them to"
             + " /tmp directly."
             # Read-only specialists cannot write files, so the report is their only collected output.
-            + "\nYour structured report is the only output the factory collects: put each finding, or each verified"
-            + " point behind an approval, in its artifacts as a self-contained string with path:line."
-            + " Don't put a report in a file instead: a reader's checkout is deleted after the run."
+            + "\n" + TYPED_REPORT_INSTRUCTION
             + "\nKeep each command's output small: page or filter large output (head, rg -l, --max-count), because"
             + " oversized output ends the run.\nUse original evidence; do not create a separate handover or status ledger.\n"
             + "Existing repository policy and user authorization remain binding.\n")
@@ -2230,7 +3495,7 @@ def cancel_assignment(rex, record, *, assignment_id) -> dict:
     assignment = record["assignments"].get(assignment_id)
     if assignment is None or assignment["state"] != "launched":
         raise FactoryError("Only a launched assignment can be cancelled; abandon a pending launch instead")
-    if native_harness(assignment["request"]["command"]) is None:
+    if local_launch_harness(assignment) is None:
         raise FactoryError("Only a native factory worker records a cancel; inspect other commands in their pane")
     observed = status(rex, record, assignment)
     if observed["state"] != "running":
@@ -2257,6 +3522,17 @@ def reconcile(rex, record, assignment):
     assignment.update(window_id=window_id, block_id=block_id, state="launched")
 
 
+def launch_replacements(record, request, brief_path):
+    replacements = {"{brief}": str(brief_path), "{brief_sha256}": request["instructions_sha256"],
+                    "{cwd}": request["cwd"]}
+    if record["admission"] is not None and "inputs" in request:
+        replacements.update({"{candidate}": request["inputs"]["candidate"],
+                             "{requirements}": request["inputs"]["requirements"],
+                             "{repository}": record["admission"]["repository"],
+                             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)})
+    return replacements
+
+
 def launch(path, *, task, assignment_id, role, goal, cwd, command,
            binary=None, server=None, purpose=None, dependencies=(), frozen_release=None, frozen_delivery=None):
     if not goal.strip():
@@ -2268,7 +3544,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         raise FactoryError("Provide an existing directory and an absolute executable command")
     if not Path(command[0]).is_absolute() or not os.access(command[0], os.X_OK):
         raise FactoryError("Command executable must be an absolute executable file")
-    record = load_task(path) if os.path.lexists(path) else new_task(task)
+    record = load_task(path, persist_migration=False) if os.path.lexists(path) else new_task(task)
     existing = record["assignments"].get(assignment_id)
     if record["schema_version"] == 12:
         import writer_transfer
@@ -2276,12 +3552,56 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         if (existing is None and not any(a["state"] == "launched" for a in record["assignments"].values())
                 and record["inputs"] != dict(candidate=origin["candidate"], requirements=origin["requirements"])):
             raise FactoryError("Reselect the imported candidate and requirements with inputs before the first launch")
+    runtime = None
+    interpreter = sys.executable
+    if managed_worker_command(command) and (not existing or command != existing["request"]["command"]):
+        # Compare aliases only for a proposed invocation. Execute the running installation's
+        # own prefix so a mutable alias never supplies authority for an archived command.
+        hint = worker_hint(command)
+        physical = Path(sys.executable).resolve(strict=True)
+        # Python discovers pyvenv.cfg beside the invoked launcher. Resolving a
+        # venv symlink for exec would select the base prefix instead.
+        interpreter = sys.executable if sys.prefix != sys.base_prefix else str(physical)
+        if hint and command[0] != sys.executable and Path(command[0]).resolve(strict=True) == physical:
+            directory = Path(command[0]).parent
+            prefix = next((p for p in (directory, directory.parent) if (p / "pyvenv.cfg").is_file()),
+                          Path(sys.base_prefix))
+            if prefix.samefile(sys.prefix):
+                command = [sys.executable, *command[1:]]
+        if hint and command[0] == sys.executable and native_harness(command) is None:
+            offset = 4 if command[1:3] == ["-E", "-s"] else 2
+            worker = Path(command[offset - 1])
+            try:
+                same_runtime = (worker.parent.samefile(ROOT) and not worker.is_symlink()
+                                and worker.samefile(ROOT / (hint + "_worker.py")))
+            except OSError:
+                same_runtime = False
+            if same_runtime:
+                command = [*command[:offset - 1], str(ROOT / worker.name), *command[offset:]]
+        if native_harness(command) is None:
+            raise FactoryError("Use this Factory's native start command with its original Python and worker")
+        if native_write_option(command) and "--write" not in command:
+            raise FactoryError("Spell out --write on a native writer assignment before launching")
+        if record["admission"] is None:
+            raise FactoryError("Admit the task before starting a native worker")
+        if existing is None:
+            runtime = native_runtime_digest(interpreter)
+            check_native_history(record, runtime)
+    frozen_command = command
+    if not existing and native_harness(command):
+        command = native_argument_view(command)
+        if native_harness(command) == "codex":
+            import codex_worker
+            parse_saved_args(codex_worker.parser(), command[4:] if command[1:3] == ["-E", "-s"] else command[2:])
+    writer_root = (git_worktree(cwd) if runtime is not None and native_write_option(frozen_command) else None)
+    physical = interpreter_identity(writer_root) if writer_root is not None else None
+    pending_links = {} if writer_root is not None else None
     if existing is None and "--write" in command and (
             command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             or command[:2] == [sys.executable, str(ROOT / "codex_worker.py")]):
         check_role_write(role)
     instructions = "" if existing else brief(role, goal, designs="--write" in command) + rendered_acceptance(record, command, role)
-    request: dict = dict(role=role, goal=goal, cwd=cwd, command=command)
+    request: dict = dict(role=role, goal=goal, cwd=cwd, command=frozen_command)
     if record["admission"] is not None:
         if purpose not in {"work", "correction", "investigation"}:
             raise FactoryError("Admitted tasks require --purpose work, correction or investigation")
@@ -2315,7 +3635,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("Admit the Claude task and select matching role/revision inputs before launching")
         check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
                        expected_identity=record["admission"]["repository_identity"],
-                       expected_git_dir=native_args.worktree_git_dir)
+                       expected_git_dir=native_args.worktree_git_dir, pending_links=pending_links)
         if native_args.write:
             check_role_write(role)
         elif any(value is not None for value in (native_args.decision_store, native_args.decision, native_args.question)):
@@ -2340,7 +3660,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError(f"Admit the {name} task and select matching role/revision inputs before launching")
         check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
                        expected_identity=record["admission"]["repository_identity"],
-                       expected_git_dir=native_args.worktree_git_dir)
+                       expected_git_dir=native_args.worktree_git_dir, pending_links=pending_links)
         if native_args.write:
             check_role_write(role)
         elif not judged(command):
@@ -2402,7 +3722,7 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         worktree_git_dir = git_dir(cwd)
         check_checkout(record["admission"]["repository"], cwd, current,
                        expected_identity=record["admission"]["repository_identity"],
-                       expected_git_dir=worktree_git_dir)
+                       expected_git_dir=worktree_git_dir, pending_links=pending_links)
     if (not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             and any(flag in command for flag in ("--decision-store", "--decision", "--question"))):
         import codex_worker
@@ -2444,24 +3764,73 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             check_session(rex, record, shared[0])
             record["session_id"] = shared[0]
     brief_path = path.parent / (task + "." + assignment_id + ".md")
-    save(brief_path, instructions)
-    replacements = {"{brief}": str(brief_path), "{instructions}": instructions,
-                    "{brief_sha256}": request["instructions_sha256"], "{cwd}": cwd}
+    replacements = launch_replacements(record, request, brief_path)
+    replacements["{instructions}"] = instructions
+    argv = [replacements.get(part, part) for part in frozen_command]
+    if native_harness(frozen_command):
+        for index, part in enumerate(frozen_command):
+            name, equals, value = part.partition("=")
+            if name.startswith("--") and equals and value in replacements:
+                argv[index] = name + equals + replacements[value]
     if record["admission"] is not None:
-        replacements.update({"{candidate}": request["inputs"]["candidate"],
-                             "{requirements}": request["inputs"]["requirements"],
-                             "{repository}": record["admission"]["repository"],
-                             "{repository_identity}": json.dumps(record["admission"]["repository_identity"], sort_keys=True)})
-    argv = [replacements.get(part, part) for part in command]
-    if record["admission"] is not None:
-        argv = [sys.executable, "-E", "-s", str(ROOT / "checkout_exec.py"), "--identity",
+        pin = ["--runtime-digest", runtime] if runtime else []
+        if runtime:
+            argv[0] = interpreter
+        argv = [interpreter, "-E", "-s", str(ROOT / "checkout_exec.py"), *pin, "--identity",
                 json.dumps(record["admission"]["repository_identity"], sort_keys=True),
                 "--candidate", record["inputs"]["candidate"], "--git-dir", str(worktree_git_dir), "--", *argv]
     assignment: dict = dict(request=request, state="launching", result=None, native_collected=False, brief=str(brief_path),
                             window_label=task + ":" + role + "-" + assignment_id + "-" + uuid.uuid4().hex[:8],
                             rex_instance=current_instance(rex))
+    if scratch_worker(command, (runtime_home() / "skill/runtime").resolve())[0] is not None:
+        trusted = interpreter_identity(sys.executable)
+        if interpreter_identity(command[0]) == trusted:
+            assignment["interpreter"] = dict(invocation=command[0], file=trusted)
+    if writer_root is not None and pending_links is not None:
+        root = Path(writer_root)
+        if physical != interpreter_identity(root):
+            raise FactoryError("Writer checkout changed during launch. Restore the original physical checkout")
+        displaced = set(pending_links.values())
+        source: dict = dict(root=writer_root, identity=physical)
+        for previous in record["assignments"].values():
+            prior = previous.get("writer_source")
+            if not isinstance(prior, dict) or prior.get("identity") is None:
+                command_before = previous["request"]["command"]
+                if "--write" in command_before and (Path(previous["request"]["cwd"]).is_relative_to(root)
+                        or str(worktree_git_dir) in command_before or f"--worktree-git-dir={worktree_git_dir}" in command_before):
+                    source["incomplete"] = True
+                continue
+            if prior["identity"] == physical:
+                known = displaced_files(prior, prior.get("root"))
+                if known is None or prior.get("incomplete"):
+                    source["incomplete"] = True
+                displaced.update(known or ())
+        assignment["writer_source"] = dict(**source, displaced=sorted(displaced))
+    if runtime is not None:
+        if record["schema_version"] == 11:
+            record["schema_version"] = 13
+        assignment["native_launch"] = dict(runtime=runtime, request=request_digest(request))
     record["assignments"][assignment_id] = assignment
-    save(path, record)
+    # Another line may target this same checkout. Publish launch intent under its inode
+    # lock so cache maintenance either sees this assignment or finishes before launch.
+    import go_cache
+    admin = go_cache.linked_admin(Path(cwd))
+    with go_cache.launch_lock(admin, path.parent) if admin else nullcontext():
+        if admin and record["admission"] and native_harness(command) and "--write" not in command:
+            try:
+                root = Path(git_worktree(cwd))
+                witness = go_cache.checkout_binding(root, admin, record["admission"]["repository_identity"])
+            except (FactoryError, OSError, ValueError) as exc:
+                print(f"Reader cleanup ownership unavailable for {task}/{assignment_id}: {exc}", file=sys.stderr)
+            else:
+                if witness and witness["head"] == request["inputs"]["candidate"]:
+                    assignment["launch_checkout"] = witness
+                    boundary = argv.index("--")
+                    argv[boundary:boundary] = ["--launch-checkout", json.dumps(witness)]
+        save(brief_path, instructions)
+        save(path, record)
+        if pending_links:
+            normalize_links(pending_links)
     options = ["--cwd", cwd, "--keep-open", "--shell=none", "--json", "--", *argv]
     try:
         if record["session_id"]:
@@ -2505,6 +3874,8 @@ def status(rex, record, assignment) -> dict:
                     block_id=None, exit=None, reason=assignment["abandoned"]["reason"])
     closed = assignment.get("closed")
     if closed is not None:
+        if not valid_closed(assignment):
+            raise FactoryError("Invalid closed tab record; restore the original Rex observation")
         retained = dict(role=assignment["request"]["role"], state=closed["state"],
                         session_id=closed["session_id"], window_id=assignment["window_id"],
                         block_id=assignment["block_id"], exit=closed["exit"], closed=True)
@@ -2640,7 +4011,7 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
         raise FactoryError(f"Supply an absolute native Codex path and a positive execution allowance of at most {MAX_NATIVE_SECONDS} seconds")
     check_commit_message(commit_message, write=write)
     binary = Path(codex).resolve()
-    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    existing = load_task(path, persist_migration=False)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None and write:
         check_role_write(role)
     if existing is None and role == "code-review":
@@ -2703,13 +4074,37 @@ def codex_command(path, *, task, assignment_id, codex, model, effort, cwd, write
     return command + (["--role", role] if role is not None else []) + (["--write"] if write else []) + (["--commit-message", commit_message] if commit_message is not None else [])
 
 
+def check_advanced_reader(assignment, args, receipt, repository):
+    """Verify first collection after a clean HEAD advance in the original reader checkout."""
+    import go_cache
+
+    head = git_commit(str(args.cwd), "HEAD")
+    candidate = receipt["inputs"]["candidate"]
+    if head == candidate:
+        return False
+    if not args.cwd.is_dir() or args.cwd.resolve() != args.cwd:
+        raise FactoryError("Restore the original reader working directory before collecting its review")
+    launch = assignment.get("launch_checkout")
+    identity = receipt["repository_identity"]
+    root = Path(git_worktree(args.cwd))
+    observed = go_cache.checkout_binding(root, args.worktree_git_dir, identity) if launch else None
+    if (not observed or observed["head"] != head or launch != {**observed, "head": candidate}
+            or git_run(repository, "merge-base", "--is-ancestor", candidate, head).returncode):
+        raise FactoryError("Reader HEAD differs from the reviewed candidate without a proven advance in the original checkout")
+    check_checkout(repository, str(args.cwd), head, expected_identity=identity,
+                   expected_git_dir=args.worktree_git_dir, read_only=True)
+    if go_cache.checkout_binding(Path(git_worktree(args.cwd)), args.worktree_git_dir, identity) != observed:
+        raise FactoryError("Original reader checkout changed during collection; inspect the frozen assignment")
+    return True
+
+
 def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False, delivery=False, captured=None):
     """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import parse_events, parser, read_events
     from factory_commit import check_commit_receipt
 
     args = evidence_worker_args("codex", parser(), assignment_id, record, assignment,
-                                replay=delivery and collected, captured=captured)
+                                replay=delivery, captured=captured)
     if args.role is not None and args.role != assignment["request"]["role"]:
         raise FactoryError("Saved worker role differs from its assignment; inspect the original request before collection")
     if not failed_identity and (observe is None or collected) and (assignment["result"] is None or (current and not result_current(record, assignment["result"]))):
@@ -2727,7 +4122,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
         raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in (4, 5, 6)
+            or receipt["schema_version"] not in (4, 5, 6, 7, SCRATCH_RECEIPT_VERSION)
             or receipt.get("kind") != "codex-execution" or receipt.get("state") != ("failed" if failed_identity else "completed")
             or any(type(receipt.get(key)) not in (int, float)
                    or not 0 <= receipt[key] <= sys.float_info.max
@@ -2787,7 +4182,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
             coordination_evidence.check_investigation(coordination["request"], record)
             coordination_evidence.validate_judge_capacity(coordination.get("judge_capacity"), args.codex,
                 args.model, args.effort, coordination.get("judge_model"), receipt["created_at"])
-    if (receipt["schema_version"] == 6) != (coordination is not None):
+    if receipt["schema_version"] not in (7, SCRATCH_RECEIPT_VERSION) and (receipt["schema_version"] == 6) != (coordination is not None):
         raise FactoryError("Native receipt format differs from its bounded coordination assignment")
     events = read_events(args.events, None if captured is None else captured["events"])
     native = parse_events(events, coordination)
@@ -2796,9 +4191,11 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
     args.cwd = Path(assignment["request"]["cwd"])  # Resolve the frozen launch placeholder.
     if observe is not None or collected:
         # Only a fully collected result may outlive its original checkout.
-        # Initial collection (including stale work) keeps the strict HEAD check.
+        # Initial collection still binds the worktree, and a writer's produced HEAD.
         check_commit_receipt(receipt, args, record["admission"]["repository"],
                              historical=collected)
+        if not collected and not args.write:
+            check_advanced_reader(assignment, args, receipt, record["admission"]["repository"])
     elif (coordination is None or args.write or receipt.get("commit") is not None
             or repository_identity(record["admission"]["repository"]) != receipt["repository_identity"]):
         raise FactoryError("Offline coordination needs collected read-only evidence from the original repository")
@@ -2829,26 +4226,31 @@ def save_report(receipt, report):
     return target
 
 
-def collect_codex(path, assignment_id, rex, record, assignment):
-    """Register a finished native report; this never accepts the whole task."""
-    args, receipt, native = codex_evidence(assignment_id, record, assignment, observe=lambda: status(rex, record, assignment))
-    artifacts = list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]]))
-    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
-                           requirements=receipt["inputs"]["requirements"],
-                           outcome=native["report"]["outcome"], artifacts=artifacts)
+def collect_report(harness, path, assignment_id, rex, record, assignment):
+    original = assignment.get("native_collected") is True
+    args, receipt, native = evidence_reader(harness)(assignment_id, record, assignment,
+        collected=original and harness != "codex", current=False, observe=lambda: status(rex, record, assignment))
+    set_result(record, assignment_id=assignment_id, candidate=receipt["candidate"],
+        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
+        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
     record["assignments"][assignment_id]["native_collected"] = True
     save(path, record)
     save_report(args.receipt, native["report"])
     return record
 
 
+def collect_codex(path, assignment_id, rex, record, assignment):
+    return collect_report("codex", path, assignment_id, rex, record, assignment)
+
+
 def claude_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False, captured=None):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import claude_worker
     import native_claude
+    import release_evidence
     import review_evidence
     args = evidence_worker_args("claude", claude_worker.parser(), assignment_id, record, assignment,
-                                replay=delivery and collected, captured=captured)
+                                replay=delivery, captured=captured)
     request = assignment["request"]
     if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
         raise FactoryError("Claude evidence needs strict original collection, never manual result registration")
@@ -2856,30 +4258,39 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         raise FactoryError("Claude result is stale; obtain a judgment of current inputs")
     if observe is None and not collected:
         raise FactoryError("First Claude collection requires original successful Rex exit")
-    if observe is not None and observe()["state"] not in {"exited", "lost"}:
+    observation = observe() if observe is not None else assignment.get("closed") or {}
+    observed = observation.get("state")
+    omitting = delivery and not collected
+    if omitting and observed == "exited":
+        raise FactoryError("Collect the successful native reader with its original runtime before delivery")
+    if omitting and (args.write or observed != "failed" or (observation.get("exit") or {}).get("exit_code") != 1):
+        raise FactoryError("An omitted reader needs its definitive original exit")
+    if observe is not None and not omitting and observed not in {"exited", "lost"}:
         raise FactoryError("Claude worker has not exited successfully; inspect its original Rex pane")
     try:
         receipt = decode_json(read_record(args.receipt, private=True) if captured is None else captured["receipt"])
         instructions = read_record(Path(assignment["brief"]), private=True) if captured is None else captured["brief"]
     except (OSError, ValueError, UnicodeError):
         raise FactoryError("Restore original private Claude receipt and brief before collection") from None
+    versions = (2,) if args.write else (3,) if args.decision is not None else (1, 4, 5)
+    checkout = isinstance(receipt, dict) and (receipt.get("schema_version") in (4, 5)
+        or (receipt.get("schema_version") in (7, SCRATCH_RECEIPT_VERSION) and not args.write and args.decision is None))
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in ((2,) if args.write else (3,) if args.decision is not None else (1, 4))
-            or (receipt["schema_version"] == 4 and receipt.get("checkout") != str(reader_checkout_path(args.receipt)))
+            or receipt["schema_version"] not in (*versions, 7, SCRATCH_RECEIPT_VERSION)
+            or (checkout and receipt.get("checkout") != str(reader_checkout_path(args.receipt)))
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
                                 or "commit" not in receipt))
-            or receipt.get("kind") != "claude-execution" or receipt.get("state") != "completed"
-            or "error" not in receipt or receipt["error"] is not None
-            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or receipt.get("kind") != "claude-execution"
             or any(type(receipt.get(k)) not in (int, float) or not 0 <= receipt[k] <= sys.float_info.max
                    for k in ("created_at", "finished_at", "elapsed_seconds"))
             or receipt["finished_at"] < receipt["created_at"]
             or args.job != record["task"] + "/" + assignment_id or receipt.get("job") != args.job
             or receipt.get("inputs") != request.get("inputs") or not valid_inputs(receipt.get("inputs"))
             or args.candidate != "{candidate}" or args.requirements != "{requirements}"
-            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])
+
             or receipt.get("role") != request["role"] or args.role != request["role"]
+            or instructions.split("\n", 1)[0] != "# Assignment: " + args.role
             or receipt.get("brief_sha256") != request["instructions_sha256"]
             or hashlib.sha256(instructions.encode()).hexdigest() != request["instructions_sha256"]
             or args.brief_sha256 != "{brief_sha256}" or str(args.brief) != "{brief}"
@@ -2896,6 +4307,19 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
             or receipt.get("native_session") != args.native_session
             or not args.events.is_absolute() or not args.receipt.is_absolute()
             or receipt.get("events") != str(args.events)):
+        raise FactoryError("Claude receipt differs from its original bound assignment; restore original evidence without relaunching")
+    if omitting and (receipt["schema_version"] not in (5, SCRATCH_RECEIPT_VERSION)
+                     or not receipt.get("events_digest") or receipt.get("native_process") is not None):
+        raise FactoryError("Missing original proof of read-only actions; inspect the original native attempt")
+    if omitting:
+        from codex_worker import CANCELLED
+        if (assignment["result"] is not None or receipt.get("state") != "failed" or receipt.get("error") != CANCELLED
+                or any(field not in receipt or receipt[field] is not None for field in
+                       ("exit_code", "candidate", "usage", "turns", "model_usage", "report", "rate_limits"))):
+            raise FactoryError("Missing original proof of cancellation before native execution")
+    elif (receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
+            or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
+            or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])):
         raise FactoryError("Claude receipt differs from its original bound assignment; restore original evidence without relaunching")
     args.candidate, args.requirements = receipt["inputs"]["candidate"], receipt["inputs"]["requirements"]
     try:
@@ -2914,8 +4338,27 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
                 coordination_evidence.validate_claude_judge(coordination, args.model, args.effort)
         elif not args.write:
             review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements, base=args.base, role=args.role)
-        checkout = receipt["schema_version"] == 4
+        if receipt["schema_version"] == 5 and not omitting:
+            if not collected:
+                raise FactoryError("First collect a Claude v5 reader on its original runtime and checkout")
+            brief_path = Path(assignment["brief"])
+            if (brief_path.name != f"{record['task']}.{assignment_id}.md"
+                    or (args.events, args.receipt) != native_output_paths(brief_path, record["task"], assignment_id, "claude")):
+                raise FactoryError("Restore the original Claude reader's private receipt, events and brief paths")
+            exit_code = ((observation or {}).get("exit") or {}).get("exit_code")
+            if (not observation or observation["state"] != "exited"
+                    or type(exit_code) is not int or exit_code != 0):
+                raise FactoryError("Restore the original successful Claude v5 worker exit before replay")
+            if "native_launch" in assignment and launch_runtime(assignment) is None:
+                raise FactoryError("Original Claude request differs from its native launch attestation")
         events = claude_worker.read_events(args.events, None if captured is None else captured["events"])
+        event_proof = receipt["schema_version"] == 5 or "events_digest" in receipt
+        if event_proof and receipt.get("events_digest") != release_evidence.digest(events):
+            raise FactoryError("Claude event stream differs from the complete history bound by its worker")
+        if omitting:
+            if events:
+                raise FactoryError("Original events conflict with cancellation before native execution")
+            return args, receipt, None
         native = native_claude.parse_execution(events,
             session_id=args.native_session, cwd=receipt["checkout"] if checkout else request["cwd"], model=args.model,
             max_turns=args.turns, writer=args.write, coordination=coordination, checkout=checkout)
@@ -2934,7 +4377,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
         from factory_commit import check_commit_receipt
         check_commit_receipt(receipt, args, repository, historical=collected)
     candidate = receipt["candidate"] if args.write else args.candidate
-    if not collected:
+    if not collected and not omitting and (args.write or not check_advanced_reader(assignment, args, receipt, repository)):
         check_checkout(record["admission"]["repository"], request["cwd"], candidate,
             expected_identity=receipt["repository_identity"], expected_git_dir=args.worktree_git_dir)
     expected = dict(inputs=receipt["inputs"], candidate=candidate, outcome=native["report"]["outcome"],
@@ -2945,16 +4388,7 @@ def claude_evidence(assignment_id, record, assignment, *, observe=None, collecte
 
 
 def collect_claude(path, assignment_id, rex, record, assignment):
-    args, receipt, native = claude_evidence(assignment_id, record, assignment,
-        collected=assignment.get("native_collected") is True, current=False,
-        observe=lambda: status(rex, record, assignment))
-    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
-        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
-        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
-    record["assignments"][assignment_id]["native_collected"] = True
-    save(path, record)
-    save_report(args.receipt, native["report"])
-    return record
+    return collect_report("claude", path, assignment_id, rex, record, assignment)
 
 
 def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, role, seconds=600, turns=30, base=None,
@@ -2982,7 +4416,7 @@ def claude_command(path, *, task, assignment_id, claude, model, effort, cwd, rol
             raise FactoryError("Select the configured Claude judge_model at maximum effort; arbitrary choices cannot adjudicate this case")
         coordination = ["--decision-store", str(decision_store), "--decision", str(decision), "--question", str(question)]
     worker = [sys.executable, "-E", "-s", str(ROOT / "claude_worker.py")]
-    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    existing = load_task(path, persist_migration=False)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
         from review_evidence import valid_base
         valid_base(base, role)
@@ -3112,7 +4546,7 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
     writer = writer_arguments("Grok", role, write, commit_message, sandbox, base)
     judgment = evidence_arguments(release_evidence, delivery_evidence)
     worker = [sys.executable, "-E", "-s", str(ROOT / "grok_worker.py")]
-    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    existing = load_task(path, persist_migration=False)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
         from review_evidence import valid_base
         valid_base(base, role)
@@ -3153,7 +4587,7 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
     import native_grok
 
     args = evidence_worker_args("grok", grok_worker.parser(), assignment_id, record, assignment,
-                                replay=delivery and collected, captured=captured)
+                                replay=delivery, captured=captured)
     from review_evidence import valid_base
     if args.role == "code-review" and args.base is None:
         raise FactoryError("Historical Grok code review has no frozen base/diff evidence and remains inspection-only; authorize a new assignment with --base before reviewing")
@@ -3173,9 +4607,11 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
     request = assignment["request"]
     keys = ("report", "request_id", "usage", "model_usage", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in ((3,) if args.write else (2, 4)) or receipt.get("kind") != "grok-execution"
+            or receipt["schema_version"] not in ((3, 7, SCRATCH_RECEIPT_VERSION) if args.write else (2, 4, 7, SCRATCH_RECEIPT_VERSION))
+            or receipt.get("kind") != "grok-execution"
             # Version 4 readers ran in the disposable checkout named beside their receipt.
-            or (receipt["schema_version"] == 4) != ("checkout" in receipt)
+            or (receipt["schema_version"] == 4 or
+                (receipt["schema_version"] in (7, SCRATCH_RECEIPT_VERSION) and not args.write)) != ("checkout" in receipt)
             or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
@@ -3229,17 +4665,7 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
 
 
 def collect_grok(path, assignment_id, rex, record, assignment):
-    """Collect the original Grok report; this never accepts a task."""
-    args, receipt, native = grok_evidence(assignment_id, record, assignment,
-        collected=assignment.get("native_collected") is True, current=False,
-        observe=lambda: status(rex, record, assignment))
-    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
-        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
-        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
-    record["assignments"][assignment_id]["native_collected"] = True
-    save(path, record)
-    save_report(args.receipt, native["report"])
-    return record
+    return collect_report("grok", path, assignment_id, rex, record, assignment)
 
 
 def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, role, seconds=600, base=None,
@@ -3256,7 +4682,7 @@ def antigravity_command(path, *, task, assignment_id, agy, model, effort, cwd, r
     writer = writer_arguments("Antigravity", role, write, commit_message, sandbox, base)
     judgment = evidence_arguments(release_evidence, delivery_evidence)
     worker = [sys.executable, "-E", "-s", str(ROOT / "antigravity_worker.py")]
-    existing = load_task(path)["assignments"].get(assignment_id) if path.exists() else None
+    existing = load_task(path, persist_migration=False)["assignments"].get(assignment_id) if path.exists() else None
     if existing is None or base is not None:
         from review_evidence import valid_base
         valid_base(base, role)
@@ -3297,7 +4723,7 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
     from codex_worker import outcome_schema
     from review_evidence import valid_base
     args = evidence_worker_args("antigravity", antigravity_worker.parser(), assignment_id, record, assignment,
-                                replay=delivery and collected, captured=captured)
+                                replay=delivery, captured=captured)
     request = assignment["request"]
     valid_base(args.base, args.role)
     if collected and (assignment.get("native_collected") is not True or assignment["result"] is None):
@@ -3314,9 +4740,11 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
         raise FactoryError("Cannot read the original Antigravity receipt; inspect or restore it without relaunching") from None
     keys = ("report", "conversation_id", "usage", "duration_seconds", "turns")
     if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in ((2, 4) if args.write else (1, 3)) or receipt.get("kind") != "antigravity-execution"
+            or receipt["schema_version"] not in ((2, 4, 7, SCRATCH_RECEIPT_VERSION) if args.write else (1, 3, 7, SCRATCH_RECEIPT_VERSION))
+            or receipt.get("kind") != "antigravity-execution"
             # Version 3 readers ran in the disposable checkout named beside their receipt.
-            or (receipt["schema_version"] == 3) != ("checkout" in receipt)
+            or (receipt["schema_version"] == 3 or
+                (receipt["schema_version"] in (7, SCRATCH_RECEIPT_VERSION) and not args.write)) != ("checkout" in receipt)
             or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
             or (args.write and (receipt.get("writer") is not True or args.commit_message is None
                                 or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
@@ -3367,27 +4795,18 @@ def antigravity_evidence(assignment_id, record, assignment, *, observe=None, col
 
 
 def collect_antigravity(path, assignment_id, rex, record, assignment):
-    """Collect the original Antigravity report; this never accepts a task."""
-    args, receipt, native = antigravity_evidence(assignment_id, record, assignment,
-        collected=assignment.get("native_collected") is True, current=False,
-        observe=lambda: status(rex, record, assignment))
-    record = record_result(path, assignment_id=assignment_id, candidate=receipt["candidate"],
-        requirements=receipt["inputs"]["requirements"], outcome=native["report"]["outcome"],
-        artifacts=list(dict.fromkeys([str(args.receipt), *native["report"]["artifacts"]])))
-    record["assignments"][assignment_id]["native_collected"] = True
-    save(path, record)
-    save_report(args.receipt, native["report"])
-    return record
+    return collect_report("antigravity", path, assignment_id, rex, record, assignment)
 
 
 NATIVE_HARNESSES = ("codex", "claude", "grok", "antigravity")
 
 
-def native_harness(command):
+def native_harness(command, *, interpreter=None):
     """The verified native worker behind a command, or None for any other adapter."""
+    executable = interpreter or sys.executable
     for harness in NATIVE_HARNESSES:
         worker = str(ROOT / (harness + "_worker.py"))
-        if command[:4] == [sys.executable, "-E", "-s", worker] or (harness == "codex" and command[:2] == [sys.executable, worker]):
+        if command[:4] == [executable, "-E", "-s", worker] or (harness == "codex" and command[:2] == [executable, worker]):
             return harness
     return None
 
@@ -3405,6 +4824,205 @@ def worker_hint(command):
     return None
 
 
+def native_argument_view(command):
+    """Expand the worker parser's option spellings for checks, preserving the saved request."""
+    harness = worker_hint(command)
+    if harness is None:
+        return command
+    parser = importlib.import_module(harness + "_worker").parser()
+    options = parser._option_string_actions
+    offset = 4 if command[1:3] == ["-E", "-s"] else 2
+    view, seen = command[:offset], set()
+    for part in command[offset:]:
+        name, equals, value = part.partition("=")
+        if not name.startswith("--"):
+            view.append(part)
+            continue
+        if name not in options:
+            matches = [option for option in options if option.startswith(name)]
+            if not parser.allow_abbrev or len(matches) != 1:
+                raise FactoryError(f"Saved {harness.title()} option is ambiguous or unknown; restore the original assignment arguments")
+            name = matches[0]
+        if name in seen:
+            raise FactoryError(f"Restore the unambiguous original {harness.title()} command before collection")
+        seen.add(name)
+        if equals and options[name].nargs == 0:
+            raise FactoryError(f"Saved {harness.title()} switch takes no value; restore the original assignment arguments")
+        # Keep an option-looking literal attached so argparse treats it as a value.
+        if equals and value.startswith("-"):
+            view.append(name + equals + value)
+        else:
+            view.append(name)
+            if equals:
+                view.append(value)
+    return view
+
+
+def codex_write_flag(part):
+    return part.startswith("--") and len(part) > 2 and "--write".startswith(part)
+
+
+def canonical_codex_option(part):
+    # --w alone is ambiguous with --worktree-git-dir.
+    return "--write" if part.startswith("--wr") and codex_write_flag(part) else part
+
+
+def native_write_option(command):
+    """Codex accepts unambiguous argparse prefixes in original generic starts."""
+    return "--write" in command or (worker_hint(command) == "codex" and
+        any(codex_write_flag(part) for part in command))
+
+
+def managed_worker_command(command):
+    """Recognize a managed launch for refusal even if its prefix is damaged."""
+    workers = {name + "_worker.py" for name in NATIVE_HARNESSES}
+    script = next((part for part in command[1:] if not part.startswith("-")), "")
+    options = {part.partition("=")[0] for part in command if part.startswith("--")}
+    return (Path(command[0]).name in workers or Path(script).name in workers
+            or (command[1:3] == ["-E", "-s"] and {"--job", "--events", "--receipt"}.issubset(options))
+            or {"--repo-identity", "--brief-sha256"}.issubset(options))
+
+
+def loaded_python_files():
+    """Ask the loader which executable image and library supply this Python process."""
+    python_api = ctypes.cast(ctypes.pythonapi.Py_GetVersion, ctypes.c_void_p).value
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None)
+        libc._dyld_get_image_header.restype = ctypes.c_void_p
+        # Query the mapped files, including Python.app behind a Homebrew launcher.
+        paths = []
+        for address in (libc._dyld_get_image_header(0), python_api):
+            name = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+            if not address or libc.proc_regionfilename(os.getpid(), ctypes.c_uint64(address), name, len(name)) <= 0:
+                raise FactoryError("Cannot identify the mapped Python executable image and library")
+            paths.append(Path(os.fsdecode(name.value)).resolve(strict=True))
+        return paths[0], paths[1]
+    if sys.platform == "linux" and python_api:
+        exe = Path("/proc/self/exe")
+        image = exe.resolve(strict=True)
+        if os.path.samestat(exe.stat(), image.stat()):
+            for line in Path("/proc/self/maps").read_text(errors="surrogateescape").splitlines():
+                region, _, _, device, inode, *name = line.split(maxsplit=5)
+                start, end = region.split("-")
+                if int(start, 16) <= python_api < int(end, 16) and name and name[0].startswith("/"):
+                    library = Path(name[0]).resolve(strict=True)
+                    st = library.stat()
+                    major, minor = device.split(":")
+                    if (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino) == (int(major, 16), int(minor, 16), int(inode)):
+                        return image, library
+                    break
+    raise FactoryError("Cannot identify the mapped Python executable image and library; restore the original installation")
+
+
+def native_runtime_digest(interpreter=None):
+    """Bind physical paths and content, independent of equivalent launcher and prefix aliases."""
+    import sysconfig
+    try:
+        executable = Path(interpreter or sys.executable).resolve(strict=True)
+        image, library = loaded_python_files()
+        if not all((ROOT / (name + "_worker.py")).is_file() for name in NATIVE_HARNESSES):
+            raise FactoryError("Restore the complete native worker installation before starting another assignment")
+        files = [executable, image, library]
+        framework = sysconfig.get_config_var("PYTHONFRAMEWORK")
+        if framework or sysconfig.get_config_var("Py_ENABLE_SHARED"):
+            directory = sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX" if framework else "LIBDIR")
+            filename = sysconfig.get_config_var("LDLIBRARY")
+            if not directory or not filename:
+                raise FactoryError("Cannot identify the configured Python library before native admission")
+            configured = Path(directory) / filename
+            try:
+                configured.lstat()
+            except FileNotFoundError:
+                # Linux distributions can reserve this linker name for the dev
+                # package. The mapped C API provider above is always required.
+                if sys.platform != "linux":
+                    raise
+            else:
+                files.append(configured.resolve(strict=True))
+        files = list(dict.fromkeys([*files, *sorted(ROOT.glob("*.py"))]))
+        digest = hashlib.sha256()
+        for value in (sys.version, str(Path(sys.prefix).resolve(strict=True)), str(Path(sys.base_prefix).resolve(strict=True)),
+                      str(executable), str(image), str(library), str(ROOT), *(str(path) for path in files)):
+            digest.update(value.encode() + b"\0")
+        for path in files:
+            fd = os.open(path.resolve(strict=True), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise FactoryError("Restore the regular interpreter and runtime files before native admission")
+                digest.update(hashlib.file_digest(stream, "sha256").digest())
+        return digest.hexdigest()
+    except (AttributeError, OSError, ValueError, RuntimeError):
+        raise FactoryError("Cannot identify the launch interpreter and Factory sources; restore them before starting") from None
+
+
+def request_digest(request):
+    import release_evidence
+    # The persisted writer bit has the same meaning for every unambiguous legacy
+    # spelling. All other fields, including the launch prefix, are bound verbatim.
+    command = request["command"]
+    if worker_hint(command) == "codex":
+        request = {**request, "command": [canonical_codex_option(part) for part in command]}
+    return release_evidence.digest(request)
+
+
+def launch_runtime(assignment):
+    """Only the launcher records this before Rex. Old requests carry no runtime identity."""
+    launch = assignment.get("native_launch")
+    if launch and launch["request"] == request_digest(assignment["request"]):
+        return launch["runtime"]
+    return None
+
+
+def local_runtime_digest():
+    """An absent launcher leaves only the original historical evidence available."""
+    try:
+        try:
+            mode = Path(sys.executable).stat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return native_runtime_digest() if stat.S_ISREG(mode) else None
+    except (OSError, FactoryError) as exc:
+        raise RuntimeObservationError(str(exc)) from exc
+
+
+def local_launch_harness(assignment, *, measure_runtime=None):
+    """An attested launch follows its measured installation across Python aliases."""
+    command = assignment["request"]["command"]
+    if "native_launch" not in assignment:
+        return native_harness(command)
+    original = launch_runtime(assignment)
+    harness = native_harness(command, interpreter=command[0])
+    # The request digest binds the original launcher spelling. Its measured bytes
+    # and the loaded installation must match the observer's independently.
+    if harness and original and original == (measure_runtime or local_runtime_digest)():
+        return harness
+    return None
+
+
+def check_native_history(record, runtime=None, *, measure_runtime=None):
+    """Recheck earlier native evidence before reserving an attempt on a changed runtime."""
+    import integration
+    for key, prior in record["assignments"].items():
+        saved = prior["request"]["command"]
+        if "native_launch" not in prior and not managed_worker_command(saved):
+            continue
+        original = launch_runtime(prior)
+        if original is not None and native_harness(saved, interpreter=saved[0]):
+            if runtime is None:
+                runtime = (measure_runtime or local_runtime_digest)()
+            if original == runtime:
+                continue
+        if prior.get("native_collected") is True:
+            integration.collected_native(key, record, prior, current=False, observe_exit=False)
+        elif native_write_option(saved):
+            integration.contributor_context(key, record, prior)
+        elif original:
+            integration.verify_omitted_reader(key, record, prior)
+        else:
+            raise FactoryError(f"{record['task']}/{key}: original native evidence needs its launch runtime; "
+                               "confirm the original Python and Factory worker before starting another assignment")
+
+
 def parse_saved_args(parser, tail):
     """Read a saved worker command without argparse printing its values or help."""
     def invalid(message=None):
@@ -3418,37 +5036,42 @@ def parse_saved_args(parser, tail):
 def evidence_worker_args(harness, parser, assignment_id, record, assignment, *, replay, captured=None):
     request = assignment["request"]
     command = request["command"]
-    historical = native_harness(command) != harness
-    if historical and not (replay and assignment.get("native_collected") is True
-                           and assignment["result"] is not None and worker_hint(command) == harness):
-        if replay:
-            raise FactoryError("Historical result lacks strict original collection; preserve the recorded attempt "
-                               "and ask the task owner to inspect its collection evidence")
+    if replay:
+        # A released writer's frozen session can still exclude that contributor.
+        # Its receipt must be proved separately and can never establish collection.
+        legacy_writer = ("native_launch" not in assignment and native_harness(command) == harness
+                         and native_write_option(command))
+        if (worker_hint(command) != harness or (assignment.get("native_collected") is not True
+                and launch_runtime(assignment) is None and not legacy_writer)):
+            raise FactoryError("Historical result lacks strict collection by the original worker or bound launch provenance; "
+                               "preserve the recorded attempt and inspect its original evidence")
+    elif local_launch_harness(assignment) != harness:
+        if native_harness(command) == harness and "native_launch" in assignment and launch_runtime(assignment) is None:
+            raise FactoryError("Saved native request differs from admission; restore the original assignment arguments "
+                               "without relaunching it")
         raise FactoryError(f"{record['task']}/{assignment_id}: not a native {harness.title()} worker of this runtime; "
                            "preserve the recorded attempt and ask the task owner to inspect its original execution evidence")
+    command = native_argument_view(command)
     tail = command[4:] if command[1:3] == ["-E", "-s"] else command[2:]
     if harness == "codex":
         if "--repo-identity" not in tail:
             raise FactoryError("Native assignment predates repository identity; inspect its retained artifacts without relaunching it")
         if "--worktree-git-dir" not in tail:
             raise FactoryError("Native assignment predates worktree identity; inspect its retained artifacts without relaunching it")
-    if historical or harness == "claude":
-        options = [part for part in tail if part.startswith("--")]
-        if len(options) != len(set(options)) or any("=" in part for part in options):
-            raise FactoryError(f"Restore the unambiguous original {harness.title()} command before collection")
-    if historical:
+    if not replay and "native_launch" not in assignment and assignment.get("native_collected") is not True:
+        raise FactoryError(f"{record['task']}/{assignment_id}: first collection requires the original released "
+                           "Python, Factory installation and checkout; this launch has no runtime digest")
+    if replay:
         parser.allow_abbrev = False
     args = parse_saved_args(parser, tail)
-    if historical:
+    if replay:
         brief = Path(assignment["brief"])
         name = record["task"] + "." + assignment_id
         prefix = brief.parent / (name + "." + harness)
         bindings = {"--job": record["task"] + "/" + assignment_id, "--repo": "{repository}",
                     "--repo-identity": "{repository_identity}", "--cwd": "{cwd}", "--brief": "{brief}",
                     "--brief-sha256": "{brief_sha256}", "--candidate": "{candidate}", "--requirements": "{requirements}",
-                    "--events": str(prefix) + ".jsonl", "--receipt": str(prefix) + ".json", "--seconds": str(args.seconds)}
-        if harness in ("grok", "claude"):
-            bindings["--turns"] = str(args.turns)
+                    "--events": str(prefix) + ".jsonl", "--receipt": str(prefix) + ".json"}
         if (brief.name != name + ".md" or not 1 <= args.seconds <= MAX_NATIVE_SECONDS
                 or any(flag not in tail or tail[tail.index(flag) + 1] != value for flag, value in bindings.items())):
             raise FactoryError("Restore the original native command bound to this task, assignment and local artifacts")
@@ -3487,7 +5110,6 @@ def judged(command):
 
 def native_arguments(command, problem):
     """A verified native worker command, parsed by that worker's own parser."""
-    import importlib
     harness = native_harness(command)
     if harness is None or command[1:3] != ["-E", "-s"]:
         raise FactoryError(problem)
@@ -3702,11 +5324,16 @@ def tidy_tasks(directory, task=None, binary=None, server=None):
 
 
 def main(argv=None):
-    try:
-        relocate("factory.py", sys.argv[1:] if argv is None else argv)
-    except (FactoryError, OSError) as exc:  # A runtime that can't install refuses like any other command.
-        print("factory: " + str(exc), file=sys.stderr)
-        return 1
+    argv = sys.argv[1:] if argv is None else argv
+    # The installed runtime can know newer arguments than this copy. Only the
+    # read-only command must parse before relocation, which can install files.
+    possible_scratch_listing = ABANDONED_SCRATCH_COMMAND in argv
+    if not possible_scratch_listing:
+        try:
+            relocate("factory.py", argv)
+        except (FactoryError, OSError) as exc:
+            print("factory: " + str(exc), file=sys.stderr)
+            return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     parser.add_argument("--rex", help="Absolute Rex binary; required for the first launch")
@@ -3790,6 +5417,9 @@ def main(argv=None):
     inputs.add_argument("--candidate", required=True)
     inputs.add_argument("--requirements", required=True)
     inputs.add_argument("--owner-decision", help="Explicit GitHub owner comment permalink for this requirements revision")
+    caches = sub.add_parser("go-caches", help="Inspect one repository's linked Go caches")
+    caches.add_argument("--repo", required=True, type=Path)
+    caches.add_argument("--clean-task", help="Retire one eligible cache during an attended exclusive maintenance window")
     release = sub.add_parser("release-worktree", help="Remove the task's provisioned worktree after its work is done; the branch stays")
     release.add_argument("--task", required=True)
     rebase = sub.add_parser("rebase-worktree", help="Move the task's provisioned worktree onto a new base, keeping its change as a patch")
@@ -3841,8 +5471,14 @@ def main(argv=None):
     import_cmd.add_argument("--file", required=True, help="Path to the bundle file")
     import_cmd.add_argument("--from-host", required=True, help="Source host_id from the export output")
     import_cmd.add_argument("--sha256", required=True, help="Bundle SHA-256 from the export output")
+    sub.add_parser(ABANDONED_SCRATCH_COMMAND, help="List scratch with proof of a finished attempt and retained result")
     args = parser.parse_args(argv)
     try:
+        if args.action == ABANDONED_SCRATCH_COMMAND:
+            print(json.dumps(abandoned_scratch(args.state_dir), indent=2))
+            return 0
+        if possible_scratch_listing:
+            relocate("factory.py", argv)
         if args.action == "codex-start" and (not args.model.strip() or not args.effort.strip()):
             raise FactoryError("Supply a discovered native model and supported effort before creating an assignment")
         if args.action == "codex-start" and (not Path(args.codex).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
@@ -3858,6 +5494,14 @@ def main(argv=None):
             raise FactoryError("Supply a native Grok path, discovered model/effort and bounded seconds/turns before launch")
         if args.action == "antigravity-start" and (not Path(args.agy).is_absolute() or not 1 <= args.seconds <= MAX_NATIVE_SECONDS):
             raise FactoryError("Supply an absolute native Antigravity path and bounded seconds before launch")
+        if args.action == "go-caches":
+            import go_cache
+            rows = go_cache.census(args.state_dir, args.repo, args.clean_task)
+            print(json.dumps(rows, indent=2))
+            if args.clean_task and not any(row["decision"] == "cleaned" for row in rows):
+                print(f"factory: No completed cleanup for {args.clean_task!r}; inspect the census reasons and owner", file=sys.stderr)
+                return 1
+            return 0
         if args.action == "tidy":
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
             print(json.dumps(report, indent=2))
@@ -3889,8 +5533,7 @@ def main(argv=None):
             import integration
             import release_evidence
             path = args.state_dir.resolve() / (args.task + ".json")
-            with task_lock(path.parent, args.task):
-                record = load_task(path)
+            record = integration.read_owner(path)
             if record["admission"] is None:
                 raise FactoryError("Admit the task before confirming its delivery")
             transport = release_evidence.GitHub(args.gh, args.release_scripts, record["admission"]["repository"])
@@ -3907,10 +5550,12 @@ def main(argv=None):
             if args.release_pr is not None and args.delivery is not None:
                 raise FactoryError("Select pre-merge release review or final delivery judgment")
             with task_lock(args.state_dir.resolve(), args.task) as path:
-                prepared = load_task(path)
+                prepared = load_task(path, persist_migration=False)
             if prepared["admission"] is None:
                 raise FactoryError("Admit a task before capturing native release evidence")
             original = prepared["assignments"].get(args.id)
+            if original is None:
+                check_native_history(prepared)
             if args.delivery is not None:
                 if original is not None:
                     frozen_delivery = release_evidence.from_delivery_assignment(prepared, original)
@@ -3939,7 +5584,7 @@ def main(argv=None):
                                  "release-worktree", "rebase-worktree", "line"}
         line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE
         with (execution_lock(args.state_dir.resolve(), line) if locked else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
-            if locked and os.path.lexists(path) and task_line(load_task(path)) != line:
+            if locked and os.path.lexists(path) and task_line(load_task(path, persist_migration=False)) != line:
                 raise FactoryError("The task moved to another line while waiting for its lock; run the command again")
             if args.action == "line":
                 print(json.dumps(task_view(move_line(path, check_line(args.line))), indent=2))
@@ -3953,7 +5598,7 @@ def main(argv=None):
             if args.action == "reset":
                 print(json.dumps(reset_writer(path, assignment_id=args.id), indent=2))
                 return 0
-            if prepared is not None and load_task(path) != prepared:
+            if prepared is not None and load_task(path, persist_migration=False) != prepared:
                 raise FactoryError("Task changed during evidence capture; reload current controls/inputs before submission")
             if args.action in {"admit", "show", "pause", "resume", "inputs", "result", "extend-allowance", "provision"}:
                 if args.action == "admit":
@@ -3961,7 +5606,7 @@ def main(argv=None):
                                    acceptance=args.acceptance, corrections=args.corrections,
                                    investigations=args.investigations, line=args.line)
                 elif args.action == "show":
-                    record = load_task(path)
+                    record = load_task(path, persist_migration=False)
                 elif args.action == "extend-allowance":
                     record = extend_allowance(path, purpose=args.purpose, additional=args.additional,
                         expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason, judge=args.judge)
@@ -3995,14 +5640,14 @@ def main(argv=None):
                 return 0
             if args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start"}:
                 if args.action == "codex-start":
-                    if load_task(path)["admission"] is None:
+                    if load_task(path, persist_migration=False)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Codex assignment")
                     argv = codex_command(path, task=args.task, assignment_id=args.id, codex=args.codex,
                                          model=args.model, effort=args.effort, cwd=args.cwd,
                                          write=args.write, seconds=args.seconds, commit_message=args.commit_message, role=args.role,
                                          decision_store=args.decision_store, decision=args.decision, question=args.question, release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 elif args.action == "claude-start":
-                    if load_task(path)["admission"] is None:
+                    if load_task(path, persist_migration=False)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Claude assignment")
                     argv = claude_command(path, task=args.task, assignment_id=args.id, claude=args.claude,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
@@ -4011,7 +5656,7 @@ def main(argv=None):
                         decision_store=args.decision_store, decision=args.decision, question=args.question,
                         release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 elif args.action == "grok-start":
-                    if load_task(path)["admission"] is None:
+                    if load_task(path, persist_migration=False)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Grok assignment")
                     argv = grok_command(path, task=args.task, assignment_id=args.id, grok=args.grok,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
@@ -4019,7 +5664,7 @@ def main(argv=None):
                         write=args.write, commit_message=args.commit_message, sandbox=args.sandbox,
                         release_evidence=frozen_release, delivery_evidence=frozen_delivery)
                 elif args.action == "antigravity-start":
-                    if load_task(path)["admission"] is None:
+                    if load_task(path, persist_migration=False)["admission"] is None:
                         raise FactoryError("Admit a task before starting a native Antigravity assignment")
                     argv = antigravity_command(path, task=args.task, assignment_id=args.id, agy=args.agy,
                         model=args.model, effort=args.effort, cwd=args.cwd, role=args.role,
@@ -4034,7 +5679,7 @@ def main(argv=None):
                     frozen_release=frozen_release, frozen_delivery=frozen_delivery)
                 rex = connect(record)
             else:
-                record = load_task(path)
+                record = load_task(path, persist_migration=False)
                 if args.id not in record["assignments"]:
                     raise FactoryError(f"Unknown assignment {args.id!r}; use show --task {args.task} to find its ID")
                 assignment = record["assignments"][args.id]
@@ -4047,7 +5692,8 @@ def main(argv=None):
                     rex = connect(record, args.rex, args.server)
                 if assignment["state"] == "launching":
                     reconcile(rex, record, assignment)
-                    save(path, record)
+                    if args.action == "status":
+                        save(path, record)
             if args.action.endswith("-collect"):
                 record = collector(args.action.removesuffix("-collect"))(path, args.id, rex, record, assignment)
                 try:
@@ -4078,7 +5724,3 @@ def main(argv=None):
         print("factory: " + str(exc), file=sys.stderr)
         return EXIT_BUSY if isinstance(exc, (ExecutionBusy, TaskLockBusy)) else 1
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

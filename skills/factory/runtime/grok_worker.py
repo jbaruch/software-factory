@@ -74,9 +74,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
     else:
         review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
                                  base=args.base, role=args.role)
-    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
-                           expected_git_dir=args.worktree_git_dir)
-    factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
+    report_source = factory.check_worker_cwd(args, identity)
     if any(binary.is_relative_to(root) for root in (
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Grok installation outside the assigned checkout and Git metadata")
@@ -103,7 +101,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
     if args.role == "release":
         release_evidence.require_max_effort(args.effort, [item["value"] for item in model["_meta"]["reasoningEfforts"]])
     # Version 3 writes; version 4 reviews in a disposable checkout (version 2 reviewed in place).
-    receipt = dict(schema_version=3 if args.write else 4, kind="grok-execution", state="starting", job=args.job,
+    receipt: dict = dict(schema_version=factory.SCRATCH_RECEIPT_VERSION, kind="grok-execution", state="starting", job=args.job,
+        scratch=None, scratch_identity=None, scratch_removed=None, native_process=None,
+        interpreter=factory.interpreter_identity(sys.executable), retained_files={},
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -113,7 +113,6 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         report=None, request_id=None, usage=None, model_usage=None, turns=None,
         candidate=None, events=str(args.events), error=None)
     if args.write:
-        # Version 3 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
     else:
         # Grok loads the operator's MCP servers whatever --tools says, and one wrote into a shared
@@ -127,13 +126,14 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
         raise
     started, process, events = timer(), None, []
     checkouts, workdir = contextlib.ExitStack(), Path(".")
+    reader_admin_stat = None
     try:
         if not args.write:
-            workdir = checkouts.enter_context(factory.reader_checkout(
+            workdir, reader_admin_stat, report_source = checkouts.enter_context(factory.reader_checkout(
                 args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
             environment = factory.worker_environment(native_grok.environment(), workdir,
-                scratch=checkouts.enter_context(factory.scratch_directory()))
+                scratch=checkouts.enter_context(factory.scratch_directory(args.receipt, receipt)))
             process = await spawn(str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search",
                 # Writers get every built-in tool and the factory commit contract.
                 "--permission-mode", "bypassPermissions",
@@ -147,6 +147,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                 "--output-format", "streaming-json", "--json-schema", json.dumps(outcome_schema()),
                 "--prompt-file", str(args.brief), cwd=str(workdir), env=environment, limit=NATIVE_LINE_LIMIT,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE)
+            factory.record_native_process(args.receipt, receipt, process)
             async def consume():
                 while True:
                     try:
@@ -167,7 +168,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                     if shown is not None:
                         print(shown, flush=True)
                 return await process.wait()
-            receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
+            deadline = factory.native_clock() + args.seconds
+            receipt["exit_code"] = await factory.within_budget(consume(), deadline=deadline)
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Grok exited unsuccessfully; inspect its retained events and original Rex pane")
@@ -175,8 +177,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
                                              cwd=str(args.cwd) if args.write else receipt["checkout"], max_turns=args.turns)
         receipt.update({key: native[key] for key in ("report", "request_id", "usage", "model_usage", "turns")})
         factory.check_tool_evidence("grok", events, args)
-        if not args.write:
-            factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
+        factory.retain_report_files(receipt, args, workdir, deadline=deadline, source=report_source,
+                                    reader_admin_stat=reader_admin_stat)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
@@ -185,6 +187,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
             if factory.git_commit(".", "HEAD") != args.candidate:
                 raise factory.FactoryError("Read-only Grok candidate changed; inspect its original checkout without reusing the report")
+            factory.check_report_index(workdir, reader_admin_stat=reader_admin_stat)
             candidate = args.candidate
         receipt.update(state="completed", candidate=candidate)
     except TimeoutError:

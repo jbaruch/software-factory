@@ -20,7 +20,7 @@ The task is a shared durable record and a dependency graph of specialist assignm
 
 ## Package and application
 
-One repository contains the application and its ACR package. The application ships inside the `factory` skill (`skills/factory/runtime/`), so `acr install` and `acr realize` install it into each project. Task state is per user, and task records freeze absolute worker paths, so a project's copy installs itself as the one per-user runtime (`~/.local/share/software-factory/skill`) and runs from there. That runtime is upgraded in place to the newest version any project brings and is never downgraded; a source checkout runs in place.
+One repository contains the application and its ACR package. The application ships inside the `factory` skill (`skills/factory/runtime/`), so `acr install` and `acr realize` install it into each project. Task state is per user, and task records freeze absolute worker paths. Installed ACR and Tessl skills use one per-user runtime (`~/.local/share/software-factory/skill`). That runtime is upgraded in place to the newest version any project brings and is never downgraded; a source checkout runs in place.
 
 The application will own scheduling, provider adapters, Rex integration, durable task state, measurement and the dashboard. Worker hooks will emit bounded lifecycle events after their native harness semantics are verified. Native Claude Code and Codex ACR realization does not establish Grok or Antigravity compatibility. Those harnesses need explicit instruction delivery and lifecycle conformance tests. ACR is not the process supervisor or model broker.
 
@@ -83,12 +83,15 @@ The release judgment alone consumes the complete frozen external-review packet;
 ordinary exact-input specialist approvals remain valid when only review prose changes.
 Failed native writers retain their original contributor identity for independence,
 without promoting failed execution or blocked results into successful evidence. A Claude or Grok
-writer lost with its host, its receipt unfinished and its result null, keeps its
-frozen native session as that identity in the same way.
+writer with its original starting receipt and a null result keeps its frozen
+native session when Rex confirms failure or loss. Reset can recover the checkout
+while delivery and final acceptance still exclude that session as a judge.
 Collected successful writers also retain their original provenance when a later
 correction advances or cleanup removes the checkout. Collected evidence validates
 against the admitted repository identity and retained candidate/parent/tree objects;
-initial collection still requires the original checkout, Git directory and HEAD.
+initial writer collection still requires the produced commit at the original checkout HEAD.
+A Codex or Claude reader can collect its frozen result after a clean HEAD advance
+when the original physical launch witness still matches. The result names the reviewed commit.
 Schema-9 assignment `native_collected` records only successful strict native
 collection; generic result registration and legacy migration never grant it.
 Legacy evidence needs explicit strict recollection while its original checkout
@@ -107,6 +110,18 @@ Provisioning does not select a produced candidate or grant acceptance/release
 authority. The [owner contract](task-state.md#writer-worktree-provisioning) defines
 the supported tree/configuration inputs and conservative reconciliation.
 
+Linked-cache retirement is a cache-only effect under the provisioned owner's
+execution and task locks. Launch intent and cache cleanup also synchronize on
+the linked Git admin directory inode across lines. Before saving intent for a
+provisioned tree, the launcher identifies its state store on that inode's directory.
+Owner release takes the same exclusive physical lock through Git deregistration
+and receipt publication. Direct checkout and cache users require independent
+exclusion through release readback. Provisioning and native launch supply the
+original physical bindings used by maintenance. An additional launch store makes the selected store
+insufficient for cleanup or release. Scheduled maintenance is read-only until
+all cache writers can be excluded throughout removal and readback. The [cache policy](native-providers.md#linked-go-cache-retention)
+defines the read-only census, terminal and process evidence, and explicit actuator.
+
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
 The factory makes no merge call. The repository's release skill merges; `delivered`
 confirms read-only that it merged the head the release judgment approved and records
@@ -114,6 +129,12 @@ one receipt per release judgment. Release capture runs outside execution/task lo
 and revalidates the owner before submission. Final acceptance freezes the recorded
 receipt in a new native brief, preserving original receipts/results and requiring a
 new semantic judgment.
+
+### Native receipt versioning
+
+Native workers and collectors ship together in one runtime. Once workers produce
+version-8 receipts, rollback must keep a version-8-capable reader. Current
+collectors continue to read supported older receipts in place. No backfill is needed.
 
 ## Measurement and self-improvement
 

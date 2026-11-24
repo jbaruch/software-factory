@@ -9,7 +9,7 @@ import factory
 
 class Budget(unittest.TestCase):
     def test_sleep_the_loop_clock_missed_still_ends_the_attempt(self):
-        readings = iter([0.0, 1.0, 10_000.0])  # Launch, a check while it runs, then the first check after the Mac woke.
+        readings = iter([1.0, 10_000.0])  # A check while running, then the first check after the Mac woke.
         cancelled = []
         async def worker():
             try:
@@ -18,7 +18,7 @@ class Budget(unittest.TestCase):
                 cancelled.append(True)
                 raise
         with patch.object(factory, "BUDGET_CHECK_SECONDS", 0.01), self.assertRaisesRegex(TimeoutError, "allowance expired"):
-            asyncio.run(factory.within_budget(worker(), 7200, clock=lambda: next(readings)))
+            asyncio.run(factory.within_budget(worker(), deadline=7200, clock=lambda: next(readings)))
         self.assertEqual(cancelled, [True])
 
     def test_a_finished_or_failing_worker_returns_or_raises_as_itself(self):
@@ -26,9 +26,9 @@ class Budget(unittest.TestCase):
             return 0
         async def failing():
             raise TimeoutError("fixture")
-        self.assertEqual(asyncio.run(factory.within_budget(done(), 30)), 0)
+        self.assertEqual(asyncio.run(factory.within_budget(done(), deadline=factory.native_clock() + 30)), 0)
         with self.assertRaisesRegex(TimeoutError, "fixture"):
-            asyncio.run(factory.within_budget(failing(), 30))
+            asyncio.run(factory.within_budget(failing(), deadline=factory.native_clock() + 30))
 
     def test_the_budget_clock_counts_sleep(self):
         import time

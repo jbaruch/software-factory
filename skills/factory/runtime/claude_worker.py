@@ -95,9 +95,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
     elif coordination is None:
         review_evidence.validate(instructions, candidate=args.candidate, requirements=args.requirements,
                                  base=args.base, role=args.role)
-    factory.check_checkout(str(args.repo), str(args.cwd), args.candidate, expected_identity=identity,
-                           expected_git_dir=args.worktree_git_dir)
-    factory.check_checkout(".", ".", args.candidate, expected_identity=identity, expected_git_dir=args.worktree_git_dir)
+    report_source = factory.check_worker_cwd(args, identity)
     if any(binary.is_relative_to(root) for root in (
             Path(factory.git_worktree(".")), factory.git_common_dir("."), args.worktree_git_dir)):
         raise factory.FactoryError("Keep the native Claude installation outside the assigned checkout and Git metadata")
@@ -116,8 +114,11 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         raise factory.FactoryError(str(exc)) from None
     # Version 2 writes, version 3 answers one bounded coordination question and version 4 reviews in a
     # throwaway checkout where it may run commands (version 1 reviewed in place with Read only).
+    # Version 5 binds the complete event history on success or on cancellation before native creation.
     reviewer = not args.write and coordination is None
-    receipt = dict(schema_version=2 if args.write else 3 if coordination else 4, kind="claude-execution", state="starting", job=args.job,
+    receipt: dict = dict(schema_version=factory.SCRATCH_RECEIPT_VERSION, kind="claude-execution", state="starting", job=args.job,
+        scratch=None, scratch_identity=None, scratch_removed=None, native_process=None,
+        interpreter=factory.interpreter_identity(sys.executable), retained_files={},
         inputs=dict(candidate=args.candidate, requirements=args.requirements), repository_identity=identity,
         worktree_git_dir=str(args.worktree_git_dir), cwd=str(args.cwd), brief_sha256=digest, role=args.role,
         binary=str(binary), requested_model=args.model, requested_effort=args.effort,
@@ -130,7 +131,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         # Version 2 adds the writer flag, its Codex sandbox tool and the factory commit evidence.
         receipt.update(writer=True, sandbox=str(args.sandbox), commit=None)
     if reviewer:
-        receipt.update(checkout=str(factory.reader_checkout_path(args.receipt)))
+        receipt.update(checkout=str(factory.reader_checkout_path(args.receipt)), events_digest=None)
     fd = os.open(args.events, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         factory.save(args.receipt, receipt, exclusive=True)
@@ -138,22 +139,28 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
         os.close(fd)
         raise
     started, process, events = timer(), None, []
+    before_native_start = True
     checkouts, workdir = contextlib.ExitStack(), Path(".")
+    reader_admin_stat = None
     try:
         if reviewer:
-            workdir = checkouts.enter_context(factory.reader_checkout(
+            workdir, reader_admin_stat, report_source = checkouts.enter_context(factory.reader_checkout(
                 args.repo, args.candidate, Path(receipt["checkout"]), identity=identity))
         with os.fdopen(fd, "w") as stream:
             environment = factory.worker_environment(native_claude.environment(), workdir,
-                scratch=checkouts.enter_context(factory.scratch_directory()))
+                scratch=checkouts.enter_context(factory.scratch_directory(args.receipt, receipt)))
             # A private file provides EOF without argv limits or pipe backpressure.
             with tempfile.TemporaryFile() as prompt:
                 prompt.write(instructions.encode("utf-8"))
                 prompt.seek(0)
                 command = (native_claude.write_command(args.model, args.effort, args.native_session, args.turns) if args.write
                            else native_claude.read_command(args.model, args.effort, args.native_session, args.turns, coordination))
+                # After handing creation to the OS, a missing handle cannot prove no child ran.
+                await asyncio.sleep(0)
+                before_native_start = False
                 process = await spawn(str(binary), *command, cwd=str(workdir), env=environment, limit=NATIVE_LINE_LIMIT,
                     stdin=prompt, stdout=asyncio.subprocess.PIPE)
+                factory.record_native_process(args.receipt, receipt, process)
             async def consume():
                 retained_bytes = 0
                 while True:
@@ -180,7 +187,8 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                     if shown is not None:
                         print(shown, flush=True)
                 return await process.wait()
-            receipt["exit_code"] = await factory.within_budget(consume(), args.seconds)
+            deadline = factory.native_clock() + args.seconds
+            receipt["exit_code"] = await factory.within_budget(consume(), deadline=deadline)
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
             raise factory.FactoryError("Native Claude exited unsuccessfully; inspect its retained events and original Rex pane")
@@ -190,8 +198,9 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
                                                checkout=reviewer)
         receipt.update({key: native[key] for key in ("report", "usage", "model_usage", "turns", "rate_limits")})
         factory.check_tool_evidence("claude", events, args, coordination)
-        if reviewer:
-            factory.retain_checkout_reports(native["report"]["artifacts"], receipt["checkout"], args.receipt)
+        if reviewer or args.write:
+            factory.retain_report_files(receipt, args, workdir, deadline=deadline, source=report_source,
+                                        reader_admin_stat=reader_admin_stat)
         if args.write:
             # The native process has exited; the factory alone stages, scans and commits its work.
             candidate = factory_commit.commit_completed(argparse.Namespace(**{**vars(args), "sandbox": sandbox}),
@@ -201,11 +210,16 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_cl
             if factory.git_commit(".", "HEAD") != args.candidate:
                 raise factory.FactoryError("Read-only Claude candidate changed; inspect its original checkout without reusing the report")
             candidate = args.candidate
+        if reviewer:
+            factory.check_report_index(workdir, reader_admin_stat=reader_admin_stat)
+            receipt["events_digest"] = release_evidence.digest(events)
         receipt.update(state="completed", candidate=candidate)
     except TimeoutError:
         receipt.update(state="failed", error="Claude execution allowance expired; inspect the original attempt without retrying")
     except asyncio.CancelledError:
         receipt.update(state="failed", error=cancelled())
+        if reviewer and before_native_start:
+            receipt["events_digest"] = release_evidence.digest(events)
     except OSError:
         receipt.update(state="failed", error="Claude process/event I/O failed; restore local access/storage and inspect the retained attempt")
     except (factory.FactoryError, native_claude.ClaudeProbeError, ValueError) as exc:

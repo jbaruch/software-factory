@@ -707,16 +707,17 @@ class NativeInbox(unittest.TestCase):
 
     def test_missing_input_engine_unavailable_and_conflicting_answers_stay_operator_items(self):
         f = self.fixture
-        f.start()
-        self.assertEqual(self.view()["decision_inbox"]["items"][0]["condition"], "awaiting_collection")
-        f.answer(None, "Supply <original> scope", outcome="blocked")
-        f.collect()
-        item, = self.view()["decision_inbox"]["items"]
-        self.assertEqual(item["condition"], "blocked")
-        self.assertIn("Supply &lt;original&gt; scope", dashboard.render(self.view()))
-        record = factory.load_task(f.path)
-        record["assignments"]["reason"]["request"]["command"][3] = "/retired/codex_worker.py"
-        factory.save(f.path, record)
+        previous = f.root / "previous-runtime"
+        previous.symlink_to(factory.ROOT, target_is_directory=True)
+        with patch.object(factory, "ROOT", previous):
+            f.start()
+            self.assertEqual(self.view()["decision_inbox"]["items"][0]["condition"], "awaiting_collection")
+            f.answer(None, "Supply <original> scope", outcome="blocked")
+            f.collect()
+            item, = self.view()["decision_inbox"]["items"]
+            self.assertEqual(item["condition"], "blocked")
+            self.assertIn("Supply &lt;original&gt; scope", dashboard.render(self.view()))
+        previous.unlink()
         self.assertEqual(self.view()["decision_inbox"]["items"][0]["condition"], "engine_unavailable")
         f.start(assignment="second")
         self.assertEqual(self.view()["decision_inbox"]["items"][0]["condition"], "conflicting_attempts")

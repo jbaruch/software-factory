@@ -80,10 +80,11 @@ Generic successful dependencies or manual report registration supply no approval
 Failed writers remain contributors. Supported native execution receipts (versions
 4–6) and original version-1 event lines supply their thread identity, with matching
 job, repository, worktree, input and brief bindings and a terminal Rex observation.
-A Claude or Grok writer lost with its host also remains a contributor: when its receipt
-never left `starting`, its assignment has no result and Rex reports it `lost`, its
-frozen native session supplies contributor identity only, never successful evidence
-or an approval. One Rex still reports running is refused.
+For a Claude or Grok writer with a bound failed receipt, or a bound starting
+receipt and a null result, the original pane or its validated stored observation
+must confirm `failed` or `lost`. Its frozen native session remains a contributor
+after checkout reset. Delivery and final acceptance exclude that session from
+independent judgments.
 A unique original `thread.started` event must agree with any recorded thread ID.
 A failure, partial report or blocked owner result never becomes successful evidence;
 unknown/ambiguous contributor identity refuses. Original artifacts stay unchanged.
@@ -125,6 +126,85 @@ merged and deployed state itself. Repeat the `delivered` command with
 receipt's digest: it requires that approved native judgment of the recorded receipt,
 current inputs, independence from every contributor and no hold, and it refuses once
 the task selects other inputs (#151). The view creates no acceptance ledger.
+
+## Retrying a delivery across Python installations
+
+Use a reviewed source checkout or verify the installed runtime against that revision.
+Run its `delivered` command with the original task, PR, release
+judgment, installed helpers and each explicitly selected `--after` ID. Factory
+re-reads strictly collected approvals across installations. First collection of a
+successful worker still uses its original runtime and checkout. After a
+confirmed successful exit, a Claude reader that ran in a disposable checkout
+can collect its frozen approval if the original assigned worktree is clean at
+the assessed commit or a descendant. The approval retains its original inputs.
+
+An omitted reader needs its own bound launch request and original brief. An
+abandoned launch has an owner record confirming that no pane was created. A
+launched Claude reader can be omitted if its version-5 receipt proves cancellation
+before native subprocess creation, binds an empty event stream and agrees with
+the original Rex failure. This check works across launch interpreters. Collect
+every successful reader with its original runtime and checkout, including readers
+whose results were registered manually. Each selected approval and the release
+judgment must pass strict collection and replay of the original evidence.
+
+Collect pending successful attempts before upgrading. The 0.39.29 launcher
+recorded paths without runtime digests. A successor installed at those same
+paths refuses first collection and leaves the task and artifacts intact. Use
+the original 0.39.29 bytes, interpreter and checkout for that collection.
+
+New managed launches keep their frozen command and start the isolated checkout wrapper
+with the physical Python launcher or, in a virtual environment, its own launcher
+so Python selects the admitted prefix. The wrapper runs the worker in the same checked
+process while holding VERSION. Equivalent interpreter aliases can collect when
+the launcher, loaded executable image, Python library, prefixes and Factory
+sources match the admission digest. A changed installation needs its original
+bytes for first collection.
+
+New native admission checks earlier requests before reserving an attempt. A
+changed runtime requires strict original collection, the omitted-reader proof
+above, or a proven failed writer. For a released writer at the original launch
+paths, Factory can re-read its bound receipt and recover its contributor identity.
+After an interruption, a bound starting receipt, a null result and definitive
+Rex failure or loss preserve the writer's frozen session through reset, replacement
+and independent review. Preserve unprovable attempts for the task owner.
+
+Delivery, dashboard, show and capture read older task state in memory. During
+capture, recovered pane IDs identify the output to return. Run status to persist
+those IDs. A bound native launch on an ordinary task requires a schema-13 reader
+for later reads. Imported history requires its schema-12 reader and pinned archive.
+Keep the original task and artifacts before upgrading. For recovery of earlier
+ordinary schema-12 records, see [task state](task-state.md#schema-and-ownership).
+
+Delivery and final acceptance can replay strictly collected mixed histories after
+the old interpreter or worker has gone. Both gates recover the original identity
+of every contributor, including a proven failed writer and supported Codex writer
+option abbreviations. An unverified historical writer blocks independence.
+Preserve the original briefs, receipts, streams and Rex observations. The old
+Claude version-1 and version-4 timeout receipts establish neither the original
+runtime bytes nor a complete history of permitted actions.
+
+ACR #221 remains blocked at the historical reader proof. The original streams
+for `verify-publish-paths-qa` and `verify-publish-paths-test-automation` both
+contain a Bash call without its matching result and end without a terminal native
+result. The timeout receipts cannot establish the complete action history. Keep
+those failed attempts and the five approvals selected
+by `release-pr247` for PR #247. The recorded head is
+`551656fb9638643727ab321a0c43277e71eaafd5` and the recorded merge is
+`0a38a4cc345cb13d792c7850052a0dbf5efad6ab`. Source verification establishes
+the refusal. Historical release confirmation still requires original proof.
+
+The combined candidate applies corrected #256, this #257 replay, then #259.
+Repeat the schema 11–13 and imported-contributor controls on that head. Exercise
+v8 writer retention and its same-scope process witness with the read-only cache
+census. Replay the clean advanced reader through first collection and verify
+that its dependent cache remains ineligible for retirement. Use
+`integration.collected_native` and `release_evidence.validate_delivery` with
+Claude v5 evidence. Preserve the launch attestation and the physical checkout
+witness at Rex entry. Verify stored Rex exits for contributors, omitted readers
+and selected approvals through delivery and final acceptance. Run both installed entrypoints
+on fresh and upgraded ACR and Tessl realizations with one synchronized package
+version higher than all prior offers, including 0.39.30. Recheck the original
+interpreter and symlink-venv cases on Linux and macOS before rollout.
 
 ## Frozen payload and receipt contracts
 

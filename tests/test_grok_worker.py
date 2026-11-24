@@ -2,7 +2,8 @@
 import runtime_path  # noqa: F401  Must precede runtime imports.
 import asyncio
 import copy
-from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+import errno
 import hashlib
 from io import StringIO
 import json
@@ -20,6 +21,7 @@ import factory
 import grok_worker
 import integration
 import native_grok
+from test_abandoned_scratch import listing_cli
 from test_codex_worker import FakeProcess
 from test_rex_launcher import FakeRex
 
@@ -89,6 +91,7 @@ class GrokWorker(unittest.TestCase):
             model="fixture-model", effort="high", cwd=str(self.repo), role="qa", seconds=30, turns=3), **changes})
 
     async def spawn(self, *command, **options):
+        self.receipt_at_spawn = json.loads(self.args.receipt.read_text())
         self.spawns.append((command, options))
         return echo_cwd(self.process, options)
 
@@ -117,28 +120,32 @@ class GrokWorker(unittest.TestCase):
         with patch.object(factory, "status", return_value=dict(state="exited")):
             return factory.collect_grok(self.path, "inspect", self.rex, self.record, self.assignment)
 
-    def launch_writer(self, **changes):
-        command = self.make_command(**{**dict(assignment_id="implement", role="backend", write=True,
+    def launch_writer(self, assignment_id="implement", sandbox=None, **changes):
+        command = self.make_command(**{**dict(assignment_id=assignment_id, role="backend", write=True,
                                               commit_message="Add fixture notes", sandbox=sys.executable), **changes})
+        if sandbox is not None:  # A hand-built launch command may name the sandbox through a link.
+            command[command.index("--sandbox") + 1] = sandbox
         with patch.object(factory, "Rex", FakeRex):
-            factory.launch(self.path, task="task", assignment_id="implement", role="backend", goal="Add fixture notes",
+            factory.launch(self.path, task="task", assignment_id=assignment_id, role="backend", goal="Add fixture notes",
                 cwd=str(self.repo), command=command, purpose="work", binary=sys.executable, server="unix:///test.sock")
         actual = [call for call in FakeRex.calls if call[0] == "new" or call[:2] == ("window", "new")][-1]
         argv = actual[actual.index("--") + 1:]
         argv = argv[argv.index("--") + 1:]
         return grok_worker.parser().parse_args(argv[4:])
 
-    def execute_writer(self, args, *, edit=True):
+    def execute_writer(self, args, *, edit=True, artifact="NOTES.md", act=None, artifacts=None):
         # A writer reads before it reports; one that calls no tool fails (#134).
         events = [dict(type="tool_call", toolCallId="read-1", toolName="read_file", title="read_file",
                        rawInput=dict(target_file="README.md")),
                   dict(type="end", stopReason="end_turn", sessionId=args.native_session, requestId="writer-request",
-                       cwd=str(self.repo), num_turns=2, structuredOutput=dict(outcome="completed", artifacts=["NOTES.md"]),
+                       cwd=str(self.repo), num_turns=2, structuredOutput=dict(outcome="completed", artifacts=[artifact] if artifacts is None else artifacts),
                        usage=dict(input_tokens=1, output_tokens=2), modelUsage=None)]
         async def spawn(*command, **options):
             self.spawns.append((command, options))
             if edit:
                 (self.repo / "NOTES.md").write_text("Notes\n")
+            if act is not None:
+                act()
             return FakeProcess(events)
         with redirect_stdout(StringIO()):
             return asyncio.run(grok_worker.execute(args, spawn=spawn, probe=self.probe, configuration=self.configuration,
@@ -163,7 +170,7 @@ class GrokWorker(unittest.TestCase):
         self.assertNotIn("Candidate path inventory", Path(factory.load_task(self.path)["assignments"]["implement"]["brief"]).read_text())
         receipt = self.execute_writer(args)
         self.assertEqual(receipt["state"], "completed", receipt["error"])
-        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (3, True, "created"))
+        self.assertEqual((receipt["schema_version"], receipt["writer"], receipt["commit"]["state"]), (8, True, "created"))
         self.assertEqual(receipt["commit"]["parent"], self.candidate)
         self.assertEqual(factory.git_commit(".", "HEAD"), receipt["candidate"])
         self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
@@ -177,13 +184,333 @@ class GrokWorker(unittest.TestCase):
         self.assertEqual((result["outcome"], result["candidate"]), ("completed", receipt["candidate"]))
         self.assertTrue(collected["assignments"]["implement"]["native_collected"])
 
+    def test_writer_normalization_carries_displaced_identities(self):
+        source = self.repo / "README.md"
+        original = source.stat()
+        os.link(source, self.root / "original-input")
+        args = self.launch_writer()
+        source_pin = factory.load_task(self.path)["assignments"]["implement"]["writer_source"]
+        self.assertEqual(source_pin, dict(root=str(self.repo), identity=factory.interpreter_identity(self.repo),
+                                              displaced=[[original.st_dev, original.st_ino]]))
+        between = source.stat()
+        os.link(source, self.root / "rex-input")
+        environment = FakeRex.writer_environment()
+        current = source.stat()
+        with patch.dict(os.environ, environment, clear=True):
+            pinned = factory.check_worker_cwd(args, json.loads(args.repo_identity))
+        if pinned is None:
+            self.fail("The launched writer lost its source identities")
+        root, indexed = pinned
+        self.assertEqual(root, self.repo)
+        self.assertTrue({(info.st_dev, info.st_ino) for info in (original, between, current)} <= indexed)
+
+    def test_linked_sandbox_writer_commits_hard_linked_output(self):
+        # A Homebrew-style bin link names the saved sandbox; the factory commit holds it resolved.
+        sandbox = self.root / "bin" / "codex"
+        sandbox.parent.mkdir()
+        sandbox.symlink_to(Path(sys.executable).resolve())
+        args = self.launch_writer(sandbox=str(sandbox))
+        notes = self.repo / "NOTES.md"
+        receipt = self.execute_writer(args, act=lambda: os.link(notes, self.root / "notes-copy"))
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(receipt["commit"]["state"], "created")
+        self.assertEqual(self.git("show", receipt["candidate"] + ":NOTES.md").stdout, "Notes\n")
+        linked = (self.root / "notes-copy").stat()
+        self.assertEqual(notes.stat().st_nlink, 1)
+        source = factory.load_task(self.path)["assignments"]["implement"]["writer_source"]
+        self.assertIn([linked.st_dev, linked.st_ino], source["displaced"])
+
+    def test_interrupted_writer_normalizations_keep_the_original_exclusions(self):
+        source = self.repo / "README.md"
+        original, actual = self.root / "launch-input", self.root / "entry-input"
+        os.link(source, original)
+        with patch.object(factory, "connect", side_effect=factory.FactoryError("fixture connection unavailable")):
+            with self.assertRaisesRegex(factory.FactoryError, "connection unavailable"):
+                self.launch_writer()
+        self.assertTrue(source.samefile(original))
+        self.launch_writer()
+        self.assertFalse(source.samefile(original))
+        os.link(source, actual)
+        FakeRex.writer_environment()  # Stop at the captured wrapper handoff before starting the worker.
+        self.assertFalse(source.samefile(actual))
+        args = self.launch_writer(assignment_id="retry")
+        equal = self.root / "independent"
+        equal.write_bytes(source.read_bytes())
+        entries = ["File: " + str(path) for path in (original, actual, equal)]
+        with patch.dict(os.environ, FakeRex.writer_environment(), clear=True):
+            receipt = self.execute_writer(args, artifacts=entries)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(list(receipt["retained_files"]), [entries[-1]])
+        self.assertEqual(receipt["report"]["artifacts"], entries)
+
+    def collect_file_attempt(self, target, act=None, *, external=False):
+        args = self.launch_writer()
+        environment = FakeRex.writer_environment()
+        entry = "File: " + str(target)
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE) as child:
+            with patch.object(FakeProcess, "pid", child.pid), patch.object(factory, "remove_scratch", return_value=False):
+                with patch.dict(os.environ, environment, clear=True):
+                    receipt = self.execute_writer(args, artifact=entry, act=act)
+            child.communicate()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        if external:
+            info = target.stat()
+            self.assertEqual(receipt["retained_files"], {entry: dict(external=str(target), st_dev=info.st_dev,
+                             st_ino=info.st_ino, sha256=hashlib.sha256(target.read_bytes()).hexdigest())})
+        else:
+            self.assertEqual(receipt["retained_files"], {})
+        original = args.receipt.read_bytes()
+        result = self.collect_writer()["assignments"]["implement"]["result"]
+        self.assertEqual(result["artifacts"], [str(args.receipt), entry])
+        self.assertEqual(args.receipt.read_bytes(), original)
+        self.assertEqual(args.receipt.with_suffix(".report.txt").read_bytes(), (entry + "\n").encode())
+        return args, receipt
+
+    def test_writer_new_equal_bytes_at_literal_path_survive_checkout_advance(self):
+        report = self.repo / ":(glob)result[1].md"
+        args, receipt = self.collect_file_attempt(report.name, lambda: report.write_bytes((self.repo / "README.md").read_bytes()))
+        expected = [dict(receipt=str(args.receipt), scratch=receipt["scratch"])]
+        self.assertEqual(listing_cli(self.root), expected)
+        report.unlink()
+        self.git("commit", "-qam", "Remove the report in a later revision", directory=self.repo)
+        result = self.git("rev-parse", "HEAD", directory=self.repo).stdout.strip()
+        self.assertNotEqual(result, receipt["candidate"])
+        factory.set_inputs(self.path, candidate=result, requirements="later-requirements")
+        files = [args.receipt, args.events, args.brief, self.path, args.receipt.with_suffix(".report.txt"),
+                 args.worktree_git_dir / "index"]
+        def snapshot():
+            return [(p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in files]
+        before = snapshot()
+        self.assertEqual(listing_cli(self.root), expected)
+        self.assertEqual(snapshot(), before)
+        os.chdir(self.base)
+        self.repo.rename(self.root / "parked-checkout")
+        self.assertEqual(listing_cli(self.root), expected)
+        for proof in (None, {**receipt["commit"], "staged_tree": result}):
+            factory.save(args.receipt, {**receipt, "commit": proof})
+            self.assertEqual(listing_cli(self.root), [])
+
+    @patch.object(factory, "native_clock", new=lambda: 10)
+    def test_file_hash_limits_preserve_the_collected_report(self):
+        args = self.launch_writer()
+        limit = 16 * 1024**2
+        paths = [self.root / name for name in ("small", "too-large", "exact", "over-total", "last")]
+        for path, size in zip(paths, (5, limit + 1, limit, limit, 4)):
+            with path.open("wb") as stream:
+                stream.truncate(size)
+        missed = [self.root / f"absent-{i}" for i in range(27)]
+        raw = ["File: " + str(p) for p in [*paths, *missed, self.root / "late"]]
+        (self.root / "late").write_text("outside the attempt limit")
+        expected = [raw[i] for i in (0, 2, 4)]
+        with patch.dict(os.environ, FakeRex.writer_environment(), clear=True):
+            receipt = self.execute_writer(args, artifacts=raw)
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(list(receipt["retained_files"]), expected)
+        for entry in expected:
+            binding = receipt["retained_files"][entry]
+            with Path(binding["external"]).open("rb") as stream:
+                self.assertEqual(binding["sha256"], hashlib.file_digest(stream, "sha256").hexdigest())
+        self.assertEqual(receipt["report"]["artifacts"], raw)
+        result = self.collect_writer()["assignments"]["implement"]["result"]
+        self.assertEqual(result["artifacts"], [str(args.receipt), *raw])
+        self.assertEqual(args.receipt.with_suffix(".report.txt").read_bytes(), ("\n".join(raw) + "\n").encode())
+
+    def test_legacy_writer_blob_uses_its_original_registration(self):
+        args, receipt = self.collect_file_attempt("NOTES.md")
+        record = factory.load_task(self.path)
+        del record["assignments"]["implement"]["writer_source"]
+        factory.save(self.path, record)
+        # Place the fixture receipt on the same clock as its original Git registration.
+        registered = (args.worktree_git_dir / "gitdir").stat().st_ctime
+        factory.save(args.receipt, {**receipt, "created_at": registered, "finished_at": registered})
+        before = [item.read_bytes() for item in (self.path, args.receipt, args.events)]
+        self.assertEqual(listing_cli(self.root), [dict(receipt=str(args.receipt), scratch=receipt["scratch"])])
+        self.assertEqual([item.read_bytes() for item in (self.path, args.receipt, args.events)], before)
+
+    def test_public_census_reads_commit_metadata_and_blob_with_local_git(self):
+        args, receipt = self.collect_file_attempt("NOTES.md")
+        run = subprocess.run
+        observed = []
+        def observe(command, **options):
+            if command[0] == factory.git_binary():
+                observed.append((command, options["env"]))
+            return run(command, **options)
+        with patch.object(subprocess, "run", side_effect=observe):
+            self.assertEqual(factory.abandoned_scratch(self.root), [dict(receipt=str(args.receipt), scratch=receipt["scratch"])])
+        commands = [command for command, _ in observed]
+        for kind in ("commit", "blob"):
+            self.assertTrue(any("cat-file" in cmd and cmd[cmd.index("cat-file") + 1] == kind for cmd in commands))
+        for command, environment in observed:
+            self.assertIn("--no-replace-objects", command)
+            self.assertNotIn("show", command)
+            self.assertIs(environment, observed[0][1])
+            for key, expected in {"GIT_TRACE2": "0", "GIT_TRACE2_EVENT": "0", "GIT_TRACE2_PERF": "0",
+                                  "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1",
+                                  "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": ""}.items():
+                self.assertEqual(environment[key], expected)
+
+    def test_committed_file_limits_and_git_timeouts_leave_inline_evidence_available(self):
+        args, receipt = self.collect_file_attempt("NOTES.md")
+        entry, = receipt["report"]["artifacts"]
+        expected = [dict(receipt=str(args.receipt), scratch=receipt["scratch"])]
+        run = subprocess.run
+        for limit in ("deadline", "attempts", "bytes", "metadata", "blob", "late", "short"):
+            with self.subTest(limit=limit):
+                now = 0
+                budget = factory.ReportHashBudget(int(limit != "attempts"), 5 if limit == "bytes" else 6,
+                                                  5, clock=lambda: now)
+                now = 5 if limit == "deadline" else 0
+                def limited(command, **options):
+                    nonlocal now
+                    if command[0] == factory.git_binary():
+                        self.assertGreater(options["timeout"], 0)
+                        self.assertLessEqual(options["timeout"], 5 - now)
+                        now += 0.1
+                        if limit == "metadata" and "rev-parse" in command:
+                            raise subprocess.TimeoutExpired(command, options["timeout"])
+                        if "blob" in command:
+                            if limit == "blob":
+                                raise subprocess.TimeoutExpired(command, options["timeout"], output=b"No")
+                            if limit == "late":
+                                now = 5
+                            if limit == "short":
+                                return subprocess.CompletedProcess(command, 0, b"No", b"")
+                    return run(command, **options)
+                receipt["report"]["artifacts"] = [entry]
+                factory.save(args.receipt, receipt)
+                with patch.object(factory, "ReportHashBudget", return_value=budget), \
+                        patch.object(subprocess, "run", side_effect=limited), redirect_stderr(StringIO()) as errors:
+                    self.assertEqual(factory.abandoned_scratch(self.root), [])
+                if limit != "short":
+                    self.assertEqual(errors.getvalue().count("census incomplete"), 1)
+                if limit in ("blob", "short"):
+                    self.assertEqual(budget.remaining, 4)
+                if limit == "late":
+                    self.assertEqual(budget.remaining, 0)
+                receipt["report"]["artifacts"].append('{"observation":"Reviewed the committed result."}')
+                factory.save(args.receipt, receipt)
+                with patch.object(factory, "ReportHashBudget", return_value=budget), redirect_stderr(StringIO()):
+                    self.assertEqual(factory.abandoned_scratch(self.root), expected)
+
+    def test_oversized_committed_blob_is_rejected_before_reading(self):
+        report = self.repo / "README.md"
+        def oversize():
+            with report.open("wb") as output:
+                output.truncate(16 * 1024**2 + 1)
+        self.collect_file_attempt(report, oversize)
+        with patch.object(subprocess, "run", wraps=subprocess.run) as run, redirect_stderr(StringIO()) as errors:
+            self.assertEqual(factory.abandoned_scratch(self.root), [])
+        self.assertEqual(errors.getvalue().count("census incomplete"), 1)
+        self.assertFalse(any("blob" in call.args[0] for call in run.call_args_list))
+
+    def test_committed_and_retained_files_share_attempts_and_bytes_in_either_order(self):
+        reader = self.reader_report(["qa.md"])
+        args, writer = self.collect_file_attempt("NOTES.md")
+        record = factory.load_task(self.path)
+        rows = dict(inspect=dict(receipt=str(self.args.receipt), scratch=reader["scratch"]),
+                    implement=dict(receipt=str(args.receipt), scratch=writer["scratch"]))
+        for order in (("inspect", "implement"), ("implement", "inspect")):
+            record["assignments"] = {key: record["assignments"][key] for key in order}
+            factory.save(self.path, record)
+            for attempts, byte_limit in ((1, 12), (2, 6), (2, 12)):
+                with self.subTest(order=order, attempts=attempts, byte_limit=byte_limit):
+                    budget = factory.ReportHashBudget(attempts, byte_limit, 5)
+                    with patch.object(factory, "ReportHashBudget", return_value=budget), redirect_stderr(StringIO()) as errors:
+                        found = factory.abandoned_scratch(self.root)
+                    complete = attempts == 2 and byte_limit == 12
+                    self.assertCountEqual(found, list(rows.values()) if complete else [rows[order[0]]])
+                    self.assertEqual(errors.getvalue().count("census incomplete"), int(not complete))
+
+    def test_nested_writer_blob_survives_worktree_move(self):
+        checkout = self.repo
+        self.repo = checkout / "module"
+        self.repo.mkdir()
+        (self.repo / "input.md").write_text("Module input")
+        self.git("add", "module", directory=checkout)
+        self.git("commit", "-qm", "Add module", directory=checkout)
+        candidate = self.git("rev-parse", "HEAD", directory=checkout).stdout.strip()
+        factory.set_inputs(self.path, candidate=candidate, requirements="module-fixture")
+        os.chdir(self.repo)
+        target = checkout / "proof.md"
+        args, receipt = self.collect_file_attempt(target, lambda: target.write_bytes(b"Original report"))
+        os.chdir(self.base)
+        self.git("worktree", "move", str(checkout), str(self.root / "moved"))
+        self.assertEqual(listing_cli(self.root), [dict(receipt=str(args.receipt), scratch=receipt["scratch"])])
+
+    def test_writer_changed_readme_is_a_retained_blob(self):
+        report = self.repo / "README.md"
+        args, receipt = self.collect_file_attempt(report, lambda: report.write_bytes(b"Verified result\x00\xff"))
+        self.assertEqual(listing_cli(self.root), [dict(receipt=str(args.receipt), scratch=receipt["scratch"])])
+        oid = self.git("rev-parse", receipt["candidate"] + ":README.md").stdout.strip()
+        blob = self.base / ".git/objects" / oid[:2] / oid[2:]
+        # A local promisor can serve the object. Listing must leave the missing proof missing.
+        mirror = self.root / "mirror.git"
+        self.git("clone", "--bare", "--no-hardlinks", str(self.repo), str(mirror))
+        self.git("config", "uploadpack.allowAnySHA1InWant", "true", directory=mirror)
+        self.git("config", "remote.fixture.url", str(mirror))
+        self.git("config", "remote.fixture.promisor", "true")
+        blob.rename(blob.with_suffix(".unavailable"))
+        self.assertEqual(listing_cli(self.root), [])
+        absent = subprocess.run([factory.git_binary(), "--no-lazy-fetch", "-C", str(self.base), "cat-file", "-e", oid],
+                                capture_output=True, check=False)
+        self.assertNotEqual(absent.returncode, 0)
+
+    def test_writer_unrelated_commit_cannot_retain_readme(self):
+        self.collect_file_attempt("README.md")
+        self.assertEqual(listing_cli(self.root), [])
+
+    def test_writer_mode_only_commit_cannot_retain_readme(self):
+        self.collect_file_attempt("README.md", lambda: (self.repo / "README.md").chmod(0o755))
+        self.assertEqual(listing_cli(self.root), [])
+
+    def test_writer_empty_blob_and_later_uncommitted_bytes_are_ineligible(self):
+        report = self.repo / "empty.md"
+        self.collect_file_attempt(report.name, report.touch)
+        self.assertEqual(listing_cli(self.root), [])
+        report.write_text("This did not come from the original writer")
+        self.assertEqual(listing_cli(self.root), [])
+
+    def test_literal_external_binding_survives_an_independent_link(self):
+        source = self.repo / "README.md"
+        target = self.root / "{fixture.md:12"
+        args, receipt = self.collect_file_attempt(target, lambda: target.write_bytes(source.read_bytes()), external=True)
+        os.link(target, self.root / "report-copy")
+        self.assertEqual(listing_cli(self.root), [dict(receipt=str(args.receipt), scratch=receipt["scratch"])])
+
+    def test_external_file_excludes_an_indexed_inode_alias(self):
+        source = self.repo / "README.md"
+        target = self.root / "outside.md"
+        args, receipt = self.collect_file_attempt(target, lambda: target.write_bytes(source.read_bytes()), external=True)
+        expected = [dict(receipt=str(args.receipt), scratch=receipt["scratch"])]
+        self.assertEqual(listing_cli(self.root), expected)
+        os.link(target, self.root / "independent-link")
+        self.assertEqual(listing_cli(self.root), expected)
+        index = args.worktree_git_dir / "index"
+        parked = index.rename(index.with_suffix(".unavailable"))
+        self.assertEqual(listing_cli(self.root), expected)
+        parked.rename(index)
+        target.unlink()
+        os.link(source, target)
+        self.assertEqual(listing_cli(self.root), [])
+
     def test_a_completed_writer_without_edits_fails_and_commits_nothing(self):
         # #166: a completed writer whose checkout ends unchanged has nothing to commit or verify.
-        receipt = self.execute_writer(self.launch_writer(), edit=False)
+        args = self.launch_writer()
+        receipt = self.execute_writer(args, edit=False)
         self.assertEqual(receipt["state"], "failed")
         self.assertIn("nothing to commit or verify", receipt["error"])
         self.assertEqual(receipt["commit"]["state"], "unchanged")
         self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        record = factory.load_task(self.path)
+        assignment = record["assignments"]["implement"]
+        with patch.object(factory, "Rex", FakeRex):
+            with self.assertRaisesRegex(factory.FactoryError, "confirm the original writer"):
+                integration.contributor_context("implement", record, assignment)
+            with patch.dict(FakeRex.exits, {assignment["block_id"]: 1}):
+                factory.tidy(self.path, factory.connect(record), record, only={"implement"}, close_session=False)
+        self.assertEqual(assignment["closed"]["exit"]["exit_code"], 1)
+        self.assertEqual(integration.contributor_context("implement", record, assignment), args.native_session)
+        self.assertIsNone(assignment["result"])
 
     def test_writer_mode_requires_a_writing_role_commit_message_and_sandbox(self):
         for changes, message in ((dict(role="qa"), "does not permit writer"),
@@ -245,7 +572,8 @@ class GrokWorker(unittest.TestCase):
                          [call for call in calls if call[0] == "new"])
 
     def test_original_events_bound_receipt_and_idempotent_collection(self):
-        with patch.dict(os.environ, {"GH_TOKEN": "fixture-private-token"}):
+        with (patch.dict(os.environ, {"GH_TOKEN": "fixture-private-token"}),
+              patch.object(factory, "native_start_time", return_value=123456)):
             receipt = self.execute()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["report"]["outcome"], "approved")
@@ -266,7 +594,12 @@ class GrokWorker(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", options["env"])
         receipt = json.loads(self.args.receipt.read_text())
         checkout = factory.reader_checkout_path(self.args.receipt)
-        self.assertEqual((receipt["schema_version"], options["cwd"]), (4, str(checkout)))
+        self.assertEqual((receipt["schema_version"], options["cwd"]), (8, str(checkout)))
+        self.assertEqual(self.receipt_at_spawn["scratch"], options["env"]["TMPDIR"])
+        self.assertIsNone(self.receipt_at_spawn["native_process"])
+        self.assertEqual(receipt["native_process"], dict(pid=self.process.pid, start_time=123456, scope=factory.process_scope()))
+        self.assertIs(receipt["scratch_removed"], True)
+        self.assertFalse(Path(receipt["scratch"]).exists())
         self.assertFalse(checkout.exists())
         result = self.collect()
         before = self.path.read_bytes()
@@ -289,16 +622,37 @@ class GrokWorker(unittest.TestCase):
         self.assertIsNone(evidence["base"])
         self.assertEqual(hashlib.sha256(instructions.encode()).hexdigest(), self.args.brief_sha256)
 
+    def test_legacy_scratchless_receipt_collects_and_verifies_in_place(self):
+        receipt = self.execute()
+        old = {key: value for key, value in receipt.items() if key not in factory.SCRATCH_RECEIPT_FIELDS | {"interpreter", "retained_files"}}
+        factory.save(self.args.receipt, {**old, "schema_version": 4})
+        original = self.args.receipt.read_bytes()
+        record = self.collect()
+        _, verified, _ = factory.grok_evidence("inspect", record, record["assignments"]["inspect"], collected=True)
+        self.assertEqual(verified["report"]["outcome"], "approved")
+        self.assertEqual(self.args.receipt.read_bytes(), original)
+
     def test_legacy_code_review_without_a_range_stays_inspection_only(self):
         historical = copy.deepcopy(self.assignment)
         historical["request"]["role"] = "code-review"
         command = historical["request"]["command"]
         command[command.index("--role") + 1] = "code-review"
+        del historical["native_launch"]  # Pre-range reviews also predate launch attestations.
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(factory.FactoryError, "remains inspection-only"):
+        with self.assertRaisesRegex(factory.FactoryError, "first collection requires the original released"):
             factory.collect_grok(self.path, "inspect", self.rex, self.record, historical)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(self.spawns, [])
+
+        # Even an already collected original result cannot supply a missing review range.
+        self.execute()
+        collected = self.collect()["assignments"]["inspect"]
+        historical.update(native_collected=collected["native_collected"], result=collected["result"])
+        before, spawns = self.path.read_bytes(), list(self.spawns)
+        with self.assertRaisesRegex(factory.FactoryError, "remains inspection-only"):
+            factory.collect_grok(self.path, "inspect", self.rex, self.record, historical)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.spawns, spawns)
 
     def test_code_review_requires_an_explicit_range_before_launch(self):
         with self.assertRaisesRegex(factory.FactoryError, "Supply --base"):
@@ -345,17 +699,105 @@ class GrokWorker(unittest.TestCase):
         self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
         self.assertEqual(self.collect()["assignments"]["inspect"]["result"]["outcome"], "approved")
 
-    def test_a_report_file_left_in_the_reader_checkout_is_retained(self):
-        self.events[-1]["structuredOutput"] = dict(outcome="approved", artifacts=["qa-report.md", "README.md"])
+    def reader_report(self, entries):
+        self.events[-1]["structuredOutput"] = dict(outcome="approved", artifacts=entries)
         self.process = FakeProcess(self.events)
         spawn = self.spawn
-        async def write_report(*command, **options):
-            (Path(options["cwd"]) / "qa-report.md").write_text("# QA\nVerified.\n")
+        async def write_reports(*command, **options):
+            for name in entries:
+                path = Path(options["cwd"]) / name
+                if not path.exists():
+                    path.write_bytes(b"Proof\n")
             return await spawn(*command, **options)
-        self.spawn = write_report
-        self.assertEqual(self.execute()["state"], "completed")
-        kept = self.args.receipt.with_name(self.args.receipt.name.removesuffix(".json") + ".artifacts")
-        self.assertEqual(sorted(path.name for path in kept.iterdir()), ["qa-report.md"])
+        self.spawn = write_reports
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE) as child:
+            with patch.object(FakeProcess, "pid", child.pid), patch.object(factory, "remove_scratch", return_value=False):
+                receipt = self.execute()
+            child.communicate()
+        self.assertEqual((receipt["exit_code"], receipt["state"]), (0, "completed"), receipt["error"])
+        self.assertFalse(factory.reader_checkout_path(self.args.receipt).exists())
+        original = self.args.receipt.read_bytes()
+        result = self.collect()["assignments"]["inspect"]["result"]
+        self.assertEqual((result["outcome"], result["artifacts"]), ("approved", [str(self.args.receipt), *entries]))
+        self.assertEqual(self.args.receipt.read_bytes(), original)
+        self.assertEqual(self.args.receipt.with_suffix(".report.txt").read_bytes(), ("\n".join(entries) + "\n").encode())
+        return receipt
+
+    def test_a_report_file_left_in_the_reader_checkout_is_retained(self):
+        receipt = self.reader_report(["qa-report.md", "README.md"])
+        kept, = self.args.receipt.with_suffix(".checkout-artifacts").iterdir()
+        self.assertEqual(kept.read_bytes(), b"Proof\n")
+        expected = [dict(receipt=str(self.args.receipt), scratch=receipt["scratch"])]
+        self.assertEqual(listing_cli(self.root), expected)
+        kept.write_bytes(b"other")
+        self.assertEqual(listing_cli(self.root), [])
+
+    def fail_copy_sync(self, fail_at):
+        provision = factory.provisioning_file
+        count = 0
+        @contextmanager
+        def create(root, name):
+            nonlocal count
+            if root == self.args.receipt.with_suffix(".checkout-artifacts"):
+                count += 1
+                if count == fail_at:
+                    with provision(root, name) as output, patch.object(os, "fsync", side_effect=OSError(errno.ENOSPC, "disk full")):
+                        yield output
+                    return
+            with provision(root, name) as output:
+                yield output
+        return patch.object(factory, "provisioning_file", create)
+
+    def test_optional_storage_failure_leaves_the_native_result_collectible(self):
+        with self.fail_copy_sync(1), redirect_stderr(StringIO()) as errors:
+            receipt = self.reader_report(["qa.md"])
+        self.assertIn("qa.md", errors.getvalue())
+        self.assertIn("disk full", errors.getvalue())
+        self.assertEqual(receipt["retained_files"], {})
+        self.assertEqual(listing_cli(self.root), [])
+
+    def test_optional_storage_failure_preserves_earlier_and_later_copies(self):
+        with self.fail_copy_sync(2), redirect_stderr(StringIO()) as errors:
+            receipt = self.reader_report(["first.md", "second.md", "third.md"])
+        self.assertIn("second.md", errors.getvalue())
+        self.assertEqual(list(receipt["retained_files"]), ["first.md", "third.md"])
+        self.assertEqual(listing_cli(self.root), [dict(receipt=str(self.args.receipt), scratch=receipt["scratch"])])
+
+    def test_expired_native_deadline_skips_optional_publication(self):
+        now = 10
+        check = factory.check_tool_evidence
+        def after_native(*args):
+            nonlocal now
+            now += self.args.seconds
+            return check(*args)
+        with patch.object(factory, "native_clock", side_effect=lambda: now), \
+                patch.object(factory, "check_tool_evidence", side_effect=after_native):
+            receipt = self.reader_report(["qa.md"])
+        self.assertEqual(receipt["retained_files"], {})
+        self.assertFalse(self.args.receipt.with_suffix(".checkout-artifacts").exists())
+        self.assertEqual(listing_cli(self.root), [])
+
+    def test_optional_git_uses_the_time_left_after_native_execution(self):
+        now = 10.0
+        check = factory.check_tool_evidence
+        run = subprocess.run
+        timeouts = []
+        def after_native(*args):
+            nonlocal now
+            now += self.args.seconds - 0.25
+            return check(*args)
+        def slow_git(command, **options):
+            if "ls-files" in command and options.get("timeout", 600) < 1:
+                timeouts.append(options["timeout"])
+                raise subprocess.TimeoutExpired(command, options["timeout"])
+            return run(command, **options)
+        with patch.object(factory, "native_clock", side_effect=lambda: now), \
+                patch.object(factory, "check_tool_evidence", side_effect=after_native), \
+                patch.object(subprocess, "run", side_effect=slow_git), redirect_stderr(StringIO()) as errors:
+            receipt = self.reader_report(["qa.md"])
+        self.assertEqual(timeouts, [0.25])
+        self.assertIn("qa.md", errors.getvalue())
+        self.assertEqual(receipt["retained_files"], {})
 
     def test_reset_restores_a_checkout_a_failed_reader_left_dirty(self):
         # The canary's worktree was dirtied by a reader that ran in place before readers got checkouts.

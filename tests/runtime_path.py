@@ -14,7 +14,7 @@ CONFIG = tempfile.TemporaryDirectory(prefix="factory-test-config-")
 os.environ["SOFTWARE_FACTORY_CONFIG"] = CONFIG.name
 
 # Attempts whose exit can't be confirmed keep their scratch on purpose; in tests that stays in this run's
-# directory, which is removed when the test process ends, never in the real /tmp. Short, for Unix sockets.
-SCRATCH = tempfile.TemporaryDirectory(prefix="sf-test-", dir="/tmp" if os.path.isdir("/tmp") else None)
+# directory, which is removed when the test process ends, never in the real /tmp.
+SCRATCH = tempfile.TemporaryDirectory(prefix="sf-test-")
 import factory  # noqa: E402  The runtime path is set above.
 factory.SCRATCH_ROOT = SCRATCH.name

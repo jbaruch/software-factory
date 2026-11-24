@@ -428,6 +428,7 @@ def brief_payload(instructions, kind, expected_digest):
 
 
 def assignment_payload(command, instructions, kind):
+    command = factory.native_argument_view(command)
     flag = "--" + kind + "-evidence"
     if flag in command:  # Historical inline commands retain their original binding.
         return factory.decode_json(command[command.index(flag) + 1])
@@ -437,7 +438,7 @@ def assignment_payload(command, instructions, kind):
 DELIVERY_MARKER = "\n## Factory confirmed delivery evidence\n\n"
 
 
-def delivered_receipt(record, review) -> dict:
+def delivered_receipt(record, review, *, assessing=None) -> dict:
     """A `delivered` receipt as final acceptance evidence: the release skill's merge the factory confirmed (#151).
 
     Version 3 freezes that receipt, keyed by the release judgment it confirmed; versions 1 and 2 froze the
@@ -477,9 +478,12 @@ def delivered_receipt(record, review) -> dict:
             or receipt["inputs"] != record["inputs"] or receipt["head"] != record["inputs"]["candidate"]):
         raise factory.FactoryError("The `delivered` receipt does not confirm the task's current delivery; "
                                    "judge final acceptance before selecting other inputs")
+
     # The recorded approvals are a hint: they must equal what the collected assignments give now.
     import integration
-    live = integration.approvals(record, review, receipt["required"])
+    live = integration.approvals(record, review, receipt["required"], assessing=assessing)
+    if receipt["pr"] != live[review]["evidence"]["pr"]["url"]:
+        raise factory.FactoryError("The recorded PR differs from the one the release judgment approved")
     if {key: {k: v for k, v in item.items() if k != "evidence"} for key, item in live.items()} != receipt["approvals"]:
         raise factory.FactoryError("The `delivered` receipt's approvals differ from the task's collected approvals; "
                                    "restore the original receipt or confirm the delivery again")
@@ -505,13 +509,15 @@ def from_delivery_assignment(record, assignment):
             raise ValueError()
     except (ValueError, IndexError, KeyError, OSError, UnicodeError):
         raise factory.FactoryError("Final native acceptance lacks the exact original frozen delivery evidence") from None
-    return validate_delivery(value, record)
+    # This judgment was launched after the delivery it assessed. An idempotent
+    # reconnect may re-read its frozen evidence while its own pane is still running.
+    return validate_delivery(value, record, assessing=assignment)
 
 
-def validate_delivery(value, record):
+def validate_delivery(value, record, *, assessing=None):
     render_delivery(value)  # Version check.
     if set(value) != {"schema_version", "review", "receipt", "receipt_digest"} or not isinstance(value["review"], str) \
-            or value != delivered_receipt(record, value["review"]):
+            or value != delivered_receipt(record, value["review"], assessing=assessing):
         raise factory.FactoryError("Final release evidence differs from the recorded `delivered` receipt")
     return value
 
