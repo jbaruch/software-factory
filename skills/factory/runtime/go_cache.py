@@ -864,22 +864,29 @@ def native_build(go, cache, lock_fds):
         environment = dict(PATH=os.defpath, HOME=temporary, TMPDIR=temporary, GOTMPDIR=temporary, GOPATH=temporary, GOCACHE=str(cache),
                            GOENV="off", GOWORK="off", GO111MODULE="off", GOPROXY="off", GOSUMDB="off",
                            GOTOOLCHAIN="local", CGO_ENABLED="0", GOTELEMETRY="off")
-        def run_go(seconds, *arguments, **options):
+        def run_go(seconds, *arguments, stdout):
             # Only Factory holds the write end. Even a hard stop wakes the lock holder.
             reader, writer = os.pipe()
-            with os.fdopen(reader, "rb") as lifetime, os.fdopen(writer, "wb"):
-                return subprocess.run([sys.executable, "-I", "-S", "-B", Path(__file__).with_name("go_command.py"),
-                                       str(seconds), go, *arguments],
-                                      cwd=package, env=environment, stdin=lifetime, text=True,
-                                      pass_fds=lock_fds, start_new_session=True, **options)
+            with os.fdopen(reader, "rb") as lifetime, os.fdopen(writer, "wb") as owner:
+                with subprocess.Popen([sys.executable, "-I", "-S", "-B", Path(__file__).with_name("go_command.py"),
+                                       str(seconds), go, *arguments], cwd=package, env=environment, stdin=lifetime,
+                                      stdout=stdout, stderr=subprocess.PIPE, text=True, pass_fds=lock_fds,
+                                      start_new_session=True) as keeper:
+                    try:
+                        output, errors = keeper.communicate()
+                    except KeyboardInterrupt:
+                        owner.close()
+                        keeper.wait()
+                        raise
+                    return subprocess.CompletedProcess(keeper.args, keeper.returncode, output, errors)
 
         # GOENV=off skips user configuration. The distribution can still set build flags and a cache program.
-        config = run_go(30, "env", "GOCACHEPROG", "GOFLAGS", capture_output=True)
+        config = run_go(30, "env", "GOCACHEPROG", "GOFLAGS", stdout=subprocess.PIPE)
         if config.returncode:
             raise factory.FactoryError(f"Go env exited {config.returncode}: {config.stderr.strip()}")
         if config.stdout != "\n\n":
             raise factory.FactoryError("Select a Go installation with empty GOCACHEPROG and GOFLAGS defaults")
-        return run_go(GO_BUILD_SECONDS, "build", "-trimpath", ".", stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return run_go(GO_BUILD_SECONDS, "build", "-trimpath", ".", stdout=subprocess.DEVNULL)
 
 
 def census(directory, repo, clean_task=None, *, trim_go=None):

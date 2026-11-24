@@ -267,7 +267,7 @@ with open({str(entry)!r}, "ab", buffering=0) as cache:
         fixture.chmod(0o700)
         paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
                  self.path.with_suffix(".lock"), self.admin, self.cache)
-        for failure in ("timeout", "driver exit", "parent kill", "group teardown"):
+        for failure in ("timeout", "driver exit", "parent kill", "parent interrupt", "group teardown"):
             with self.subTest(failure=failure):
                 # A session-leading Factory can have unrelated peers. This peer echoes
                 # a byte after readback to prove it survived the hosted timeout.
@@ -296,10 +296,27 @@ raise SystemExit(factory.main())
                                 self.fail(f"Acquired {path} during a compiler write")
                         if failure == "parent kill":
                             caller.kill()
+                        elif failure == "parent interrupt":
+                            caller.send_signal(signal.SIGINT)
                         elif failure == "group teardown":
                             os.killpg(caller.pid, signal.SIGKILL)
                         elif failure == "driver exit":
                             exit_driver.touch()
+                        # At the first opportunity to acquire each admission lock, the
+                        # compiler must already have released its separate mutation flock.
+                        deadline = time.monotonic() + 5
+                        with entry.open("rb") as mutation:
+                            pending = set(paths)
+                            while pending:
+                                for path in pending.copy():
+                                    try:
+                                        with go_cache.inode_lock(path, directory=path.is_dir()):
+                                            fcntl.flock(mutation, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                                            pending.remove(path)
+                                    except factory.ExecutionBusy:
+                                        continue
+                                self.assertLess(time.monotonic(), deadline, f"Locks retained after stop: {pending}")
+                                time.sleep(0.01)
                         output, _ = caller.communicate(timeout=6)
                         if failure in ("timeout", "driver exit"):
                             row, = json.loads(output)
@@ -312,23 +329,10 @@ raise SystemExit(factory.main())
                             probe.settimeout(2)
                             probe.sendall(b"?")
                             self.assertEqual(probe.recv(1), b"?")
+                        elif failure == "parent interrupt":
+                            self.assertEqual(caller.returncode, -signal.SIGINT)
                         else:
                             self.assertEqual(caller.returncode, -signal.SIGKILL)
-                    # At the first opportunity to acquire each admission lock, the
-                    # compiler must already have released its separate mutation flock.
-                    deadline = time.monotonic() + 5
-                    with entry.open("rb") as mutation:
-                        pending = set(paths)
-                        while pending:
-                            for path in pending.copy():
-                                try:
-                                    with go_cache.inode_lock(path, directory=path.is_dir()):
-                                        fcntl.flock(mutation, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                                        pending.remove(path)
-                                except factory.ExecutionBusy:
-                                    continue
-                            self.assertLess(time.monotonic(), deadline, f"Locks retained after stop: {pending}")
-                            time.sleep(0.01)
                 ready.unlink()
                 exit_driver.unlink(missing_ok=True)
 
