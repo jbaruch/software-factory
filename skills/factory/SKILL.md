@@ -13,6 +13,8 @@ Use the smallest factory operation that finishes the request. Follow the project
 
 Reuse the existing task and selected inputs for continuation. Admit a task and provision an isolated writer worktree when the work needs them. Select only the roles the task needs from the [role catalog](references/roles.json).
 
+Record the requester's words as acceptance references. Label coordinator inferences as assumptions. Treat only the requester’s words as binding acceptance. On the second correction to the same area, reset the approach. Restate the problem from the requester's words and name the simplest approach before planning more corrections.
+
 Use the [ready-plan contract](references/ready-plan.md) for inputs, provider routing, and result states. Run the plan with the controller command in the [command reference](references/commands.md). Inspect its JSON result and reconcile partial effects before retrying. Keep active work within the selected limits. Leave spare capacity idle. Finish here.
 
 ## Step 2 — Launch one assignment

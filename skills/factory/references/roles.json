@@ -111,6 +111,7 @@
       "result": "Interfaces, decision rationale, dependencies and material uncertainties.",
       "model_binding": "per_assignment",
       "instructions": [
+        "Start with the simplest approach. Explain why it fails before proposing added machinery.",
         "Define interfaces, ownership and useful parallel delivery boundaries.",
         "Evaluate alternatives against actual requirements, constraints and failure modes.",
         "Involve security, data or operations only where the change actually touches their discipline.",
@@ -285,6 +286,7 @@
       "model_binding": "per_assignment",
       "instructions": [
         "Review the actual diff and relevant surrounding behavior against requirements.",
+        "By default, independently judge whether the approach is the simplest way to meet the requester's goal.",
         "Provide material findings with evidence and distinguish advisories from blockers.",
         "Verify corrections without taking over implementation or duplicating specialist reviews."
       ]
