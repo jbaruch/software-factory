@@ -87,6 +87,13 @@ boundary is structural instead:
 - a writer's ignored outputs (test caches, bytecode, installs) and the empty
   directories Git cannot track are discarded before the factory commit and listed
   in the receipt's `commit.discarded`;
+- the factory then stages every nonignored file in the writer's checkout,
+  whatever the report says it excluded, so build outputs belong in scratch or
+  under the repository's existing ignores. For an addition with executable
+  mode in the index or the file's owner-execute bit set, the factory checks the
+  first 8 KiB of the finished file for a NUL byte (#269). The refusal directs
+  writers to inspect staged additions and move the build output. Executable text
+  scripts and ordinary new source commit as before;
 - a writer that fails after editing leaves its worktree dirty, so
   `factory.py reset --task TASK --id ID` saves the leftover edits as
   `TASK.ID.HARNESS.reset.patch` beside the receipt and restores the candidate.

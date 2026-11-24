@@ -746,6 +746,87 @@ class NativeResults(unittest.TestCase):
                 factory_commit.check_commit_receipt({**receipt, "commit": {**receipt["commit"], "discarded": damaged}},
                                                     self.args, str(self.repo))
 
+    def build_output(self, *, ignored, name="tool", attributes=None):
+        # #269: a writer's untracked macOS build of a Go tool entered the candidate as a new executable blob.
+        if ignored:
+            (self.repo / ".gitignore").write_text("/tool/tool\n")
+            self.assertEqual(factory.git_run(".", "add", ".gitignore").returncode, 0)
+            self.assertEqual(factory.git_run(".", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                             "-c", "commit.gpgsign=false", "commit", "-qm", "Ignore builds").returncode, 0)
+            self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        self.writer()
+        original_spawn = self.spawn
+        async def with_build(*command, **options):
+            if attributes:
+                (self.repo / ".gitattributes").write_text(attributes)
+            (self.repo / "tool").mkdir()
+            (self.repo / "tool" / "main.go").write_text("package main\n\nfunc main() {}\n")
+            (self.repo / "tool" / "run.sh").write_text("#!/bin/sh\nexec go run .\n")
+            (self.repo / "tool" / name).write_bytes(b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + bytes(64))
+            for executable in ("run.sh", name):
+                (self.repo / "tool" / executable).chmod(0o755)
+            return await original_spawn(*command, **options)
+        self.spawn = with_build
+        return self.execute()
+
+    def test_ignored_build_binary_is_discarded_and_new_source_commits(self):
+        receipt = self.build_output(ignored=True, attributes="*.sh -diff\n")
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual((receipt["commit"]["state"], receipt["commit"]["discarded"]), ("created", ["tool/tool"]))
+        tree = factory.git_run(".", "ls-tree", "-r", receipt["candidate"]).stdout
+        self.assertIn("100755 blob", next(line for line in tree.splitlines() if line.endswith("\ttool/run.sh")))
+        self.assertEqual(factory.git_run(".", "show", "--numstat", "--format=", receipt["candidate"],
+                                         "--", "tool/run.sh").stdout.strip(), "-\t-\ttool/run.sh")
+        self.assertEqual(sorted(line.split("\t")[1] for line in tree.splitlines()),
+                         [".gitattributes", ".gitignore", "feature.py", "tool/main.go", "tool/run.sh"])
+        factory_commit.check_commit_receipt(receipt, self.args, str(self.repo))
+
+    def test_unignored_build_binary_refuses_the_commit_with_forced_text_diff(self):
+        self.git_scope = factory_commit.isolated_git
+        git_execution = factory.git_execution
+        with patch.object(factory, "git_execution", side_effect=lambda _, env: git_execution(lambda: [], env)):
+            receipt = self.build_output(ignored=False, attributes="tool/tool diff\n")
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(receipt["error"], "Writer left new executable binary output. Inspect staged additions and move "
+                         "build outputs to scratch outside the checkout or under the repository's existing ignores "
+                         "before correcting the attempt. Nothing was committed")
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(factory.git_run(".", "diff", "--cached", "--numstat", "--", "tool/tool").stdout.strip(),
+                         "1\t0\ttool/tool")
+        self.assertEqual(self.scans, [])
+        self.assertTrue((self.repo / "tool" / "tool").exists())
+        self.assertEqual((self.repo / "feature.py").read_text(), "answer = 42\n")
+
+    def test_build_binary_refusal_uses_owner_execute_bit_and_omits_filename(self):
+        self.assertEqual(factory.git_run(".", "config", "core.filemode", "false").returncode, 0)
+        name = "synthetic-filename-marker\t\n"
+        receipt = self.build_output(ignored=False, name=name)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIn("Inspect staged additions", receipt["error"])
+        self.assertNotIn("synthetic-filename-marker", receipt["error"])
+        self.assertNotIn("synthetic-filename-marker", self.args.receipt.read_text())
+        self.assertEqual(factory.git_commit(".", "HEAD"), self.candidate)
+        self.assertEqual(self.scans, [])
+        self.assertTrue(factory.git_run(".", "ls-files", "--stage", "-z", "--", "tool/" + name)
+                        .stdout.startswith("100644 "))
+
+    def test_modified_executable_binary_still_commits(self):
+        self.writer()
+        binary = self.repo / "existing"
+        binary.write_bytes(b"\0original")
+        binary.chmod(0o755)
+        self.assertEqual(factory.git_run(".", "add", "existing").returncode, 0)
+        self.assertEqual(factory.git_run(".", "commit", "-qm", "Track existing binary").returncode, 0)
+        self.candidate = self.args.candidate = factory.git_commit(".", "HEAD")
+        original_spawn = self.spawn
+        async def with_update(*command, **options):
+            binary.write_bytes(b"\0updated")
+            return await original_spawn(*command, **options)
+        self.spawn = with_update
+        receipt = self.execute()
+        self.assertEqual(receipt["state"], "completed", receipt["error"])
+        self.assertEqual(factory.git_run_bytes(".", "show", receipt["candidate"] + ":existing").stdout, b"\0updated")
+
     def test_writer_ignored_link_goes_and_its_target_stays(self):
         # #115: ignored outputs are removed on the host without Git; a link must never be followed out of the checkout.
         outside = self.root / "outside.txt"

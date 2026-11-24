@@ -30,6 +30,9 @@ WRITER_CONTRACT = ("Factory commit mode: edit and test only; do not stage or com
                    "is in place, listing residual findings in your artifacts; findings or blocked leave your edits "
                    "uncommitted. Report only when you are done: blocked is for a blocker you hit, and progress notes "
                    "belong in your work, never in the report. Keep temporary outputs outside this checkout. "
+                   "The factory stages every nonignored file in this checkout, whatever your report excludes: put "
+                   "build outputs in scratch or under the repository's existing ignores. A new executable binary "
+                   "blocks the commit. Inspect staged additions to locate the output. "
                    "Do not use git stash: every worktree of this repository shares one stash, so another writer "
                    "could pop your changes; to see old code, read it with git show HEAD:<path>. "
                    "Before committing, the factory scans the lines you add with Gitleaks default rules and ignores "
@@ -638,6 +641,11 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
     entries = git("ls-files", "--stage", "-z")
     if entries.returncode:
         raise factory.FactoryError("Cannot inspect staged writer paths; restore Git access and inspect the retained attempt")
+    added = git("diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=A",
+                "--no-ext-diff", "--no-textconv", args.candidate)
+    if added.returncode:
+        raise factory.FactoryError("Cannot inspect staged writer files; restore Git access and inspect the retained attempt")
+    additions = set(added.stdout.split("\0"))
     try:
         for entry in entries.stdout.split("\0"):
             if not entry:
@@ -650,6 +658,17 @@ def commit_changes(args, receipt, *, git_scope=isolated_git, scan=scan_staged):
             info = source.lstat()
             if mode not in {"100644", "100755"} or stage != "0" or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise factory.FactoryError("Writer staged linked or non-regular source; inspect the retained changes and use independent regular files")
+            if name in additions and (mode == "100755" or info.st_mode & stat.S_IXUSR):
+                # #269: check the first 8 KiB for NUL, independently of Git diff attributes.
+                try:
+                    with source.open("rb") as stream:
+                        binary = b"\0" in stream.read(8192)
+                except OSError:
+                    raise factory.FactoryError("Cannot read a staged executable addition; inspect the retained worktree and restore read access") from None
+                if binary:
+                    raise Refusal("Writer left new executable binary output. Inspect staged additions and move build "
+                                  "outputs to scratch outside the checkout or under the repository's existing ignores "
+                                  "before correcting the attempt. Nothing was committed")
     except ValueError:
         raise factory.FactoryError("Cannot decode the writer index; inspect Git compatibility and the retained changes before committing") from None
     tree = git("write-tree", environment=environment)
