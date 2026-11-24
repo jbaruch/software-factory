@@ -2,6 +2,7 @@
 from contextlib import contextmanager, ExitStack
 import calendar
 import ctypes
+import errno
 import fcntl
 import hashlib
 import importlib
@@ -21,7 +22,7 @@ import release_evidence
 
 MIN_KIB = 1024 * 1024
 IDLE_SECONDS = 24 * 3600
-DARWIN = ctypes.CDLL(None)
+DARWIN = ctypes.CDLL(None, use_errno=True)
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
 
@@ -688,6 +689,38 @@ def process_check(work, admin, task, intervals, *, attended_release=False):
     return dict(observed_processes=len(observed), host_boot=boot, first_possible_start_this_boot=earliest)
 
 
+def check_native_cache_path(cache):
+    # Validate from the root down so each pathname is reached through a trusted parent.
+    for path in (*reversed(cache.parents), cache):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            # A trusted sticky directory protects the next component once its owner is checked.
+            if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                raise factory.FactoryError(f"Retain cache under replaceable directory {path}; inspect owner and permissions")
+            if sys.platform != "darwin":
+                continue
+            DARWIN.acl_get_fd.restype = ctypes.c_void_p
+            acl = ctypes.c_void_p(DARWIN.acl_get_fd(fd))
+            if not acl:
+                if ctypes.get_errno() == errno.ENOENT:  # No extended ACL on this open inode.
+                    continue
+                raise factory.FactoryError(f"Cannot verify directory ACL at {path}")
+            try:
+                entry, tag = ctypes.c_void_p(), ctypes.c_int()
+                index = 0  # ACL_FIRST_ENTRY
+                while DARWIN.acl_get_entry(acl, index, ctypes.byref(entry)) == 0:
+                    if DARWIN.acl_get_tag_type(entry, ctypes.byref(tag)) or tag.value != 2:  # ACL_EXTENDED_DENY
+                        raise factory.FactoryError(f"Retain cache with an unverified or granting ACL at {path}")
+                    index = -1  # ACL_NEXT_ENTRY
+                if ctypes.get_errno() != errno.EINVAL:  # Darwin signals end of entries with EINVAL.
+                    raise factory.FactoryError(f"Cannot verify directory ACL at {path}")
+            finally:
+                DARWIN.acl_free(acl)
+        finally:
+            os.close(fd)
+
+
 def check_mounts(repo, work, cache, *, native_mount=None):
     # A same-device submount can hide under a shard. Check before opening the cache.
     local = False
@@ -719,8 +752,10 @@ def check_mounts(repo, work, cache, *, native_mount=None):
     if not work_mounts or work_mounts != repo_mounts or any(p == work or p.is_relative_to(cache) or p.is_relative_to(repo) and p in cache.parents
                          for p in mounts):
         raise factory.FactoryError("Unexpected mount at the worktree, Git directory or cache; inspect before cleanup")
-    if native_mount is not None and not local:
-        raise factory.FactoryError("Cannot establish a local filesystem for native Go aging")
+    if native_mount is not None:
+        if not local:
+            raise factory.FactoryError("Cannot establish a local filesystem for native Go aging")
+        check_native_cache_path(cache)
 
 
 def mount_id(fd):
@@ -816,7 +851,7 @@ def confirm_window(task):
         raise factory.FactoryError("Exclusive maintenance window unconfirmed; retain the checkout and cache")
 
 
-def native_build(go, cache):
+def native_build(go, cache, lock_fds):
     parent = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()).resolve(strict=True)
     if any(os.path.lexists(p / ".git") for p in (parent, *parent.parents)):
         raise factory.FactoryError("Supply a temporary directory outside Git worktrees")
@@ -830,11 +865,14 @@ def native_build(go, cache):
                            GOTOOLCHAIN="local", CGO_ENABLED="0", GOTELEMETRY="off")
         # GOENV=off skips user configuration. The distribution can still set build flags and a cache program.
         config = subprocess.run([go, "env", "GOCACHEPROG", "GOFLAGS"], cwd=package, env=environment,
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=True)
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=True,
+                                pass_fds=lock_fds)
         if config.stdout != "\n\n":
             raise factory.FactoryError("Select a Go installation with empty GOCACHEPROG and GOFLAGS defaults")
+        # Go holds the same flock references even if Factory receives a parent-only SIGTERM.
         return subprocess.run([go, "build", "-trimpath", "."], cwd=package, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=120, env=environment)
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=120,
+                              env=environment, pass_fds=lock_fds)
 
 
 def census(directory, repo, clean_task=None, *, trim_go=None):
@@ -969,7 +1007,7 @@ def _census(directory, repo, clean_task, trim_go):
                 elif trim_go is not None:
                     result.update(decision="failed")
                     try:
-                        build = native_build(trim_go, cache)
+                        build = native_build(trim_go, cache, fds)
                         result["go_exit_code"] = build.returncode
                         if build.returncode:
                             raise factory.FactoryError(f"Go build exited {build.returncode}: {build.stderr.strip()}")

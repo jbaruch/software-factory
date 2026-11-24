@@ -3,13 +3,17 @@ import runtime_path  # noqa: F401
 import asyncio
 from contextlib import chdir
 import copy
+import fcntl
 import hashlib
 import shutil
 import json
 import os
 from pathlib import Path
 from io import StringIO
+import signal
+import stat
 import subprocess
+import time
 import unittest
 import sys
 from unittest.mock import patch
@@ -171,6 +175,112 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertEqual(row["decision"], "failed")
         self.assertIn("Go build exited 7", row["reason"])
         self.assertEqual((row["removed_entries"], row["after_kib"]), (0, row["size_kib"]))
+
+    def test_parent_only_sigterm_keeps_locks_until_native_go_finishes(self):
+        # This disposable tool gate pauses the real Go driver while it waits for its compiler.
+        fixture = self.root / "disposable-trim-go"
+        ready = self.root / "disposable-compiler-ready"
+        gate = self.root / "disposable-compiler-gate"
+        diagnostic = self.root / "disposable-go.stderr"
+        go = shutil.which("go")
+        fixture.write_text(f"""#!{sys.executable}
+import fcntl, os, sys
+from pathlib import Path
+if sys.argv[1] == "build":
+    # Keep fixture diagnostics readable after the CLI's stderr pipe loses its reader.
+    with open({str(diagnostic)!r}, "w") as log:
+        os.dup2(log.fileno(), 2)
+    os.environ["PATH"] = {str(self.root)!r} + os.pathsep + os.defpath
+    sys.argv.insert(2, "-toolexec={fixture.name}")
+elif sys.argv[1] != "env":
+    with open({str(gate)!r}) as gate:
+        Path({str(ready)!r}).touch()
+        fcntl.flock(gate, fcntl.LOCK_SH)
+    os.execv(sys.argv[1], sys.argv[1:])
+os.execv({go!r}, [{go!r}, *sys.argv[1:]])
+""")
+        fixture.chmod(0o700)
+        old = self.cache / "ab" / ("ab" + "2" * 62 + "-d")
+        old.write_bytes(b"disposable old entry")
+        os.utime(old, (self.at, self.at))
+        (self.cache / "trim.txt").write_text(str(self.at))
+        paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
+                 self.path.with_suffix(".lock"), self.admin, self.cache)
+        with gate.open("w") as hold:
+            fcntl.flock(hold, fcntl.LOCK_EX)
+            with subprocess.Popen([sys.executable, factory.__file__, "--state-dir", str(self.state),
+                                   "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)],
+                                  env={**os.environ, "TMPDIR": str(self.root)}, stdout=subprocess.PIPE) as parent:
+                try:
+                    deadline = time.monotonic() + 30
+                    while not ready.exists():
+                        self.assertIsNone(parent.poll(), "Factory exited before the disposable compiler gate")
+                        self.assertLess(time.monotonic(), deadline, "Go did not reach the disposable compiler gate")
+                        time.sleep(0.02)
+                finally:
+                    parent.terminate()
+                self.assertEqual(parent.communicate(timeout=10), (b"", None))
+                self.assertEqual(parent.returncode, -signal.SIGTERM)
+            for path in paths:
+                with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
+                    self.fail(f"Acquired {path} while Go could still write")
+            self.assertTrue(old.exists())
+        # Go now finishes the build and ages the cache. Wait for its last lock reference to close.
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                with go_cache.inode_lock(self.cache):
+                    break
+            except factory.ExecutionBusy:
+                self.assertLess(time.monotonic(), deadline, "Go retained the disposable cache lock")
+                time.sleep(0.02)
+        self.assertFalse(old.exists(), diagnostic.read_text())
+        for path in paths:
+            with go_cache.inode_lock(path, directory=path.is_dir()):
+                pass
+
+    def test_native_aging_retains_cache_under_replaceable_ancestor(self):
+        self.root.chmod(0o770)
+        with patch.object(go_cache, "native_build") as build:
+            row = self.trim()
+            self.assertEqual(row["decision"], "retained")
+            self.assertIn(f"replaceable directory {self.root}", row["reason"])
+            build.assert_not_called()
+
+    def test_native_aging_refuses_foreign_owner_of_mode_0700_ancestor(self):
+        root = self.root.stat()
+        fstat = os.fstat
+
+        def fixture_owner(fd):
+            info = fstat(fd)
+            if os.path.samestat(info, root):
+                fields = list(info)
+                fields[stat.ST_UID] = os.getuid() + 1  # Fixture owner could chmod this ancestor.
+                return os.stat_result(fields)
+            return info
+
+        with patch.object(os, "fstat", side_effect=fixture_owner), patch.object(go_cache, "native_build") as build:
+            row = self.trim()
+            self.assertEqual(row["decision"], "retained")
+            self.assertIn(f"replaceable directory {self.root}", row["reason"])
+            build.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin extended ACLs")
+    def test_native_aging_checks_acl_grants_on_cache_and_ancestors(self):
+        subprocess.run(["/bin/chmod", "+a", "everyone deny delete", self.root], check=True)
+        self.addCleanup(subprocess.run, ["/bin/chmod", "-a", "everyone deny delete", self.root], check=True)
+        self.assertEqual(self.trim()["go_exit_code"], 0)
+        for path, add in ((self.cache, "+ai"), (self.root, "+a")):
+            with self.subTest(path=path), patch.object(go_cache, "native_build") as build:
+                grant = "group:staff allow list,search"
+                subprocess.run(["/bin/chmod", add, grant, path], check=True)
+                try:
+                    row = self.trim()
+                    self.assertEqual(row["decision"], "retained")
+                    self.assertIn(f"granting ACL at {path}", row["reason"])
+                    build.assert_not_called()
+                finally:
+                    subprocess.run(["/bin/chmod", "-a", grant, path], check=True)
 
     def test_native_aging_refuses_distribution_cache_backend(self):
         executable = self.root / "fixture-go"
