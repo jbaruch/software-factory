@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from io import StringIO
 import signal
+import socket
 import stat
 import subprocess
 import time
@@ -176,7 +177,7 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertIn("Go build exited 7", row["reason"])
         self.assertEqual((row["removed_entries"], row["after_kib"]), (0, row["size_kib"]))
 
-    def test_parent_only_sigterm_keeps_locks_until_native_go_finishes(self):
+    def test_parent_only_sigterm_cancels_the_gated_native_compiler(self):
         # This disposable tool gate pauses the real Go driver while it waits for its compiler.
         fixture = self.root / "disposable-trim-go"
         ready = self.root / "disposable-compiler-ready"
@@ -221,46 +222,44 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
                     parent.terminate()
                 self.assertEqual(parent.communicate(timeout=10), (b"", None))
                 self.assertEqual(parent.returncode, -signal.SIGTERM)
+            # Keep the compiler gate closed. Cancellation must release the locks
+            # independently of both the gate and the normal build deadline.
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with go_cache.inode_lock(self.cache):
+                        break
+                except factory.ExecutionBusy:
+                    self.assertLess(time.monotonic(), deadline, "Go retained the disposable cache lock")
+                    time.sleep(0.02)
+            self.assertTrue(old.exists(), diagnostic.read_text())
             for path in paths:
-                with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
-                    self.fail(f"Acquired {path} while Go could still write")
-            self.assertTrue(old.exists())
-        # Go now finishes the build and ages the cache. Wait for its last lock reference to close.
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                with go_cache.inode_lock(self.cache):
-                    break
-            except factory.ExecutionBusy:
-                self.assertLess(time.monotonic(), deadline, "Go retained the disposable cache lock")
-                time.sleep(0.02)
-        self.assertFalse(old.exists(), diagnostic.read_text())
-        for path in paths:
-            with go_cache.inode_lock(path, directory=path.is_dir()):
-                pass
+                with go_cache.inode_lock(path, directory=path.is_dir()):
+                    pass
 
-    def test_stalled_compiler_after_parent_stop_releases_locks_by_deadline(self):
-        fixture = self.root / "disposable-stalled-go"
+    def test_native_go_process_failures(self):
+        fixture = self.root / "disposable-go"
         ready = self.root / "compiler-ready"
+        exit_driver = self.root / "exit-driver"
         entry = next(self.cache.glob("*/*-d"))
         fixture.write_text(f"""#!{sys.executable}
-import fcntl, os, signal, sys, time
+import fcntl, os, sys, time
 from pathlib import Path
 if sys.argv[1] == "env":
     sys.stdout.write("\\n\\n")
     sys.exit(0)
-keeper = os.getppid()
 compiler = os.fork()
 if compiler:
-    os.waitpid(compiler, 0)
-    sys.exit(0)
-os.closerange(3, os.sysconf("SC_OPEN_MAX"))
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while not Path({str(exit_driver)!r}).exists():
+        if os.waitpid(compiler, os.WNOHANG)[0]:
+            sys.exit(0)
+        time.sleep(0.01)
+    sys.exit(7)
+os.closerange(0, os.sysconf("SC_OPEN_MAX"))
 with open({str(entry)!r}, "ab", buffering=0) as cache:
     fcntl.flock(cache, fcntl.LOCK_EX)
-    Path({str(ready)!r}).write_text(f"{{os.getpgid(keeper)}} {{os.getpgrp()}}")
-    # Self-limit this disposable writer even if supervision regresses.
-    until = time.monotonic() + 15
+    Path({str(ready)!r}).touch()
+    until = time.monotonic() + 20
     while time.monotonic() < until:
         cache.write(b".")
         time.sleep(0.02)
@@ -268,47 +267,70 @@ with open({str(entry)!r}, "ab", buffering=0) as cache:
         fixture.chmod(0o700)
         paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
                  self.path.with_suffix(".lock"), self.admin, self.cache)
-        # Shorten only the real build deadline in the disposable CLI process.
-        cli = [sys.executable, "-B", "-c",
-               "import factory, go_cache; go_cache.GO_BUILD_SECONDS = 2; raise SystemExit(factory.main())",
-               "--state-dir", str(self.state), "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)]
-        for hosted in (False, True):
-            with self.subTest(hosted=hosted), subprocess.Popen(
-                    cli, cwd=factory.ROOT, env={**os.environ, "TMPDIR": str(self.root)},
-                    start_new_session=hosted, stdout=subprocess.DEVNULL) as caller:
-                try:
-                    deadline = time.monotonic() + 10
-                    while not ready.exists() or not ready.stat().st_size:
-                        self.assertIsNone(caller.poll(), "Factory exited before the compiler wrote")
-                        self.assertLess(time.monotonic(), deadline)
-                        time.sleep(0.01)
-                    if hosted:
-                        self.assertEqual(ready.read_text().split(), [str(caller.pid)] * 2)
-                finally:
-                    caller.kill()
-                    caller.wait(timeout=5)
-                size = entry.stat().st_size
-                deadline = time.monotonic() + 6
-                while entry.stat().st_size == size:
-                    self.assertLess(time.monotonic(), deadline, "Expected a cache write after caller exit")
-                    time.sleep(0.01)
-                pending = set(paths)
-                with entry.open("rb") as mutation:
-                    for path in paths:
-                        with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
-                            self.fail(f"Acquired {path} during a compiler write")
-                    while pending:
-                        for path in pending.copy():
-                            try:
-                                with go_cache.inode_lock(path, directory=path.is_dir()):
-                                    # The writer holds this separate flock for its entire mutation loop.
-                                    fcntl.flock(mutation, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                                    pending.remove(path)
-                            except factory.ExecutionBusy:
-                                continue
-                        self.assertLess(time.monotonic(), deadline, f"Locks retained after timeout: {pending}")
-                        time.sleep(0.01)
+        for failure in ("timeout", "driver exit", "parent kill", "group teardown"):
+            with self.subTest(failure=failure):
+                # A session-leading Factory can have unrelated peers. This peer echoes
+                # a byte after readback to prove it survived the hosted timeout.
+                probe, peer = socket.socketpair()
+                with probe, peer:
+                    launch = f"""import os, subprocess, sys
+import factory, go_cache
+subprocess.Popen(["/bin/cat"], stdin={peer.fileno()}, stdout={peer.fileno()})
+os.close({peer.fileno()})
+go_cache.GO_BUILD_SECONDS = {2 if failure == "timeout" else 30}
+raise SystemExit(factory.main())
+"""
+                    cli = [sys.executable, "-B", "-c", launch, "--state-dir", str(self.state),
+                           "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)]
+                    with subprocess.Popen(cli, cwd=factory.ROOT, env={**os.environ, "TMPDIR": str(self.root)},
+                                          start_new_session=True, pass_fds=(peer.fileno(),),
+                                          stdout=subprocess.PIPE) as caller:
+                        peer.close()
+                        deadline = time.monotonic() + 10
+                        while not ready.exists():
+                            self.assertIsNone(caller.poll(), "Factory exited before the compiler wrote")
+                            self.assertLess(time.monotonic(), deadline)
+                            time.sleep(0.01)
+                        for path in paths:
+                            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
+                                self.fail(f"Acquired {path} during a compiler write")
+                        if failure == "parent kill":
+                            caller.kill()
+                        elif failure == "group teardown":
+                            os.killpg(caller.pid, signal.SIGKILL)
+                        elif failure == "driver exit":
+                            exit_driver.touch()
+                        output, _ = caller.communicate(timeout=6)
+                        if failure in ("timeout", "driver exit"):
+                            row, = json.loads(output)
+                            self.assertEqual((caller.returncode, row["decision"], row["go_exit_code"]),
+                                             (1, "failed", 124 if failure == "timeout" else 7), row)
+                            self.assertEqual(row["removed_entries"], 0)
+                            self.assertGreater(row["after_kib"], 0)
+                            if failure == "timeout":
+                                self.assertIn("exceeded its 2-second deadline", row["reason"])
+                            probe.settimeout(2)
+                            probe.sendall(b"?")
+                            self.assertEqual(probe.recv(1), b"?")
+                        else:
+                            self.assertEqual(caller.returncode, -signal.SIGKILL)
+                    # At the first opportunity to acquire each admission lock, the
+                    # compiler must already have released its separate mutation flock.
+                    deadline = time.monotonic() + 5
+                    with entry.open("rb") as mutation:
+                        pending = set(paths)
+                        while pending:
+                            for path in pending.copy():
+                                try:
+                                    with go_cache.inode_lock(path, directory=path.is_dir()):
+                                        fcntl.flock(mutation, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                                        pending.remove(path)
+                                except factory.ExecutionBusy:
+                                    continue
+                            self.assertLess(time.monotonic(), deadline, f"Locks retained after stop: {pending}")
+                            time.sleep(0.01)
                 ready.unlink()
+                exit_driver.unlink(missing_ok=True)
 
     def test_native_aging_retains_cache_under_replaceable_ancestor(self):
         self.root.chmod(0o770)

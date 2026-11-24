@@ -865,15 +865,18 @@ def native_build(go, cache, lock_fds):
                            GOENV="off", GOWORK="off", GO111MODULE="off", GOPROXY="off", GOSUMDB="off",
                            GOTOOLCHAIN="local", CGO_ENABLED="0", GOTELEMETRY="off")
         def run_go(seconds, *arguments, **options):
-            # The lock owner enforces the deadline even after this caller exits.
-            caller = os.getpid()
-            return subprocess.run([sys.executable, "-I", "-S", "-B", Path(__file__).with_name("go_command.py"),
-                                   str(caller), str(seconds), go, *arguments],
-                                  cwd=package, env=environment, stdin=subprocess.DEVNULL, text=True,
-                                  pass_fds=lock_fds, process_group=None if os.getsid(0) == caller else 0, **options)
+            # Only Factory holds the write end. Even a hard stop wakes the lock holder.
+            reader, writer = os.pipe()
+            with os.fdopen(reader, "rb") as lifetime, os.fdopen(writer, "wb"):
+                return subprocess.run([sys.executable, "-I", "-S", "-B", Path(__file__).with_name("go_command.py"),
+                                       str(seconds), go, *arguments],
+                                      cwd=package, env=environment, stdin=lifetime, text=True,
+                                      pass_fds=lock_fds, start_new_session=True, **options)
 
         # GOENV=off skips user configuration. The distribution can still set build flags and a cache program.
-        config = run_go(30, "env", "GOCACHEPROG", "GOFLAGS", capture_output=True, check=True)
+        config = run_go(30, "env", "GOCACHEPROG", "GOFLAGS", capture_output=True)
+        if config.returncode:
+            raise factory.FactoryError(f"Go env exited {config.returncode}: {config.stderr.strip()}")
         if config.stdout != "\n\n":
             raise factory.FactoryError("Select a Go installation with empty GOCACHEPROG and GOFLAGS defaults")
         return run_go(GO_BUILD_SECONDS, "build", "-trimpath", ".", stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
