@@ -1907,7 +1907,7 @@ def release_worktree(path, line_fd):
         head = witness["head"]
         go_cache.check_release_users(path.parent, record, destination, directory)
         cache = directory / "go-build"
-        go_cache.check_mounts(Path(admission["repository"]), destination, directory)
+        go_cache.check_mounts(Path(admission["repository"]), destination, directory, remove_worktree=True)
         cache_fd = None
         if os.path.lexists(cache):
             go_cache.real_directory(cache, os.fstat(fd).st_dev)

@@ -133,6 +133,29 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertEqual(self.protected(), protected)
         self.build()
 
+    @unittest.skipUnless(sys.platform == "darwin", "uses the Darwin mount table")
+    def test_native_aging_ignores_tracked_submount_but_retains_cache_submount(self):
+        # WorktreeProvisioning tests recursive release against this same tracked directory.
+        run = subprocess.run
+        table = run(["/sbin/mount"], capture_output=True, text=True, check=True).stdout
+        mounted = self.destination / "nested"
+
+        def with_mount(args, *positional, **kwargs):
+            if args == ["/sbin/mount"]:
+                return subprocess.CompletedProcess(args, 0, table + f"/disk on {mounted} (apfs, local)\n", "")
+            return run(args, *positional, **kwargs)
+
+        with patch.object(subprocess, "run", side_effect=with_mount), \
+                patch.object(go_cache, "native_build", return_value=subprocess.CompletedProcess([], 0)) as build:
+            self.assertEqual(self.inspect()["decision"], "eligible")
+            row = self.trim()
+            build.assert_called_once()
+            self.assertEqual((row["go_exit_code"], row["removed_entries"], row["after_kib"]),
+                             (0, 0, row["size_kib"]))
+            mounted = self.cache / "ab"
+            self.assertIn("Unexpected mount", self.trim()["reason"])
+            build.assert_called_once()
+
     def test_native_aging_requires_owner_terminal_local_cache_and_exclusive_locks(self):
         with patch.object(go_cache, "native_build") as build:
             with go_cache.inode_lock(self.admin, shared=True):
