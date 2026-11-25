@@ -967,10 +967,12 @@ def _census(directory, repo, clean_task, trim_go):
             if trim_go is not None and (trim_go.is_relative_to(work) or trim_go.is_relative_to(repo)):
                 raise factory.FactoryError("Select a trusted Go installation outside the admitted repository and worktree")
             result.update(worktree=str(work), owner_record=str(path))
-            line = factory.task_line(current)
-            # The process doing the deletion holds every lock for its entire walk.
+            # Preview and native aging exclude only the owner and physical resources.
+            # Explicit retirement also holds the line lock.
+            lock_paths = (directory / (task + ".lock"), admin, cache)
+            if clean_task == task:
+                lock_paths = (factory.execution_lock_path(directory, factory.task_line(current)), *lock_paths)
             with ExitStack() as locks:
-                lock_paths = (factory.execution_lock_path(directory, line), directory / (task + ".lock"), admin, cache)
                 fds = [locks.enter_context(inode_lock(p, directory=p in (admin, cache))) for p in lock_paths]
                 if factory.read_record_bytes(path, private=True) != original_raw:
                     raise factory.FactoryError("Owner or assignments changed during census; retry")
