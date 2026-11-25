@@ -566,7 +566,7 @@ def check_native_cache_path(cache):
 
 
 def check_mounts(repo, work, cache, *, native_mount=None):
-    # A same-device submount can hide under a shard. Check before opening the cache.
+    # Same-device submounts can hide below a tree selected for cleanup.
     local = False
     if sys.platform == "darwin":
         table = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=10, check=True)
@@ -593,8 +593,9 @@ def check_mounts(repo, work, cache, *, native_mount=None):
         raise factory.FactoryError("Cannot verify local mounts on this platform")
     work_mounts = {m for m in mounts if work.is_relative_to(m)}
     repo_mounts = {m for m in mounts if repo.is_relative_to(m)}
-    if not work_mounts or work_mounts != repo_mounts or any(p == work or p.is_relative_to(cache) or p.is_relative_to(repo) and p in cache.parents
-                         for p in mounts):
+    if not work_mounts or work_mounts != repo_mounts or any(
+            p.is_relative_to(work) or p.is_relative_to(cache) or p.is_relative_to(repo) and p in cache.parents
+            for p in mounts):
         raise factory.FactoryError("Unexpected mount at the worktree, Git directory or cache; inspect before cleanup")
     if native_mount is not None:
         if not local:

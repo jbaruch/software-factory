@@ -112,6 +112,35 @@ class WorktreeProvisioning(ProvisionedRepository):
         self.assertEqual(sibling.read_bytes(), original)
         self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
 
+    def test_release_retains_reported_nested_mounts_without_go_cache(self):
+        record = self.provision()
+        admin = Path(record["provisioning"]["git_dir"])
+        source = self.destination / "nested/source"
+        candidate = record["inputs"]["candidate"]
+        expected = subprocess.check_output([factory.git_binary(), "-C", str(self.repo),
+                                            "show", f"{candidate}:nested/source"])
+        self.assertEqual(source.read_bytes(), expected)
+        self.assertFalse((admin / "go-build").exists())
+        run = subprocess.run
+
+        for mount in (admin / "logs", source.parent):
+            with self.subTest(mount=mount):
+                self.assertTrue(mount.is_dir())
+                table = f"/disk on / (apfs, local)\n/disk on {mount} (apfs, local)\n"
+
+                def with_mount(args, *positional, **kwargs):
+                    if args == ["/sbin/mount"]:
+                        return subprocess.CompletedProcess(args, 0, table, "")
+                    return run(args, *positional, **kwargs)
+
+                with patch.object(sys, "platform", "darwin"), patch.object(subprocess, "run", side_effect=with_mount):
+                    code, _, error = self.cli("release-worktree", "--task", "fixture")
+                self.assertEqual(code, 1, error)
+                self.assertIn("Unexpected mount", error)
+                self.assertEqual(source.read_bytes(), expected)
+                self.assertTrue(admin.is_dir())
+                self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+
     def test_invalid_recorded_identity_refuses_release(self):
         record = self.provision()
         for identity in (None, [], [[0, 0]] * 4):
