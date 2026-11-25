@@ -179,16 +179,6 @@ the cache, allocated KiB when measurable, and the evidence for eligibility or
 retention. Unowned and stranded reader caches remain visible. The census reads
 original records without migrating them and opens existing locks.
 
-The Mini census measured 2.84–7.92 GiB for each of five writer caches. ACR 202
-grew to 4.86 GiB during an active attempt despite a stale root timestamp. The
-attended ACR 242 pilot cleaned 7,195,228 KiB to 8 KiB and rebuilt offline to
-147,968 KiB, with 990 source entries, ten Git admin entries and the sticky
-exclusion verified. The **1 GiB** floor leaves that rebuilt cache warm. The
-**24-hour** grace covers a full daily work cycle, including the roughly six-hour
-gap between the pilot's last attempt and the attended cleanup. Both the newest
-cache write and the last observed terminal attempt must clear that grace.
-[Mini census and linked-worktree pilot](https://github.com/jbaruch/software-factory/issues/259#issuecomment-7094118940)
-
 For native age trimming, the existing hourly Mini job selects a trusted Go
 executable by absolute path.
 
@@ -207,36 +197,12 @@ in a private temporary directory with an isolated home, the local toolchain,
 the selected disk cache and dependency fetching disabled. The Go installation
 must report empty `GOCACHEPROG` and `GOFLAGS` settings. Go checks its own
 trim marker and ages entries under its native concurrent-build policy.
-The whole-cache size floor, idle window and process inventory apply to
-retirement. A concurrent Go build can add or remove entries during observation.
+A concurrent Go build can add or remove entries during observation.
 `removed_entries` and `retained_entries` count previously observed Go entry
 names absent or present at readback. A successful build reports `cleaned` only
 when an entry disappeared. `size_kib` and `after_kib` include newly created
 entries in their respective measurements. A build or readback failure reports
 `failed` and exits nonzero.
-
-For attended retirement, stop admissions and direct builds, reconcile every
-launch store, and drain all descendants that might reopen this cache. Keep
-every route to the cache exclusive until the actuator finishes its readback.
-During that window invoke
-`python3 -B "$runtime" go-caches --repo /absolute/primary/checkout --clean-task TASK`
-from a terminal and confirm the task. The prompt holds the line, task, admin
-and cache locks while it waits. Save the command output for the maintenance
-record. The independently enforced window supplies writer exclusion.
-If a writer can still enter, leave the cache in place.
-
-Automatic full retirement requires a shared lock on the verified physical checkout or
-cache inode for the full lifetime of **every** cache user, including descendants.
-The cleaner needs its exclusive counterpart through removal and readback.
-Account for independent Go builds as well as Factory launches, or isolate
-the cache so only cooperating processes can access it. Verify both admission
-paths and surviving descendants against an exclusive cleaner before enabling
-automatic removal.
-The later managed-cache stage must demonstrate a warm build, idle retirement
-and rebuild with exclusion covering every helper and descendant. Go can return
-an export path that remains in use after helper exit. Verify delayed reads by
-name and account for backing, materialized outputs and native fallback bytes
-together before enabling scheduled removal.
 
 A nonzero exit means that the requested cleanup did not complete. The actuator
 checks the provisioned owner token, pinned repository, reciprocal Git pointers,
@@ -255,7 +221,7 @@ Claude or Codex to collect the original approval. The advanced reader retains it
 dependent cache. Factory binds the writer
 checkout, admin and reciprocal pointer inodes when it creates the worktree.
 A provisioning retry or later collection cannot supply missing original identity.
-Legacy approval alone supplies no physical ownership evidence. Retire an eligible cache while its linked readers are still present.
+Legacy approval alone supplies no physical ownership evidence. Native aging requires verified ownership of linked readers.
 When a reader has gone, the owner receipt can confirm Git removal. Factory lacks
 independent evidence of direct-user exclusion at that release, so the census
 retains the dependent cache. The native worker's finalizer
@@ -267,50 +233,16 @@ with the newer PID witness also requires the owning runtime's process-scope
 check. Unfinished, lost, uncollected or conflicting
 evidence supplies a retain reason.
 
-The actuator holds the line, task, Git admin and cache inode locks during
-removal. Before publishing intent for a provisioned worktree, each launcher
-adds a `factory-launch-store-DEVICE-INODE` symlink to its state directory in
-the Git admin directory under the shared inode lock. The census verifies the
-directory identity and the link target. Additional stores can launch normally.
-Their durable references tell cleanup
-that the selected store alone cannot establish exclusive use of this tree.
-A busy admin lock before intent leaves the same job waiting with its attempt
-available. A saved intent still goes through ordinary reconciliation.
+The native build inherits the line, task, Git admin and cache locks. Before publishing
+launch intent, a Factory launcher registers its state store under the shared Git
+admin lock. A busy lock leaves the job waiting with its attempt available.
 
-A detached child can leave the worktree, close every cache file and later use
-its inherited GOCACHE. The original terminal receipt and Rex exit bound the
-period in which the worker could have passed on this cache. A later host boot
-ends those descendants. On the same boot, a user process young enough to be
-a descendant makes the cache ambiguous, even with an unrelated command and
-cwd. The observer also checks commands, working directories and open files.
-It reads process metadata without requesting process environments.
-
-The census checks the mount table before sizing. Its first pass measures leaf
-files from their metadata and checks each opened directory. The locked
-eligibility and removal passes verify each open entry is on the primary
-repository's mount before reading data or enumerating children. Cleanup removes validated Go
-build entries relative to their open parent directories. Go's recursive clean
-cannot enforce that boundary. The root inode and its sticky backup exclusion
-survive. After interruption, run a fresh census before retrying.
-
-Before scheduling the retirement census, integrate #256's producer and PID witness on current main,
-then reconcile #257's original collector, launch attestation and delivery replay.
-Verify the combined runtime privately against released schema 11, imported schema
-12 with writer provenance, and ordinary schema 13. Conversion of standalone
-ordinary schema 12 requires producer provenance. Keep #257's attested runtime and
-original collector checks alongside the physical checkout checks. Replay Claude v5
-with its owning collector and delivery validator. Replay stored exits and exercise
-omitted readers, independent approval contexts, owner decisions and #261 reset.
-A starting receipt still retains the cache after reset. Verify the native PID
-witness on Mini. A witness from an unverifiable or different boot retains the cache. Drain older launchers and reconcile outstanding intents in
-previously used stores. Verify the reviewed shared source and interpreter for
-every launcher and the actuator. As the scheduler account, run the read-only
-command above for the ACR primary checkout. Compare all five historical writer
-rows and the stranded readers with the original census and ACR 242 pilot.
-Check current allocated KiB, exact owner, terminal and activity evidence, and
-retention of active, ambiguous and warm caches. Measure census duration and
-confirm the account can observe the required processes before selecting a
-schedule. [Acceptance and rollout](https://github.com/jbaruch/software-factory/issues/259)
+Owner release removes a private linked cache only with its unused, clean Factory
+worktree. A worker can pass GOCACHE to a detached helper before exiting. Any
+recorded use, unresolved launch intent, foreign store or unknown admin data
+therefore retains the checkout and cache. Git inherits the line, admin and cache
+locks through removal. The owner verifies deregistration and publishes the existing
+release receipt. [Task state](task-state.md)
 
 ## Sanitized native Claude authentication
 
@@ -774,7 +706,7 @@ when `git worktree remove` does. Each worktree otherwise wrote its own copy of e
 into the shared cache, which Go keeps five days, and filled the disk (#183). On macOS the
 directory gets Time Machine's sticky exclusion, the attribute `tmutil addexclusion` sets, as
 `~/Library/Caches` has by default. The main checkout keeps the user's cache.
-See the [linked cache policy](#linked-go-cache-retention) for the census and explicit retirement command.
+See the [linked cache policy](#linked-go-cache-retention) for the read-only census and native aging command.
 No native worker gets a GitHub identity. Readers lost it after a release judgment
 merged a PR and deployed it with the operator's, and writers need none: the factory
 commits their work and the line's foreman pushes it, so a writer misled by text it

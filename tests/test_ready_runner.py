@@ -1409,7 +1409,7 @@ class ReadyRunner(unittest.TestCase):
             cache.mkdir(mode=0o700, exist_ok=True)
             (work / "library.go").write_text("package library\nconst Number = 7\n")
             build()
-            active, = go_cache.census(self.directory, self.repo, "task")
+            active, = go_cache.census(self.directory, self.repo)
             self.assertIn("observed Rex process exit", active["reason"])
 
         self.finish("task", "first", outcome="completed", edit=edit)
@@ -1422,26 +1422,10 @@ class ReadyRunner(unittest.TestCase):
         gone = patch.object(factory, "process_proven_gone", return_value=True)
         gone.start()
         self.addCleanup(gone.stop)
-        for entry in (cache, *cache.rglob("*")):
-            os.utime(entry, (self.now, self.now))
-        pid = os.getpid()
-        ps = f"{pid} Thu Jan 1 00:00:00 1970 census\n".encode()
-        files = f"p{pid}\0\nfcwd\0tDIR\0n/elsewhere\0\n".encode()
-        size = sum(p.stat().st_blocks for p in (cache, *cache.rglob("*"))) // 2
-        with patch.object(go_cache, "MIN_KIB", size // 2), patch.object(go_cache.time, "time",
-                return_value=self.now + go_cache.IDLE_SECONDS), patch.object(go_cache, "boot_time", return_value=1100), \
-                patch.object(go_cache, "inventory", side_effect=[(7, ps, b""), (8, files, b"")] * 2):
-            entries = set(cache.rglob("*"))
-            idle, = go_cache.census(self.directory, self.repo)
-            self.assertEqual(idle["decision"], "eligible", idle)
-            self.assertEqual(set(cache.rglob("*")), entries)
-            # Only this fixture can build here, and build() resumes after retirement.
-            with patch.object(sys, "stdin", StringIO("task\n")) as terminal, patch.object(terminal, "isatty", return_value=True):
-                retired, = go_cache.census(self.directory, self.repo, "task")
-        self.assertEqual(retired["decision"], "cleaned", retired)
-        build()
-        warm, = go_cache.census(self.directory, self.repo, "task")
-        self.assertIn("size floor", warm["reason"])
+        entries = set(cache.rglob("*"))
+        idle, = go_cache.census(self.directory, self.repo)
+        self.assertEqual(idle["decision"], "eligible", idle)
+        self.assertEqual(set(cache.rglob("*")), entries)
 
     def test_uncertain_launch_reconciles_same_pane_and_reserves_a_slot(self):
         PlanRex.fail_after_create = True
