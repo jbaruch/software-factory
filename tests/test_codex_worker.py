@@ -367,7 +367,7 @@ class NativeResults(unittest.TestCase):
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["exit_code"], 0)
         self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["evidence/qa.txt"]))
-        removed = sys.platform == "darwin"
+        removed = sys.platform == "linux"
         self.assertIs(receipt["scratch_removed"], removed)
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
         self.assertEqual(self.scratch_at_spawn.exists(), not removed)

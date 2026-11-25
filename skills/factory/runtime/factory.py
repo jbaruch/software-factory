@@ -2577,94 +2577,139 @@ def owned_scratch(info, identity):
             and (info.st_dev, info.st_ino) == (identity["st_dev"], identity["st_ino"]))
 
 
-def restore_scratch_name(held, directory):
-    # Another directory may already occupy the public name. Never overwrite it on recovery.
+def rename_scratch_exclusive(source, destination, src_fd, dst_fd):
     libc = ctypes.CDLL(None, use_errno=True)
-    src, dst = os.fsencode(held), os.fsencode(directory)
-    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
-        result = libc.renamex_np(src, dst, 4)  # RENAME_EXCL
+    src, dst = os.fsencode(source), os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        result = libc.renameatx_np(src_fd, src, dst_fd, dst, 4)  # RENAME_EXCL
     elif sys.platform == "linux" and hasattr(libc, "renameat2"):
-        result = libc.renameat2(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        result = libc.renameat2(src_fd, src, dst_fd, dst, 1)  # RENAME_NOREPLACE
     else:
-        raise OSError(f"Exclusive rename unavailable; inspect the preserved directory at {held}")
+        raise OSError("Exclusive scratch rename unavailable")
     if result:
-        raise OSError(f"Inspect the preserved directory at {held}: {os.strerror(ctypes.get_errno())}")
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), source)
 
 
 def remove_scratch(directory, identity, fd):
     """Return whether removal succeeded. A leftover is reported and remains nonfatal."""
-    def unreadable(error):
-        raise error
+    from go_cache import mount_id
 
     def check(info):
         if not owned_scratch(info, identity):
             raise OSError("Scratch directory ownership or identity changed")
 
-    def remove_contents():
-        check(directory.lstat())
-        for name in os.listdir(fd):
-            if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
-                shutil.rmtree(name, dir_fd=fd)
+    def require_mount(actual):
+        if actual != mount:
+            raise OSError("Scratch entry is on another mount")
+
+    def claim_and_remove(parent, name, expected):
+        # Claim across parents: a same-parent rename can move a Darwin mount.
+        rename_scratch_exclusive(name, held.name, parent, holder_fd)
+        try:
+            claimed = os.stat(held.name, dir_fd=holder_fd, follow_symlinks=False)
+            if not os.path.samestat(expected, claimed) or claimed.st_uid != expected.st_uid:
+                raise OSError(f"Scratch entry {name!r} changed during cleanup")
+            if stat.S_ISDIR(expected.st_mode):
+                os.rmdir(held.name, dir_fd=holder_fd)
             else:
-                os.unlink(name, dir_fd=fd)
+                os.unlink(held.name, dir_fd=holder_fd)
+        except OSError:
+            try:
+                rename_scratch_exclusive(held.name, name, holder_fd, parent)
+            except OSError as exc:
+                raise OSError(f"Inspect the preserved entry at {held}: {exc}") from exc
+            raise
+
+    flags = os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW
+
+    def remove_contents(parent, repair):
+        current = os.fstat(parent)
+        if repair:
+            if current.st_uid != os.getuid():
+                raise PermissionError("Scratch directory ownership changed")
+            if current.st_mode & 0o700 != 0o700:
+                os.fchmod(parent, stat.S_IMODE(current.st_mode) | 0o700)
+        for name in os.listdir(parent):
+            if not repair and current.st_uid == os.getuid() and current.st_mode & 0o300 != 0o300:
+                raise PermissionError("Scratch parent requires repair before claiming entries")
+            # Link first: a stat of the public name cannot keep a discarded inode allocated.
+            try:
+                os.link(name, "pin", src_dir_fd=parent, dst_dir_fd=holder_fd, follow_symlinks=False)
+            except OSError as exc:
+                # Directories cannot be hard-linked. Only a directory can take the descent path.
+                if exc.errno not in (errno.EACCES, errno.EPERM, errno.EISDIR):
+                    raise
+                entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISDIR(entry.st_mode) or entry.st_dev != info.st_dev:
+                    raise OSError(f"Cannot pin scratch entry {name!r}: {exc}") from exc
+            else:
+                try:
+                    entry = os.stat("pin", dir_fd=holder_fd, follow_symlinks=False)
+                    if entry.st_dev != info.st_dev or stat.S_ISDIR(entry.st_mode):
+                        raise OSError(f"Unexpected scratch leaf {name!r}")
+                    claim_and_remove(parent, name, entry)
+                except PermissionError as exc:
+                    # A new walk after releasing this pin could authorize a replacement.
+                    raise OSError(f"Cannot verify and remove pinned entry {name!r}: {exc}") from exc
+                finally:
+                    os.unlink("pin", dir_fd=holder_fd)
+                continue
+            try:
+                child = os.open(name, flags, dir_fd=parent)
+            except PermissionError:
+                if (sys.platform != "linux" or not repair or entry.st_uid != os.getuid()
+                        or entry.st_mode & 0o700 == 0o700):
+                    raise
+                mode = stat.S_IMODE(entry.st_mode) | 0o700
+                pinned = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                try:
+                    if not os.path.samestat(entry, os.fstat(pinned)):
+                        raise OSError(f"Scratch directory {name!r} changed before repair")
+                    require_mount(mount_id(pinned))
+                    os.chmod(f"/proc/self/fd/{pinned}", mode)
+                    child = os.open(".", flags, dir_fd=pinned)
+                finally:
+                    os.close(pinned)
+            try:
+                if not os.path.samestat(entry, os.fstat(child)):
+                    raise OSError(f"Scratch directory {name!r} changed before descent")
+                require_mount(mount_id(child))
+                remove_contents(child, repair)
+                claim_and_remove(parent, name, entry)
+            finally:
+                os.close(child)
 
     try:
         if fd is None:
             raise OSError("Original scratch directory was not recorded")
         info = os.fstat(fd)
         check(info)
-        try:
-            remove_contents()
-        except PermissionError:
-            # Repair and retry only through the original, still-open directory.
-            check(directory.lstat())
-            if (os.fstat(fd).st_mode & 0o077 or not directory.name.startswith("sf-")
-                    or directory.parent.resolve() != Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve()):
-                raise
-            for _, children, _, descriptor in os.fwalk(".", topdown=True, dir_fd=fd, onerror=unreadable):
-                current = os.fstat(descriptor)
-                if current.st_uid != os.getuid() or current.st_dev != info.st_dev:
-                    raise PermissionError("Scratch directory ownership or identity changed")
-                if current.st_mode & 0o700 != 0o700:
-                    os.fchmod(descriptor, stat.S_IMODE(current.st_mode) | 0o700)
-                if sys.platform != "darwin":
-                    continue
-                # fwalk opens each child before yielding its descriptor.
-                for name in children.copy():
-                    child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    if stat.S_ISLNK(child.st_mode):
-                        children.remove(name)
-                        continue
-                    if not stat.S_ISDIR(child.st_mode):
-                        raise OSError(f"Scratch entry {name!r} changed before permission repair")
-                    if child.st_uid != os.getuid() or child.st_dev != info.st_dev:
-                        raise PermissionError("Scratch directory ownership or identity changed")
-                    if child.st_mode & 0o700 != 0o700:
-                        libc = ctypes.CDLL(None, use_errno=True)
-                        # A trailing slash requires a directory. Darwin's AT_SYMLINK_NOFOLLOW_ANY
-                        # (sys/fcntl.h) also rejects symlinks when resolving that slash.
-                        if libc.fchmodat(descriptor, os.fsencode(name) + b"/",
-                                         stat.S_IMODE(child.st_mode) | 0o700, 0x0800) != 0:
-                            error = ctypes.get_errno()
-                            raise OSError(error, f"Cannot repair scratch permissions: {os.strerror(error)}", name)
-            remove_contents()
         check(directory.lstat())
-        # rmdir has no expected-inode argument. Claim the last name in a private
-        # directory, then verify which inode actually moved before unlinking it.
+        mount = mount_id(fd)
         holder = Path(tempfile.mkdtemp(prefix=".sf-cleanup-", dir=directory.parent))
-        held = holder / directory.name
+        held = holder / "claimed"
+        holder_fd = os.open(holder, flags)
         try:
-            directory.rename(held)
             try:
-                check(held.lstat())
-                held.rmdir()
-            except OSError:
-                restore_scratch_name(held, directory)
-                raise
+                remove_contents(fd, False)
+            except PermissionError:
+                check(directory.lstat())
+                if (os.fstat(fd).st_mode & 0o077 or not directory.name.startswith("sf-")
+                        or directory.parent.resolve() != Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve()):
+                    raise
+                remove_contents(fd, True)
+            check(directory.lstat())
+            parent = os.open(directory.parent, os.O_DIRECTORY | os.O_RDONLY)
+            try:
+                claim_and_remove(parent, directory.name, info)
+            finally:
+                os.close(parent)
         finally:
+            os.close(holder_fd)
             if not os.path.lexists(held):
                 holder.rmdir()
-    except OSError as exc:
+    except (FactoryError, OSError, RecursionError) as exc:
         print(f"factory: scratch {directory} was not fully removed ({exc}); inspect it before cleanup", file=sys.stderr, flush=True)
         return False
     return True

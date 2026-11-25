@@ -11,6 +11,8 @@ The start time is in microseconds on macOS and kernel clock ticks on Linux.
 Asyncio may reap a fast child before the probe, leaving `start_time` null. An
 integer `exit_code` from the worker waiting on and reaping its own child is
 stronger evidence of exit than the start-time fingerprint.
+Cleanup checks each open directory against the original scratch mount before listing its children.
+A foreign or unverifiable mount stops cleanup, including permission repair.
 `scratch_removed` records the cleanup result. It is false when removal fails
 or Codex keeps the directory after an unconfirmed exit. Fields for steps that
 have not run are null. Collectors still accept their supported older receipts.

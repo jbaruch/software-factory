@@ -1081,20 +1081,19 @@ class ClaudeWorker(unittest.TestCase):
         self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o700))
         unreadable.chmod(0)
 
-        def fail_repair(*args):
-            factory.ctypes.set_errno(errno.EIO)
-            return -1
-
         with patch.object(factory, "new_scratch", return_value=scratch), \
                 ExitStack() as effects, \
                 redirect_stderr(StringIO()) as errors:
-            if sys.platform == "darwin":
-                libc = factory.ctypes.CDLL(None, use_errno=True)
-                effects.enter_context(patch.object(factory.ctypes, "CDLL", return_value=libc))
-                repair = effects.enter_context(patch.object(libc, "fchmodat", side_effect=fail_repair))
+            if sys.platform == "linux":
+                chmod = os.chmod
+
+                def fail_pinned_chmod(path, mode, **kwargs):
+                    if os.fsdecode(path).startswith("/proc/self/fd/"):
+                        raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+                    return chmod(path, mode, **kwargs)
+
+                effects.enter_context(patch.object(os, "chmod", side_effect=fail_pinned_chmod))
             receipt = self.execute()
-            if sys.platform == "darwin":
-                repair.assert_called_once()
         self.assertEqual(receipt["state"], "completed", receipt["error"])
         self.assertEqual(receipt["exit_code"], 0)
         self.assertEqual(receipt["report"], dict(outcome="approved", artifacts=["README.md"]))
@@ -1103,8 +1102,9 @@ class ClaudeWorker(unittest.TestCase):
         self.assertTrue(scratch.is_dir())
         self.assertFalse(Path(receipt["checkout"]).exists())
         self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
-        if sys.platform == "darwin":
+        if sys.platform == "linux":
             self.assertIn(os.strerror(errno.EIO), errors.getvalue())
+        if sys.platform == "darwin":
             self.assertIn(repr(unreadable.name), errors.getvalue())
         self.assertEqual(json.loads(self.args.receipt.read_text()), receipt)
 
