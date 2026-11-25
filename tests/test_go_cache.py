@@ -3,6 +3,7 @@ import runtime_path  # noqa: F401
 import asyncio
 from contextlib import chdir
 import copy
+import errno
 import fcntl
 import hashlib
 import shutil
@@ -127,7 +128,7 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         recent.write_bytes(b"recent fixture")
         root, readme = self.cache.stat(), (self.cache / "README").read_bytes()
         protected = self.protected()
-        with patch.dict(os.environ, GOFLAGS="-unknown", GOTOOLCHAIN="missing", GOENV="/missing",
+        with patch.dict(os.environ, TMPDIR=str(self.root), GOFLAGS="-unknown", GOTOOLCHAIN="missing", GOENV="/missing",
                         GOCACHEPROG="/missing", GOPROXY="invalid", GOROOT="/missing"):
             row = self.trim()
             self.assertEqual((row["decision"], row["removed_entries"]), ("retained", 0), row)
@@ -135,6 +136,7 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
             (self.cache / "trim.txt").write_text(str(self.at))
             before = {p.name for p in self.cache.glob("*/*")}
             row = self.trim()
+        self.assertEqual(list(self.root.glob("factory-go-trim-*")), [])
         after = {p.name for p in self.cache.glob("*/*")}
         self.assertFalse(after - before, "The hourly probe should reuse its own cache entries")
         self.assertEqual((row["decision"], row["removed_entries"], row["retained_entries"]),
@@ -180,25 +182,31 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertEqual((row["removed_entries"], row["after_kib"]), (0, row["size_kib"]))
 
     def test_same_line_provision_during_native_trim_and_parent_only_sigterm(self):
-        # This disposable tool gate pauses the real Go driver while it waits for its compiler.
+        self.gated_compiler_loss(signal.SIGTERM)
+
+    def test_parent_only_sigkill_reclaims_gated_native_compiler_scratch(self):
+        self.gated_compiler_loss(signal.SIGKILL)
+
+    def gated_compiler_loss(self, stop):
+        # The real compiler blocks reading an extra Go source file from a FIFO.
         fixture = self.root / "disposable-trim-go"
-        ready = self.root / "disposable-compiler-ready"
-        gate = self.root / "disposable-compiler-gate"
+        gate = self.root / "gate.go"
+        os.mkfifo(gate)
         diagnostic = self.root / "disposable-go.stderr"
         go = shutil.which("go")
         fixture.write_text(f"""#!{sys.executable}
-import fcntl, os, sys
+import os, subprocess, sys
 from pathlib import Path
 if sys.argv[1] == "build":
     # Keep fixture diagnostics readable after the CLI's stderr pipe loses its reader.
     with open({str(diagnostic)!r}, "w") as log:
         os.dup2(log.fileno(), 2)
+        subprocess.run([{go!r}, "env", "GOTELEMETRY"], stdout=log, check=True)
     os.environ["PATH"] = {str(self.root)!r} + os.pathsep + os.defpath
     sys.argv.insert(2, "-toolexec={fixture.name}")
 elif sys.argv[1] != "env":
-    with open({str(gate)!r}) as gate:
-        Path({str(ready)!r}).touch()
-        fcntl.flock(gate, fcntl.LOCK_SH)
+    if Path(sys.argv[1]).name == "compile" and "-V=full" not in sys.argv:
+        sys.argv.append({str(gate)!r})
     os.execv(sys.argv[1], sys.argv[1:])
 os.execv({go!r}, [{go!r}, *sys.argv[1:]])
 """)
@@ -214,35 +222,43 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
         factory.set_inputs(other, candidate="HEAD", requirements="requirements-v1")
         destination = self.root / "independent"
         paths = (self.path.with_suffix(".lock"), self.admin, self.cache)
-        with gate.open("w") as hold:
-            fcntl.flock(hold, fcntl.LOCK_EX)
-            with subprocess.Popen([sys.executable, factory.__file__, "--state-dir", str(self.state),
-                                   "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)],
-                                  env={**os.environ, "TMPDIR": str(self.root)}, stdout=subprocess.PIPE) as parent:
-                try:
-                    deadline = time.monotonic() + 30
-                    while not ready.exists():
-                        self.assertIsNone(parent.poll(), "Factory exited before the disposable compiler gate")
-                        self.assertLess(time.monotonic(), deadline, "Go did not reach the disposable compiler gate")
-                        time.sleep(0.02)
-                    code, out, err = self.cli("provision", "--task", "independent",
-                                              "--id", "backend", "--path", str(destination))
-                    self.assertEqual(code, 0, (out, err))
-                    self.assertEqual(factory.task_line(factory.load_task(other)), line)
-                    self.assertNotEqual(factory.git_dir(destination), self.admin)
-                    code, _, err = self.cli("provision", "--task", "fixture",
-                                            "--id", "backend", "--path", str(self.destination))
-                    self.assertEqual(code, 75, err)
-                    self.assertIn("working on this task", err)
-                    with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.admin, shared=True):
-                        self.fail("Acquired the shared launch lock during native aging")
-                    with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.cache):
-                        self.fail("Acquired the same physical cache during native aging")
-                    self.assertIsNone(parent.poll())
-                finally:
-                    parent.terminate()
-                self.assertEqual(parent.communicate(timeout=10), (b"", None))
-                self.assertEqual(parent.returncode, -signal.SIGTERM)
+        with subprocess.Popen([sys.executable, factory.__file__, "--state-dir", str(self.state),
+                               "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)],
+                              env={**os.environ, "TMPDIR": str(self.root)}, stdout=subprocess.PIPE) as parent:
+            deadline = time.monotonic() + 30
+            try:
+                while True:
+                    try:
+                        writer = os.open(gate, os.O_WRONLY | os.O_NONBLOCK)
+                        self.addCleanup(os.close, writer)
+                        break
+                    except OSError as exc:
+                        if exc.errno != errno.ENXIO:
+                            raise
+                    if parent.poll() is not None:
+                        self.fail(f"Factory exited before the disposable compiler gate: {parent.communicate()[0]!r}")
+                    self.assertLess(time.monotonic(), deadline, "Go did not reach the disposable compiler gate")
+                    time.sleep(0.02)
+                scratch, = self.root.glob("factory-go-trim-*")
+                self.assertTrue((scratch / "src/factory.local/trim/trim.go").is_file())
+                code, out, err = self.cli("provision", "--task", "independent",
+                                          "--id", "backend", "--path", str(destination))
+                self.assertEqual(code, 0, (out, err))
+                self.assertEqual(factory.task_line(factory.load_task(other)), line)
+                self.assertNotEqual(factory.git_dir(destination), self.admin)
+                code, _, err = self.cli("provision", "--task", "fixture",
+                                        "--id", "backend", "--path", str(self.destination))
+                self.assertEqual(code, 75, err)
+                self.assertIn("working on this task", err)
+                with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.admin, shared=True):
+                    self.fail("Acquired the shared launch lock during native aging")
+                with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.cache):
+                    self.fail("Acquired the same physical cache during native aging")
+                self.assertIsNone(parent.poll())
+            finally:
+                parent.send_signal(stop)
+            self.assertEqual(parent.communicate(timeout=10), (b"", None))
+            self.assertEqual(parent.returncode, -stop)
             # Keep the compiler gate closed. Cancellation must release the locks
             # independently of both the gate and the normal build deadline.
             deadline = time.monotonic() + 5
@@ -253,7 +269,9 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
                 except factory.ExecutionBusy:
                     self.assertLess(time.monotonic(), deadline, "Go retained the disposable cache lock")
                     time.sleep(0.02)
+            self.assertEqual(list(self.root.glob("factory-go-trim-*")), [])
             self.assertTrue(old.exists(), diagnostic.read_text())
+            self.assertEqual(diagnostic.read_text().strip(), "off")
             for path in paths:
                 with go_cache.inode_lock(path, directory=path.is_dir()):
                     pass
@@ -337,6 +355,7 @@ raise SystemExit(factory.main())
                                         continue
                                 self.assertLess(time.monotonic(), deadline, f"Locks retained after stop: {pending}")
                                 time.sleep(0.01)
+                        self.assertEqual(list(self.root.glob("factory-go-trim-*")), [])
                         output, _ = caller.communicate(timeout=6)
                         if failure in ("timeout", "driver exit"):
                             row, = json.loads(output)
