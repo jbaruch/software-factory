@@ -4,6 +4,8 @@ import errno
 import io
 import json
 import os
+import plistlib
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,7 @@ from unittest.mock import call, patch
 
 import codex_worker
 import factory
+import go_cache
 
 
 class ReaderEnvironment(unittest.TestCase):
@@ -604,11 +607,61 @@ class ManagedScratch(unittest.TestCase):
             self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
             self.assertEqual(marker.read_text(), "keep")
 
+    def test_cleanup_repairs_held_root_and_openable_child(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            receipt = {}
+            with factory.scratch_directory(Path(state) / "receipt.json", receipt) as scratch:
+                nested = scratch / "nested"
+                nested.mkdir()
+                (nested / "payload").write_text("owned")
+                nested.chmod(0o500)
+                scratch.chmod(0)
+            self.assertIs(receipt["scratch_removed"], True)
+            self.assertFalse(scratch.exists())
+
+    @unittest.skipUnless(sys.platform == "linux" and os.getuid() != 0, "Requires unprivileged Linux directory repair")
+    def test_cleanup_removes_unreadable_directory(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            receipt = {}
+            with factory.scratch_directory(Path(state) / "receipt.json", receipt) as scratch:
+                nested = scratch / "nested"
+                nested.mkdir()
+                (nested / "payload").write_text("owned")
+                nested.chmod(0)
+            self.assertIs(receipt["scratch_removed"], True)
+            self.assertFalse(scratch.exists())
+
+    @unittest.skipUnless(sys.platform == "linux" and os.getuid() != 0, "Requires unprivileged Linux directory repair")
+    def test_descriptor_repair_preserves_substituted_symlink_target(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            root = Path(state)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "payload").write_bytes(b"keep")
+            outside.chmod(0o555)
+            chmod = os.chmod
+            receipt = {}
+            with ExitStack() as effects, redirect_stderr(io.StringIO()):
+                with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                    nested = scratch / "nested"
+                    nested.mkdir(mode=0)
+
+                    def replace_before_chmod(path, mode):
+                        nested.rename(scratch / "moved")
+                        nested.symlink_to(outside, target_is_directory=True)
+                        chmod(path, mode)
+
+                    effects.enter_context(patch.object(os, "chmod", side_effect=replace_before_chmod))
+            self.assertIs(receipt["scratch_removed"], False)
+            self.assertTrue(nested.is_symlink())
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o555)
+            self.assertEqual((outside / "payload").read_bytes(), b"keep")
+            outside.chmod(0o700)
+
     @unittest.skipUnless(sys.platform == "darwin" and os.getuid() != 0, "Requires unprivileged Darwin directory repair")
     def test_permission_repair_refuses_substituted_links(self):
-        libc = factory.ctypes.CDLL(None, use_errno=True)
-        fchmodat = libc.fchmodat
-        for symlink, expected_errno in ((True, errno.ELOOP), (False, errno.ENOTDIR)):
+        open_directory = os.open
+        for symlink in (True, False):
             with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as state:
                 root = Path(state)
                 outside = root / "outside-directory"
@@ -617,34 +670,187 @@ class ManagedScratch(unittest.TestCase):
                 marker.write_text("keep")
                 marker.chmod(0o400)
                 outside.chmod(0o500)
-
-                def replace_entry(parent_fd, path, mode, flags):
-                    os.rmdir("nested", dir_fd=parent_fd)
-                    if symlink:
-                        os.symlink(outside, "nested", dir_fd=parent_fd)
-                    else:
-                        os.link(marker, "nested", dst_dir_fd=parent_fd)
-                    return fchmodat(parent_fd, path, mode, flags)
-
                 receipt = {}
-                with patch.object(factory, "SCRATCH_ROOT", state), \
-                        patch.object(factory.ctypes, "CDLL", return_value=libc), \
-                        patch.object(libc, "fchmodat", side_effect=replace_entry) as repair, \
-                        redirect_stderr(io.StringIO()) as errors:
+                with patch.object(factory, "SCRATCH_ROOT", state), ExitStack() as effects, redirect_stderr(io.StringIO()):
                     with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
-                        (scratch / "nested").mkdir(mode=0)
-                repair.assert_called_once()
+                        nested = scratch / "nested"
+                        nested.mkdir(mode=0)
+                        scratch.chmod(0)  # Exercise held-root repair before the child open.
+
+                        def replace_before_open(path, flags, *args, **kwargs):
+                            if path == nested.name:
+                                nested.rmdir()
+                                if symlink:
+                                    nested.symlink_to(outside, target_is_directory=True)
+                                else:
+                                    os.link(marker, nested)
+                            return open_directory(path, flags, *args, **kwargs)
+
+                        effects.enter_context(patch.object(os, "open", side_effect=replace_before_open))
                 self.assertIs(receipt["scratch_removed"], False)
-                self.assertTrue(scratch.is_dir())
-                self.assertIn(os.strerror(expected_errno), errors.getvalue())
-                self.assertIn("'nested'", errors.getvalue())
+                self.assertTrue(os.path.samestat(nested.stat(), (outside if symlink else marker).stat()))
                 self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
                 self.assertEqual(marker.stat().st_mode & 0o777, 0o400)
                 self.assertEqual(marker.read_text(), "keep")
 
-    def test_cleanup_and_permission_retry_stay_with_the_recorded_directory(self):
-        rmtree = factory.shutil.rmtree
-        fwalk = os.fwalk
+    @unittest.skipUnless(sys.platform == "darwin" and os.getuid() != 0, "Requires unprivileged Darwin directory repair")
+    def test_unopenable_child_survives_until_owner_restores_access(self):
+        for mode in (0, 0o100):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+                receipt = {}
+                with ExitStack() as handles, redirect_stderr(io.StringIO()) as errors:
+                    with factory.scratch_directory(Path(state) / "receipt.json", receipt) as scratch:
+                        fd = os.open(scratch, os.O_DIRECTORY)
+                        handles.callback(os.close, fd)
+                        nested = scratch / "nested"
+                        nested.mkdir()
+                        payload = nested / "payload"
+                        payload.write_bytes(b"owned")
+                        nested.chmod(mode)
+                        original = nested.stat()
+                    self.assertIs(receipt["scratch_removed"], False)
+                    self.assertIn(f"scratch {scratch} was not fully removed", errors.getvalue())
+                    self.assertTrue(os.path.samestat(nested.stat(), original))
+                    self.assertEqual(nested.stat().st_mode, original.st_mode)
+                    nested.chmod(0o700)
+                    self.assertEqual(payload.read_bytes(), b"owned")
+                    self.assertIs(factory.remove_scratch(scratch, receipt["scratch_identity"], fd), True)
+                    self.assertFalse(scratch.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin" and os.getuid() != 0, "Requires unprivileged Darwin HFS+")
+    def test_physical_mount_stays_at_original_name(self):
+        for moment in ("before cleanup", "denied open", "nested claim", "fixture failure"):
+            with self.subTest(moment=moment), ExitStack() as cleanup:
+                root = Path(tempfile.mkdtemp())
+                image = root / "fixture.dmg"
+                cleanup.enter_context(patch.object(factory, "SCRATCH_ROOT", str(root)))
+                scratch = None
+
+                def devices():
+                    inventory = subprocess.run(["hdiutil", "info", "-plist"], check=True, capture_output=True)
+                    return [disk["system-entities"][0]["dev-entry"]
+                            for disk in plistlib.loads(inventory.stdout)["images"]
+                            if Path(disk["image-path"]).resolve() == image.resolve()]
+
+                def detach():
+                    for device in devices():
+                        subprocess.run(["hdiutil", "detach", device], check=True, capture_output=True)
+                    self.assertFalse(devices(), f"Inspect attached fixture image {image}")
+
+                def dispose():
+                    # An inventory or detach failure stops here, preserving the image for inspection.
+                    detach()
+                    if scratch is not None and scratch.exists():
+                        scratch.chmod(0o700)
+                        if (scratch / "nested").exists():
+                            (scratch / "nested").rmdir()
+                        scratch.rmdir()
+                    image.unlink(missing_ok=True)
+                    root.rmdir()
+
+                cleanup.callback(dispose)
+                scratch = factory.new_scratch()
+                child = scratch / "nested"
+                subprocess.run(["hdiutil", "create", "-quiet", "-size", "16m", "-fs", "HFS+", "-volname",
+                                "scratch-test", image], check=True, capture_output=True)
+                child.mkdir(mode=0 if moment == "denied open" else 0o700)
+                original = child.stat()
+                fd = os.open(scratch, os.O_DIRECTORY)
+                cleanup.callback(os.close, fd)
+                info = os.fstat(fd)
+                identity = dict(st_dev=info.st_dev, st_ino=info.st_ino)
+                mounted = None
+                marker = child / "payload"
+                open_directory = os.open
+                rename = factory.rename_scratch_exclusive
+
+                def attach():
+                    nonlocal mounted
+                    subprocess.run(["hdiutil", "attach", "-owners", "on", "-nobrowse", "-mountpoint", child,
+                                    image], check=True, capture_output=True)
+                    self.assertTrue(child.is_mount())
+                    child.chmod(0o755)
+                    marker.write_bytes(b"preserve")
+                    marker.chmod(0o444)
+                    mounted = child.stat()
+
+                def open_child(path, flags, *args, **kwargs):
+                    try:
+                        return open_directory(path, flags, *args, **kwargs)
+                    except PermissionError:
+                        if path == child.name and moment == "denied open":
+                            attach()
+                        raise
+
+                def claim(path, destination, src_fd, dst_fd):
+                    if path == child.name and moment == "nested claim":
+                        attach()
+                    return rename(path, destination, src_fd, dst_fd)
+
+                if moment == "fixture failure":
+                    with self.assertRaisesRegex(ValueError, "fixture setup"), cleanup.pop_all():
+                        attach()
+                        raise ValueError("fixture setup")
+                    self.assertFalse(root.exists())
+                    continue
+                if moment == "before cleanup":
+                    attach()
+                elif moment == "denied open":
+                    scratch.chmod(0)
+                with patch.object(os, "open", side_effect=open_child), patch.object(factory, "rename_scratch_exclusive", side_effect=claim), \
+                        redirect_stderr(io.StringIO()):
+                    self.assertIs(factory.remove_scratch(scratch, identity, fd), False)
+                self.assertTrue(child.is_mount())
+                assert mounted is not None
+                self.assertTrue(os.path.samestat(child.stat(), mounted))
+                self.assertEqual(child.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(marker.stat().st_mode & 0o777, 0o444)
+                self.assertEqual(marker.read_bytes(), b"preserve")
+                detach()
+                self.assertTrue(os.path.samestat(child.stat(), original))
+                self.assertEqual(child.stat().st_mode, original.st_mode)
+                child.chmod(0o700)
+                self.assertIs(factory.remove_scratch(scratch, identity, fd), True)
+                self.assertFalse(scratch.exists())
+
+    def test_cleanup_checks_child_mount_before_listing_or_repair(self):
+        identify = go_cache.mount_id
+        for mode in (0o700, 0):
+            if mode == 0 and os.getuid() == 0:
+                continue
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as state:
+                root = Path(state)
+                receipt = {}
+                with patch.object(factory, "SCRATCH_ROOT", state), redirect_stderr(io.StringIO()), ExitStack() as effects:
+                    with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                        child = scratch / "nested"
+                        child.mkdir()
+                        marker = child / "marker"
+                        marker.write_text("keep")
+                        child.chmod(mode)
+                        child_info = child.stat()
+
+                        def mount(fd):
+                            if os.path.samestat(child_info, os.fstat(fd)):
+                                return "other mount"
+                            return identify(fd)
+
+                        list_directory = os.listdir
+
+                        def list_children(fd):
+                            self.assertFalse(os.path.samestat(child_info, os.fstat(fd)))
+                            return list_directory(fd)
+
+                        effects.enter_context(patch.object(go_cache, "mount_id", side_effect=mount))
+                        effects.enter_context(patch.object(os, "listdir", side_effect=list_children))
+                self.assertIs(receipt["scratch_removed"], False)
+                self.assertEqual(child.stat().st_mode & 0o777, mode)
+                child.chmod(0o700)
+                self.assertEqual(marker.read_text(), "keep")
+
+    def test_cleanup_and_permission_repair_stay_with_the_recorded_directory(self):
+        open_directory = os.open
+        chmod_directory = os.fchmod
         for moment in ("during removal", "before permission repair", "after permission repair"):
             with self.subTest(moment=moment), tempfile.TemporaryDirectory() as state:
                 root = Path(state)
@@ -660,52 +866,155 @@ class ManagedScratch(unittest.TestCase):
                             (scratch / "nested/marker").write_text("keep")
                             (scratch / "nested").chmod(0o500)
 
-                        def remove(name, **kwargs):
-                            if moment == "during removal":
+                        def open_child(name, flags, *args, **kwargs):
+                            if name == "nested" and moment == "during removal":
                                 replace()
-                                return rmtree(name, **kwargs)
+                            return open_directory(name, flags, *args, **kwargs)
+
+                        def repair_directory(fd, mode):
                             if moment == "before permission repair":
                                 replace()
-                            raise PermissionError("fixture requires repair")
-
-                        def repair(*args, **kwargs):
-                            yield from fwalk(*args, **kwargs)
+                            chmod_directory(fd, mode)
                             if moment == "after permission repair":
                                 replace()
 
-                        effects.enter_context(patch.object(factory.shutil, "rmtree", side_effect=remove))
-                        effects.enter_context(patch.object(os, "fwalk", side_effect=repair))
+                        if moment != "during removal":
+                            scratch.chmod(0o500)
+                        effects.enter_context(patch.object(os, "open", side_effect=open_child))
+                        effects.enter_context(patch.object(os, "fchmod", side_effect=repair_directory))
                 self.assertIs(receipt["scratch_removed"], False)
                 self.assertEqual((scratch / "nested/marker").read_text(), "keep")
                 self.assertEqual((scratch / "nested").stat().st_mode & 0o777, 0o500)
                 (scratch / "nested").chmod(0o700)
 
-    def test_final_unlink_preserves_a_directory_swapped_at_the_last_name_check(self):
-        rename = Path.rename
-        for occupied in (False, True):
-            with self.subTest(occupied=occupied), tempfile.TemporaryDirectory() as state:
-                root = Path(state)
-                receipt = {}
-                replacements = []
-                with patch.object(factory, "SCRATCH_ROOT", state), redirect_stderr(io.StringIO()) as errors:
-                    def swap_before_claim(path, destination):
-                        rename(path, root / "original")
-                        path.mkdir()
-                        replacements.append(path.stat())
-                        rename(path, destination)
-                        if occupied:
-                            path.mkdir()
-                            replacements.append(path.stat())
-                        return destination
+    def test_denied_child_does_not_restart_cleanup_on_changed_sibling(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            root = Path(state)
+            receipt = {}
+            with ExitStack() as effects, redirect_stderr(io.StringIO()):
+                with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                    denied = scratch / "denied"
+                    denied.mkdir(mode=0o700)
+                    payload = denied / "payload"
+                    payload.write_bytes(b"child")
+                    sibling = scratch / "sibling"
+                    sibling.write_bytes(b"original")
+                    replacement = root / "replacement"
+                    replacement.write_bytes(b"replacement")
+                    saved = root / "original"
+                    originals = [path.stat() for path in (scratch, denied, payload, sibling, replacement)]
+                    open_directory = os.open
+                    list_directory = os.listdir
 
-                    with patch.object(Path, "rename", autospec=True, side_effect=swap_before_claim) as claim:
+                    def deny_child(path, flags, *args, **kwargs):
+                        if path == denied.name and replacement.exists():
+                            sibling.rename(saved)
+                            replacement.rename(sibling)
+                            raise PermissionError(errno.EACCES, "denied", path)
+                        return open_directory(path, flags, *args, **kwargs)
+
+                    def list_children(fd):
+                        return sorted(list_directory(fd))  # Visit denied before sibling.
+
+                    listing = effects.enter_context(patch.object(os, "listdir", side_effect=list_children))
+                    effects.enter_context(patch.object(os, "open", side_effect=deny_child))
+            self.assertIs(receipt["scratch_removed"], False)
+            listing.assert_called_once()
+            for path, original in zip((scratch, denied, payload, saved, sibling), originals):
+                self.assertTrue(os.path.samestat(original, path.stat()), path)
+                self.assertEqual(original.st_mode, path.stat().st_mode)
+            self.assertEqual([p.read_bytes() for p in (payload, saved, sibling)], [b"child", b"original", b"replacement"])
+
+    def test_exact_leaf_cleanup(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            root = Path(state)
+            receipt = {}
+            missing = root / "missing"
+            with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                (scratch / "dangling").symlink_to(missing)
+                (scratch / "unreadable").touch(mode=0)
+                os.mkfifo(scratch / "fifo")
+                with socket.socket(socket.AF_UNIX) as endpoint:
+                    endpoint.bind(str(scratch / "socket"))
+            self.assertIs(receipt["scratch_removed"], True)
+            self.assertFalse(scratch.exists())
+            self.assertFalse(missing.exists())
+            self.assertFalse(list(root.glob(".sf-cleanup-*")))
+
+    def test_denied_leaf_pin_retains_entry(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            receipt = {}
+            with ExitStack() as effects, redirect_stderr(io.StringIO()):
+                with factory.scratch_directory(Path(state) / "receipt.json", receipt) as scratch:
+                    leaf = scratch / "entry"
+                    leaf.write_bytes(b"keep")
+                    original = leaf.stat()
+                    effects.enter_context(patch.object(os, "link", side_effect=PermissionError(errno.EPERM, "denied")))
+            self.assertIs(receipt["scratch_removed"], False)
+            self.assertTrue(os.path.samestat(original, leaf.stat()))
+            self.assertEqual(leaf.read_bytes(), b"keep")
+            self.assertFalse(list(Path(state).glob(".sf-cleanup-*")))
+
+    def test_private_claim_preserves_replacements_and_occupants(self):
+        rename = factory.rename_scratch_exclusive
+        for kind in ("root", "directory", "file"):
+            for occupied in (False, True):
+                with self.subTest(kind=kind, occupied=occupied), tempfile.TemporaryDirectory() as state:
+                    root = Path(state)
+                    receipt = {}
+                    replacements = []
+                    with patch.object(factory, "SCRATCH_ROOT", state), ExitStack() as effects:
+                        errors = effects.enter_context(redirect_stderr(io.StringIO()))
                         with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
-                            pass
-                self.assertIs(receipt["scratch_removed"], False)
-                self.assertTrue(os.path.samestat(scratch.stat(), replacements[-1]))
-                held = claim.call_args.args[1]
-                if occupied:
-                    self.assertTrue(os.path.samestat(held.stat(), replacements[0]))
-                    self.assertIn(str(held), errors.getvalue())
-                else:
-                    self.assertFalse(held.parent.exists())
+                            target = scratch if kind == "root" else scratch / "entry"
+                            if kind == "directory":
+                                target.mkdir()
+                            elif kind == "file":
+                                target.write_bytes(b"owned")
+                            original = target.stat()
+
+                            if kind == "file":
+                                real_stat = os.stat
+
+                                def discard_last_public_link(path, *args, **kwargs):
+                                    info = real_stat(path, *args, **kwargs)
+                                    if not replacements and os.path.samestat(info, original):
+                                        target.unlink()
+                                        target.write_bytes(b"foreign")
+                                        replacements.append(real_stat(target))
+                                        self.assertEqual(info.st_nlink, 2, "first observation must already be pinned")
+                                    return info
+
+                                effects.enter_context(patch.object(os, "stat", side_effect=discard_last_public_link))
+
+                            def swap_before_claim(name, destination, src_fd, dst_fd):
+                                if name == target.name:
+                                    if kind == "file":
+                                        pin = os.stat("pin", dir_fd=dst_fd, follow_symlinks=False)
+                                        self.assertTrue(os.path.samestat(pin, original))
+                                        self.assertEqual(pin.st_nlink, 1)
+                                    else:
+                                        target.rename(root / "original")
+                                        target.mkdir()
+                                        replacements.append(target.stat())
+                                rename(name, destination, src_fd, dst_fd)
+                                if name == target.name and occupied:
+                                    target.mkdir()
+                                    replacements.append(target.stat())
+
+                            effects.enter_context(patch.object(factory, "rename_scratch_exclusive",
+                                                               side_effect=swap_before_claim))
+                    self.assertIs(receipt["scratch_removed"], False)
+                    if kind != "file":
+                        self.assertTrue(os.path.samestat((root / "original").stat(), original))
+                    self.assertTrue(os.path.samestat(target.stat(), replacements[-1]))
+                    retained = target
+                    if occupied:
+                        holder, = root.glob(".sf-cleanup-*")
+                        retained = holder / "claimed"
+                        self.assertTrue(os.path.samestat(retained.stat(), replacements[0]))
+                        self.assertIn(str(retained), errors.getvalue())
+                    else:
+                        self.assertFalse(list(root.glob(".sf-cleanup-*")))
+                    if kind == "file":
+                        self.assertEqual(retained.read_bytes(), b"foreign")

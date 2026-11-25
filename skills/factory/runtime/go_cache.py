@@ -760,7 +760,7 @@ def check_mounts(repo, work, cache, *, native_mount=None):
 
 
 def mount_id(fd):
-    """Ask the kernel about this open object, including same-device submounts."""
+    """Identify an open object's mount."""
     if sys.platform == "linux":
         match = re.search(r"^mnt_id:\s*(\d+)$", Path(f"/proc/self/fdinfo/{fd}").read_text(), re.MULTILINE)
         if match:
@@ -770,14 +770,15 @@ def mount_id(fd):
         # The mount name offset is relative to its reference, after the length and fsid_t.
         attributes = struct.pack("=HHIIIII", 5, 0, 4, 0x80001000, 0, 0, 0)
         buffer = ctypes.create_string_buffer(4096)
-        if not DARWIN.fgetattrlist(fd, attributes, buffer, len(buffer), 0):
+        result = DARWIN.fgetattrlist(fd, attributes, buffer, len(buffer), 0)
+        if not result:
             length, fsid, offset, size = struct.unpack_from("=I8siI", buffer)
             start = 12 + offset
             if 20 <= start < start + size <= length <= len(buffer):
-                name = buffer.raw[start:start + size]
-                if name.startswith(b"/") and name.endswith(b"\0"):
-                    return fsid, name
-    raise factory.FactoryError("Cannot verify the mount identity of an open cache entry")
+                mountpoint = buffer.raw[start:start + size]
+                if mountpoint.startswith(b"/") and mountpoint.endswith(b"\0"):
+                    return fsid, mountpoint
+    raise factory.FactoryError("Cannot verify filesystem mount identity")
 
 
 def cache_contents(fd, mount, *, clean=False, size_only=False, entries=None):
