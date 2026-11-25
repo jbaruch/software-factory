@@ -205,7 +205,7 @@ def execution_lock(directory, line=DEFAULT_LINE):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ExecutionBusy("Another launcher or ready-work controller owns execution; wait for it to finish before starting more work") from None
-        yield
+        yield fd
     finally:
         os.close(fd)
 
@@ -1872,7 +1872,7 @@ def release_proof(path, record):
     return proof, raw
 
 
-def release_worktree(path):
+def release_worktree(path, line_fd):
     """Caller holds the owner's execution and task locks. Keep launch exclusion through publication."""
     import go_cache
 
@@ -1905,12 +1905,12 @@ def release_worktree(path):
         if not legacy and not original_checkout(item, witness):
             raise FactoryError("Invalid or changed original provisioning identity. Preserve the checkout for inspection.")
         head = witness["head"]
-        user_records = go_cache.check_release_users(path.parent, record, destination, directory, witness)
+        go_cache.check_release_users(path.parent, record, destination, directory)
         cache = directory / "go-build"
+        go_cache.check_mounts(Path(admission["repository"]), destination, directory)
         cache_fd = None
         if os.path.lexists(cache):
             go_cache.real_directory(cache, os.fstat(fd).st_dev)
-            go_cache.check_mounts(Path(admission["repository"]), destination, cache)
             go_cache.check_native_cache_path(cache)
             cache_fd = locks.enter_context(go_cache.inode_lock(cache))
             go_cache.cache_contents(cache_fd, go_cache.mount_id(fd), allow_empty=True)
@@ -1918,9 +1918,6 @@ def release_worktree(path):
                        expected_git_dir=directory, read_only=True)
         if legacy:
             check_legacy_registration(record, witness)
-        for user_path, saved in user_records.items():
-            if read_record_bytes(user_path, private=True) != saved:
-                raise FactoryError(f"Checkout user changed before release at {user_path}; inspect before retrying")
         if (read_record_bytes(path, private=True) != raw or not os.path.samestat(os.fstat(fd), directory.lstat())
                 or provisioning_owned(record, item) != directory
                 or go_cache.checkout_binding(destination, directory, repo) != witness):
@@ -1930,8 +1927,23 @@ def release_worktree(path):
         if (os.path.lexists(cache) if cache_fd is None else
                 not os.path.samestat(os.fstat(cache_fd), cache.lstat())):
             raise FactoryError("Linked cache changed during release; inspect the original checkout")
+        # Git recursively removes the linked admin directory, including non-Git files.
+        device = os.fstat(fd).st_dev
+        for entry in directory.iterdir():
+            if entry.name == "go-build":
+                continue  # Validated and locked above.
+            if entry.name in {"HEAD", "ORIG_HEAD", "index", "commondir", "gitdir", "locked"}:
+                go_cache.metadata_identity(entry, device)
+            elif entry.name in {"logs", "refs"}:
+                go_cache.real_directory(entry, device)
+                for child in entry.iterdir():
+                    if entry.name != "logs" or child.name != "HEAD":
+                        raise FactoryError(f"Retain unknown Git admin data at {child}")
+                    go_cache.metadata_identity(child, device)
+            else:
+                raise FactoryError(f"Retain unknown Git admin data or launch intent at {entry}")
         provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination),
-                         timeout=600, pass_fds=(fd,) if cache_fd is None else (fd, cache_fd))
+                         timeout=600, pass_fds=(line_fd, fd) if cache_fd is None else (line_fd, fd, cache_fd))
         if go_cache.checkout_binding(destination, directory, repo) is not None:
             raise FactoryError("Git removal left a checkout endpoint; inspect incomplete teardown")
         outcome = dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"],
@@ -5444,9 +5456,7 @@ def main(argv=None):
     inputs.add_argument("--owner-decision", help="Explicit GitHub owner comment permalink for this requirements revision")
     caches = sub.add_parser("go-caches", allow_abbrev=False, help="Inspect one repository's linked Go caches")
     caches.add_argument("--repo", required=True, type=Path)
-    cache_action = caches.add_mutually_exclusive_group()
-    cache_action.add_argument("--clean-task", help="Retire one eligible cache during an attended exclusive maintenance window")
-    cache_action.add_argument("--trim-go", type=Path, metavar="GO", help="Age verified private local caches with this absolute trusted Go executable")
+    caches.add_argument("--trim-go", type=Path, metavar="GO", help="Age verified private local caches with this absolute trusted Go executable")
     release = sub.add_parser("release-worktree", help="Remove the task's provisioned worktree after its work is done; the branch stays")
     release.add_argument("--task", required=True)
     rebase = sub.add_parser("rebase-worktree", help="Move the task's provisioned worktree onto a new base, keeping its change as a patch")
@@ -5523,11 +5533,8 @@ def main(argv=None):
             raise FactoryError("Supply an absolute native Antigravity path and bounded seconds before launch")
         if args.action == "go-caches":
             import go_cache
-            rows = go_cache.census(args.state_dir, args.repo, args.clean_task, trim_go=args.trim_go)
+            rows = go_cache.census(args.state_dir, args.repo, trim_go=args.trim_go)
             print(json.dumps(rows, indent=2))
-            if args.clean_task and not any(row["decision"] == "cleaned" for row in rows):
-                print(f"factory: No completed cleanup for {args.clean_task!r}; inspect the census reasons and owner", file=sys.stderr)
-                return 1
             return int(any(row["decision"] == "failed" for row in rows))
         if args.action == "tidy":
             report, failed = tidy_tasks(args.state_dir.resolve(), args.task, args.rex, args.server)
@@ -5610,7 +5617,7 @@ def main(argv=None):
         locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
                                  "release-worktree", "rebase-worktree", "line"}
         line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE
-        with (execution_lock(args.state_dir.resolve(), line) if locked else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+        with (execution_lock(args.state_dir.resolve(), line) if locked else nullcontext()) as line_fd, task_lock(args.state_dir.resolve(), args.task) as path:
             if locked and os.path.lexists(path) and task_line(load_task(path, persist_migration=False)) != line:
                 raise FactoryError("The task moved to another line while waiting for its lock; run the command again")
             if args.action == "line":
@@ -5620,7 +5627,7 @@ def main(argv=None):
                 print(json.dumps(rebase_worktree(path, onto=args.onto), indent=2))
                 return 0
             if args.action == "release-worktree":
-                print(json.dumps(release_worktree(path), indent=2))
+                print(json.dumps(release_worktree(path, line_fd), indent=2))
                 return 0
             if args.action == "reset":
                 print(json.dumps(reset_writer(path, assignment_id=args.id), indent=2))

@@ -110,19 +110,14 @@ Provisioning does not select a produced candidate or grant acceptance/release
 authority. The [owner contract](task-state.md#writer-worktree-provisioning) defines
 the supported tree/configuration inputs and conservative reconciliation.
 
-Linked-cache retirement is a cache-only effect under the provisioned owner's
-execution and task locks. Launch intent and cache cleanup also synchronize on
-the linked Git admin directory inode across lines. Before saving intent for a
-provisioned tree, the launcher identifies its state store on that inode's directory.
-Owner release takes the same exclusive physical lock through Git deregistration
-and receipt publication. Owner release verifies terminal evidence for every
-recorded checkout user. Git removes the private linked Go cache with the checkout. Provisioning and native launch supply the
-original physical bindings used by maintenance. An additional launch store makes the selected store
-insufficient for cleanup or release. The hourly host job can explicitly select
-Go-native aging for a verified private local cache. Factory holds its admission
-locks through an offline build and entry readback. Go coordinates concurrent
-native builds and decides which entries to expire. Cache-only retirement requires
-attended exclusion of all cache users. See the [cache policy](native-providers.md#linked-go-cache-retention).
+Provisioned worktree launch and release synchronize on the linked Git admin inode.
+Before saving intent, a launcher records its state store in that directory.
+Owner release requires an unused, clean, registered checkout and recognized admin contents.
+Git inherits the line, admin and private cache locks while removing the checkout.
+Factory verifies deregistration before publishing the release receipt.
+For surviving caches, the hourly job can select Go-native aging under the existing
+admission locks. Go coordinates concurrent builds and decides which entries to expire.
+See the [cache policy](native-providers.md#linked-go-cache-retention).
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.
 The factory makes no merge call. The repository's release skill merges; `delivered`

@@ -404,11 +404,11 @@ replays the patch and resolves any conflicts.
 
 `release-worktree --task TASK` removes the provisioned worktree once the task's
 work is done. Under the owner's line and task locks it takes the exclusive
-linked Git admin lock, reconciles registered stores, checkout users and
-terminal receipts. Release runs unattended. Each recorded user needs a terminal
-worker receipt bound to its assignment and an observed worker exit or a
-strictly collected result. A recorded native child must also be proven gone.
-Lost or starting attempts and reset patches alone leave the checkout in place.
+linked Git admin lock and checks registered stores, assignment histories and orphaned
+receipts. Release runs unattended for unused worktrees. Any recorded use retains
+the checkout because a descendant can survive the recorded exit. Unknown admin
+entries or unresolved launch intent also retain it. The Git child inherits the line,
+admin and private cache locks until it exits.
 The owner checks the clean worktree, branch, marker and physical checkout,
 admin and pointer identities from provisioning. For completed pre-upgrade
 provisioning without `checkout_inodes`, the owner checks the exact current

@@ -77,15 +77,6 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.collect_fixture("writer", self.native)
         self.assignment = self.record["assignments"]["writer"]
         self.addCleanup(patch.stopall)
-        patch.object(go_cache.time, "time", return_value=self.at + go_cache.IDLE_SECONDS + 1).start()
-        # Scale only the byte floor for this small native build.
-        size = sum(p.stat().st_blocks for p in (self.cache, *self.cache.rglob("*"))) // 2
-        patch.object(go_cache, "MIN_KIB", size // 2).start()
-        # This fixture owns the only build process and keeps it stopped until readback.
-        self.terminal = patch.object(sys, "stdin", StringIO()).start()
-        self.terminal.isatty = lambda: True
-        self.process_check = go_cache.process_check
-        self.observer = patch.object(go_cache, "process_check", return_value={"observed_processes": 2}).start()
 
     def build(self):
         subprocess.run(["go", "build", str(self.file)], cwd=self.destination, env={
@@ -97,15 +88,11 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         for path in [self.cache, *self.cache.rglob("*")]:
             os.utime(path, (timestamp, timestamp))
 
-    def inspect(self, clean=False):
-        self.terminal.seek(0)
-        self.terminal.write("fixture\n")
-        self.terminal.seek(0)
-        status, out, err = self.cli("go-caches", "--repo", str(self.repo),
-                                    *(["--clean-task", "fixture"] if clean else []))
+    def inspect(self):
+        status, out, err = self.cli("go-caches", "--repo", str(self.repo))
         self.assertTrue(out, err)
         row, = json.loads(out)
-        self.assertEqual(status, int(clean and row["decision"] != "cleaned"), row)
+        self.assertEqual(status, 0, row)
         return row
 
     def protected(self):
@@ -144,7 +131,6 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertTrue(os.path.samestat(self.cache.stat(), root))
         self.assertEqual((self.cache / "README").read_bytes(), readme)
         self.assertEqual(self.protected(), protected)
-        self.observer.assert_not_called()
         self.build()
 
     def test_native_aging_requires_owner_terminal_local_cache_and_exclusive_locks(self):
@@ -388,8 +374,10 @@ raise SystemExit(factory.main())
         self.assertIn("GOCACHEPROG", row["reason"])
         self.assertFalse((self.cache / "build-ran").exists())
 
-    def test_native_aging_leaves_an_attended_retirement_empty(self):
-        self.assertEqual(self.inspect(True)["decision"], "cleaned")
+    def test_native_aging_leaves_a_cache_without_entries_alone(self):
+        for shard in self.cache.iterdir():
+            if shard.is_dir():
+                shutil.rmtree(shard)
         remaining = list(self.cache.iterdir())
         row = self.trim()
         self.assertEqual((row["decision"], row["removed_entries"], row["retained_entries"]), ("retained", 0, 0))
@@ -442,47 +430,18 @@ raise SystemExit(factory.main())
                 self.assertIn(damaged.name, row["reason"])
                 self.assertEqual(damaged.read_bytes(), payload)
 
-    def test_clean_and_native_rebuild_preserve_working_admin_and_owner_files(self):
-        (self.destination / "untracked").write_text("operator work")
-        (self.destination / "tool").write_text("edited")
-        self.git("-C", str(self.destination), "add", "tool")
-        (self.destination / "tool").write_text("another unstaged edit")
-        (self.admin / "index.lock").write_text("keep")
-        before = self.protected()
-        identity = self.cache.stat()
-        self.assertTrue(list(self.cache.glob("*/*-a")))
-        self.assertEqual(self.inspect()["decision"], "eligible")
-        row = self.inspect(True)
-        self.assertEqual(row["decision"], "cleaned", row)
-        self.assertLess(row["after_kib"], row["size_kib"])
-        self.assertFalse(list(self.cache.glob("*/*-a")))
-        self.assertTrue(os.path.samestat(self.cache.stat(), identity))
-        if sys.platform == "darwin":
-            attr, expected = factory.TIME_MACHINE_EXCLUSION
-            value = subprocess.check_output(["/usr/bin/xattr", "-px", attr, str(self.cache)], text=True)
-            self.assertEqual(bytes.fromhex(value), bytes.fromhex(expected))
-        self.build()
-        self.set_cache_time(self.at + go_cache.IDLE_SECONDS)
-        self.assertTrue(list(self.cache.glob("*/*-a")))
-        self.assertIn("24 hours", self.inspect(True)["reason"])
-        self.assertEqual(self.protected(), before)
-
-    def test_terminal_and_size_bounds(self):
-        with patch.object(go_cache, "MIN_KIB", 1024 * 1024):
-            self.assertIn("size floor", self.inspect(True)["reason"])
-        with patch.object(go_cache.time, "time", return_value=self.at + go_cache.IDLE_SECONDS - 1):
-            self.assertIn("24 hours", self.inspect(True)["reason"])
+    def test_terminal_receipt_bounds(self):
         self.native["state"] = "starting"
         factory.save(self.receipt, self.native)
-        self.assertIn("inconsistent terminal", self.inspect(True)["reason"])
+        self.assertIn("inconsistent terminal", self.inspect()["reason"])
         self.native["state"] = "failed"
         factory.save(self.receipt, self.native)
-        self.assertIn("inconsistent terminal", self.inspect(True)["reason"])
+        self.assertIn("inconsistent terminal", self.inspect()["reason"])
         self.assignment["closed"].update(state="lost", exit=None, reason="Rex restarted")
         factory.save(self.path, self.record)
-        self.assertIn("Rex process exit", self.inspect(True)["reason"])
+        self.assertIn("Rex process exit", self.inspect()["reason"])
 
-    def test_promised_objects_must_be_local_for_census_and_clean(self):
+    def test_promised_objects_must_be_local_for_census(self):
         remote = self.root / "promisor.git"
         self.git("clone", "--quiet", "--bare", "--no-local", str(self.repo), str(remote))
         self.git("remote", "add", "fixture", str(remote))
@@ -496,12 +455,11 @@ raise SystemExit(factory.main())
             obj = self.repo / ".git/objects" / oid[:2] / oid[2:]
             obj.rename(held)
             before = self.protected()
-            for clean in (False, True):
-                with self.subTest(field=field, clean=clean):
-                    row = self.inspect(clean)
-                    self.assertEqual(row["decision"], "retained", row)
-                    self.assertEqual(self.protected(), before)
-                    self.assertTrue(list(self.cache.glob("*/*-a")))
+            with self.subTest(field=field):
+                row = self.inspect()
+                self.assertEqual(row["decision"], "retained", row)
+                self.assertEqual(self.protected(), before)
+                self.assertTrue(list(self.cache.glob("*/*-a")))
             held.rename(obj)
 
     def test_configured_trace_destinations_stay_absent_through_cleanup(self):
@@ -517,10 +475,9 @@ raise SystemExit(factory.main())
                 self.assertGreater(target.stat().st_size, 0)
                 target.unlink()
             before = self.protected()
-            for clean, expected in ((False, "eligible"), (True, "cleaned")):
-                self.assertEqual(self.inspect(clean)["decision"], expected)
-                self.assertFalse(any(path.exists() for path in targets))
-                self.assertEqual(self.protected(), before)
+            self.assertEqual(self.inspect()["decision"], "eligible")
+            self.assertFalse(any(path.exists() for path in targets))
+            self.assertEqual(self.protected(), before)
 
     def test_signed_commit_parent_read_uses_no_git_children(self):
         headers, message = self.git("cat-file", "commit", self.native["candidate"]).split("\n\n", 1)
@@ -546,7 +503,6 @@ raise SystemExit(factory.main())
 
         with patch.object(subprocess, "run", side_effect=instrument):
             self.assertEqual(self.inspect()["decision"], "eligible")
-            self.assertEqual(self.inspect(True)["decision"], "cleaned")
         events = [json.loads(line) for line in trace.read_text().splitlines()]
         self.assertTrue(any(event["event"] == "start" for event in events))
         self.assertFalse([event for event in events if event["event"] == "child_start"])
@@ -608,10 +564,9 @@ raise SystemExit(factory.main())
         path, delivered = self.delivery_fixture(self.destination)
         self.assertEqual(self.inspect()["decision"], "eligible")
         factory.save(path, {**delivered, "pr": "https://github.com/fixture/project/pull/8"})
-        for clean in (False, True):
-            row = self.inspect(clean)
-            self.assertEqual(row["decision"], "retained")
-            self.assertIn("release judgment approved", row["reason"])
+        row = self.inspect()
+        self.assertEqual(row["decision"], "retained")
+        self.assertIn("release judgment approved", row["reason"])
         for changes in ({"kind": "other"}, {"task": "other"}, {"review": "other"}, {"schema_version": True},
                         {"required": []}, {"worktree_git_dir": str(self.admin)}, {"cwd": str(self.destination)},
                         {"approvals": {**delivered["approvals"], "qa": delivered["approvals"]["release"]}},
@@ -619,21 +574,8 @@ raise SystemExit(factory.main())
                                                                "release": delivered["approvals"]["release"]}}):
             with self.subTest(changes=changes):
                 factory.save(path, {**delivered, **changes})
-                self.assertEqual(self.inspect(True)["decision"], "retained")
+                self.assertEqual(self.inspect()["decision"], "retained")
         factory.save(path, delivered)
-
-        def replace_receipt(*_):
-            factory.save(path, self.native)
-            return {}
-
-        self.observer.side_effect = replace_receipt
-        self.assertEqual(self.inspect(True)["decision"], "retained")
-        self.assertTrue(list(self.cache.glob("*/*-a")))
-        self.observer.side_effect = None
-        factory.save(path, delivered)
-        before = self.protected()
-        self.assertEqual(self.inspect(True)["decision"], "cleaned")
-        self.assertEqual(self.protected(), before)
 
     def test_delivery_replays_original_approval_and_writer_contexts(self):
         path, delivered = self.delivery_fixture(self.destination)
@@ -654,7 +596,7 @@ raise SystemExit(factory.main())
                 first = json.loads(lines[0])
                 first["data"] = json.dumps(dict(type="thread.started", thread_id=context))
                 factory.save(stream, "\n".join([json.dumps(first), *lines[1:]]) + "\n")
-                self.assertIn("distinct original native contexts", self.inspect(True)["reason"])
+                self.assertIn("distinct original native contexts", self.inspect()["reason"])
                 self.assertTrue(list(self.cache.glob("*/*-a")))
 
     def test_current_reader_cannot_select_an_older_writer_commit(self):
@@ -664,7 +606,7 @@ raise SystemExit(factory.main())
         self.reader_fixture("qa", self.destination)
         self.assertTrue(factory.result_current(self.record, self.record["assignments"]["qa"]["result"]))
         before = self.protected()
-        self.assertIn("verified commit produced the selected", self.inspect(True)["reason"])
+        self.assertIn("verified commit produced the selected", self.inspect()["reason"])
         self.assertEqual(self.protected(), before)
         self.assertTrue(list(self.cache.glob("*/*-a")))
 
@@ -685,28 +627,16 @@ raise SystemExit(factory.main())
         self.assertEqual(assignment["launch_checkout"]["head"], self.native["candidate"])
         self.assertIn("original reader worktree ownership", self.inspect()["reason"])
 
-    def test_nested_legacy_reader_passes_release_user_check_only(self):
+    def test_release_retains_nested_legacy_reader(self):
         self.reader_fixture("qa", self.destination / "nested", legacy=True)
         assignment = self.record["assignments"]["qa"]
         self.assertTrue(assignment["native_collected"])
         self.assertNotIn("launch_checkout", assignment)
         owner_bytes = self.path.read_bytes()
-        witness = go_cache.checkout_binding(self.destination, self.admin, self.record["admission"]["repository_identity"])
-        with go_cache.inode_lock(self.admin):
-            users = go_cache.check_release_users(self.state, self.record, self.destination, self.admin, witness)
-        receipt = self.state / "fixture.qa.codex.json"
-        self.assertEqual(users[receipt], receipt.read_bytes())
-        self.assertIn("missing original reader worktree ownership", self.inspect()["reason"])
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("descendants", error)
         self.assertEqual(self.path.read_bytes(), owner_bytes)
-        # The same collected reader can finish a pre-upgrade checkout's lifecycle.
-        del self.record["provisioning"]["checkout_inodes"]
-        factory.save(self.path, self.record)
-        owner_bytes = self.path.read_bytes()
-        code, output, error = self.cli("release-worktree", "--task", "fixture")
-        self.assertEqual(code, 0, error)
-        self.assertFalse(json.loads(output)["already_released"])
-        self.assertEqual(self.path.read_bytes(), owner_bytes)
-        self.assertEqual(receipt.read_bytes(), users[receipt])
 
     def test_collection_does_not_adopt_a_reader_pointer_or_a_legacy_collection_witness(self):
         reader = self.root / "qa"
@@ -725,7 +655,7 @@ raise SystemExit(factory.main())
         assignment = self.record["assignments"]["qa"]
         self.assertTrue(assignment["native_collected"])
         self.assertEqual(assignment["result"]["outcome"], "approved")
-        self.assertIn("original reader worktree ownership", self.inspect(True)["reason"])
+        self.assertIn("original reader worktree ownership", self.inspect()["reason"])
         assignment["reader_checkout"] = go_cache.checkout_binding(reader, factory.git_dir(reader),
             self.record["admission"]["repository_identity"])
         del assignment["launch_checkout"]
@@ -733,7 +663,7 @@ raise SystemExit(factory.main())
         collected = collect(self.path, "qa", None, self.record, assignment)["assignments"]["qa"]
         self.assertNotIn("launch_checkout", collected)
         self.assertEqual(collected["result"], assignment["result"])
-        self.assertIn("original reader worktree ownership", self.inspect(True)["reason"])
+        self.assertIn("original reader worktree ownership", self.inspect()["reason"])
 
     def test_replaced_writer_pointer_is_never_adopted(self):
         pointer = self.destination / ".git"
@@ -742,9 +672,10 @@ raise SystemExit(factory.main())
         pointer.write_bytes(saved.read_bytes())
         self.assertNotEqual(pointer.stat().st_ino, saved.stat().st_ino)
         entries = set(self.cache.rglob("*"))
-        self.assertIn("original writer checkout", self.inspect(True)["reason"])
-        with self.assertRaisesRegex(factory.FactoryError, "original provisioning identity"):
-            factory.release_worktree(self.path)
+        self.assertIn("original writer checkout", self.inspect()["reason"])
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("original provisioning identity", error)
         self.assertTrue(pointer.exists())
         self.assertEqual(set(self.cache.rglob("*")), entries)
 
@@ -755,15 +686,10 @@ raise SystemExit(factory.main())
         self.assertEqual(self.inspect()["decision"], "eligible")
         backlink = factory.git_dir(reader) / "gitdir"
         original = backlink.read_text()
-        def redirect_backlink(*_):
-            backlink.write_text(str(self.destination / ".git") + "\n")
-            return {}
-
-        self.observer.side_effect = redirect_backlink
-        self.assertIn("worktree", self.inspect(True)["reason"])
-        self.observer.side_effect = None
+        backlink.write_text(str(self.destination / ".git") + "\n")
+        self.assertIn("worktree", self.inspect()["reason"])
         backlink.write_text(original)
-        self.assertEqual(self.inspect(True)["decision"], "cleaned")
+        self.assertEqual(self.inspect()["decision"], "eligible")
 
     def assert_reader_replacement_retained(self, provisioned):
         reader = self.root / "qa"
@@ -782,7 +708,7 @@ raise SystemExit(factory.main())
         witness = assignment.pop("launch_checkout")
         factory.save(self.path, self.record)
         original = self.path.read_bytes()
-        self.assertIn("original reader worktree ownership", self.inspect(True)["reason"])
+        self.assertIn("original reader worktree ownership", self.inspect()["reason"])
         self.assertEqual(self.path.read_bytes(), original)
         assignment["launch_checkout"] = witness
         factory.save(self.path, self.record)
@@ -795,7 +721,7 @@ raise SystemExit(factory.main())
         self.assertEqual(factory.git_dir(reader), linked)
         self.assertEqual(factory.git_commit(str(reader), "HEAD"), witness["head"])
         before = set(self.cache.rglob("*"))
-        self.assertIn("original reader worktree ownership", self.inspect(True)["reason"])
+        self.assertIn("original reader worktree ownership", self.inspect()["reason"])
         self.assertEqual(set(self.cache.rglob("*")), before)
 
     def test_replacement_reader_with_copied_provisioner_marker_retains(self):
@@ -810,120 +736,46 @@ raise SystemExit(factory.main())
         shutil.copytree(factory.ROOT, successor)
         with patch.object(factory, "ROOT", successor):
             self.assertIsNone(factory.native_harness(self.assignment["request"]["command"]))
-            row = self.inspect(True)
-        self.assertEqual(row["decision"], "cleaned", row)
+            row = self.inspect()
+        self.assertEqual(row["decision"], "eligible", row)
 
-    def test_unattended_owner_release_removes_only_its_linked_build_cache(self):
-        unrelated = self.root / "go-build"
-        unrelated.mkdir()
-        saved = unrelated / "entry"
-        saved.write_bytes(b"another build")
-        self.assertTrue(list(self.cache.glob("*/*-a")))
-        # This collected worker finished before its pane was tidied.
-        self.native["schema_version"] = 7
-        self.collect_fixture("writer", self.native)
-        self.record["assignments"]["writer"].pop("closed")
-        factory.save(self.path, self.record)
-        with patch.object(sys, "stdin", StringIO()):
-            code, _, error = self.cli("release-worktree", "--task", "fixture")
-        self.assertEqual(code, 0, error)
-        self.observer.assert_not_called()
-        self.assertFalse(self.destination.exists())
-        self.assertFalse(self.cache.exists())
-        self.assertFalse(self.admin.exists())
-        self.assertEqual(saved.read_bytes(), b"another build")
-
-    def test_owner_release_replays_only_bound_stopped_historical_failure(self):
+    def test_release_retains_failed_native_with_detached_helper(self):
         self.assignment.update(result=None, native_collected=False)
         self.assignment["closed"].update(state="failed", exit={"exit_code": 1})
         self.assignment["request"]["command"][0] = str(self.root / "previous-python")
         self.attest(self.assignment)
         self.assignment["native_launch"]["runtime"] = "a" * 64
-        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
-                              stdin=subprocess.PIPE) as child:
-            process = dict(scope=factory.process_scope(), pid=child.pid, start_time=factory.native_start_time(child.pid))
-            self.native.update(schema_version=8, native_process=process, state="failed", exit_code=1, report=None)
-            factory.save(self.receipt, self.native)
-            factory.save(self.path, self.record)
-            try:
-                code, _, error = self.cli("release-worktree", "--task", "fixture")
-                self.assertEqual(code, 1)
-                self.assertIn("native process is active", error)
-            finally:
-                child.communicate(timeout=10)
-
-        self.assertEqual(self.inspect()["decision"], "retained")
-        for key, value in (("native_launch", None), ("request", {**self.assignment["request"], "goal": "changed"})):
-            with self.subTest(key=key):
-                damaged = dict(self.assignment)
-                if value is None:
-                    del damaged[key]
-                else:
-                    damaged[key] = value
-                factory.save(self.path, {**self.record, "assignments": {"writer": damaged}})
-                self.assertEqual(self.cli("release-worktree", "--task", "fixture")[0], 1)
-        factory.save(self.path, self.record)
-        owner = self.path.read_bytes()
-        for changes in (dict(job="fixture/other"), dict(exit_code=None), dict(native_process=None)):
-            with self.subTest(changes=changes):
-                factory.save(self.receipt, {**self.native, **changes})
-                self.assertEqual(self.cli("release-worktree", "--task", "fixture")[0], 1)
-        factory.save(self.receipt, self.native)
-        code, _, error = self.cli("release-worktree", "--task", "fixture")
-        self.assertEqual(code, 0, error)
-        self.assertFalse(self.destination.exists())
-        self.assertEqual(self.path.read_bytes(), owner)
-
-    def test_git_removal_holds_both_flocks_after_owner_is_killed(self):
-        wrapper = self.root / "gated-git"
-        real_git = factory.git_binary()
-        wrapper.write_text(f"""#!{sys.executable}
-import os, socket, sys
-if sys.argv[-5:-3] == ["worktree", "remove"]:
-    gate = socket.socket(socket.AF_UNIX)
-    os.chdir({str(self.root)!r})
-    gate.connect("remove.sock")
-    gate.settimeout(30)
-    if gate.recv(1) != b"g":
-        sys.exit(1)
-    gate.set_inheritable(True)
-os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
-""")
-        wrapper.chmod(0o700)
+        # The recorded native exits after starting a detached helper with its cache.
+        helper = ("import os, socket; s = socket.socket(socket.AF_UNIX); "
+                  "s.settimeout(20); s.connect(os.environ['FIXTURE_GATE']); "
+                  "s.sendall(os.fsencode(os.environ['GOCACHE'])); s.recv(1); s.sendall(b'alive')")
+        launch = ("import subprocess, sys; sys.stdin.read(1); "
+                  "subprocess.Popen([sys.executable, '-c', sys.argv[1]], start_new_session=True); sys.exit(1)")
         with socket.socket(socket.AF_UNIX) as listener:
             with chdir(self.root):
-                listener.bind("remove.sock")
+                listener.bind("helper.sock")
             listener.listen(1)
-            listener.settimeout(30)
-            launch = ("import factory, sys; factory.git_binary = lambda: sys.argv[1]; "
-                      "sys.exit(factory.main(sys.argv[2:]))")
-            with subprocess.Popen([sys.executable, "-c", launch, str(wrapper), "--state-dir", str(self.state),
-                                   "release-worktree", "--task", "fixture"], cwd=factory.ROOT) as parent:
-                try:
-                    child, _ = listener.accept()
-                    with child:
-                        parent.kill()
-                        self.assertEqual(parent.wait(timeout=10), -signal.SIGKILL)
-                        for path in (self.admin, self.cache):
-                            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path):
-                                pass
-                        child.sendall(b"g")
-                        child.settimeout(30)
-                        self.assertEqual(child.recv(1), b"")
-                finally:
-                    if parent.poll() is None:
-                        parent.kill()
-        self.assertFalse(self.destination.exists())
-        self.assertFalse(self.admin.exists())
-
-    def test_unknown_linked_cache_data_preserves_the_checkout(self):
-        unknown = self.cache / "unfinished-work"
-        unknown.write_bytes(b"preserve this")
-        code, _, error = self.cli("release-worktree", "--task", "fixture")
-        self.assertEqual(code, 1)
-        self.assertIn("unexpected cache entry", error)
-        self.assertTrue(self.destination.is_dir())
-        self.assertEqual(unknown.read_bytes(), b"preserve this")
+            listener.settimeout(20)
+            with subprocess.Popen([sys.executable, "-c", launch, helper], cwd=self.destination, stdin=subprocess.PIPE,
+                                  env={**os.environ, "GOCACHE": str(self.cache),
+                                       "FIXTURE_GATE": "../helper.sock"}) as parent:
+                process = dict(scope=factory.process_scope(), pid=parent.pid, start_time=factory.native_start_time(parent.pid))
+                parent.communicate(b"x", timeout=10)
+                self.assertEqual(parent.returncode, 1)
+            child, _ = listener.accept()
+            with child:
+                child.settimeout(20)
+                self.assertEqual(child.recv(4096), os.fsencode(self.cache))
+                self.native.update(schema_version=8, native_process=process, state="failed", exit_code=1, report=None)
+                factory.save(self.receipt, self.native)
+                factory.save(self.path, self.record)
+                code, _, error = self.cli("release-worktree", "--task", "fixture")
+                self.assertEqual(code, 1)
+                self.assertIn("descendants", error)
+                self.assertTrue(self.cache.is_dir())
+                self.assertTrue(self.destination.is_dir())
+                child.sendall(b"x")
+                self.assertEqual(child.recv(5), b"alive")
 
     def test_release_confirms_git_removal_and_retains_the_dependent_cache(self):
         cwd = self.root / "qa"
@@ -934,51 +786,30 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         with factory.execution_lock(self.state), factory.task_lock(self.state, "qa"):
             factory.provision_worktree(owner, worktree_id="reader", destination=str(cwd))
         linked = factory.git_dir(cwd)
-        path, delivered = self.delivery_fixture(cwd)
+        self.delivery_fixture(cwd)
         self.assertEqual(self.inspect()["decision"], "eligible")
         entries = set(self.cache.rglob("*"))
-        verify = release_evidence.delivered_receipt
-
-        raw_owner = owner.read_bytes()
-        self.observer.reset_mock()
-        def rewrite_owner_after_replay(*args, **kwargs):
-            verified = verify(*args, **kwargs)
-            if self.observer.called:
-                owner.write_bytes(raw_owner.replace(b"\n", b"\r\n"))
-            return verified
-        with patch.object(release_evidence, "delivered_receipt", side_effect=rewrite_owner_after_replay):
-            self.assertEqual(self.inspect(True)["decision"], "retained")
-            self.assertEqual(json.loads(owner.read_bytes()), json.loads(raw_owner))
-            self.assertEqual(set(self.cache.rglob("*")), entries)
-        owner.write_bytes(raw_owner)
-
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "qa"):
-            released = factory.release_worktree(owner)
-        self.assertFalse(released["already_released"])
-        self.assertFalse(os.path.lexists(linked))
-        self.assertIn("direct-user exclusion", self.inspect(True)["reason"])
-        factory.save(path, {**delivered, "pr": "https://github.com/fixture/project/pull/8"})
-        self.assertIn("release judgment approved", self.inspect(True)["reason"])
-        factory.save(path, delivered)
-        release_receipt = owner.with_suffix(".worktree-release.json")
-        original = json.loads(release_receipt.read_text())
-        release_receipt.unlink()
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "qa"):
-            with self.assertRaisesRegex(factory.FactoryError, "Missing original owner release"):
-                factory.release_worktree(owner)
-        self.assertIn("owner release outcome", self.inspect(True)["reason"])
-        self.assertFalse(release_receipt.exists())
-        for changes in ({"owner_token": "another-owner"}, {"worktree": str(self.destination)},
-                        {"already_released": True}, {"schema_version": True}):
-            with self.subTest(changes=changes):
-                factory.save(release_receipt, {**original, **changes})
-                self.assertIn("owner release outcome", self.inspect(True)["reason"])
-        factory.save(release_receipt, original)
-        self.assertEqual(set(self.cache.rglob("*")), entries)
-        self.assertIn("direct-user exclusion", self.inspect(True)["reason"])
+        code, _, error = self.cli("release-worktree", "--task", "qa")
+        self.assertEqual(code, 1)
+        self.assertIn("descendants", error)
+        self.assertTrue(linked.is_dir())
         self.assertEqual(set(self.cache.rglob("*")), entries)
 
-    def test_legacy_reader_release_and_retry_keep_dependent_cache(self):
+        # Existing releases from older runtimes still cannot authorize native aging.
+        item = factory.load_task(owner)["provisioning"]
+        witness = self.record["assignments"]["qa"]["launch_checkout"]
+        self.git("worktree", "remove", "--force", "--force", str(cwd))
+        receipt = owner.with_suffix(".worktree-release.json")
+        factory.save(receipt, dict(schema_version=1, at=self.at + 1, checkout=witness, head=witness["head"],
+                                  task="qa", worktree=str(cwd), git_dir=str(linked), owner_token=item["owner_token"],
+                                  branch=item["request"]["branch"], already_released=False))
+        code, output, error = self.cli("release-worktree", "--task", "qa")
+        self.assertEqual(code, 0, error)
+        self.assertTrue(json.loads(output)["already_released"])
+        self.assertIn("direct-user exclusion", self.trim()["reason"])
+        self.assertEqual(set(self.cache.rglob("*")), entries)
+
+    def test_used_legacy_reader_retains_dependent_cache(self):
         reader = self.root / "qa"
         owner = self.state / "qa.json"
         factory.admit(owner, task="qa", repository=str(self.repo), goal="Read the fixture",
@@ -994,22 +825,11 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         original = {p: p.read_bytes() for p in (owner, self.path, self.state / "fixture.qa.codex.json")}
         entries = {p: p.read_bytes() for p in self.cache.rglob("*") if p.is_file()}
         self.assertIn("Missing original provisioner ownership", self.inspect()["reason"])
-        code, output, error = self.cli("release-worktree", "--task", "qa")
-        self.assertEqual(code, 0, error)
-        self.assertFalse(json.loads(output)["already_released"])
-        self.assertFalse(reader.exists())
-        self.assertFalse(Path(item["git_dir"]).exists())
-        self.assertEqual(self.git("rev-parse", item["request"]["branch"]), record["inputs"]["candidate"])
-        released = owner.with_suffix(".worktree-release.json")
-        original[released] = released.read_bytes()
-        proof = json.loads(original[released])
-        self.assertNotIn("checkout", proof)
-        self.assertEqual(proof["observed_checkout"], self.record["assignments"]["qa"]["launch_checkout"])
-        code, output, error = self.cli("release-worktree", "--task", "qa")
-        self.assertEqual(code, 0, error)
-        self.assertTrue(json.loads(output)["already_released"])
+        code, _, error = self.cli("release-worktree", "--task", "qa")
+        self.assertEqual(code, 1)
+        self.assertIn("descendants", error)
+        self.assertTrue(reader.is_dir())
         self.assertIn("Missing original provisioner ownership", self.inspect()["reason"])
-        self.assertIn("Missing original provisioner ownership", self.inspect(True)["reason"])
         self.assertEqual({p: p.read_bytes() for p in self.cache.rglob("*") if p.is_file()}, entries)
         self.assertEqual({p: p.read_bytes() for p in original}, original)
 
@@ -1020,7 +840,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.git("worktree", "remove", str(cwd))
         before = self.protected()
         entries = set(self.cache.rglob("*"))
-        self.assertIn("original owner release", self.inspect(True)["reason"])
+        self.assertIn("original owner release", self.inspect()["reason"])
         self.assertEqual(set(self.cache.rglob("*")), entries)
         self.assertEqual(self.protected(), before)
         self.assertEqual(json.loads(path.read_text()), delivered)
@@ -1037,12 +857,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
 
         def redirect_after_verification(*args, **kwargs):
             result = verify_delivery(*args, **kwargs)
-            if self.observer.called:
+            if replay.call_count == 2:
                 backlink.write_text(str(other / ".git") + "\n")
             return result
 
-        with patch.object(release_evidence, "delivered_receipt", side_effect=redirect_after_verification):
-            row = self.inspect(True)
+        with patch.object(release_evidence, "delivered_receipt", side_effect=redirect_after_verification) as replay:
+            row = self.trim()
         self.assertEqual(backlink.read_text().strip(), str(other / ".git"))
         self.assertEqual(row["decision"], "retained", row)
         self.assertEqual(set(self.cache.rglob("*")), entries)
@@ -1053,51 +873,16 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
     def test_reader_backlink_changed_during_final_delivery_check_retains_cache(self):
         self.assert_late_backlink_change_retains_cache("reader")
 
-    def test_live_process_busy_locks_and_other_line_reuse(self):
-        self.observer.side_effect = factory.FactoryError("Process 42 has an open path")
-        self.assertIn("Process 42", self.inspect(True)["reason"])
+    def test_busy_locks_and_other_line_reuse(self):
         for lock in (factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"),
                      go_cache.inode_lock(self.admin, shared=True)):
             with lock:
-                self.assertIn("Busy lock", self.inspect(True)["reason"])
+                self.assertIn("Busy lock", self.inspect()["reason"])
         other = factory.new_task("other", "other-line")
         other["assignments"]["pending"] = {"request": self.assignment["request"]}
         factory.save(self.state / "other.json", other)
-        self.assertIn("reuse by other/pending", self.inspect(True)["reason"])
+        self.assertIn("reuse by other/pending", self.inspect()["reason"])
         self.assertTrue(list(self.cache.glob("*/*-a")))
-
-    def test_detached_user_then_inactive_and_warm_cache(self):
-        # This workload closes its cache files and waits outside the tree. It can still
-        # write into its inherited cache after the synthetic Rex exit.
-        program = ("import os, sys; from pathlib import Path; "
-                   "sys.stdin.buffer.read(1); (Path(os.environ['GOCACHE'])/'log.txt').write_text('resumed')")
-        child = subprocess.Popen([sys.executable, "-c", program], cwd=self.root, stdin=subprocess.PIPE,
-                                 env={"GOCACHE": str(self.cache)}, start_new_session=True)
-        self.addCleanup(child.wait)
-        self.addCleanup(child.kill)
-
-        def observe(*args):
-            own = os.getpid()
-            ps = f"{own} Sun Sep 13 12:00:00 2020 census\n"
-            listing = f"p{own}\0\nfcwd\0tDIR\0n/elsewhere\0\n".encode()
-            ps += "41 Sun Sep 13 11:00:00 2020 older-workload\n"
-            listing += b"p41\0\nfcwd\0tDIR\0n/elsewhere\0\n"
-            if child.poll() is None:
-                ps += f"{child.pid} Sun Sep 13 12:26:00 2020 helper\n"
-                listing += f"p{child.pid}\0\nfcwd\0tDIR\0n{self.root}\0\n".encode()
-            with patch.object(go_cache, "boot_time", return_value=self.at - 3600), patch.object(
-                    go_cache, "inventory", side_effect=[(7, ps.encode(), b""), (8, listing, b"")]):
-                return self.process_check(*args)
-        self.observer.side_effect = observe
-        self.assertIn("detached cache user", self.inspect(True)["reason"])
-        child.communicate(b"x", timeout=10)
-        self.assertEqual(child.returncode, 0)
-        self.assertEqual((self.cache / "log.txt").read_text(), "resumed")
-        self.set_cache_time(self.at)
-        self.assertEqual(self.inspect(True)["decision"], "cleaned")
-        self.build()
-        with patch.object(go_cache, "MIN_KIB", 1024 * 1024):
-            self.assertIn("size floor", self.inspect(True)["reason"])
 
     def test_standalone_census_from_existing_shared_entry_is_read_only(self):
         data = self.root / "shared-data"
@@ -1123,12 +908,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             command[command.index("--worktree-git-dir") + 1] = str(value)
             other["assignments"]["pending"] = {"request": {"cwd": str(self.repo), "command": command}}
             factory.save(self.state / "other.json", other)
-            self.assertIn("reuse by other/pending", self.inspect(True)["reason"])
+            self.assertIn("reuse by other/pending", self.inspect()["reason"])
 
     def test_receipt_requires_original_harness_and_frozen_request(self):
         extra = self.state / "fixture.writer.claude.json"
         factory.save(extra, {**self.native, "kind": "claude-execution", "state": "starting"})
-        self.assertIn(extra.name, self.inspect(True)["reason"])
+        self.assertIn(extra.name, self.inspect()["reason"])
         extra.unlink()
         alias = self.root / "receipt-admin"
         alias.symlink_to(self.admin, target_is_directory=True)
@@ -1138,15 +923,15 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         foreign = self.state / "other.writer.codex.json"
         factory.save(foreign, {**self.native, "job": "other/writer", "cwd": str(self.repo),
                                "worktree_git_dir": str(alias)})
-        self.assertIn(foreign.name, self.inspect(True)["reason"])
+        self.assertIn(foreign.name, self.inspect()["reason"])
         unknown = foreign.with_name("other.writer.unrecognized.json")
         foreign.rename(unknown)
-        self.assertIn(unknown.name, self.inspect(True)["reason"])
+        self.assertIn(unknown.name, self.inspect()["reason"])
         unknown.unlink()
         for key, value in (("requested_model", "other"), ("writer", False), ("events", "/elsewhere")):
             with self.subTest(key=key):
                 factory.save(self.receipt, {**self.native, key: value})
-                self.assertIn("inconsistent terminal", self.inspect(True)["reason"])
+                self.assertIn("inconsistent terminal", self.inspect()["reason"])
         factory.save(self.receipt, self.native)
         self.assertEqual(self.inspect()["decision"], "eligible")
 
@@ -1156,9 +941,9 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         factory.save(self.receipt, self.native)
         factory.save(self.path, self.record)
         before = self.protected()
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
-                self.assertRaisesRegex(factory.FactoryError, "observed Rex process exit"):
-            factory.release_worktree(self.path)
+        with factory.execution_lock(self.state) as line_fd, factory.task_lock(self.state, "fixture"), \
+                self.assertRaisesRegex(factory.FactoryError, "descendants"):
+            factory.release_worktree(self.path, line_fd)
         self.assertEqual(self.protected(), before)
         self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
 
@@ -1170,9 +955,9 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         factory.save(self.path, self.record)
         patch_path = factory.reset_patch(self.receipt)
         factory.save(patch_path, "original private patch")
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
-                self.assertRaisesRegex(factory.FactoryError, "inconsistent terminal receipt"):
-            factory.release_worktree(self.path)
+        with factory.execution_lock(self.state) as line_fd, factory.task_lock(self.state, "fixture"), \
+                self.assertRaisesRegex(factory.FactoryError, "descendants"):
+            factory.release_worktree(self.path, line_fd)
         self.assertTrue(self.destination.is_dir())
         self.assertEqual(patch_path.read_text(), "original private patch")
 
@@ -1186,7 +971,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
                 if args[0] == "new":
                     case.assertEqual(factory.load_task(other / "another.json")["assignments"]["reader"]["state"],
                                      "launching")
-                    case.assertIn("state store", case.inspect(True)["reason"])
+                    case.assertIn("state store", case.inspect()["reason"])
                 return super().call(*args, **kwargs)
 
         with patch.object(factory, "Rex", ObservedRex), patch.object(FakeRex, "sessions", []), \
@@ -1195,12 +980,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
                 role="qa", goal="Inspect", cwd=str(self.destination), command=[sys.executable, "{instructions}"],
                 binary=sys.executable, server="unix:///fixture")
         self.assertEqual(attempt["state"], "launched")
-        self.assertIn("state store", self.inspect(True)["reason"])
+        self.assertIn("state store", self.inspect()["reason"])
 
     def test_mount_checked_before_size_and_again_on_open_shard(self):
         with patch.object(go_cache, "check_mounts", side_effect=factory.FactoryError("fixture mount")), \
                 patch.object(go_cache, "cache_contents") as walk:
-            self.assertIn("fixture mount", self.inspect(True)["reason"])
+            self.assertIn("fixture mount", self.inspect()["reason"])
             walk.assert_not_called()
         shard = (self.cache / "ab").stat()
         mounted = False
@@ -1218,12 +1003,12 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
 
         def during_walk(fd, mount, **kwargs):
             nonlocal mounted
-            mounted = bool(kwargs.get("clean"))
+            mounted = not kwargs.get("size_only", False)
             return clean(fd, mount, **kwargs)
 
         with patch.object(go_cache, "cache_contents", side_effect=during_walk), \
                 patch.object(go_cache, "mount_id", side_effect=identify_open), patch.object(os, "listdir", list_on_mount):
-            self.assertIn("Mount or identity changed", self.inspect(True)["reason"])
+            self.assertIn("Mount or identity changed", self.inspect()["reason"])
         self.assertTrue((self.cache / "ab").is_dir())
 
     def test_size_pass_skips_leaf_open_but_cleanup_checks_its_mount(self):
@@ -1240,7 +1025,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             return mount_id(fd)
 
         with patch.object(go_cache, "mount_id", side_effect=other_mount):
-            row = self.inspect(True)
+            row = self.inspect()
         self.assertGreater(row["size_kib"], 0)
         self.assertIn("Mount or identity changed at cache entry", row["reason"])
         self.assertEqual(len(checks), 1)
@@ -1248,38 +1033,19 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
 
     def test_lost_owner_changed_root_and_unexpected_contents(self):
         (self.cache / "unknown").symlink_to(self.destination / "tool")
-        self.assertIn("unexpected cache entry", self.inspect(True)["reason"])
+        self.assertIn("unexpected cache entry", self.inspect()["reason"])
         (self.cache / "unknown").unlink()
         self.cache.chmod(0o755)
-        self.assertIn("0700", self.inspect(True)["reason"])
+        self.assertIn("0700", self.inspect()["reason"])
         self.cache.chmod(0o700)
         saved = self.cache.with_name("saved")
         self.cache.rename(saved)
         self.cache.symlink_to(saved, target_is_directory=True)
-        self.assertIn("changed path", self.inspect(True)["reason"])
+        self.assertIn("changed path", self.inspect()["reason"])
         self.cache.unlink()
         saved.rename(self.cache)
         self.path.unlink()
-        self.assertIn("one provisioned task", self.inspect(True)["reason"])
-
-    def test_interrupt_after_partial_cleanup_is_reported_and_retry_rechecks(self):
-        unlink = os.unlink
-        def interrupted(name, *, dir_fd):
-            unlink(name, dir_fd=dir_fd)
-            timestamp = self.at + go_cache.IDLE_SECONDS
-            os.utime(dir_fd, (timestamp, timestamp))
-            raise OSError("fixture interruption")
-
-        before = self.protected()
-        with patch.object(go_cache.os, "unlink", side_effect=interrupted):
-            row = self.inspect(True)
-        self.assertEqual(row["decision"], "failed")
-        self.assertIn("may be partial", row["reason"])
-        self.assertEqual(self.protected(), before)
-        self.assertIn("24 hours", self.inspect(True)["reason"])
-        self.set_cache_time(self.at)
-        self.assertEqual(self.inspect(True)["decision"], "cleaned")
-
+        self.assertIn("one provisioned task", self.inspect()["reason"])
 
     def test_census_keeps_reader_and_leaves_old_task_bytes_unchanged(self):
         reader = self.root / "reader"
@@ -1301,8 +1067,6 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         self.assertEqual(rows[str(self.cache)]["decision"], "eligible")
         self.assertIn("one provisioned task", rows[str(other)]["reason"])
         self.assertEqual(self.protected(), saved)
-        self.assertEqual(self.inspect(True)["decision"], "cleaned")
-        self.assertEqual(self.protected(), saved)
 
     def test_schema_eight_retains_for_missing_exit_without_migrating(self):
         self.record["schema_version"] = 8
@@ -1312,27 +1076,18 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         del self.assignment["closed"], self.assignment["native_collected"]
         factory.save(self.path, self.record)
         before = self.protected()
-        for clean in (False, True):
-            self.assertIn("observed Rex process exit", self.inspect(clean)["reason"])
-            self.assertEqual(self.protected(), before)
+        self.assertIn("observed Rex process exit", self.inspect()["reason"])
+        self.assertEqual(self.protected(), before)
 
     def test_surviving_writer_with_release_receipt_retains_every_entry(self):
         factory.save(self.path.with_suffix(".worktree-release.json"), "conflicting release")
         entries = set(self.cache.rglob("*"))
-        self.assertIn("surviving writer checkout", self.inspect(True)["reason"])
+        self.assertIn("surviving writer checkout", self.inspect()["reason"])
         self.assertEqual(set(self.cache.rglob("*")), entries)
 
-    def test_replaced_lock_or_owner_marker_retains(self):
-        def replace_lock(*_):
-            lock = self.state / "fixture.lock"
-            lock.rename(self.state / "previous.lock")
-            lock.touch(mode=0o600)
-            return {"observed_processes": 1}
-
-        self.observer.side_effect = replace_lock
-        self.assertIn("lock identity changed", self.inspect(True)["reason"])
-        (self.admin / "locked").write_text("different owner")
-        self.assertIn("ownership differs", self.inspect(True)["reason"])
+    def test_changed_owner_marker_retains(self):
+        (self.admin / "locked").write_text("replacement")
+        self.assertIn("ownership differs", self.inspect()["reason"])
         self.assertTrue(list(self.cache.glob("*/*-a")))
 
     def test_archived_failure_preceding_collected_recovery_is_terminal(self):
@@ -1355,7 +1110,7 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         row = self.inspect()
         self.assertEqual((row["decision"], row["attempts"]), ("eligible", 2))
         path.unlink()
-        self.assertIn(path.name, self.inspect(True)["reason"])
+        self.assertIn(path.name, self.inspect()["reason"])
 
     def test_collected_worker_receipt_with_private_native_child(self):
         # The inert transport reports completion while its PID stays occupied. Only
@@ -1425,78 +1180,11 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
         with patch.object(factory, "SCRATCH_RECEIPT_VERSION", 7, create=True), \
                 patch.object(factory, "process_scope", return_value="original-boot", create=True), \
                 patch.object(factory, "process_proven_gone", return_value=False, create=True) as gone:
-            self.assertIn("cannot be verified", self.inspect(True)["reason"])
+            self.assertIn("cannot be verified", self.inspect()["reason"])
             gone.assert_called_once_with(None, "original-boot", 0)
         self.native["schema_version"] = 999
         factory.save(self.receipt, self.native)
-        self.assertIn("receipt version", self.inspect(True)["reason"])
-
-    def test_owner_newlines_change_during_observation_retains_all_entries(self):
-        entries = set(self.cache.rglob("*"))
-        original = self.path.read_bytes()
-        changed = original.replace(b"\n", b"\r\n")
-        self.assertNotEqual(original, changed)
-        self.assertEqual(json.loads(original), json.loads(changed))
-        def rewrite(*_):
-            self.path.write_bytes(changed)
-            return {}
-        self.observer.side_effect = rewrite
-        self.assertEqual(self.inspect(True)["decision"], "retained")
-        self.assertEqual(set(self.cache.rglob("*")), entries)
-
-    def test_write_at_return_from_final_delivery_replay_retains_all_entries(self):
-        self.delivery_fixture(self.destination)
-        entries = set(self.cache.rglob("*"))
-        new = self.cache / "aa" / ("aa" + "0" * 62 + "-d")
-        verify = release_evidence.delivered_receipt
-        def write_after_replay(*args, **kwargs):
-            verified = verify(*args, **kwargs)
-            if self.observer.called:
-                new.write_bytes(b"inert build output")
-            return verified
-        with patch.object(release_evidence, "delivered_receipt", side_effect=write_after_replay):
-            row = self.inspect(True)
-        self.assertIn("Cache changed during observation", row["reason"])
-        self.assertEqual(set(self.cache.rglob("*")), entries | {new})
-        self.assertEqual(new.read_bytes(), b"inert build output")
-
-    def test_unattended_selection_retains_even_when_all_samples_are_idle(self):
-        entries = set(self.cache.rglob("*"))
-        self.terminal.isatty = lambda: False
-        self.assertEqual(self.inspect()["decision"], "eligible")
-        # A direct writer can enter after the last sample even with the launch lock held.
-        shard = self.cache / "aa" / ("aa" + "1" * 62 + "-d")
-        def direct_writer():
-            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.admin, shared=True):
-                pass
-            subprocess.run([sys.executable, "-c", "import pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(b'build')",
-                            str(shard)], cwd=self.root, check=True)
-            return False
-        self.terminal.isatty = direct_writer
-        row = self.inspect(True)
-        self.assertEqual(row["decision"], "retained")
-        self.assertIn("attended exclusive maintenance window", row["reason"])
-        self.assertEqual(set(self.cache.rglob("*")), entries | {shard})
-        self.assertEqual(shard.read_bytes(), b"build")
-
-    def test_last_observation_rechecks_cache_writes_and_inode(self):
-        def write(*_):
-            timestamp = self.at + go_cache.IDLE_SECONDS
-            os.utime(next(self.cache.glob("*/*-a")), (timestamp, timestamp))
-            return {"observed_processes": 1}
-
-        self.observer.side_effect = write
-        self.assertIn("changed during observation", self.inspect(True)["reason"])
-        self.set_cache_time(self.at)
-
-        def replace(*_):
-            self.cache.rename(self.cache.with_name("original"))
-            self.cache.mkdir(mode=0o700)
-            return {"observed_processes": 1}
-
-        self.observer.side_effect = replace
-        self.assertIn("identity changed", self.inspect(True)["reason"])
-        self.assertTrue(list((self.admin / "original").glob("*/*-a")))
+        self.assertIn("receipt version", self.inspect()["reason"])
 
     def test_concurrent_launch_cannot_publish_an_intent_or_spend_an_attempt(self):
         from test_rex_launcher import FakeRex
@@ -1513,6 +1201,121 @@ os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
             self.assertFalse(other.exists())
             self.assertFalse((self.state / "another.reader.md").exists())
             self.assertFalse(FakeRex.sessions)
+
+
+class UnusedCheckout(test_provisioning.ProvisionedRepository):
+    def setUp(self):
+        super().setUp()
+        self.provision()
+        self.admin = factory.git_dir(self.destination)
+        self.cache = Path(factory.worker_environment({}, self.destination)["GOCACHE"])
+        self.cache.mkdir(mode=0o700, exist_ok=True)
+        source = self.root / "library.go"
+        source.write_text("package library\n")
+        subprocess.run(["go", "build", source], cwd=self.root, check=True, env={
+            "HOME": str(self.root), "PATH": os.environ["PATH"], "TMPDIR": str(self.root),
+            "GOCACHE": str(self.cache), "GOTOOLCHAIN": "local", "GOENV": "off",
+            "GOTELEMETRY": "off", "GO111MODULE": "off", "GOPROXY": "off"})
+
+    def test_request_from_another_cwd_names_the_checkout(self):
+        other = factory.new_task("other", "other-line")
+        other["assignments"]["reader"] = {"request": {"cwd": str(self.repo),
+            "command": ["/bin/cat", str(self.destination / "source.bin")]}}
+        factory.save(self.state / "other.json", other)
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("other/reader", error)
+        self.assertTrue(self.cache.is_dir())
+        self.assertTrue(self.destination.is_dir())
+
+    def test_unknown_admin_data_survives_with_and_without_cache(self):
+        unknown = self.admin / "independent-cache"
+        unknown.mkdir()
+        payload = unknown / "user-data"
+        payload.write_bytes(b"preserve")
+        for cache_present in (True, False):
+            if not cache_present:
+                shutil.rmtree(self.cache)
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+            self.assertEqual(code, 1)
+            self.assertIn("unknown Git admin data", error)
+            self.assertEqual(payload.read_bytes(), b"preserve")
+            self.assertTrue(self.destination.exists())
+            self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
+
+    def test_unattended_owner_release_removes_only_its_linked_build_cache(self):
+        unrelated = self.root / "go-build"
+        unrelated.mkdir()
+        saved = unrelated / "entry"
+        saved.write_bytes(b"another build")
+        self.assertTrue(list(self.cache.glob("*/*-a")))
+        with patch.object(sys, "stdin", StringIO()):
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.cache.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(saved.read_bytes(), b"another build")
+
+    def test_git_child_excludes_rebase_after_owner_is_killed(self):
+        head = self.git("-C", str(self.destination), "rev-parse", "HEAD")
+        inputs = self.path.read_bytes()
+        self.git("commit", "--allow-empty", "-qm", "New base")
+        onto = self.git("rev-parse", "HEAD")
+        wrapper = self.root / "gated-git"
+        real_git = factory.git_binary()
+        wrapper.write_text(f"""#!{sys.executable}
+import os, socket, sys
+if sys.argv[-5:-3] == ["worktree", "remove"]:
+    gate = socket.socket(socket.AF_UNIX)
+    os.chdir({str(self.root)!r})
+    gate.connect("remove.sock")
+    gate.settimeout(30)
+    if gate.recv(1) != b"g":
+        sys.exit(1)
+    gate.set_inheritable(True)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+        wrapper.chmod(0o700)
+        with socket.socket(socket.AF_UNIX) as listener:
+            with chdir(self.root):
+                listener.bind("remove.sock")
+            listener.listen(1)
+            listener.settimeout(30)
+            launch = ("import factory, sys; factory.git_binary = lambda: sys.argv[1]; "
+                      "sys.exit(factory.main(sys.argv[2:]))")
+            with subprocess.Popen([sys.executable, "-c", launch, str(wrapper), "--state-dir", str(self.state),
+                                   "release-worktree", "--task", "fixture"], cwd=factory.ROOT) as parent:
+                try:
+                    child, _ = listener.accept()
+                    with child:
+                        parent.kill()
+                        self.assertEqual(parent.wait(timeout=10), -signal.SIGKILL)
+                        for path in (self.admin, self.cache):
+                            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path):
+                                pass
+                        code, _, error = self.cli("rebase-worktree", "--task", "fixture", "--onto", onto)
+                        self.assertEqual(code, factory.EXIT_BUSY)
+                        self.assertIn("owns execution", error)
+                        self.assertEqual(self.git("-C", str(self.destination), "rev-parse", "HEAD"), head)
+                        self.assertEqual(self.path.read_bytes(), inputs)
+                        child.sendall(b"g")
+                        child.settimeout(30)
+                        self.assertEqual(child.recv(1), b"")
+                finally:
+                    if parent.poll() is None:
+                        parent.kill()
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.admin.exists())
+
+    def test_unknown_linked_cache_data_preserves_the_checkout(self):
+        unknown = self.cache / "unfinished-work"
+        unknown.write_bytes(b"preserve this")
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("unexpected cache entry", error)
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual(unknown.read_bytes(), b"preserve this")
 
 
 class ActivityObservation(unittest.TestCase):
@@ -1533,32 +1336,3 @@ class ActivityObservation(unittest.TestCase):
                 return_value=subprocess.CompletedProcess([], 0, table, "")), \
                 self.assertRaisesRegex(factory.FactoryError, "Unexpected mount"):
             go_cache.check_mounts(repo, Path("/fixture/linked"), cache)
-
-    def test_missing_process_cwd_is_never_a_scheduled_permit(self):
-        own = os.getpid()
-        ps = f"{own} Sun Sep 13 12:00:00 2020 census\n42 Sun Sep 13 12:00:00 2020 login\n".encode()
-        listing = f"p{own}\0\nfcwd\0tDIR\0n/elsewhere\0\np42\0\n".encode()
-        work, admin = Path("/fixture/tree"), Path("/fixture/admin")
-        def observations():
-            return patch.object(go_cache, "inventory", side_effect=[(7, ps, b""), (8, listing, b"")])
-        with patch.object(go_cache, "boot_time", return_value=100), patch.object(os, "kill"):
-            with observations(), self.assertRaisesRegex(factory.FactoryError, "working directory of process 42"):
-                go_cache.process_check(work, admin, "example", [])
-
-    def test_user_file_and_process_inventory(self):
-        work, admin = Path("/fixture/tree"), Path("/fixture/admin")
-        ps = f"{os.getpid()} Sun Sep 13 12:00:00 2020 census\n42 Sun Sep 13 12:00:00 2020 native\n".encode()
-        own = f"p{os.getpid()}\0\nfcwd\0tDIR\0n/elsewhere\0\n".encode()
-        for listing, expected in [
-            (b"p42\0\nfcwd\0tDIR\0n/fixture/tree\0\n", "open path"),
-            (b"p42\0\nfcwd\0tDIR\0n/elsewhere\0\nf4\0tREG\0n/fixture/admin/go-build/x\0\n", "open path"),
-            (b"p42\0\nfcwd\0tDIR\0\n", "Cannot verify"),
-            (b"p42\0\nfcwd\0tDIR\0n/elsewhere\0\n", None),
-        ]:
-            with self.subTest(listing=listing), patch.object(go_cache, "boot_time", return_value=100), patch.object(go_cache, "inventory", side_effect=[
-                    (7, ps, b""), (8, own + listing, b"")]):
-                if expected:
-                    with self.assertRaisesRegex(factory.FactoryError, expected):
-                        go_cache.process_check(work, admin, "example", [(10, 20)])
-                else:
-                    self.assertEqual(go_cache.process_check(work, admin, "example", [(10, 20)])["observed_processes"], 2)
