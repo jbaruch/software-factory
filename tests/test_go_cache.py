@@ -833,6 +833,89 @@ raise SystemExit(factory.main())
         self.assertFalse(self.admin.exists())
         self.assertEqual(saved.read_bytes(), b"another build")
 
+    def test_owner_release_replays_only_bound_stopped_historical_failure(self):
+        self.assignment.update(result=None, native_collected=False)
+        self.assignment["closed"].update(state="failed", exit={"exit_code": 1})
+        self.assignment["request"]["command"][0] = str(self.root / "previous-python")
+        self.attest(self.assignment)
+        self.assignment["native_launch"]["runtime"] = "a" * 64
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                              stdin=subprocess.PIPE) as child:
+            process = dict(scope=factory.process_scope(), pid=child.pid, start_time=factory.native_start_time(child.pid))
+            self.native.update(schema_version=8, native_process=process, state="failed", exit_code=1, report=None)
+            factory.save(self.receipt, self.native)
+            factory.save(self.path, self.record)
+            try:
+                code, _, error = self.cli("release-worktree", "--task", "fixture")
+                self.assertEqual(code, 1)
+                self.assertIn("native process is active", error)
+            finally:
+                child.communicate(timeout=10)
+
+        self.assertEqual(self.inspect()["decision"], "retained")
+        for key, value in (("native_launch", None), ("request", {**self.assignment["request"], "goal": "changed"})):
+            with self.subTest(key=key):
+                damaged = dict(self.assignment)
+                if value is None:
+                    del damaged[key]
+                else:
+                    damaged[key] = value
+                factory.save(self.path, {**self.record, "assignments": {"writer": damaged}})
+                self.assertEqual(self.cli("release-worktree", "--task", "fixture")[0], 1)
+        factory.save(self.path, self.record)
+        owner = self.path.read_bytes()
+        for changes in (dict(job="fixture/other"), dict(exit_code=None), dict(native_process=None)):
+            with self.subTest(changes=changes):
+                factory.save(self.receipt, {**self.native, **changes})
+                self.assertEqual(self.cli("release-worktree", "--task", "fixture")[0], 1)
+        factory.save(self.receipt, self.native)
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(self.path.read_bytes(), owner)
+
+    def test_git_removal_holds_both_flocks_after_owner_is_killed(self):
+        wrapper = self.root / "gated-git"
+        real_git = factory.git_binary()
+        wrapper.write_text(f"""#!{sys.executable}
+import os, socket, sys
+if sys.argv[-5:-3] == ["worktree", "remove"]:
+    gate = socket.socket(socket.AF_UNIX)
+    os.chdir({str(self.root)!r})
+    gate.connect("remove.sock")
+    gate.settimeout(30)
+    if gate.recv(1) != b"g":
+        sys.exit(1)
+    gate.set_inheritable(True)
+os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])
+""")
+        wrapper.chmod(0o700)
+        with socket.socket(socket.AF_UNIX) as listener:
+            with chdir(self.root):
+                listener.bind("remove.sock")
+            listener.listen(1)
+            listener.settimeout(30)
+            launch = ("import factory, sys; factory.git_binary = lambda: sys.argv[1]; "
+                      "sys.exit(factory.main(sys.argv[2:]))")
+            with subprocess.Popen([sys.executable, "-c", launch, str(wrapper), "--state-dir", str(self.state),
+                                   "release-worktree", "--task", "fixture"], cwd=factory.ROOT) as parent:
+                try:
+                    child, _ = listener.accept()
+                    with child:
+                        parent.kill()
+                        self.assertEqual(parent.wait(timeout=10), -signal.SIGKILL)
+                        for path in (self.admin, self.cache):
+                            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path):
+                                pass
+                        child.sendall(b"g")
+                        child.settimeout(30)
+                        self.assertEqual(child.recv(1), b"")
+                finally:
+                    if parent.poll() is None:
+                        parent.kill()
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.admin.exists())
+
     def test_unknown_linked_cache_data_preserves_the_checkout(self):
         unknown = self.cache / "unfinished-work"
         unknown.write_bytes(b"preserve this")

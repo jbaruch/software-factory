@@ -239,7 +239,13 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
         raise factory.FactoryError(f"{job}: native assignment or exact worktree is ambiguous")
     parser = importlib.import_module(harness + "_worker").parser()
     parser.allow_abbrev = False
-    args = factory.evidence_worker_args(harness, parser, name, record, assignment, replay=assignment.get("native_collected") is True)
+    raw = factory.read_record_bytes(path, private=True)
+    receipt = factory.decode_json(raw)
+    replay_failure = (ordinary_release and closed.get("state") == "failed" and isinstance(receipt, dict)
+                      and receipt.get("schema_version") == factory.SCRATCH_RECEIPT_VERSION
+                      and factory.launch_runtime(assignment) is not None)
+    args = factory.evidence_worker_args(harness, parser, name, record, assignment,
+                                        replay=assignment.get("native_collected") is True or replay_failure)
     cwd = Path(req["cwd"])
     launch = assignment.get("launch_checkout")
     root = cwd
@@ -285,8 +291,6 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
             or args.brief_sha256 != "{brief_sha256}" or args.candidate != "{candidate}"
             or args.requirements != "{requirements}"):
         raise factory.FactoryError(f"{job}: restore the exact native worktree, inputs and receipt binding")
-    raw = factory.read_record_bytes(path, private=True)
-    receipt = factory.decode_json(raw)
     expected = {"kind": harness + "-execution", "job": job, "inputs": req["inputs"],
                 "brief_sha256": req["instructions_sha256"], "cwd": req["cwd"], "worktree_git_dir": str(args.worktree_git_dir),
                 "events": str(args.events), "requested_model": args.model, "requested_effort": args.effort,

@@ -1131,7 +1131,7 @@ def validate_provisioning(record):
         raise FactoryError("Invalid task provisioning request; restore the original record")
 
 
-def provisioning_git(repository, *args, output=None, timeout=30):
+def provisioning_git(repository, *args, output=None, timeout=30, pass_fds=()):
     """Metadata/index operations and raw blobs only; never checkout callbacks."""
     scope = GIT_EXECUTION.get()
     environment = git_environment() if scope is None else scope[1]
@@ -1144,7 +1144,7 @@ def provisioning_git(repository, *args, output=None, timeout=30):
             "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
             env=environment, stdout=subprocess.PIPE if output is None else output,
-            stderr=subprocess.PIPE, timeout=timeout, check=False)
+            stderr=subprocess.PIPE, timeout=timeout, check=False, pass_fds=pass_fds)
         diagnostic = result.stderr.decode("utf-8")
         output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
@@ -1930,7 +1930,8 @@ def release_worktree(path):
         if (os.path.lexists(cache) if cache_fd is None else
                 not os.path.samestat(os.fstat(cache_fd), cache.lstat())):
             raise FactoryError("Linked cache changed during release; inspect the original checkout")
-        provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination), timeout=600)
+        provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination),
+                         timeout=600, pass_fds=(fd,) if cache_fd is None else (fd, cache_fd))
         if go_cache.checkout_binding(destination, directory, repo) is not None:
             raise FactoryError("Git removal left a checkout endpoint; inspect incomplete teardown")
         outcome = dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"],
