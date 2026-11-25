@@ -675,7 +675,7 @@ class ManagedScratch(unittest.TestCase):
                     with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
                         nested = scratch / "nested"
                         nested.mkdir(mode=0)
-                        scratch.chmod(0)  # Force the descriptor repair pass before the child open.
+                        scratch.chmod(0)  # Exercise held-root repair before the child open.
 
                         def replace_before_open(path, flags, *args, **kwargs):
                             if path == nested.name:
@@ -848,9 +848,9 @@ class ManagedScratch(unittest.TestCase):
                 child.chmod(0o700)
                 self.assertEqual(marker.read_text(), "keep")
 
-    def test_cleanup_and_permission_retry_stay_with_the_recorded_directory(self):
+    def test_cleanup_and_permission_repair_stay_with_the_recorded_directory(self):
         open_directory = os.open
-        list_directory = os.listdir
+        chmod_directory = os.fchmod
         for moment in ("during removal", "before permission repair", "after permission repair"):
             with self.subTest(moment=moment), tempfile.TemporaryDirectory() as state:
                 root = Path(state)
@@ -871,25 +871,59 @@ class ManagedScratch(unittest.TestCase):
                                 replace()
                             return open_directory(name, flags, *args, **kwargs)
 
-                        calls = 0
-
-                        def list_children(descriptor):
-                            nonlocal calls
-                            calls += 1
-                            if calls == 1 and moment != "during removal":
-                                if moment == "before permission repair":
-                                    replace()
-                                raise PermissionError("fixture requires repair")
-                            if calls == 2 and moment == "after permission repair":
+                        def repair_directory(fd, mode):
+                            if moment == "before permission repair":
                                 replace()
-                            return list_directory(descriptor)
+                            chmod_directory(fd, mode)
+                            if moment == "after permission repair":
+                                replace()
 
+                        if moment != "during removal":
+                            scratch.chmod(0o500)
                         effects.enter_context(patch.object(os, "open", side_effect=open_child))
-                        effects.enter_context(patch.object(os, "listdir", side_effect=list_children))
+                        effects.enter_context(patch.object(os, "fchmod", side_effect=repair_directory))
                 self.assertIs(receipt["scratch_removed"], False)
                 self.assertEqual((scratch / "nested/marker").read_text(), "keep")
                 self.assertEqual((scratch / "nested").stat().st_mode & 0o777, 0o500)
                 (scratch / "nested").chmod(0o700)
+
+    def test_denied_child_does_not_restart_cleanup_on_changed_sibling(self):
+        with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):
+            root = Path(state)
+            receipt = {}
+            with ExitStack() as effects, redirect_stderr(io.StringIO()):
+                with factory.scratch_directory(root / "receipt.json", receipt) as scratch:
+                    denied = scratch / "denied"
+                    denied.mkdir(mode=0o700)
+                    payload = denied / "payload"
+                    payload.write_bytes(b"child")
+                    sibling = scratch / "sibling"
+                    sibling.write_bytes(b"original")
+                    replacement = root / "replacement"
+                    replacement.write_bytes(b"replacement")
+                    saved = root / "original"
+                    originals = [path.stat() for path in (scratch, denied, payload, sibling, replacement)]
+                    open_directory = os.open
+                    list_directory = os.listdir
+
+                    def deny_child(path, flags, *args, **kwargs):
+                        if path == denied.name and replacement.exists():
+                            sibling.rename(saved)
+                            replacement.rename(sibling)
+                            raise PermissionError(errno.EACCES, "denied", path)
+                        return open_directory(path, flags, *args, **kwargs)
+
+                    def list_children(fd):
+                        return sorted(list_directory(fd))  # Visit denied before sibling.
+
+                    listing = effects.enter_context(patch.object(os, "listdir", side_effect=list_children))
+                    effects.enter_context(patch.object(os, "open", side_effect=deny_child))
+            self.assertIs(receipt["scratch_removed"], False)
+            listing.assert_called_once()
+            for path, original in zip((scratch, denied, payload, saved, sibling), originals):
+                self.assertTrue(os.path.samestat(original, path.stat()), path)
+                self.assertEqual(original.st_mode, path.stat().st_mode)
+            self.assertEqual([p.read_bytes() for p in (payload, saved, sibling)], [b"child", b"original", b"replacement"])
 
     def test_exact_leaf_cleanup(self):
         with tempfile.TemporaryDirectory() as state, patch.object(factory, "SCRATCH_ROOT", state):

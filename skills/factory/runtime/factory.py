@@ -2623,13 +2623,10 @@ def remove_scratch(directory, identity, fd):
 
     flags = os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW
 
-    def remove_contents(parent, repair):
+    def remove_contents(parent):
         current = os.fstat(parent)
-        if repair:
-            if current.st_uid != os.getuid():
-                raise PermissionError("Scratch directory ownership changed")
-            if current.st_mode & 0o700 != 0o700:
-                os.fchmod(parent, stat.S_IMODE(current.st_mode) | 0o700)
+        if repair and current.st_uid == os.getuid() and current.st_mode & 0o700 != 0o700:
+            os.fchmod(parent, stat.S_IMODE(current.st_mode) | 0o700)
         for name in os.listdir(parent):
             if not repair and current.st_uid == os.getuid() and current.st_mode & 0o300 != 0o300:
                 raise PermissionError("Scratch parent requires repair before claiming entries")
@@ -2649,9 +2646,6 @@ def remove_scratch(directory, identity, fd):
                     if entry.st_dev != info.st_dev or stat.S_ISDIR(entry.st_mode):
                         raise OSError(f"Unexpected scratch leaf {name!r}")
                     claim_and_remove(parent, name, entry)
-                except PermissionError as exc:
-                    # A new walk after releasing this pin could authorize a replacement.
-                    raise OSError(f"Cannot verify and remove pinned entry {name!r}: {exc}") from exc
                 finally:
                     os.unlink("pin", dir_fd=holder_fd)
                 continue
@@ -2661,21 +2655,22 @@ def remove_scratch(directory, identity, fd):
                 if (sys.platform != "linux" or not repair or entry.st_uid != os.getuid()
                         or entry.st_mode & 0o700 == 0o700):
                     raise
-                mode = stat.S_IMODE(entry.st_mode) | 0o700
                 pinned = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                 try:
-                    if not os.path.samestat(entry, os.fstat(pinned)):
+                    pinned_info = os.fstat(pinned)
+                    if not os.path.samestat(entry, pinned_info) or pinned_info.st_uid != os.getuid():
                         raise OSError(f"Scratch directory {name!r} changed before repair")
                     require_mount(mount_id(pinned))
-                    os.chmod(f"/proc/self/fd/{pinned}", mode)
+                    os.chmod(f"/proc/self/fd/{pinned}", stat.S_IMODE(pinned_info.st_mode) | 0o700)
                     child = os.open(".", flags, dir_fd=pinned)
                 finally:
                     os.close(pinned)
             try:
-                if not os.path.samestat(entry, os.fstat(child)):
+                opened = os.fstat(child)
+                if not os.path.samestat(entry, opened) or entry.st_uid != opened.st_uid:
                     raise OSError(f"Scratch directory {name!r} changed before descent")
                 require_mount(mount_id(child))
-                remove_contents(child, repair)
+                remove_contents(child)
                 claim_and_remove(parent, name, entry)
             finally:
                 os.close(child)
@@ -2691,14 +2686,9 @@ def remove_scratch(directory, identity, fd):
         held = holder / "claimed"
         holder_fd = os.open(holder, flags)
         try:
-            try:
-                remove_contents(fd, False)
-            except PermissionError:
-                check(directory.lstat())
-                if (os.fstat(fd).st_mode & 0o077 or not directory.name.startswith("sf-")
-                        or directory.parent.resolve() != Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve()):
-                    raise
-                remove_contents(fd, True)
+            repair = (info.st_mode & 0o077 == 0 and directory.name.startswith("sf-")
+                      and directory.parent.resolve() == Path(SCRATCH_ROOT or tempfile.gettempdir()).resolve())
+            remove_contents(fd)
             check(directory.lstat())
             parent = os.open(directory.parent, os.O_DIRECTORY | os.O_RDONLY)
             try:
