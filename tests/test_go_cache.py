@@ -1058,6 +1058,32 @@ raise SystemExit(factory.main())
         self.assertEqual(before, {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in data.rglob("*")})
         self.assertEqual(self.protected(), records)
 
+    def test_same_line_provision_during_eligible_preview(self):
+        other = self.state / "independent.json"
+        line = factory.task_line(self.record)
+        factory.admit(other, task="independent", goal="Provision an independent checkout",
+                      repository=str(self.repo), acceptance=["requirements.md"], line=line)
+        factory.set_inputs(other, candidate="HEAD", requirements="requirements-v1")
+        destination = self.root / "independent"
+
+        def observe(*_):
+            with self.assertRaises(factory.TaskLockBusy), factory.task_lock(self.state, "fixture"):
+                self.fail("Acquired the owner task lock during preview")
+            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.admin, shared=True):
+                self.fail("Acquired the shared launch lock during preview")
+            with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.cache):
+                self.fail("Acquired the same physical cache during preview")
+            code, out, err = self.cli("provision", "--task", "independent",
+                                      "--id", "backend", "--path", str(destination))
+            self.assertEqual(code, 0, (out, err))
+            return {"observed_processes": 2}
+
+        self.observer.side_effect = observe
+        row = self.inspect()
+        self.assertEqual(row["decision"], "eligible", row)
+        self.assertEqual(factory.task_line(factory.load_task(other)), line)
+        self.assertNotEqual(factory.git_dir(destination), self.admin)
+
     def test_foreign_request_matches_the_physical_admin(self):
         other = factory.new_task("other", "other-line")
         alias = self.root / "alternate-admin"

@@ -967,10 +967,10 @@ def _census(directory, repo, clean_task, trim_go):
             if trim_go is not None and (trim_go.is_relative_to(work) or trim_go.is_relative_to(repo)):
                 raise factory.FactoryError("Select a trusted Go installation outside the admitted repository and worktree")
             result.update(worktree=str(work), owner_record=str(path))
-            # Native aging excludes just the owner and physical resources through
-            # the bounded Go child and readback. Retirement keeps the line lock.
+            # Preview and native aging exclude only the owner and physical resources.
+            # Explicit retirement also holds the line lock.
             lock_paths = (directory / (task + ".lock"), admin, cache)
-            if trim_go is None:
+            if clean_task == task:
                 lock_paths = (factory.execution_lock_path(directory, factory.task_line(current)), *lock_paths)
             with ExitStack() as locks:
                 fds = [locks.enter_context(inode_lock(p, directory=p in (admin, cache))) for p in lock_paths]
