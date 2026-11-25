@@ -1,4 +1,5 @@
 """Run one trusted Go command under the inherited cache admission locks."""
+import ctypes
 import os
 from pathlib import Path
 import select
@@ -30,18 +31,30 @@ def main():
 
 
 def run(command, seconds, package):
+    if sys.platform == "linux":
+        # PR_SET_CHILD_SUBREAPER makes this private keeper adopt orphaned Go tools.
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+            print(f"Cannot enable Go keeper child subreaper: {os.strerror(ctypes.get_errno())}", file=sys.stderr)
+            return 1
     # Wake on driver status change without reaping it: its PID pins our signal target.
     reader, writer = os.pipe()
+    child = None
 
     def child_changed(signum, _frame):
+        if sys.platform == "linux" and (child is None or not os.waitid(
+                os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)):
+            return  # An adopted compiler may exit before the driver.
         signal.signal(signum, signal.SIG_DFL)
-        os.close(writer)
+        os.write(writer, b".")
 
     signal.signal(signal.SIGCHLD, child_changed)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGCHLD})
     # Only the keeper inherits Factory's locks. Go and its tools cannot pin them.
     child = subprocess.Popen(command, cwd=package, stdin=subprocess.DEVNULL, process_group=0)
+    if sys.platform == "linux":
+        child_changed(signal.SIGCHLD, None)  # Cover driver exit during Popen.
     expired = not select.select([sys.stdin, reader], [], [], seconds)[0]
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     try:
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -54,6 +67,12 @@ def run(command, seconds, package):
     # A compiler can close all inherited FDs and outlive its driver. Probe until
     # the group has drained before releasing the locks. Never signal a reaped PID.
     while True:
+        if sys.platform == "linux":
+            try:
+                while os.waitpid(-child.pid, os.WNOHANG)[0]:
+                    pass
+            except ChildProcessError:
+                pass  # No adopted child remains in this group.
         try:
             os.killpg(child.pid, 0)
         except ProcessLookupError:
