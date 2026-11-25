@@ -287,6 +287,16 @@ from pathlib import Path
 if sys.argv[1] == "env":
     sys.stdout.write("\\n\\n")
     sys.exit(0)
+if sys.platform == "linux":
+    # An adopted tool can exit while the driver is still building.
+    helper = os.fork()
+    if helper == 0:
+        parent = os.getpid()
+        if os.fork() == 0:
+            while os.getppid() == parent:
+                time.sleep(0.001)
+        os._exit(0)
+    os.waitpid(helper, 0)
 compiler = os.fork()
 if compiler:
     while not Path({str(exit_driver)!r}).exists():
@@ -313,6 +323,10 @@ with open({str(entry)!r}, "ab", buffering=0) as cache:
                 with probe, peer:
                     launch = f"""import os, subprocess, sys
 import factory, go_cache
+if sys.platform == "linux":
+    # Model a non-reaping outer init even on hosts that normally reap orphans.
+    import ctypes
+    assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
 subprocess.Popen(["/bin/cat"], stdin={peer.fileno()}, stdout={peer.fileno()})
 os.close({peer.fileno()})
 go_cache.GO_BUILD_SECONDS = {2 if failure == "timeout" else 30}
