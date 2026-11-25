@@ -151,6 +151,8 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         with patch.object(go_cache, "native_build") as build:
             with go_cache.inode_lock(self.admin, shared=True):
                 self.assertIn("Busy lock", self.trim()["reason"])
+            with go_cache.inode_lock(self.cache):
+                self.assertIn(f"Busy lock at {self.cache}", self.trim()["reason"])
             unknown = self.cache / "not-a-go-entry"
             unknown.touch()
             self.assertIn("unexpected cache entry", self.trim()["reason"])
@@ -177,7 +179,7 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertIn("Go build exited 7", row["reason"])
         self.assertEqual((row["removed_entries"], row["after_kib"]), (0, row["size_kib"]))
 
-    def test_parent_only_sigterm_cancels_the_gated_native_compiler(self):
+    def test_same_line_provision_during_native_trim_and_parent_only_sigterm(self):
         # This disposable tool gate pauses the real Go driver while it waits for its compiler.
         fixture = self.root / "disposable-trim-go"
         ready = self.root / "disposable-compiler-ready"
@@ -205,8 +207,13 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
         old.write_bytes(b"disposable old entry")
         os.utime(old, (self.at, self.at))
         (self.cache / "trim.txt").write_text(str(self.at))
-        paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
-                 self.path.with_suffix(".lock"), self.admin, self.cache)
+        other = self.state / "independent.json"
+        line = factory.task_line(self.record)
+        factory.admit(other, task="independent", goal="Provision an independent checkout",
+                      repository=str(self.repo), acceptance=["requirements.md"], line=line)
+        factory.set_inputs(other, candidate="HEAD", requirements="requirements-v1")
+        destination = self.root / "independent"
+        paths = (self.path.with_suffix(".lock"), self.admin, self.cache)
         with gate.open("w") as hold:
             fcntl.flock(hold, fcntl.LOCK_EX)
             with subprocess.Popen([sys.executable, factory.__file__, "--state-dir", str(self.state),
@@ -218,6 +225,20 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
                         self.assertIsNone(parent.poll(), "Factory exited before the disposable compiler gate")
                         self.assertLess(time.monotonic(), deadline, "Go did not reach the disposable compiler gate")
                         time.sleep(0.02)
+                    code, out, err = self.cli("provision", "--task", "independent",
+                                              "--id", "backend", "--path", str(destination))
+                    self.assertEqual(code, 0, (out, err))
+                    self.assertEqual(factory.task_line(factory.load_task(other)), line)
+                    self.assertNotEqual(factory.git_dir(destination), self.admin)
+                    code, _, err = self.cli("provision", "--task", "fixture",
+                                            "--id", "backend", "--path", str(self.destination))
+                    self.assertEqual(code, 75, err)
+                    self.assertIn("working on this task", err)
+                    with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.admin, shared=True):
+                        self.fail("Acquired the shared launch lock during native aging")
+                    with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.cache):
+                        self.fail("Acquired the same physical cache during native aging")
+                    self.assertIsNone(parent.poll())
                 finally:
                     parent.terminate()
                 self.assertEqual(parent.communicate(timeout=10), (b"", None))
@@ -265,8 +286,7 @@ with open({str(entry)!r}, "ab", buffering=0) as cache:
         time.sleep(0.02)
 """)
         fixture.chmod(0o700)
-        paths = (factory.execution_lock_path(self.state, factory.task_line(self.record)),
-                 self.path.with_suffix(".lock"), self.admin, self.cache)
+        paths = (self.path.with_suffix(".lock"), self.admin, self.cache)
         for failure in ("timeout", "driver exit", "parent kill", "parent interrupt", "group teardown"):
             with self.subTest(failure=failure):
                 # A session-leading Factory can have unrelated peers. This peer echoes
@@ -395,10 +415,12 @@ raise SystemExit(factory.main())
         self.assertEqual((row["decision"], row["removed_entries"], row["retained_entries"]), ("retained", 0, 0))
         self.assertCountEqual(self.cache.iterdir(), remaining)
 
-    def test_native_build_and_readback_hold_admission_locks(self):
+    def test_native_build_and_readback_hold_only_resource_locks(self):
         line = factory.execution_lock_path(self.state, factory.task_line(self.record))
         def contend():
-            for path in (line, self.path.with_suffix(".lock"), self.admin, self.cache):
+            with go_cache.inode_lock(line, directory=False):
+                pass
+            for path in (self.path.with_suffix(".lock"), self.admin, self.cache):
                 with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
                     self.fail(f"Acquired {path} during native aging")
 
@@ -420,6 +442,27 @@ raise SystemExit(factory.main())
         self.assertEqual(row["decision"], "failed")
         self.assertIn("fixture readback failure", row["reason"])
         self.assertNotIn("removed_entries", row)
+
+    def test_native_aging_retains_a_cache_replaced_before_build(self):
+        original = self.cache.with_name("original")
+        walk = go_cache.cache_contents
+
+        def replace_after_snapshot(*args, **kwargs):
+            snapshot = walk(*args, **kwargs)
+            if kwargs.get("entries") is not None:
+                self.cache.rename(original)
+                self.cache.mkdir(mode=0o700)
+            return snapshot
+
+        entries = {p.relative_to(self.cache) for p in self.cache.rglob("*")}
+        with patch.object(go_cache, "cache_contents", side_effect=replace_after_snapshot), \
+                patch.object(go_cache, "native_build") as build:
+            row = self.trim()
+        self.assertEqual(row["decision"], "retained")
+        self.assertIn("identity changed", row["reason"])
+        build.assert_not_called()
+        self.assertEqual({p.relative_to(original) for p in original.rglob("*")}, entries)
+        self.assertEqual(list(self.cache.iterdir()), [])
 
     def test_census_preserves_review_exports_but_refuses_a_damaged_task(self):
         export = self.state / "release-review.json"
