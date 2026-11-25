@@ -685,7 +685,7 @@ raise SystemExit(factory.main())
         self.assertEqual(assignment["launch_checkout"]["head"], self.native["candidate"])
         self.assertIn("original reader worktree ownership", self.inspect()["reason"])
 
-    def test_nested_legacy_reader_passes_attended_release_user_check_only(self):
+    def test_nested_legacy_reader_passes_release_user_check_only(self):
         self.reader_fixture("qa", self.destination / "nested", legacy=True)
         assignment = self.record["assignments"]["qa"]
         self.assertTrue(assignment["native_collected"])
@@ -698,13 +698,10 @@ raise SystemExit(factory.main())
         self.assertEqual(users[receipt], receipt.read_bytes())
         self.assertIn("missing original reader worktree ownership", self.inspect()["reason"])
         self.assertEqual(self.path.read_bytes(), owner_bytes)
-        # The same collected reader can finish an attended pre-upgrade checkout's lifecycle.
+        # The same collected reader can finish a pre-upgrade checkout's lifecycle.
         del self.record["provisioning"]["checkout_inodes"]
         factory.save(self.path, self.record)
         owner_bytes = self.path.read_bytes()
-        self.terminal.seek(0)
-        self.terminal.write("fixture\n")
-        self.terminal.seek(0)
         code, output, error = self.cli("release-worktree", "--task", "fixture")
         self.assertEqual(code, 0, error)
         self.assertFalse(json.loads(output)["already_released"])
@@ -816,6 +813,35 @@ raise SystemExit(factory.main())
             row = self.inspect(True)
         self.assertEqual(row["decision"], "cleaned", row)
 
+    def test_unattended_owner_release_removes_only_its_linked_build_cache(self):
+        unrelated = self.root / "go-build"
+        unrelated.mkdir()
+        saved = unrelated / "entry"
+        saved.write_bytes(b"another build")
+        self.assertTrue(list(self.cache.glob("*/*-a")))
+        # This collected worker finished before its pane was tidied.
+        self.native["schema_version"] = 7
+        self.collect_fixture("writer", self.native)
+        self.record["assignments"]["writer"].pop("closed")
+        factory.save(self.path, self.record)
+        with patch.object(sys, "stdin", StringIO()):
+            code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 0, error)
+        self.observer.assert_not_called()
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.cache.exists())
+        self.assertFalse(self.admin.exists())
+        self.assertEqual(saved.read_bytes(), b"another build")
+
+    def test_unknown_linked_cache_data_preserves_the_checkout(self):
+        unknown = self.cache / "unfinished-work"
+        unknown.write_bytes(b"preserve this")
+        code, _, error = self.cli("release-worktree", "--task", "fixture")
+        self.assertEqual(code, 1)
+        self.assertIn("unexpected cache entry", error)
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual(unknown.read_bytes(), b"preserve this")
+
     def test_release_confirms_git_removal_and_retains_the_dependent_cache(self):
         cwd = self.root / "qa"
         owner = self.state / "qa.json"
@@ -844,9 +870,6 @@ raise SystemExit(factory.main())
         owner.write_bytes(raw_owner)
 
         with factory.execution_lock(self.state), factory.task_lock(self.state, "qa"):
-            self.terminal.seek(0)
-            self.terminal.write("qa\n")
-            self.terminal.seek(0)
             released = factory.release_worktree(owner)
         self.assertFalse(released["already_released"])
         self.assertFalse(os.path.lexists(linked))
@@ -872,7 +895,7 @@ raise SystemExit(factory.main())
         self.assertIn("direct-user exclusion", self.inspect(True)["reason"])
         self.assertEqual(set(self.cache.rglob("*")), entries)
 
-    def test_attended_legacy_reader_release_and_retry_keep_dependent_cache(self):
+    def test_legacy_reader_release_and_retry_keep_dependent_cache(self):
         reader = self.root / "qa"
         owner = self.state / "qa.json"
         factory.admit(owner, task="qa", repository=str(self.repo), goal="Read the fixture",
@@ -888,17 +911,8 @@ raise SystemExit(factory.main())
         original = {p: p.read_bytes() for p in (owner, self.path, self.state / "fixture.qa.codex.json")}
         entries = {p: p.read_bytes() for p in self.cache.rglob("*") if p.is_file()}
         self.assertIn("Missing original provisioner ownership", self.inspect()["reason"])
-        self.terminal.seek(0)
-        self.terminal.truncate()
-        self.terminal.write("wrong\nqa\n")
-        self.terminal.seek(0)
-        code, _, error = self.cli("release-worktree", "--task", "qa")
-        self.assertEqual(code, 1)
-        self.assertIn("unconfirmed", error)
-        self.assertTrue(reader.is_dir())
         code, output, error = self.cli("release-worktree", "--task", "qa")
         self.assertEqual(code, 0, error)
-        self.assertIn("never recorded checkout_inodes", error)
         self.assertFalse(json.loads(output)["already_released"])
         self.assertFalse(reader.exists())
         self.assertFalse(Path(item["git_dir"]).exists())
@@ -1053,25 +1067,19 @@ raise SystemExit(factory.main())
         factory.save(self.receipt, self.native)
         self.assertEqual(self.inspect()["decision"], "eligible")
 
-    def test_lost_owner_requires_attended_release_and_never_certifies_exclusion(self):
+    def test_lost_owner_retains_checkout(self):
         self.assignment["closed"].update(state="lost", exit=None, reason="Rex restarted")
         self.native.update(state="starting")
         factory.save(self.receipt, self.native)
         factory.save(self.path, self.record)
         before = self.protected()
         with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
-                self.assertRaisesRegex(factory.FactoryError, "window unconfirmed"):
+                self.assertRaisesRegex(factory.FactoryError, "observed Rex process exit"):
             factory.release_worktree(self.path)
         self.assertEqual(self.protected(), before)
         self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
-            self.terminal.write("fixture\n")
-            self.terminal.seek(0)
-            factory.release_worktree(self.path)
-        proof = json.loads(self.path.with_suffix(".worktree-release.json").read_bytes())
-        self.assertNotIn("exclusive", proof)
 
-    def test_reset_owner_can_release_without_certifying_exclusion(self):
+    def test_reset_patch_does_not_prove_a_starting_worker_stopped(self):
         self.assignment["closed"].update(state="failed", exit={"exit_code": 1})
         self.assignment.update(result=None, native_collected=False)
         self.native.update(state="starting", exit_code=None, candidate=None)
@@ -1079,13 +1087,11 @@ raise SystemExit(factory.main())
         factory.save(self.path, self.record)
         patch_path = factory.reset_patch(self.receipt)
         factory.save(patch_path, "original private patch")
-        self.terminal.write("fixture\n")
-        self.terminal.seek(0)
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+                self.assertRaisesRegex(factory.FactoryError, "inconsistent terminal receipt"):
             factory.release_worktree(self.path)
-        self.assertFalse(self.destination.exists())
+        self.assertTrue(self.destination.is_dir())
         self.assertEqual(patch_path.read_text(), "original private patch")
-        self.assertNotIn("exclusive", json.loads(self.path.with_suffix(".worktree-release.json").read_bytes()))
 
     def test_foreign_store_visible_between_intent_and_rex_start(self):
         from test_rex_launcher import FakeRex
@@ -1312,6 +1318,10 @@ raise SystemExit(factory.main())
                     self.assertEqual(receipt["native_process"]["pid"], child.pid)
                     row, = go_cache.census(self.state, self.repo)
                     self.assertIn("native process is active", row["reason"])
+                    code, _, error = self.cli("release-worktree", "--task", "fixture")
+                    self.assertEqual(code, 1)
+                    self.assertIn("native process is active", error)
+                    self.assertTrue(self.cache.is_dir())
             finally:
                 child.communicate(input=b"", timeout=10)
         before = self.protected()
@@ -1451,9 +1461,6 @@ class ActivityObservation(unittest.TestCase):
         with patch.object(go_cache, "boot_time", return_value=100), patch.object(os, "kill"):
             with observations(), self.assertRaisesRegex(factory.FactoryError, "working directory of process 42"):
                 go_cache.process_check(work, admin, "example", [])
-            with observations(), patch.object(sys, "stderr", StringIO()) as diagnostic:
-                go_cache.process_check(work, admin, "example", [], attended_release=True)
-                self.assertIn("requires independent exclusion", diagnostic.getvalue())
 
     def test_user_file_and_process_inventory(self):
         work, admin = Path("/fixture/tree"), Path("/fixture/admin")

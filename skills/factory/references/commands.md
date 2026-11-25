@@ -127,7 +127,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 | `reset` | Saves a failed writer's leftover edits as a patch and restores its checkout | `{task, assignment, checkout, candidate, patch, next}` | `reset_writer()` |
 | `rebase-worktree` | Saves the change as a patch, moves the worktree onto a new base and selects it | `{task, worktree, previous, candidate, patch, next}` | `rebase_worktree()` |
 | `go-caches --repo PATH` | Inspects linked Go caches. Select `--trim-go /absolute/path/to/go` for native aging or `--clean-task TASK` for attended exclusive retirement | JSON rows with path, allocated KiB, decision and evidence or retain reason. Native aging reports entry counts after readback | `skills/factory/runtime/go_cache.py` `census()` |
-| `release-worktree` | Removes the provisioned worktree during an attended exclusive window and keeps the branch | `{task, worktree, branch, head}` | `release_worktree()` |
+| `release-worktree` | Removes the finished provisioned worktree and its private linked Go cache unattended, keeping the branch | `{task, worktree, branch, head}` | `release_worktree()` |
 | `delivered` | Confirms the release skill merged the head the release judgment approved, and records its receipt | The receipt; `--acceptance` adds `acceptance` | `skills/factory/runtime/integration.py` `delivered()` |
 | `export-writer` | Exports a settled writer as source history for one-hop transfer; prints source host and SHA-256 | `{source_host, sha256, out}` | `skills/factory/runtime/writer_transfer.py` `export_writer()` |
 | `import-writer` | Imports a writer bundle on the destination host; requires `--rex` and `--server` | Task view | `skills/factory/runtime/writer_transfer.py` `import_writer()` |

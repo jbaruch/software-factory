@@ -230,8 +230,10 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
     harness = factory.worker_hint(cmd)
     path = directory / f"{record['task']}.{name}.{harness}.json"
     closed = assignment.get("closed") or {}
-    if (assignment["state"] != "launched" or closed.get("state") not in ("exited", "failed")
-            or not factory.valid_closed(assignment)):
+    # Strict collection replays a completed receipt even when the pane was never tidied.
+    collected = ordinary_release and assignment.get("closed") is None and assignment.get("native_collected") is True
+    if (assignment["state"] != "launched" or not collected and (closed.get("state") not in ("exited", "failed")
+            or not factory.valid_closed(assignment))):
         raise factory.FactoryError(f"{job}: need a tidied, observed Rex process exit; inspect the original attempt")
     if harness is None:
         raise factory.FactoryError(f"{job}: native assignment or exact worktree is ambiguous")
@@ -300,11 +302,11 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
         expected["writer"] = False
     if args.write and harness != "codex":
         expected["sandbox"] = str(args.sandbox)
-    code = closed["exit"]["exit_code"]
-    success = closed["state"] == "exited"
+    success = collected or closed["state"] == "exited"
     if (not isinstance(receipt, dict) or any(
             k not in receipt or type(receipt[k]) is not type(v) or receipt[k] != v for k, v in expected.items())
-            or success != (code == 0) or receipt.get("state") != ("completed" if success else "failed")
+            or receipt.get("state") != ("completed" if success else "failed")
+            or ordinary_release and type(receipt.get("exit_code")) is not int
             or success and (type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0)):
         raise factory.FactoryError(f"{job}: inspect inconsistent terminal receipt and Rex exit")
     version = receipt.get("schema_version")
@@ -319,7 +321,7 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
         if (not isinstance(scope, str) or not scope or type(receipt.get("exit_code")) is not int
                 or not gone(receipt.get("native_process"), scope, receipt["exit_code"])):
             raise factory.FactoryError(f"{job}: recorded native process is active or cannot be verified")
-    elif version not in versions[harness] or "native_process" in receipt:
+    elif (version not in versions[harness] and not (ordinary_release and version == 7)) or "native_process" in receipt:
         raise factory.FactoryError(f"{job}: use the runtime owning this native process/receipt version")
     selected_writer = False
     if success:
@@ -340,9 +342,9 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
     start, finish = receipt.get("created_at"), receipt.get("finished_at")
     if (not isinstance(start, (int, float)) or not isinstance(finish, (int, float))
             or isinstance(start, bool) or isinstance(finish, bool)
-            or not 0 < start <= finish <= closed["at"]):
+            or not 0 < start <= finish or closed and finish > closed["at"]):
         raise factory.FactoryError(f"{job}: restore consistent attempt timestamps")
-    return (start, closed["at"]), reader, selected_writer, (path, raw)
+    return (start, closed.get("at", finish)), reader, selected_writer, (path, raw)
 
 
 def terminal_attempts(record, directory, work, admin):
@@ -429,7 +431,6 @@ def receipt_uses_checkout(receipt, work, admin):
 def check_release_users(directory, owner, work, admin, witness):
     """Called under the physical launch lock, before removing the inode that carries it."""
     check_launch_stores(directory, admin)
-    intervals = []
     user_records = {}
     for row, raw in records(directory):
         task = row["task"]
@@ -452,33 +453,9 @@ def check_release_users(directory, owner, work, admin, witness):
             launch = assignment.get("launch_checkout")
             if not local and (launch != witness or not Path(req["cwd"]).is_relative_to(work)):
                 raise factory.FactoryError(f"Reconcile foreign use by {task}/{name} before release")
-            harness = factory.worker_hint(req["command"])
-            receipt_path = directory / f"{task}.{name}.{harness}.json"
-            reset = factory.reset_patch(receipt_path)
-            lost = (assignment.get("closed") or {}).get("state") == "lost"
-            if local and harness and assignment["state"] == "launched" and (lost or os.path.lexists(reset)):
-                command = req["command"]
-                tail = command[4:] if command[1:3] == ["-E", "-s"] else command[2:]
-                args = factory.parse_saved_args(importlib.import_module(harness + "_worker").parser(), tail)
-                raw_receipt = factory.read_record_bytes(receipt_path, private=True)
-                receipt = factory.decode_json(raw_receipt)
-                if (args.receipt != receipt_path or args.job != f"{task}/{name}" or args.worktree_git_dir != admin
-                        or receipt.get("kind") != harness + "-execution" or receipt.get("state") not in ("starting", "failed")
-                        or receipt.get("job") != args.job or receipt.get("brief_sha256") != req["instructions_sha256"]
-                        or receipt.get("cwd") != req["cwd"] or receipt.get("worktree_git_dir") != str(admin)
-                        or receipt.get("repository_identity") != repo or receipt.get("inputs") != req["inputs"]):
-                    raise factory.FactoryError(f"Restore the original stopped attempt for {task}/{name} before release")
-                if not lost:
-                    metadata_identity(reset, directory.stat().st_dev)
-                user_records[receipt_path] = raw_receipt
-                continue
-            # A strictly collected owner reader can predate launch-time physical binding.
-            # Preserve its stopped result for release without certifying it for cache retirement.
-            ordinary = local and "--write" not in req["command"]
-            interval, _, _, (_, raw_receipt) = terminal_attempt(checked, directory, work, admin, name, assignment,
-                                                                 ordinary_release=ordinary)
+            _, _, _, (receipt_path, raw_receipt) = terminal_attempt(
+                checked, directory, work, admin, name, assignment, ordinary_release=True)
             user_records[receipt_path] = raw_receipt
-            intervals.append(interval)
     for path in directory.glob("*.*.*.json"):
         if path in user_records or len(path.name.split(".")) != 4:
             continue
@@ -488,7 +465,6 @@ def check_release_users(directory, owner, work, admin, witness):
         if ("worktree_git_dir" in receipt or path.name.split(".")[-2] in factory.NATIVE_HARNESSES
                 or str(receipt.get("kind", "")).endswith("-execution")) and receipt_uses_checkout(receipt, work, admin):
             raise factory.FactoryError(f"Reconcile orphaned native receipt {path.name} before release")
-    process_check(work, admin, owner["task"], intervals, attended_release=True)
     return user_records
 
 
@@ -612,8 +588,8 @@ def inventory(command, timeout):
         return process.pid, listing, diagnostics
 
 
-def process_check(work, admin, task, intervals, *, attended_release=False):
-    """Only an attended checkout release can rely on independent exclusion for incomplete process scope."""
+def process_check(work, admin, task, intervals):
+    """Verify process scope for cache-only retirement."""
     scope_gap = None
     if any(not str(p).isascii() or not str(p).isprintable() or "\\" in str(p) for p in (work, admin)):
         raise factory.FactoryError("Cannot match the worktree path unambiguously in the process listing")
@@ -684,9 +660,7 @@ def process_check(work, admin, task, intervals, *, attended_release=False):
             continue
         scope_gap = f"Cannot verify working directory of process {missing}"
     if scope_gap:
-        if not attended_release:
-            raise factory.FactoryError(scope_gap)
-        print(f"{scope_gap}. Release requires independent exclusion of all checkout and cache users.", file=sys.stderr)
+        raise factory.FactoryError(scope_gap)
     return dict(observed_processes=len(observed), host_boot=boot, first_possible_start_this_boot=earliest)
 
 
@@ -780,7 +754,7 @@ def mount_id(fd):
     raise factory.FactoryError("Cannot verify the mount identity of an open cache entry")
 
 
-def cache_contents(fd, mount, *, clean=False, size_only=False, entries=None):
+def cache_contents(fd, mount, *, clean=False, size_only=False, entries=None, allow_empty=False):
     """Size and retire Go build entries only through verified open parent directories."""
     base = os.fstat(fd)
     if mount_id(fd) != mount or stat.S_IMODE(base.st_mode) != 0o700:
@@ -797,7 +771,7 @@ def cache_contents(fd, mount, *, clean=False, size_only=False, entries=None):
     def visit(parent, parts):
         nonlocal latest, blocks, changed
         names = os.listdir(parent)
-        if not parts and "README" not in names:
+        if not parts and "README" not in names and (names or not allow_empty):
             raise factory.FactoryError("Inspect missing native Go cache signature")
         if len(parts) == 2 and len(names) > 1:
             raise factory.FactoryError("Inspect ambiguous cached executable")

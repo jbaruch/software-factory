@@ -1790,7 +1790,7 @@ def check_deregistered(repository, destination, admin):
 
 
 def check_legacy_registration(record, witness):
-    """Match the attended observation to one currently registered, owner-locked checkout."""
+    """Match the release observation to one currently registered, owner-locked checkout."""
     item = record["provisioning"]
     request = item["request"]
     marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
@@ -1836,7 +1836,7 @@ def release_proof(path, record):
     proof = decode_json(raw)
     marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
     version = proof.get("schema_version") if isinstance(proof, dict) else None
-    # Only a completed owner with no original observation can replay an attended observation.
+    # Only a completed owner with no original observation can replay a release observation.
     legacy = version == 3
     if legacy and (item["state"] != "provisioned" or "checkout_inodes" in item):
         raise FactoryError(f"Restore the original owner release outcome for deregistered checkout {destination}")
@@ -1894,26 +1894,26 @@ def release_worktree(path):
             raise FactoryError("Legacy release readback changed. Inspect the owner record and retain dependent caches.")
         return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=None,
                     already_released=True)
-    with go_cache.inode_lock(directory) as fd:
+    with go_cache.inode_lock(directory) as fd, ExitStack() as locks:
         if os.path.lexists(receipt_path):
             raise FactoryError("Inspect the existing owner release receipt before removing a surviving worktree")
-        provisioning_owned(record, item)
         repo = admission["repository_identity"]
         witness = go_cache.checkout_binding(destination, directory, repo)
         legacy = "checkout_inodes" not in item
         if not witness:
             raise FactoryError("Missing current checkout. Preserve the registration and inspect the owner record.")
-        if legacy:
-            check_legacy_registration(record, witness)
-        elif not original_checkout(item, witness):
+        if not legacy and not original_checkout(item, witness):
             raise FactoryError("Invalid or changed original provisioning identity. Preserve the checkout for inspection.")
         head = witness["head"]
         user_records = go_cache.check_release_users(path.parent, record, destination, directory, witness)
-        if legacy:
-            print(f"Legacy provisioning never recorded checkout_inodes. Confirm Git removal of the current "
-                  f"owner-registered checkout {destination} and its admin directory {directory} "
-                  f"on {item['request']['branch']}. Dependent caches stay retained.", file=sys.stderr)
-        go_cache.confirm_window(record["task"])
+        cache = directory / "go-build"
+        cache_fd = None
+        if os.path.lexists(cache):
+            go_cache.real_directory(cache, os.fstat(fd).st_dev)
+            go_cache.check_mounts(Path(admission["repository"]), destination, cache)
+            go_cache.check_native_cache_path(cache)
+            cache_fd = locks.enter_context(go_cache.inode_lock(cache))
+            go_cache.cache_contents(cache_fd, go_cache.mount_id(fd), allow_empty=True)
         check_checkout(admission["repository"], str(destination), head, expected_identity=repo,
                        expected_git_dir=directory, read_only=True)
         if legacy:
@@ -1927,6 +1927,9 @@ def release_worktree(path):
             raise FactoryError("Checkout changed during release; inspect ownership before retrying")
         if provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]:
             raise FactoryError("Restore the original provisioned branch before release")
+        if (os.path.lexists(cache) if cache_fd is None else
+                not os.path.samestat(os.fstat(cache_fd), cache.lstat())):
+            raise FactoryError("Linked cache changed during release; inspect the original checkout")
         provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination), timeout=600)
         if go_cache.checkout_binding(destination, directory, repo) is not None:
             raise FactoryError("Git removal left a checkout endpoint; inspect incomplete teardown")

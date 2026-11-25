@@ -115,13 +115,13 @@ execution and task locks. Launch intent and cache cleanup also synchronize on
 the linked Git admin directory inode across lines. Before saving intent for a
 provisioned tree, the launcher identifies its state store on that inode's directory.
 Owner release takes the same exclusive physical lock through Git deregistration
-and receipt publication. Direct checkout and cache users require independent
-exclusion through release readback. Provisioning and native launch supply the
+and receipt publication. Owner release verifies terminal evidence for every
+recorded checkout user. Git removes the private linked Go cache with the checkout. Provisioning and native launch supply the
 original physical bindings used by maintenance. An additional launch store makes the selected store
 insufficient for cleanup or release. The hourly host job can explicitly select
 Go-native aging for a verified private local cache. Factory holds its admission
 locks through an offline build and entry readback. Go coordinates concurrent
-native builds and decides which entries to expire. Full retirement requires
+native builds and decides which entries to expire. Cache-only retirement requires
 attended exclusion of all cache users. See the [cache policy](native-providers.md#linked-go-cache-retention).
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.

@@ -405,27 +405,25 @@ replays the patch and resolves any conflicts.
 `release-worktree --task TASK` removes the provisioned worktree once the task's
 work is done. Under the owner's line and task locks it takes the exclusive
 linked Git admin lock, reconciles registered stores, checkout users and
-terminal receipts, and checks for active processes. Release requires an
-attended window with independent exclusion of direct checkout and cache users,
-including new entrants and surviving descendants, through publication and readback.
-An observed user blocks removal. If process ancestry or cwd coverage is incomplete,
-the operator must verify exclusion outside Factory before confirming the task
-at the terminal. The line, task and admin locks are held while the prompt waits.
+terminal receipts. Release runs unattended. Each recorded user needs a terminal
+worker receipt bound to its assignment and an observed worker exit or a
+strictly collected result. A recorded native child must also be proven gone.
+Lost or starting attempts and reset patches alone leave the checkout in place.
 The owner checks the clean worktree, branch, marker and physical checkout,
-admin and pointer identities from provisioning. A completed pre-upgrade record
-without `checkout_inodes` uses the same attended command. The owner verifies
-the current registration, HEAD, branch and owner lock before confirmation and
-again before Git removal. An invalid or changed saved identity blocks release.
+admin and pointer identities from provisioning. For completed pre-upgrade
+provisioning without `checkout_inodes`, the owner checks the exact current
+Git registration and lock marker. An invalid or changed saved identity blocks release.
+Git removes the private linked Go cache with its admin directory. Unverified
+cache contents or ownership block removal of the checkout.
 The owner verifies Git deregistration
 and both absent endpoints before publishing the private
 `TASK.worktree-release.json` receipt. The branch stays available.
-A stopped owner attempt with an original reset patch or a recorded lost exit
-allows attended release. The receipt records Git removal and its original
+The receipt records Git removal and its original
 publication alias. A later census retains caches that depend on this checkout
 because direct-user exclusion at release cannot be established from the receipt.
 Single-link version 1 receipts remain available for release readback. Two-link
 version 1 receipts require preserving both names because the publisher recorded
-no alias. For an attended pre-upgrade release the version 3 receipt stores
+no alias. For a pre-upgrade release the version 3 receipt stores
 `observed_checkout` in place of `checkout`. That observation is bound to the
 current release only. The original provisioning and launch records stay intact.
 Retry validates the receipt against the same owner record and reports
