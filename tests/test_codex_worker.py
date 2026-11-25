@@ -2683,6 +2683,16 @@ def check_checkout(*args, **kwargs):
         with self.assertRaises(worker.WorkerError):
             worker.parse_events([stream[0], diagnostic, stream[-1], stream[-2], stream[2]])
 
+    def test_completed_turn_preserves_coordination_report_and_usage(self):
+        stream = events()
+        answer = dict(decision="fixture", question="next-step", choice="continue", missing_input=None)
+        coordination = dict(decision="fixture", question="next-step",
+                            request={"payload": {"questions": {"next-step": {"criteria": ["continue", "uncertain"]}}}})
+        report = dict(outcome="completed", artifacts=["evidence/qa.txt"], answer=answer)
+        stream[-2]["item"]["text"] = json.dumps(report)
+        self.assertEqual(worker.parse_events(stream, coordination),
+                         dict(thread_id="thread-fixture", report=report, usage=dict(input_tokens=100, output_tokens=30)))
+
     def test_a_recovered_mid_turn_reconnect_is_a_notice(self):
         # acr-216's writer completed after this notice, and the worker refused the turn as failed.
         notice = dict(type="error", message="Reconnecting... 2/5 (stream disconnected before completion: "

@@ -21,6 +21,9 @@ import review_evidence
 from codex_worker import NATIVE_LINE_LIMIT, cancelled, outcome_schema, finish_native_child, with_sigterm
 
 
+UNSUCCESSFUL_EXIT = "Native Grok exited unsuccessfully; inspect its retained events and original Rex pane"
+
+
 def read_events(path, content=None):
     try:
         records = (factory.read_record(path) if content is None else content).splitlines()
@@ -175,7 +178,7 @@ async def execute(args, *, spawn=asyncio.create_subprocess_exec, probe=native_gr
             receipt["exit_code"] = await factory.within_budget(consume(), deadline=deadline)
             os.fsync(stream.fileno())
         if receipt["exit_code"] != 0:
-            raise factory.FactoryError("Native Grok exited unsuccessfully; inspect its retained events and original Rex pane")
+            raise factory.FactoryError(UNSUCCESSFUL_EXIT)
         native = native_grok.parse_execution(events, session_id=args.native_session,
                                              cwd=str(args.cwd) if args.write else receipt["checkout"], max_turns=args.turns)
         receipt.update({key: native[key] for key in ("report", "request_id", "usage", "model_usage", "turns")})

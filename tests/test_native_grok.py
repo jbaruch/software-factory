@@ -419,6 +419,26 @@ class NativeGrokExecution(unittest.TestCase):
         self.assertEqual(result["usage"], events[-1]["usage"])
         self.assertEqual(result["model_usage"], events[-1]["modelUsage"])
 
+    def test_turn_limit_requires_one_bound_terminal_pair_and_no_report(self):
+        marker = {"type": "max_turns_reached"}
+        final = dict(self.final(), stopReason="max_turn_requests", num_turns=3, structuredOutput=None)
+        text = dict(type="text", data='{"outcome":"approved","artifacts":[]}')
+        bounds = dict(session_id="fixture-session", cwd="/fixture", max_turns=3)
+        self.assertIsNone(native_grok.verify_turn_limit([text, marker, final], **bounds))
+        with self.assertRaises(native_grok.GrokProbeError):
+            self.parse([marker, final])
+        cases = [[final], [marker], [marker, text, final], [marker, marker, final], [marker, final, text],
+                 [marker, final, final], [dict(type="error"), marker, final], [None, marker, final],
+                 [marker, {k: v for k, v in final.items() if k != "structuredOutput"}]]
+        for field, value in (("stopReason", "end_turn"), ("num_turns", 2), ("num_turns", True),
+                             ("requestId", " "), ("cwd", "/other"), ("sessionId", "other"),
+                             ("usage", {"input_tokens": True}), ("modelUsage", []),
+                             ("structuredOutput", self.final()["structuredOutput"])):
+            cases.append([marker, {**final, field: value}])
+        for index, events in enumerate(cases):
+            with self.subTest(index=index), self.assertRaises(native_grok.GrokProbeError):
+                native_grok.verify_turn_limit(events, **bounds)
+
     def test_missing_ambiguous_failed_or_unbound_completion_refuses(self):
         final = self.final()
         cases = [[], [dict(type="text", data=json.dumps(final["structuredOutput"]))],

@@ -147,6 +147,23 @@ every successful reader with its original runtime and checkout, including reader
 whose results were registered manually. Each selected approval and the release
 judgment must pass strict collection and replay of the original evidence.
 
+A managed, unselected Codex or Grok reader can also be omitted after Rex records a
+failed close with a nonzero wrapper exit. Its private v8 receipt must match
+the original read-only command, brief, checkout identifiers and assignment
+inputs. The Codex stream must identify the same single thread and end its
+single turn in failure. For Grok, native exit 1 and the original unsuccessful-exit
+receipt must agree with a single turn-limit marker immediately before the final
+event. That event binds the session, reader checkout and exact requested turn
+count, ends with `max_turn_requests` and carries an explicit null structured output.
+The receipt must finish by the recorded close time. A report, registered result
+or writer commitment rules out this path.
+
+Omission supplies no approval or release judgment. The wrapper exit
+corroborates native failure, including a signal exit. It cannot identify the
+exact native exit code. These records carry no historical receipt digest.
+Omission neither authenticates every receipt byte nor certifies the state of
+the checkout, scratch directory or process. It uses no such path for cleanup.
+
 Collect pending successful attempts before upgrading. The 0.39.29 launcher
 recorded paths without runtime digests. A successor installed at those same
 paths refuses first collection and leaves the task and artifacts intact. Use

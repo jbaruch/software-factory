@@ -145,8 +145,8 @@ def parse_configuration(report, cwd) -> dict:
                 no_executable_customizations=not customized)
 
 
-def parse_execution(events, *, session_id, cwd, max_turns):
-    """Decode headless Grok's final event; text fragments carry no result."""
+def execution_end(events, *, session_id, cwd, max_turns):
+    """Bind the single terminal event to the frozen native invocation."""
     final = None
     for event in events:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
@@ -157,7 +157,7 @@ def parse_execution(events, *, session_id, cwd, max_turns):
             raise GrokProbeError("Native Grok reported an execution error; inspect the original stream without retrying")
         if event["type"] == "end":
             final = event
-    if (final is None or final.get("stopReason") != "end_turn"
+    if (final is None
             or not isinstance(session_id, str) or not session_id.strip()
             or not isinstance(cwd, str) or not Path(cwd).is_absolute()
             or final.get("sessionId") != session_id or final.get("cwd") != cwd
@@ -165,12 +165,6 @@ def parse_execution(events, *, session_id, cwd, max_turns):
             or type(max_turns) is not int or max_turns < 1
             or type(final.get("num_turns")) is not int or not 1 <= final["num_turns"] <= max_turns):
         raise GrokProbeError("Native Grok completion differs from the frozen session, directory or turn bound; inspect its original stream before collection")
-    report = final.get("structuredOutput")
-    if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
-            or not isinstance(report["outcome"], str) or report["outcome"] not in RESULT_OUTCOMES
-            or not isinstance(report["artifacts"], list)
-            or any(not isinstance(value, str) or not value.strip() for value in report["artifacts"])):
-        raise GrokProbeError("Native Grok has no supported final structured report; inspect its original stream and update the adapter before collection")
     usage, models = final.get("usage"), final.get("modelUsage")
     if usage is not None and (not isinstance(usage, dict)
             or any(type(value) is not int or value < 0 or value > sys.float_info.max for value in usage.values())):
@@ -182,8 +176,31 @@ def parse_execution(events, *, session_id, cwd, max_turns):
                     or type(value) is float and not math.isfinite(value) for value in values.values())
                 for model, values in models.items())):
             raise GrokProbeError("Native Grok model usage is malformed; inspect the original final event before collection")
+    return final
+
+
+def verify_turn_limit(events, *, session_id, cwd, max_turns):
+    final = execution_end(events, session_id=session_id, cwd=cwd, max_turns=max_turns)
+    if (len(events) < 2 or events[-2] != {"type": "max_turns_reached"}
+            or any(event["type"] == "max_turns_reached" for event in events[:-2])
+            or final.get("stopReason") != "max_turn_requests" or final["num_turns"] != max_turns
+            or "structuredOutput" not in final or final["structuredOutput"] is not None):
+        raise GrokProbeError("Restore the original Grok turn-limit marker and terminal event before omission")
+
+
+def parse_execution(events, *, session_id, cwd, max_turns) -> dict:
+    """Decode headless Grok's final event; text fragments carry no result."""
+    final = execution_end(events, session_id=session_id, cwd=cwd, max_turns=max_turns)
+    if final.get("stopReason") != "end_turn":
+        raise GrokProbeError("Native Grok completion differs from the requested end turn; inspect its original stream before collection")
+    report = final.get("structuredOutput")
+    if (not isinstance(report, dict) or set(report) != {"outcome", "artifacts"}
+            or not isinstance(report["outcome"], str) or report["outcome"] not in RESULT_OUTCOMES
+            or not isinstance(report["artifacts"], list)
+            or any(not isinstance(value, str) or not value.strip() for value in report["artifacts"])):
+        raise GrokProbeError("Native Grok has no supported final structured report; inspect its original stream and update the adapter before collection")
     return dict(report=report, session_id=session_id, request_id=final["requestId"],
-                usage=usage, model_usage=models, turns=final["num_turns"])
+                usage=final.get("usage"), model_usage=final.get("modelUsage"), turns=final["num_turns"])
 
 
 async def exchange(process, identity, method, params):
