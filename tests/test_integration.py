@@ -561,6 +561,14 @@ class Integration(NativeReviewFixture):
         original = copy.deepcopy(record)
         path = self.native.args.receipt
         receipt = json.loads(path.read_text())
+        factory.save(self.path, record)
+        self.release_skill_merges()
+        path.unlink()
+        self.assertEqual(self.delivered_cli(review="release", required="qa"), (1, None,
+            "factory: deliver/failed-reader: cannot omit the uncollected reader: "
+            "Restore the original v8 Codex receipt from the archive before omission. "
+            "Omission remains blocked if the receipt is unavailable.\n"))
+        factory.save(path, receipt)
         self.assertNotEqual(factory.launch_runtime(reader), factory.native_runtime_digest())
         self.assertEqual(receipt["exit_code"], -signal.SIGTERM)
         self.assertIsNone(receipt["native_process"]["scope"])
@@ -631,6 +639,14 @@ class Integration(NativeReviewFixture):
         write_stream([thread])
         with self.assertRaisesRegex(factory.FactoryError, "failed Codex reader"):
             integration.verify_omitted_reader(key, record, reader)
+
+    def test_missing_codex_receipt_during_ordinary_collection(self):
+        reader = self.review("reader", "qa", frozen=False, collect=False)
+        self.native.args.receipt.unlink()
+        record = factory.load_task(self.path)
+        with patch.object(factory, "status", return_value=dict(state="exited")), self.assertRaises(factory.FactoryError) as error:
+            factory.collect_codex(self.path, "reader", None, record, reader)
+        self.assertEqual(str(error.exception), "Native receipt is missing; inspect the existing pane and events, never relaunch blindly")
 
     def test_mixed_stale_approval_and_unverified_failed_writer_refuse(self):
         with patch.object(factory, "ROOT", self.root / "earlier"):

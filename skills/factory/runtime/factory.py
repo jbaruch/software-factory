@@ -4159,6 +4159,9 @@ def bound_codex_receipt(assignment_id, record, assignment, args, *, failed, capt
     try:
         receipt = decode_json(read_record(args.receipt, private=failed and not args.write) if captured is None else captured["receipt"])
     except FileNotFoundError:
+        if failed and not args.write:
+            raise FactoryError("Restore the original v8 Codex receipt from the archive before omission. "
+                               "Omission remains blocked if the receipt is unavailable.") from None
         raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
     except (OSError, ValueError, UnicodeDecodeError):
         raise FactoryError("Cannot read native receipt for this assignment; inspect or restore the original artifact before collection") from None
