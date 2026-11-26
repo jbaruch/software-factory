@@ -7,6 +7,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,8 @@ class NativeReviewFixture(unittest.TestCase):
         events = fixtures.events(outcome)
         events[0]["thread_id"] = context or ("context-" + key)
         self.native.process = fixtures.FakeProcess(events[:2] if failed else events, timeout=failed, exit_code=-2 if failed else 0)
+        if failed and not collect:
+            self.native.process = fixtures.FakeProcess(events[:2] + [dict(type="turn.failed")], exit_code=-signal.SIGTERM)
         spawn = self.native.spawn
         async def edit(*args, **kwargs):
             if change is not None:
@@ -143,6 +146,8 @@ class NativeReviewFixture(unittest.TestCase):
             os.chdir(previous_cwd)
         if failed:
             self.assertEqual(receipt["state"], "failed")
+            if not collect:
+                return assignment
             factory.record_result(self.path, assignment_id=key, candidate=self.head,
                 requirements=record["inputs"]["requirements"], outcome="blocked", artifacts=[str(self.native.args.receipt)])
             return factory.load_task(self.path)["assignments"][key]
@@ -542,6 +547,106 @@ class Integration(NativeReviewFixture):
         with patch.object(factory, "ROOT", self.root / "earlier"):
             self.review("self-final", "release", delivery="release", context="writer-session")
         self.assertIn("contributor cannot judge", self.delivered_cli("self-final", **select)[2])
+
+    def test_failed_codex_reader_omission_requires_original_terminal_evidence(self):
+        key = "failed-reader"
+        with (patch.object(factory, "ROOT", self.root / "earlier"),
+              patch.object(factory, "native_start_time", return_value=None),
+              patch.object(factory, "process_scope", side_effect=OSError)):
+            self.review(key, "sre", failed=True, frozen=False, collect=False)
+        record = factory.load_task(self.path)
+        reader = record["assignments"][key]
+        reader["closed"] = dict(state="failed", exit={"exit_code": 1}, reason=None,
+                                session_id=record["session_id"], capture=None, at=1000)
+        original = copy.deepcopy(record)
+        path = self.native.args.receipt
+        receipt = json.loads(path.read_text())
+        factory.save(self.path, record)
+        self.release_skill_merges()
+        path.unlink()
+        self.assertEqual(self.delivered_cli(review="release", required="qa"), (1, None,
+            "factory: deliver/failed-reader: cannot omit the uncollected reader: "
+            "Restore the original v8 Codex receipt from the archive before omission. "
+            "Omission remains blocked if the receipt is unavailable.\n"))
+        factory.save(path, receipt)
+        self.assertNotEqual(factory.launch_runtime(reader), factory.native_runtime_digest())
+        self.assertEqual(receipt["exit_code"], -signal.SIGTERM)
+        self.assertIsNone(receipt["native_process"]["scope"])
+        self.assertIsNone(receipt["native_process"]["start_time"])
+        for changes in ({"schema_version": 7}, {"exit_code": 0}, {"report": {"outcome": "approved"}},
+                        {"thread_id": None}, {"thread_id": "another-reader"}, {"commit": {}},
+                        {"answer": "approved"}, {"writer": True}, {"events": str(path)}, {"interpreter": {}},
+                        {"finished_at": reader["closed"]["at"] + 1}, {"scratch": "/"}, {"native_process": None}):
+            with self.subTest(changes=changes), self.assertRaises(factory.FactoryError):
+                factory.save(path, {**receipt, **changes})
+                integration.verify_omitted_reader(key, record, reader)
+        # Neither the native signal number nor scratch/process cleanup is independently witnessed.
+        factory.save(path, {**receipt, "exit_code": 1, "scratch": str(self.root / "sf-elsewhere"),
+                            "scratch_removed": False, "native_process": {**receipt["native_process"], "pid": 456}})
+        self.assertIsNone(integration.verify_omitted_reader(key, record, reader))
+        factory.save(path, receipt)
+        altered = copy.deepcopy(reader)
+        altered["request"]["command"][3] = str(self.root / "manual" / "codex_worker.py")
+        missing = dict(reader)
+        del missing["native_launch"]
+        for unbound in (altered, missing):
+            with self.assertRaisesRegex(factory.FactoryError, "missing native result"):
+                integration.verify_omitted_reader(key, record, unbound)
+        for artifact in (path, self.native.args.events, Path(reader["brief"])):
+            artifact.chmod(0o644)
+            with self.subTest(public=artifact), self.assertRaises(factory.FactoryError):
+                integration.verify_omitted_reader(key, record, reader)
+            artifact.chmod(0o600)
+        report = path.with_suffix(".report.txt")
+        report.write_text("collected report")
+        with self.assertRaises(factory.FactoryError):
+            integration.verify_omitted_reader(key, record, reader)
+        report.unlink()
+        closed = reader["closed"]
+        for observation in (None, {**closed, "state": "running"}, {**closed, "state": "lost", "exit": None, "reason": "pane lost"},
+                            {**closed, "state": "exited", "exit": {"exit_code": 0}}, {**closed, "exit": None},
+                            {**closed, "exit": {"exit_code": 0}}):
+            with self.subTest(closed=observation), self.assertRaises(factory.FactoryError):
+                integration.verify_omitted_reader(key, record, {**reader, "closed": observation})
+        events = self.native.args.events
+        thread, start, failed = codex_worker.read_events(events)
+        startup = dict(type="item.completed", item=dict(type="error"))
+        message = fixtures.events()[-2]  # A well-formed approval still carries no authority in a failed turn.
+        diagnostic = dict(type="error", message="Fixture native failure")
+
+        def write_stream(stream):
+            events.write_text("".join(json.dumps(dict(schema_version=1, kind="codex-event-line",
+                data=json.dumps(event) + "\n")) + "\n" for event in stream))
+
+        for ending in ([failed], [diagnostic, failed]):
+            write_stream([thread, startup, start, message, *ending])
+            self.assertIsNone(integration.verify_omitted_reader(key, record, reader))
+            self.assertEqual(set(integration.approvals(record, "release", ["qa"])), {"qa", "release"})
+            for review, required in (("release", [key]), (key, ["qa"])):
+                with self.assertRaisesRegex(factory.FactoryError, "missing native result"):
+                    integration.approvals(record, review, required)
+            self.assertEqual(record, original)
+
+        for stream in ([thread, message, start, failed], [thread, start, dict(type="item.completed"), failed],
+                       [thread, failed], [thread, start, dict(type="turn.completed"), failed],
+                       [thread, start, failed, diagnostic], [thread, thread, start, failed],
+                       [thread, start, start, failed], [thread, start, dict(failed, thread_id="another-reader")],
+                       [thread, start, dict(diagnostic, thread_id="another-reader"), failed],
+                       [thread, start, dict(type="turn.unknown"), failed]):
+            with self.subTest(stream=stream), self.assertRaises(factory.FactoryError):
+                write_stream(stream)
+                integration.verify_omitted_reader(key, record, reader)
+        write_stream([thread])
+        with self.assertRaisesRegex(factory.FactoryError, "failed Codex reader"):
+            integration.verify_omitted_reader(key, record, reader)
+
+    def test_missing_codex_receipt_during_ordinary_collection(self):
+        reader = self.review("reader", "qa", frozen=False, collect=False)
+        self.native.args.receipt.unlink()
+        record = factory.load_task(self.path)
+        with patch.object(factory, "status", return_value=dict(state="exited")), self.assertRaises(factory.FactoryError) as error:
+            factory.collect_codex(self.path, "reader", None, record, reader)
+        self.assertEqual(str(error.exception), "Native receipt is missing; inspect the existing pane and events, never relaunch blindly")
 
     def test_mixed_stale_approval_and_unverified_failed_writer_refuse(self):
         with patch.object(factory, "ROOT", self.root / "earlier"):

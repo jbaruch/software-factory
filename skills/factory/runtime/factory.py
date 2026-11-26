@@ -4154,7 +4154,59 @@ def check_advanced_reader(assignment, args, receipt, repository):
     return True
 
 
-def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=False, delivery=False, captured=None):
+def bound_codex_receipt(assignment_id, record, assignment, args, *, failed, captured=None):
+    """Match the worker record to the command and the assignment's own inputs."""
+    try:
+        receipt = decode_json(read_record(args.receipt, private=failed and not args.write) if captured is None else captured["receipt"])
+    except FileNotFoundError:
+        if failed and not args.write:
+            raise FactoryError("Restore the original v8 Codex receipt from the archive before omission. "
+                               "Omission remains blocked if the receipt is unavailable.") from None
+        raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise FactoryError("Cannot read native receipt for this assignment; inspect or restore the original artifact before collection") from None
+    if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
+        raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] not in (4, 5, 6, 7, SCRATCH_RECEIPT_VERSION)
+            or receipt.get("kind") != "codex-execution" or receipt.get("state") != ("failed" if failed else "completed")
+            or any(type(receipt.get(key)) not in (int, float)
+                   or not 0 <= receipt[key] <= sys.float_info.max
+                   for key in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"]
+            or (not isinstance(receipt.get("error"), str) if failed else ("error" not in receipt or receipt["error"] is not None))
+            or any(key not in receipt for key in ("thread_id", "report", "usage"))
+            or (not failed and (type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0))
+            or receipt.get("job") != record["task"] + "/" + assignment_id
+            or not valid_inputs(receipt.get("inputs"))
+            or receipt.get("inputs") != assignment["request"].get("inputs")
+            or not valid_repository_identity(receipt.get("repository_identity"))
+            or receipt["repository_identity"] != record["admission"]["repository_identity"]
+            or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
+            or receipt.get("cwd") != assignment["request"]["cwd"]
+            or not args.worktree_git_dir.is_absolute()
+            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or receipt.get("binary") != str(args.codex) or not args.codex.is_absolute()
+            or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
+            or (not failed and (not isinstance(receipt.get("candidate"), str)
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
+                or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])))
+            or receipt.get("events") != str(args.events)):
+        raise FactoryError("Native receipt does not match this assignment; inspect the original artifacts")
+    return receipt
+
+
+def failed_codex_thread(events):
+    threads = [event.get("thread_id") for event in events
+               if isinstance(event, dict) and event.get("type") == "thread.started"]
+    if (len(threads) == 1 and isinstance(events[0], dict) and events[0].get("type") == "thread.started"
+            and isinstance(threads[0], str) and threads[0]):
+        return threads[0]
+    return None
+
+
+def codex_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, failed_identity=None, delivery=False, captured=None):
     """Verify original native evidence; offline callers require a collected current result."""
     from codex_worker import parse_events, parser, read_events
     from factory_commit import check_commit_receipt
@@ -4169,51 +4221,11 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
         raise FactoryError("Native evidence lacks proven strict collection; explicitly collect it with its original checkout available")
     if observe is not None and observe()["state"] not in ({"failed", "exited", "lost"} if failed_identity else {"exited", "lost"}):
         raise FactoryError("Native worker has not exited successfully; inspect status/capture before collection")
-    try:
-        receipt = decode_json(read_record(args.receipt) if captured is None else captured["receipt"])
-    except FileNotFoundError:
-        raise FactoryError("Native receipt is missing; inspect the existing pane and events, never relaunch blindly") from None
-    except (OSError, ValueError, UnicodeDecodeError):
-        raise FactoryError("Cannot read native receipt for this assignment; inspect or restore the original artifact before collection") from None
-    if isinstance(receipt, dict) and type(receipt.get("schema_version")) is int and receipt["schema_version"] in (1, 2, 3):
-        raise FactoryError("Legacy native receipt lacks the current repository/worktree binding; inspect the original attempt without relaunching it")
-    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in (4, 5, 6, 7, SCRATCH_RECEIPT_VERSION)
-            or receipt.get("kind") != "codex-execution" or receipt.get("state") != ("failed" if failed_identity else "completed")
-            or any(type(receipt.get(key)) not in (int, float)
-                   or not 0 <= receipt[key] <= sys.float_info.max
-                   for key in ("created_at", "finished_at", "elapsed_seconds"))
-            or receipt["finished_at"] < receipt["created_at"]
-            or (not isinstance(receipt.get("error"), str) if failed_identity else ("error" not in receipt or receipt["error"] is not None))
-            or any(key not in receipt for key in ("thread_id", "report", "usage"))
-            or (not failed_identity and (type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0))
-            or receipt.get("job") != record["task"] + "/" + assignment_id
-            or not valid_inputs(receipt.get("inputs"))
-            or receipt.get("inputs") != assignment["request"].get("inputs")
-            or not valid_repository_identity(receipt.get("repository_identity"))
-            or receipt["repository_identity"] != record["admission"]["repository_identity"]
-            or receipt.get("brief_sha256") != assignment["request"]["instructions_sha256"]
-            or receipt.get("cwd") != assignment["request"]["cwd"]
-            or not args.worktree_git_dir.is_absolute()
-            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
-            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
-            or receipt.get("binary") != str(args.codex) or not args.codex.is_absolute()
-            or type(receipt.get("writer")) is not bool or receipt["writer"] != args.write
-            or (not failed_identity and (not isinstance(receipt.get("candidate"), str)
-                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", receipt["candidate"])
-                or (not args.write and receipt.get("candidate") != receipt["inputs"]["candidate"])))
-            or receipt.get("events") != str(args.events)):
-        raise FactoryError("Native receipt does not match this completed assignment; inspect the original artifacts")
+    receipt = bound_codex_receipt(assignment_id, record, assignment, args, failed=bool(failed_identity), captured=captured)
     if failed_identity:
-        # Identity-only recovery of a failed contributor. This is never a report,
-        # success receipt, dependency or approval, even if partial events contain one.
         events = read_events(args.events, None if captured is None else captured["events"])
-        threads = [event.get("thread_id") for event in events
-                   if isinstance(event, dict) and event.get("type") == "thread.started"]
-        if (not args.write or not events or not isinstance(events[0], dict)
-                or events[0].get("type") != "thread.started" or len(threads) != 1
-                or not isinstance(threads[0], str) or not threads[0]
-                or receipt.get("thread_id") not in (None, threads[0])):
+        thread = failed_codex_thread(events)
+        if failed_identity != "writer" or not args.write or thread is None or receipt["thread_id"] not in (None, thread):
             raise FactoryError("Unknown or ambiguous original failed contributor context")
         try:
             instructions = Path(assignment["brief"]).read_text() if captured is None else captured["brief"]
@@ -4221,7 +4233,7 @@ def codex_evidence(assignment_id, record, assignment, *, observe=None, collected
             raise FactoryError("Restore the original failed contributor brief") from None
         if hashlib.sha256(instructions.encode()).hexdigest() != assignment["request"]["instructions_sha256"]:
             raise FactoryError("Original failed contributor brief changed")
-        return args, receipt, dict(thread_id=threads[0])
+        return args, receipt, dict(thread_id=thread)
     import coordination_evidence
     coordination = None
     if args.decision is not None or args.question is not None:
@@ -4637,6 +4649,53 @@ def grok_command(path, *, task, assignment_id, grok, model, effort, cwd, role, s
         "--worktree-git-dir", gitdir, "--events", str(events), "--receipt", str(receipt)]
 
 
+def bound_grok_receipt(assignment_id, record, assignment, args, *, private=False, captured=None):
+    """Match retained discovery and worker identity to the original Grok request."""
+    import native_grok
+
+    try:
+        receipt = decode_json(read_record(args.receipt, private=private) if captured is None else captured["receipt"])
+    except (OSError, ValueError, UnicodeError):
+        raise FactoryError("Cannot read the original Grok receipt; inspect or restore it without relaunching") from None
+    request = assignment["request"]
+    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+            or receipt["schema_version"] not in ((3, 7, SCRATCH_RECEIPT_VERSION) if args.write else (2, 4, 7, SCRATCH_RECEIPT_VERSION))
+            or receipt.get("kind") != "grok-execution"
+            # Version 4 readers ran in the disposable checkout named beside their receipt.
+            or (receipt["schema_version"] == 4 or
+                (receipt["schema_version"] in (7, SCRATCH_RECEIPT_VERSION) and not args.write)) != ("checkout" in receipt)
+            or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
+            or (args.write and (receipt.get("writer") is not True or args.commit_message is None
+                                or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
+                                or "commit" not in receipt))
+            or any(type(receipt.get(key)) not in (int, float) or not 0 <= receipt[key] <= sys.float_info.max
+                   for key in ("created_at", "finished_at", "elapsed_seconds"))
+            or receipt["finished_at"] < receipt["created_at"]
+            or receipt.get("job") != record["task"] + "/" + assignment_id
+            or not valid_inputs(receipt.get("inputs")) or receipt["inputs"] != request.get("inputs")
+            or receipt.get("repository_identity") != record["admission"]["repository_identity"]
+            or not valid_repository_identity(receipt.get("repository_identity"))
+            or receipt.get("brief_sha256") != request["instructions_sha256"]
+            or args.role != request["role"] or receipt.get("role") != args.role
+            or receipt.get("cwd") != request["cwd"] or not args.worktree_git_dir.is_absolute()
+            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
+            or not args.grok.is_absolute() or receipt.get("binary") != str(args.grok)
+            or receipt.get("native_session") != args.native_session
+            or not isinstance(receipt.get("discovery"), dict)
+            or "configuration" not in receipt
+            or receipt["discovery"].get("configuration") != receipt["configuration"]
+            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
+            or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
+            or type(receipt.get("max_turns")) is not int or receipt["max_turns"] != args.turns
+            or receipt.get("events") != str(args.events)):
+        raise FactoryError("Grok receipt differs from its frozen completed assignment; inspect the original artifacts")
+    try:
+        native_grok.validate_discovery(receipt["discovery"], args.grok, request["cwd"])
+    except native_grok.GrokProbeError as exc:
+        raise FactoryError(str(exc)) from None
+    return receipt
+
+
 def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=False, current=True, delivery=False, captured=None):
     """Strict original reviewer or writer evidence; history is granted only by actual collection."""
     import grok_worker
@@ -4656,48 +4715,15 @@ def grok_evidence(assignment_id, record, assignment, *, observe=None, collected=
         raise FactoryError("First Grok collection requires original successful Rex exit")
     if observe is not None and observe()["state"] not in {"exited", "lost"}:
         raise FactoryError("Grok worker has not exited successfully; inspect its original status and capture")
-    try:
-        receipt = decode_json(read_record(args.receipt) if captured is None else captured["receipt"])
-    except (OSError, ValueError, UnicodeError):
-        raise FactoryError("Cannot read the original Grok receipt; inspect or restore it without relaunching") from None
     request = assignment["request"]
     keys = ("report", "request_id", "usage", "model_usage", "turns")
-    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
-            or receipt["schema_version"] not in ((3, 7, SCRATCH_RECEIPT_VERSION) if args.write else (2, 4, 7, SCRATCH_RECEIPT_VERSION))
-            or receipt.get("kind") != "grok-execution"
-            # Version 4 readers ran in the disposable checkout named beside their receipt.
-            or (receipt["schema_version"] == 4 or
-                (receipt["schema_version"] in (7, SCRATCH_RECEIPT_VERSION) and not args.write)) != ("checkout" in receipt)
-            or ("checkout" in receipt and receipt["checkout"] != str(reader_checkout_path(args.receipt)))
-            or (args.write and (receipt.get("writer") is not True or args.commit_message is None
-                                or args.sandbox is None or receipt.get("sandbox") != str(args.sandbox)
-                                or "commit" not in receipt))
-            or receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
+    receipt = bound_grok_receipt(assignment_id, record, assignment, args, captured=captured)
+    if (receipt.get("state") != "completed" or "error" not in receipt or receipt["error"] is not None
             or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0
-            or any(type(receipt.get(key)) not in (int, float) or not 0 <= receipt[key] <= sys.float_info.max
-                   for key in ("created_at", "finished_at", "elapsed_seconds"))
-            or receipt["finished_at"] < receipt["created_at"] or any(key not in receipt for key in keys)
-            or receipt.get("job") != record["task"] + "/" + assignment_id
-            or not valid_inputs(receipt.get("inputs")) or receipt["inputs"] != request.get("inputs")
-            or (not args.write and receipt.get("candidate") != request["inputs"]["candidate"])
-            or receipt.get("repository_identity") != record["admission"]["repository_identity"]
-            or not valid_repository_identity(receipt.get("repository_identity"))
-            or receipt.get("brief_sha256") != request["instructions_sha256"]
-            or args.role != request["role"] or receipt.get("role") != args.role
-            or receipt.get("cwd") != request["cwd"] or not args.worktree_git_dir.is_absolute()
-            or receipt.get("worktree_git_dir") != str(args.worktree_git_dir)
-            or not args.grok.is_absolute() or receipt.get("binary") != str(args.grok)
-            or receipt.get("native_session") != args.native_session
-            or not isinstance(receipt.get("discovery"), dict)
-            or "configuration" not in receipt
-            or receipt["discovery"].get("configuration") != receipt["configuration"]
-            or receipt.get("requested_model") != args.model or receipt.get("requested_effort") != args.effort
-            or type(receipt.get("seconds")) is not int or receipt["seconds"] != args.seconds
-            or type(receipt.get("max_turns")) is not int or receipt["max_turns"] != args.turns
-            or receipt.get("events") != str(args.events)):
+            or any(key not in receipt for key in keys)
+            or (not args.write and receipt.get("candidate") != request["inputs"]["candidate"])):
         raise FactoryError("Grok receipt differs from its frozen completed assignment; inspect the original artifacts")
     try:
-        native_grok.validate_discovery(receipt["discovery"], args.grok, request["cwd"])
         events = grok_worker.read_events(args.events, None if captured is None else captured["events"])
         native = native_grok.parse_execution(events, session_id=args.native_session,
                                             cwd=receipt.get("checkout", request["cwd"]), max_turns=args.turns)

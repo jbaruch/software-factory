@@ -141,7 +141,7 @@ def contributor_context(key, record, assignment):
             return args.native_session
     elif isinstance(receipt, dict) and receipt.get("state") == "failed":
         try:
-            _, _, native = factory.codex_evidence(key, record, assignment, failed_identity=True, delivery=True,
+            _, _, native = factory.codex_evidence(key, record, assignment, failed_identity="writer", delivery=True,
                 observe=lambda: original_status(record, assignment))
         except (factory.FactoryError, ValueError) as exc:
             raise factory.FactoryError(f"{label}: {exc}") from None
@@ -198,6 +198,29 @@ def _all_contributors(record):
     return contributors
 
 
+def verify_failed_reader_receipt(receipt, fields, assignment, args):
+    """Check the v8 failure against its wrapper close, without inspecting its old process or scratch."""
+    expected = fields | factory.SCRATCH_RECEIPT_FIELDS | {"interpreter", "retained_files"}
+    if receipt["schema_version"] != 8 or set(receipt) != expected:
+        raise factory.FactoryError("Restore the original v8 reader receipt")
+    interpreter = assignment.get("interpreter")
+    # The v8 allocator creates an absolute sf-* path. Never resolve or inspect it for omission.
+    scratch = receipt["scratch"]
+    if (not isinstance(scratch, str) or not Path(scratch).is_absolute() or not Path(scratch).name.startswith("sf-")
+            or receipt["finished_at"] > assignment["closed"]["at"]
+            or not isinstance(receipt["native_process"], dict)
+            or not {"pid", "scope", "start_time"}.issubset(receipt["native_process"])
+            or not isinstance(interpreter, dict) or interpreter.get("invocation") != assignment["request"]["command"][0]
+            or not isinstance(receipt["interpreter"], dict)
+            or any(type(receipt["interpreter"].get(k)) is not int for k in ("st_dev", "st_ino"))
+            or receipt["interpreter"] != interpreter.get("file")):
+        raise factory.FactoryError("Reconcile the failed reader receipt with its launch and Rex close")
+    if (receipt["state"] != "failed" or type(receipt["exit_code"]) is not int or receipt["exit_code"] == 0
+            or any(receipt[k] is not None for k in ("report", "usage", "candidate"))
+            or receipt["retained_files"] != {} or os.path.lexists(args.receipt.with_suffix(".report.txt"))):
+        raise factory.FactoryError("Restore the original terminal failed reader receipt and events")
+
+
 def verify_omitted_reader(key, record, assignment):
     """Check an omitted attempt against its own authenticated launch and terminal evidence."""
     if factory.launch_runtime(assignment) is None or assignment.get("native_collected") is True:
@@ -212,6 +235,43 @@ def verify_omitted_reader(key, record, assignment):
         args = factory.evidence_worker_args(harness, worker.parser(), key, record, assignment, replay=True)
         if args.write or assignment["result"] is not None or os.path.lexists(args.receipt) or os.path.lexists(args.events):
             raise factory.FactoryError(f"{record['task']}/{key}: native evidence conflicts with the abandoned reader")
+        return
+    command = assignment["request"]["command"]
+    closed = assignment.get("closed")
+    if (harness in ("codex", "grok") and assignment["result"] is None and assignment.get("native_collected") is False
+            and command[1:3] == ["-E", "-s"] and closed is not None and factory.valid_closed(assignment)
+            and closed["state"] == "failed"):
+        import native_grok
+        worker = importlib.import_module(harness + "_worker")
+        try:
+            args = factory.evidence_worker_args(harness, worker.parser(), key, record, assignment, replay=True)
+            if (args.write or args.role != assignment["request"]["role"] or (harness == "codex" and args.decision is not None)
+                    or factory.carries_judgment(args) or factory.native_argument_view(command) != command):
+                raise factory.FactoryError("Restore the ordinary read-only invocation before omission")
+            events = worker.read_events(args.events, factory.read_record(args.events, private=True, exact=True))
+            if harness == "codex":
+                receipt = factory.bound_codex_receipt(key, record, assignment, args, failed=True)
+                fields = {"schema_version", "kind", "job", "state", "inputs", "repository_identity", "worktree_git_dir",
+                          "brief_sha256", "cwd", "requested_model", "requested_effort", "binary", "writer", "created_at",
+                          "finished_at", "elapsed_seconds", "exit_code", "thread_id", "report", "usage", "candidate",
+                          "events", "error", "commit"}
+                verify_failed_reader_receipt(receipt, fields, assignment, args)
+                worker.verify_failed_reader_events(events, receipt["thread_id"])
+                if receipt["commit"] is not None or receipt["error"] != worker.exit_diagnostic(events):
+                    raise factory.FactoryError("Restore the original terminal failed Codex reader receipt and events")
+            else:
+                if "--turns" not in command or "--seconds" not in command:
+                    raise factory.FactoryError("Restore the original Grok command with its explicit turn and time limits")
+                receipt = factory.bound_grok_receipt(key, record, assignment, args, private=True)
+                fields = (STARTING_FIELDS["grok"] - {"writer", "sandbox", "commit"}) | {"checkout"}
+                verify_failed_reader_receipt(receipt, fields, assignment, args)
+                if (receipt["exit_code"] != 1 or receipt["error"] != worker.UNSUCCESSFUL_EXIT
+                        or any(receipt[k] is not None for k in ("request_id", "model_usage", "turns"))):
+                    raise factory.FactoryError("Restore the original failed Grok turn-limit receipt and events")
+                native_grok.verify_turn_limit(events, session_id=args.native_session, cwd=receipt["checkout"],
+                                             max_turns=args.turns)
+        except (factory.FactoryError, native_grok.GrokProbeError, OSError, ValueError) as exc:
+            raise factory.FactoryError(f"{record['task']}/{key}: cannot omit the uncollected reader: {exc}") from None
         return
     if harness != "claude":
         collected_native(key, record, assignment, current=False)

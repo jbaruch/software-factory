@@ -823,6 +823,58 @@ class GrokWorker(unittest.TestCase):
             self.collect()
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_omit_only_a_bound_failed_turn_limit_reader(self):
+        self.events[-1].update(stopReason="max_turn_requests", num_turns=3, structuredOutput=None)
+        self.events.insert(-1, {"type": "max_turns_reached"})
+        self.process = FakeProcess(self.events, exit_code=1)
+        receipt = self.execute()
+        closed = dict(state="failed", exit={"exit_code": 2}, reason=None,
+                      session_id=self.record["session_id"], capture=None, at=1001)
+        self.assignment["closed"] = closed
+        factory.save(self.path, self.record)
+        artifacts = [self.path, self.args.receipt, self.args.events, self.args.brief]
+        original = [p.read_bytes() for p in artifacts]
+
+        def omit(assignment):
+            return integration.verify_omitted_reader("inspect", self.record, assignment)
+
+        self.assertIsNone(omit(self.assignment))
+        with self.assertRaisesRegex(factory.FactoryError, "inspect: missing native result"):
+            integration.approvals(self.record, "release", ["inspect"])
+        self.assertEqual([p.read_bytes() for p in artifacts], original)
+        for changes in ({"schema_version": 7}, {"exit_code": -1}, {"exit_code": True}, {"state": "completed"},
+                        {"error": "unsuccessful"}, {"candidate": self.candidate}, {"report": {}}, {"request_id": "other"},
+                        {"model_usage": {}}, {"usage": {}}, {"turns": 3}, {"writer": False}, {"commit": None},
+                        {"retained_files": {"report": {}}}, {"checkout": str(self.repo)}, {"native_session": "other"},
+                        {"max_turns": 2}, {"inputs": self.record["inputs"] | {"requirements": "other"}},
+                        {"interpreter": {}}, {"finished_at": 1002}, {"configuration": {}},
+                        {"discovery": {**receipt["discovery"], "route": "other"}}):
+            with self.subTest(changes=list(changes)), self.assertRaises(factory.FactoryError):
+                factory.save(self.args.receipt, {**receipt, **changes})
+                omit(self.assignment)
+        factory.save(self.args.receipt, receipt)
+        for changes in ({"closed": None}, {"closed": {**closed, "exit": {"exit_code": 0}}},
+                        {"closed": {**closed, "state": "lost", "exit": None, "reason": "missing pane"}},
+                        {"request": {**self.assignment["request"], "role": "release"}}):
+            with self.subTest(changes=changes.keys()), self.assertRaises(factory.FactoryError):
+                omit({**self.assignment, **changes})
+        for flag in ("--turns", "--seconds"):
+            implicit = copy.deepcopy(self.assignment)
+            command = implicit["request"]["command"]
+            index = command.index(flag)
+            del command[index:index + 2]
+            implicit["native_launch"]["request"] = factory.request_digest(implicit["request"])
+            with self.subTest(missing=flag), self.assertRaisesRegex(factory.FactoryError, "explicit turn and time limits"):
+                omit(implicit)
+        for path in artifacts[1:]:
+            with self.subTest(public=path.name), self.assertRaises(factory.FactoryError):
+                path.chmod(0o644)
+                omit(self.assignment)
+            path.chmod(0o600)
+        self.args.receipt.with_suffix(".report.txt").write_text("partial")
+        with self.assertRaises(factory.FactoryError):
+            omit(self.assignment)
+
     def test_wrong_native_session_refuses_completion(self):
         self.events[-1]["sessionId"] = "another-session"
         self.process = FakeProcess(self.events)

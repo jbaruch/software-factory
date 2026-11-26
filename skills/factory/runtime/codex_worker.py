@@ -59,8 +59,7 @@ def outcome_schema(coordination=None):
     return schema
 
 
-def parse_events(events, coordination=None) -> dict:
-    """A native completion is a carrier for a specialist report, never task acceptance."""
+def _walk_events(events):
     thread, phase, message, usage = None, "before-thread", None, None
     for event in events:
         if not isinstance(event, dict):
@@ -100,6 +99,31 @@ def parse_events(events, coordination=None) -> dict:
                 raise WorkerError("Native lifecycle is out of order; reconcile the existing attempt")
             phase = "finished"
             usage = event.get("usage")
+    return thread, phase, message, usage
+
+
+def verify_failed_reader_events(events, expected_thread) -> None:
+    """Verify the original failed turn without interpreting any report."""
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(kind := event.get("type"), str):
+            raise WorkerError("Restore the original failed Codex reader event objects")
+        if event.get("thread_id", expected_thread) != expected_thread:
+            raise WorkerError("Reconcile the failed Codex reader thread with its receipt")
+        if kind.startswith("turn.") and kind not in {"turn.started", "turn.completed", "turn.failed"}:
+            raise WorkerError("Inspect the unsupported turn in the failed Codex reader events")
+    if not events or events[0]["type"] != "thread.started" or events[-1]["type"] != "turn.failed":
+        raise WorkerError("Restore the original terminal failed Codex reader events")
+    end = -1
+    if events[-2]["type"] == "error" and isinstance(events[-2].get("message"), str) and events[-2]["message"]:
+        end = -2
+    thread, phase, _, _ = _walk_events(events[:end])
+    if thread != expected_thread or phase != "active":
+        raise WorkerError("Reconcile the failed Codex reader with its original active turn")
+
+
+def parse_events(events, coordination=None) -> dict:
+    """A native completion is a carrier for a specialist report, never task acceptance."""
+    thread, phase, message, usage = _walk_events(events)
     if phase != "finished":
         raise WorkerError("Native completion is missing or ambiguous; reconcile the existing attempt")
     if not isinstance(message, str):
