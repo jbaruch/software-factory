@@ -492,6 +492,11 @@ def check_release_users(directory, owner, work, admin, witness):
     return user_records
 
 
+def release_started(task_path):
+    return (os.path.lexists(task_path.with_suffix(".worktree-release.json"))
+            or os.path.lexists(task_path.with_suffix(".worktree-release-intent.json")))
+
+
 def check_reuse(directory, owner, original_raw, work, admin, readers):
     task = owner["task"]
 
@@ -522,8 +527,8 @@ def check_reuse(directory, owner, original_raw, work, admin, readers):
             raise factory.FactoryError(f"Reconcile conflicting or orphaned native receipt {path.name}")
 
     rows = {row["task"]: (row, raw) for row, raw in records(directory)}
-    if os.path.lexists(directory / (task + ".worktree-release.json")):
-        raise factory.FactoryError(f"Inspect the surviving writer checkout and its owner release receipt for {task}")
+    if release_started(directory / (task + ".json")):
+        raise factory.FactoryError(f"Inspect the surviving writer checkout and its owner release records for {task}")
     if rows[task][1] != original_raw:
         raise factory.FactoryError("Owner record changed during census; retry")
     check_launch_stores(directory, admin)
@@ -569,8 +574,8 @@ def check_reuse(directory, owner, original_raw, work, admin, readers):
             raise factory.FactoryError(f"Missing original provisioner ownership for reader checkout {cwd}")
         releases[path] = raw
         if observed is not None:
-            if os.path.lexists(receipt_path):
-                raise factory.FactoryError(f"Inspect the surviving reader checkout {cwd} and its owner release receipt")
+            if release_started(path):
+                raise factory.FactoryError(f"Inspect the surviving reader checkout {cwd} and its owner release records")
             continue
         proof, _ = factory.release_proof(receipt_path, released)
         assignment = owner["assignments"][name]

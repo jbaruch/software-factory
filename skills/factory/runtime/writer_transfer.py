@@ -54,15 +54,7 @@ def _write_exclusive_private(path, content: bytes):
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
-    _sync_parent(path)
-
-
-def _sync_parent(path):
-    directory = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    factory.sync_parent(path)
 
 
 def _blob_digest(content: bytes) -> str:
@@ -516,7 +508,7 @@ def _save_archive(archive_path, bundle_bytes: bytes, sha256: str):
                 raise factory.FactoryError(
                     f"Conflicting archive at {archive_path}; inspect the orphan before retrying") from None
             os.fsync(descriptor)
-        _sync_parent(archive_path)
+        factory.sync_parent(archive_path)
 
 
 def _origin_fields(bundle, archive_path, sha256) -> dict:

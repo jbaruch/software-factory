@@ -403,34 +403,56 @@ moves the worktree onto COMMIT and selects it as the task's candidate; a writer 
 replays the patch and resolves any conflicts.
 
 `release-worktree --task TASK` removes the provisioned worktree once the task's
-work is done. Under the owner's line and task locks it takes the exclusive
+work is done. Under the owner's task lock it takes the exclusive
 linked Git admin lock, reconciles registered stores, checkout users and
 terminal receipts, and checks for active processes. Release requires an
 attended window with independent exclusion of direct checkout and cache users,
 including new entrants and surviving descendants, through publication and readback.
 An observed user blocks removal. If process ancestry or cwd coverage is incomplete,
 the operator must verify exclusion outside Factory before confirming the task
-at the terminal. The line, task and admin locks are held while the prompt waits.
+at the terminal. The task and admin locks are held while the prompt waits.
 The owner checks the clean worktree, branch, marker and physical checkout,
 admin and pointer identities from provisioning. A completed pre-upgrade record
 without `checkout_inodes` uses the same attended command. The owner verifies
 the current registration, HEAD, branch and owner lock before confirmation and
 again before Git removal. An invalid or changed saved identity blocks release.
-The owner verifies Git deregistration
-and both absent endpoints before publishing the private
-`TASK.worktree-release.json` receipt. The branch stays available.
-A stopped owner attempt with an original reset patch or a recorded lost exit
-allows attended release. The receipt records Git removal and its original
-publication alias. A later census retains caches that depend on this checkout
-because direct-user exclusion at release cannot be established from the receipt.
-Single-link version 1 receipts remain available for release readback. Two-link
-version 1 receipts require preserving both names because the publisher recorded
-no alias. For an attended pre-upgrade release the version 3 receipt stores
-`observed_checkout` in place of `checkout`. That observation is bound to the
-current release only. The original provisioning and launch records stay intact.
-Retry validates the receipt against the same owner record and reports
-`already_released`. Dependent caches remain retained before release, after
-release and after retry. Missing proof after removal also retains dependent caches.
+Immediately before Git removal, the owner saves and reads back a private
+`TASK.worktree-release-intent.json`. Version 1 contains `schema_version`,
+`phase: removing`, the branch and the checkout witness (paths, repository,
+owner marker, tip and four inode pairs). The owner uses `checkout` for an
+original binding and `observed_checkout` for the attended legacy observation.
+On retry with an intact checkout, the owner repeats the attended checks, syncs
+the intent directory and requires an exact match before invoking Git again.
+Under the gate-store migration exception, only `release-worktree` writes the
+sidecar and migrates accepted older versions on read. Version 1 has no predecessor.
+Release refuses unsupported versions. For a surviving checkout, the sidecar's
+presence alone retains dependent caches.
+
+After successful Git exit and verified deregistration and endpoint absence,
+release publishes the existing `TASK.worktree-release.json` completion receipt.
+It uses version 2 for an original checkout and version 3 for an attended legacy
+observation. This receipt takes precedence over the retained pre-removal intent.
+Fresh publication requires byte-for-byte readback. Retries validate completed versions 1–3 in place,
+including releases predating the sidecar. A two-link receipt requires inspection
+of the original publication alias. Retry syncs the owner directory before
+acknowledging a visible completion receipt.
+
+When only intent survives and the destination is missing, release takes the
+owner line's nonblocking execution lock under the task lock. Contention returns
+busy. Recovery verifies the repository, registration and both endpoints, saves
+`phase: absent`, reads it back and rechecks the task and endpoints under those
+locks. A repeat syncs the directory before acknowledging that observation.
+The result reports `phase: absent`, the provisioning token as `intent_id`, the
+expected tip and `already_released: false`. Attribution remains unknown. A
+replacement seen on readback blocks the result and stays intact.
+
+The line lock serializes ordinary provisioning within that line and store.
+Another line, another store or a direct Git user can reuse the path after the
+last observation. The result confers no reservation or cleanup authority.
+Dependent caches retain their existing release and independent-exclusion
+requirements.
+
+The attended command leaves the branch available.
 Collected writers keep their provenance after the checkout is gone.
 
 Provisioning does not launch a writer, select new task inputs, hand off a produced
