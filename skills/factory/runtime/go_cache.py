@@ -184,9 +184,14 @@ def binding(record, repo, cache):
 def reciprocal_links(cwd, admin, device):
     pointer = metadata_identity(cwd / ".git", device)
     backlink = metadata_identity(admin / "gitdir", device)
-    if (factory.read_record_bytes(cwd / ".git") != os.fsencode(f"gitdir: {admin}\n")
-            or factory.read_record_bytes(admin / "gitdir") != os.fsencode(cwd / ".git") + b"\n"
-            or factory.git_dir(cwd) != admin):
+    expected_pointer = os.fsencode(f"gitdir: {admin}\n")
+    expected_backlink = os.fsencode(cwd / ".git") + b"\n"
+    try:
+        matches = (factory.read_record_bytes(cwd / ".git", max_bytes=len(expected_pointer)) == expected_pointer
+                   and factory.read_record_bytes(admin / "gitdir", max_bytes=len(expected_backlink)) == expected_backlink)
+    except OSError as exc:
+        raise factory.FactoryError(f"Inspect the reciprocal Git pointers for worktree {cwd}: {exc}") from exc
+    if not matches or factory.git_dir(cwd) != admin:
         raise factory.FactoryError(f"Restore the reciprocal Git pointers and repository identity for worktree {cwd}")
     return pointer, backlink
 
@@ -904,7 +909,9 @@ def age_native_cache(repo, cache, go, mount, result):
                 if not os.path.samestat(real_directory(path, device), os.fstat(fd)) or mount_id(fd) != mount:
                     raise factory.FactoryError(f"Cache or admin identity changed at {path}; retry census")
             metadata_identity(admin / "gitdir", device)
-            work = Path(factory.read_record(admin / "gitdir", exact=True).removesuffix("\n")).parent
+            # Support Git worktree pointer paths up to 4096 bytes plus their trailing newline.
+            backlink = factory.read_record(admin / "gitdir", exact=True, max_bytes=4096 + 1)
+            work = Path(backlink.removesuffix("\n")).parent
             real_directory(work, device)
             reciprocal_links(work, admin, device)
             if factory.git_common_dir(work) != repo / ".git":

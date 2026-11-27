@@ -539,6 +539,38 @@ raise SystemExit(factory.main())
             self.assertIn("admin identity changed", self.trim()["reason"])
             build.assert_not_called()
 
+    def test_native_aging_bounds_git_pointers_and_continues_after_oversized_backlink(self):
+        damaged_work = self.root / "a-damaged"
+        self.git("worktree", "add", "--quiet", "--detach", str(damaged_work))
+        damaged_admin = factory.git_dir(damaged_work)
+        damaged_cache = damaged_admin / "go-build"
+        shutil.copytree(self.cache, damaged_cache)
+        oversized = b"x" * 4097 + b"\n"
+        (damaged_admin / "gitdir").write_bytes(oversized)
+        old = next(self.cache.glob("*/*-a"))
+        (self.cache / "trim.txt").write_text(str(self.at))
+        pointer = self.destination / ".git"
+        backlink = self.admin / "gitdir"
+
+        with patch.object(factory, "read_record_bytes", wraps=factory.read_record_bytes) as read, \
+                patch.object(go_cache, "native_build", wraps=go_cache.native_build) as build:
+            code, out, err = self.cli("go-caches", "--repo", str(self.repo), "--trim-go", shutil.which("go"))
+        self.assertEqual(code, 0, err)
+        damaged, valid = json.loads(out)
+        self.assertEqual((damaged["cache"], damaged["decision"]), (str(damaged_cache), "retained"))
+        self.assertIn("exceeds its byte limit", damaged["reason"])
+        self.assertEqual((damaged_admin / "gitdir").read_bytes(), oversized)
+        self.assertTrue((damaged_cache / old.relative_to(self.cache)).is_file())
+        self.assertEqual((valid["cache"], valid["decision"]), (str(self.cache), "cleaned"))
+        self.assertFalse(old.exists())
+        build.assert_called_once()
+        self.assertEqual(build.call_args.args[1], self.cache)
+        for path, limits in ((damaged_admin / "gitdir", {4097}), (pointer, {pointer.stat().st_size}),
+                             (backlink, {4097, backlink.stat().st_size})):
+            with self.subTest(path=path):
+                self.assertEqual({call.kwargs.get("max_bytes") for call in read.call_args_list
+                                  if call.args[0] == path}, limits)
+
     def test_native_aging_requires_reciprocal_link(self):
         (self.admin / "gitdir").write_text(str(self.repo / ".git") + "\n")
         with patch.object(go_cache, "native_build") as build:
