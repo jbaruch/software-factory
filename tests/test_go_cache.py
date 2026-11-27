@@ -163,34 +163,20 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.observer.assert_not_called()
         self.build()
 
-    def test_historical_local_reader_requires_original_binding_and_collection(self):
-        reader = self.historical_local_reader()
-        launch = reader["launch_checkout"]
-        with patch.object(go_cache, "native_build") as build:
-            for target, changes in (
-                (launch, {"marker": "different"}),
-                (launch, {"inodes": [*launch["inodes"][:-1], [1, 1]]}),
-                (launch, {"head": self.record["inputs"]["candidate"]}),
-                (self.record, {"inputs": reader["request"]["inputs"]}),
-                (reader, {"result": None, "native_collected": False}),
-                (reader, {"closed": dict(reader["closed"], state="failed", exit={"exit_code": 1}),
-                          "native_collected": False, "result": None}),
-            ):
-                with self.subTest(changes=changes), patch.dict(target, changes):
-                    factory.save(self.path, self.record)
-                    self.assertEqual(self.trim()["decision"], "retained")
-            factory.save(self.path, self.record)
-            stream = self.state / "fixture.qa.codex.jsonl"
-            original = stream.read_text()
-            factory.save(stream, original.replace("thread.started", "unexpected.event"))
-            self.assertEqual(self.trim()["decision"], "retained")
-            factory.save(stream, original)
-            del self.record["provisioning"]["checkout_inodes"]
-            factory.save(self.path, self.record)
-            self.assertIn("at provisioning", self.trim()["reason"])
-            build.assert_not_called()
+    def test_native_aging_without_factory_task(self):
+        self.path.unlink()
+        for clean in (False, True):
+            self.assertIn("one provisioned task", self.inspect(clean)["reason"])
+        (self.cache / "trim.txt").write_text(str(self.at))
+        old = next(self.cache.glob("*/*-a"))
+        with patch.object(go_cache, "records", side_effect=AssertionError("read historical tasks")):
+            row = self.trim()
+        self.assertEqual(row["decision"], "cleaned", row)
+        self.assertGreater(row["removed_entries"], 0)
+        self.assertFalse(old.exists())
+        self.build()
 
-    def test_native_aging_requires_owner_terminal_local_cache_and_exclusive_locks(self):
+    def test_native_aging_requires_native_contents_and_physical_locks(self):
         with patch.object(go_cache, "native_build") as build:
             with go_cache.inode_lock(self.admin, shared=True):
                 self.assertIn("Busy lock", self.trim()["reason"])
@@ -200,17 +186,12 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
             unknown.touch()
             self.assertIn("unexpected cache entry", self.trim()["reason"])
             unknown.unlink()
-            other = factory.new_task("other", "other-line")
-            other["assignments"]["consumer"] = {"request": {"command": ["/bin/cat", str(self.cache / "README")],
-                                                            "cwd": str(self.root)}}
-            factory.save(self.state / "other.json", other)
-            self.assertIn("reuse by other/consumer", self.trim()["reason"])
-            (self.state / "other.json").unlink()
-            self.assignment["closed"] = None
-            factory.save(self.path, self.record)
-            self.assertEqual(self.trim()["decision"], "retained")
-            self.path.unlink()
-            self.assertIn("one provisioned task", self.trim()["reason"])
+            for child in self.cache.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            self.assertIn("missing native Go cache signature", self.trim()["reason"])
             build.assert_not_called()
 
     def test_failed_native_build_reports_readback_and_nonzero_status(self):
@@ -255,14 +236,16 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
         old = self.cache / "ab" / ("ab" + "2" * 62 + "-d")
         old.write_bytes(b"disposable old entry")
         os.utime(old, (self.at, self.at))
-        (self.cache / "trim.txt").write_text(str(self.at))
+        marker = self.cache / "trim.txt"
+        fresh_marker = marker.read_bytes()
+        marker.write_text(str(self.at))
         other = self.state / "independent.json"
         line = factory.task_line(self.record)
         factory.admit(other, task="independent", goal="Provision an independent checkout",
                       repository=str(self.repo), acceptance=["requirements.md"], line=line)
         factory.set_inputs(other, candidate="HEAD", requirements="requirements-v1")
         destination = self.root / "independent"
-        paths = (self.path.with_suffix(".lock"), self.admin, self.cache)
+        paths = (self.admin, self.cache)
         with subprocess.Popen([sys.executable, factory.__file__, "--state-dir", str(self.state),
                                "go-caches", "--repo", str(self.repo), "--trim-go", str(fixture)],
                               env={**os.environ, "TMPDIR": str(self.root)}, stdout=subprocess.PIPE) as parent:
@@ -287,10 +270,10 @@ os.execv({go!r}, [{go!r}, *sys.argv[1:]])
                 self.assertEqual(code, 0, (out, err))
                 self.assertEqual(factory.task_line(factory.load_task(other)), line)
                 self.assertNotEqual(factory.git_dir(destination), self.admin)
-                code, _, err = self.cli("provision", "--task", "fixture",
-                                        "--id", "backend", "--path", str(self.destination))
-                self.assertEqual(code, 75, err)
-                self.assertIn("working on this task", err)
+                # An independent offline Go build can finish while the aging compiler is blocked.
+                marker.write_bytes(fresh_marker)
+                self.build()
+                marker.write_text(str(self.at))
                 with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.admin, shared=True):
                     self.fail("Acquired the shared launch lock during native aging")
                 with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(self.cache):
@@ -355,7 +338,7 @@ with open({str(entry)!r}, "ab", buffering=0) as cache:
         time.sleep(0.02)
 """)
         fixture.chmod(0o700)
-        paths = (self.path.with_suffix(".lock"), self.admin, self.cache)
+        paths = (self.admin, self.cache)
         for failure in ("timeout", "driver exit", "parent kill", "parent interrupt", "group teardown"):
             with self.subTest(failure=failure):
                 # A session-leading Factory can have unrelated peers. This peer echoes
@@ -494,7 +477,9 @@ raise SystemExit(factory.main())
         def contend():
             with go_cache.inode_lock(line, directory=False):
                 pass
-            for path in (self.path.with_suffix(".lock"), self.admin, self.cache):
+            with go_cache.inode_lock(self.path.with_suffix(".lock"), directory=False):
+                pass
+            for path in (self.admin, self.cache):
                 with self.assertRaises(factory.ExecutionBusy), go_cache.inode_lock(path, directory=path.is_dir()):
                     self.fail(f"Acquired {path} during native aging")
 
@@ -537,6 +522,60 @@ raise SystemExit(factory.main())
         build.assert_not_called()
         self.assertEqual({p.relative_to(original) for p in original.rglob("*")}, entries)
         self.assertEqual(list(self.cache.iterdir()), [])
+
+    def test_native_aging_refuses_changed_admin_with_same_cache_inode(self):
+        old_admin = self.root / "old-admin"
+        walk = go_cache.cache_contents
+
+        def replace_admin(*args, **kwargs):
+            sample = walk(*args, **kwargs)
+            self.admin.rename(old_admin)
+            self.admin.mkdir()
+            (old_admin / "go-build").rename(self.cache)
+            return sample
+
+        with patch.object(go_cache, "cache_contents", side_effect=replace_admin), \
+                patch.object(go_cache, "native_build") as build:
+            self.assertIn("admin identity changed", self.trim()["reason"])
+            build.assert_not_called()
+
+    def test_native_aging_retains_oversized_git_pointers_and_continues(self):
+        old = next(self.cache.glob("*/*-a"))
+        (self.cache / "trim.txt").write_text(str(self.at))
+        damaged = []
+        for name in ("a-oversized-backlink", "b-oversized-checkout"):
+            work = self.root / name
+            self.git("worktree", "add", "--quiet", "--detach", str(work))
+            admin = factory.git_dir(work)
+            cache = admin / "go-build"
+            shutil.copytree(self.cache, cache)
+            pointer = admin / "gitdir" if name == "a-oversized-backlink" else work / ".git"
+            oversized = pointer.read_bytes() + b" " * 4097
+            pointer.write_bytes(oversized)
+            entries = {path.relative_to(cache): (path.read_bytes(), path.stat().st_mtime_ns)
+                       for path in cache.rglob("*") if path.is_file()}
+            damaged.append((cache, pointer, oversized, entries))
+
+        code, out, err = self.cli("go-caches", "--repo", str(self.repo), "--trim-go", shutil.which("go"))
+        self.assertEqual(code, 0, err)
+        *retained, valid = json.loads(out)
+        self.assertEqual(len(retained), len(damaged))
+        for row, (cache, pointer, oversized, entries) in zip(retained, damaged):
+            with self.subTest(pointer=pointer):
+                self.assertEqual((row["cache"], row["decision"]), (str(cache), "retained"))
+                self.assertIn("exceeds its byte limit", row["reason"])
+                self.assertEqual(pointer.read_bytes(), oversized)
+                self.assertTrue(cache.is_dir())
+                self.assertEqual({path.relative_to(cache): (path.read_bytes(), path.stat().st_mtime_ns)
+                                  for path in cache.rglob("*") if path.is_file()}, entries)
+        self.assertEqual((valid["cache"], valid["decision"]), (str(self.cache), "cleaned"))
+        self.assertFalse(old.exists())
+
+    def test_native_aging_requires_reciprocal_link(self):
+        (self.admin / "gitdir").write_text(str(self.repo / ".git") + "\n")
+        with patch.object(go_cache, "native_build") as build:
+            self.assertEqual(self.trim()["decision"], "retained")
+            build.assert_not_called()
 
     def test_census_preserves_review_exports_but_refuses_a_damaged_task(self):
         export = self.state / "release-review.json"

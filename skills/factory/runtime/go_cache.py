@@ -181,6 +181,21 @@ def binding(record, repo, cache):
     return (work, item["owner_token"], head, ids)
 
 
+def reciprocal_links(cwd, admin, device):
+    pointer = metadata_identity(cwd / ".git", device)
+    backlink = metadata_identity(admin / "gitdir", device)
+    expected_pointer = os.fsencode(f"gitdir: {admin}\n")
+    expected_backlink = os.fsencode(cwd / ".git") + b"\n"
+    try:
+        matches = (factory.read_record_bytes(cwd / ".git", max_bytes=len(expected_pointer)) == expected_pointer
+                   and factory.read_record_bytes(admin / "gitdir", max_bytes=len(expected_backlink)) == expected_backlink)
+    except OSError as exc:
+        raise factory.FactoryError(f"Inspect the reciprocal Git pointers for worktree {cwd}: {exc}") from exc
+    if not matches or factory.git_dir(cwd) != admin:
+        raise factory.FactoryError(f"Restore the reciprocal Git pointers and repository identity for worktree {cwd}")
+    return pointer, backlink
+
+
 def checkout_binding(cwd, admin, repository_identity) -> dict | None:
     common = Path(repository_identity["common_dir"])
     device = real_directory(common).st_dev
@@ -200,11 +215,8 @@ def checkout_binding(cwd, admin, repository_identity) -> dict | None:
             return None
         raise factory.FactoryError(f"Worktree {cwd} is missing but its Git directory survives") from None
     linked = real_directory(admin, device)
-    pointer = metadata_identity(cwd / ".git", device)
-    backlink = metadata_identity(admin / "gitdir", device)
-    if (factory.read_record_bytes(cwd / ".git") != os.fsencode(f"gitdir: {admin}\n")
-            or factory.read_record_bytes(admin / "gitdir") != os.fsencode(cwd / ".git") + b"\n"
-            or factory.git_dir(cwd) != admin or factory.repository_identity(cwd) != repository_identity):
+    pointer, backlink = reciprocal_links(cwd, admin, device)
+    if factory.repository_identity(cwd) != repository_identity:
         raise factory.FactoryError(f"Restore the reciprocal Git pointers and repository identity for worktree {cwd}")
     try:
         metadata_identity(admin / "locked", device)
@@ -221,7 +233,7 @@ def checkout_binding(cwd, admin, repository_identity) -> dict | None:
     return dict(cwd=str(cwd), git_dir=str(admin), repository=repository_identity, head=head, marker=marker, inodes=inodes)
 
 
-def terminal_attempt(record, directory, work, admin, name, assignment, *, ordinary_release=False, native_aging=False):
+def terminal_attempt(record, directory, work, admin, name, assignment, *, ordinary_release=False):
     reader = None
     job = record["task"] + "/" + name
     req = assignment["request"]
@@ -255,9 +267,7 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
         bound = args.worktree_git_dir == admin
         if not args.write and launch is not None:
             observed = checkout_binding(work, admin, record["admission"]["repository_identity"])
-            if observed and (ordinary_release or (
-                    native_aging and closed["state"] == "exited" and assignment.get("native_collected") is True
-                    and observed["head"] == record["inputs"]["candidate"])):
+            if observed and ordinary_release:
                 observed = {**observed, "head": req["inputs"]["candidate"]}
             if not observed or launch != observed:
                 raise factory.FactoryError(f"{job}: changed original reader worktree ownership at {cwd}")
@@ -347,14 +357,14 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
     return (start, closed["at"]), reader, selected_writer, (path, raw)
 
 
-def terminal_attempts(record, directory, work, admin, *, native_aging):
+def terminal_attempts(record, directory, work, admin):
     intervals = []
     readers = {}
     selected_writer = False
     receipts = {}
     for name, assignment in record["assignments"].items():
         interval, reader, selected, (path, raw) = terminal_attempt(
-            record, directory, work, admin, name, assignment, native_aging=native_aging)
+            record, directory, work, admin, name, assignment)
         intervals.append(interval)
         if reader:
             readers[name] = reader
@@ -888,6 +898,54 @@ def native_build(go, cache, lock_fds):
     return run_go(GO_BUILD_SECONDS, "build", "-trimpath", ".", stdout=subprocess.DEVNULL)
 
 
+def age_native_cache(repo, cache, go, mount, result):
+    admin = cache.parent
+    device = real_directory(repo).st_dev
+    with inode_lock(admin) as admin_fd, inode_lock(cache) as cache_fd:
+        fds = (admin_fd, cache_fd)
+
+        def verify_paths():
+            for path, fd in zip((admin, cache), fds):
+                if not os.path.samestat(real_directory(path, device), os.fstat(fd)) or mount_id(fd) != mount:
+                    raise factory.FactoryError(f"Cache or admin identity changed at {path}; retry census")
+            metadata_identity(admin / "gitdir", device)
+            # Support Git worktree pointer paths up to 4096 bytes plus their trailing newline.
+            backlink = factory.read_record(admin / "gitdir", exact=True, max_bytes=4096 + 1)
+            work = Path(backlink.removesuffix("\n")).parent
+            real_directory(work, device)
+            reciprocal_links(work, admin, device)
+            if factory.git_common_dir(work) != repo / ".git":
+                raise factory.FactoryError("Restore the linked worktree's primary repository before native aging")
+            if go.is_relative_to(work) or go.is_relative_to(repo):
+                raise factory.FactoryError("Select a trusted Go installation outside the admitted repository and worktree")
+            check_mounts(repo, work, cache, native_mount=mount)
+            return work, checkout_inodes(work, admin)
+
+        original = verify_paths()
+        result["worktree"] = str(original[0])
+        before = set()
+        result["last_cache_write"], result["size_kib"], _ = cache_contents(cache_fd, mount, entries=before)
+        if verify_paths() != original:
+            raise factory.FactoryError("Checkout identity changed before native aging")
+        if not before:
+            result.update(reason="No native Go entries to age", removed_entries=0, retained_entries=0)
+            return
+        result["decision"] = "failed"
+        try:
+            build = native_build(go, cache, fds)
+            result["go_exit_code"] = build.returncode
+            if build.returncode:
+                raise factory.FactoryError(f"Go build exited {build.returncode}: {build.stderr.strip()}")
+        finally:
+            after = set()
+            _, after_kib, _ = cache_contents(cache_fd, mount, entries=after)
+            if verify_paths() != original:
+                raise factory.FactoryError("Checkout identity changed during native aging")
+            result.update(after_kib=after_kib, removed_entries=len(before - after), retained_entries=len(before & after))
+        result.update(decision="cleaned" if result["removed_entries"] else "retained",
+                      reason="Native Go build completed; compared cache entries before and after")
+
+
 def census(directory, repo, clean_task=None, *, trim_go=None):
     if trim_go is not None:
         if clean_task is not None or not trim_go.is_absolute() or not trim_go.is_file() or not os.access(trim_go, os.X_OK):
@@ -904,7 +962,8 @@ def _census(directory, repo, clean_task, trim_go):
     if clean_task is not None and not TASK.fullmatch(clean_task):
         raise factory.FactoryError("Select one Factory task slug for explicit cleanup")
     directory, repo = Path(directory), Path(repo)
-    real_directory(directory)
+    if trim_go is None:
+        real_directory(directory)
     device = real_directory(repo).st_dev
     common = repo / ".git"
     real_directory(common, device)
@@ -921,10 +980,12 @@ def _census(directory, repo, clean_task, trim_go):
     finally:
         os.close(primary)
     state_problem = None
-    try:
-        rows = records(directory)
-    except (factory.FactoryError, OSError) as exc:
-        rows, state_problem = [], str(exc)
+    rows = []
+    if trim_go is None:
+        try:
+            rows = records(directory)
+        except (factory.FactoryError, OSError) as exc:
+            state_problem = str(exc)
     report = []
     base_fd = os.open(base, os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -943,11 +1004,15 @@ def _census(directory, repo, clean_task, trim_go):
                 real_directory(cache, device)
             except FileNotFoundError:
                 continue
+            if trim_go is not None:
+                age_native_cache(repo, cache, trim_go, mount, result)
+                report.append(result)
+                continue
             owners = [(r, raw) for r, raw in rows if (r.get("provisioning") or {}).get("git_dir") == str(admin)]
             if clean_task and rows and not any(r["task"] == clean_task for r, _ in owners):
                 continue
             work = Path(owners[0][0]["provisioning"]["request"]["path"]) if len(owners) == 1 else repo
-            check_mounts(repo, work, cache, native_mount=mount if trim_go is not None else None)
+            check_mounts(repo, work, cache)
             cache_fd = os.open(cache, os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 _, result["size_kib"], _ = cache_contents(cache_fd, mount, size_only=True)
@@ -963,10 +1028,8 @@ def _census(directory, repo, clean_task, trim_go):
             current = factory.validate_task(path, first)
             original = binding(current, repo, cache)
             work = original[0]
-            if trim_go is not None and (trim_go.is_relative_to(work) or trim_go.is_relative_to(repo)):
-                raise factory.FactoryError("Select a trusted Go installation outside the admitted repository and worktree")
             result.update(worktree=str(work), owner_record=str(path))
-            # Preview and native aging exclude only the owner and physical resources.
+            # Preview locks the owner and physical resources.
             # Explicit retirement also holds the line lock.
             lock_paths = (directory / (task + ".lock"), admin, cache)
             if clean_task == task:
@@ -978,28 +1041,23 @@ def _census(directory, repo, clean_task, trim_go):
                 if binding(current, repo, cache) != original:
                     raise factory.FactoryError("Line or linked worktree identity changed during census; retry")
                 check_mounts(repo, work, cache)
-                retirement_sample = None
-                if trim_go is None:
-                    retirement_sample = cache_contents(fds[-1], mount)
-                    result.update(last_cache_write=retirement_sample[0], size_kib=retirement_sample[1])
-                native_aging = trim_go is not None
-                intervals, readers, receipts = terminal_attempts(current, directory, work, admin, native_aging=native_aging)
+                retirement_sample = cache_contents(fds[-1], mount)
+                result.update(last_cache_write=retirement_sample[0], size_kib=retirement_sample[1])
+                intervals, readers, receipts = terminal_attempts(current, directory, work, admin)
                 terminal = max(closed for _, closed in intervals)
                 result.update(last_terminal=terminal, attempts=len(current["assignments"]))
-                if retirement_sample and retirement_sample[1] < MIN_KIB:
+                if retirement_sample[1] < MIN_KIB:
                     raise factory.FactoryError("Below the 1 GiB allocated-size floor")
                 evidence = check_reuse(directory, current, original_raw, work, admin, readers)
-                if retirement_sample:
-                    if time.time() - max(terminal, retirement_sample[0]) < IDLE_SECONDS:
-                        raise factory.FactoryError("Wait for 24 hours after the last terminal observation and cache write")
-                    result.update(process_check(work, admin, task, intervals))
+                if time.time() - max(terminal, retirement_sample[0]) < IDLE_SECONDS:
+                    raise factory.FactoryError("Wait for 24 hours after the last terminal observation and cache write")
+                result.update(process_check(work, admin, task, intervals))
                 if not os.path.samestat(cache.lstat(), os.fstat(fds[-1])):
                     raise factory.FactoryError("Cache identity changed before cleanup; retry census")
                 if clean_task == task:
                     confirm_window(task)
-                if clean_task == task or trim_go is not None:
                     if (factory.read_record_bytes(path, private=True) != original_raw
-                            or terminal_attempts(current, directory, work, admin, native_aging=native_aging)
+                            or terminal_attempts(current, directory, work, admin)
                             != (intervals, readers, receipts)):
                         raise factory.FactoryError("Owner, receipt or cache changed during observation; rerun the census")
                     if check_reuse(directory, current, original_raw, work, admin, readers) != evidence:
@@ -1007,37 +1065,14 @@ def _census(directory, repo, clean_task, trim_go):
                     for cwd, reader_admin, original_reader in readers.values():
                         if checkout_binding(cwd, reader_admin, current["admission"]["repository_identity"]) != original_reader:
                             raise factory.FactoryError(f"Reader worktree identity changed before cleanup at {cwd}; retry census")
-                if clean_task == task or trim_go is not None:
-                    check_mounts(repo, work, cache, native_mount=mount if trim_go is not None else None)
+                    check_mounts(repo, work, cache)
                     for owner_path, raw in (receipts | evidence[0] | evidence[1]).items():
                         if factory.read_record_bytes(owner_path, private=True) != raw:
                             raise factory.FactoryError(f"Reader owner changed during observation at {owner_path}")
-                before = set()
-                if trim_go is not None:
-                    result["last_cache_write"], result["size_kib"], _ = cache_contents(fds[-1], mount, entries=before)
                 if (factory.read_record_bytes(path, private=True) != original_raw or binding(current, repo, cache) != original or any(
                         not os.path.samestat(p.lstat(), os.fstat(fd)) for p, fd in zip(lock_paths, fds))):
                     raise factory.FactoryError("Worktree or lock identity changed immediately before cleanup; retry census")
-                if trim_go is not None and not before:
-                    result.update(decision="retained", reason="No native Go entries to age",
-                                  removed_entries=0, retained_entries=0)
-                elif trim_go is not None:
-                    result.update(decision="failed")
-                    try:
-                        build = native_build(trim_go, cache, fds)
-                        result["go_exit_code"] = build.returncode
-                        if build.returncode:
-                            raise factory.FactoryError(f"Go build exited {build.returncode}: {build.stderr.strip()}")
-                    finally:
-                        after = set()
-                        _, after_kib, _ = cache_contents(fds[-1], mount, entries=after)
-                        if binding(current, repo, cache) != original or any(
-                                not os.path.samestat(p.lstat(), os.fstat(fd)) for p, fd in zip(lock_paths, fds)):
-                            raise factory.FactoryError("Checkout or lock identity changed during native aging")
-                        result.update(after_kib=after_kib, removed_entries=len(before - after), retained_entries=len(before & after))
-                    result.update(decision="cleaned" if result["removed_entries"] else "retained",
-                                  reason="Native Go build completed; compared cache entries before and after")
-                elif clean_task == task:
+                if clean_task == task:
                     final = cache_contents(fds[-1], mount)
                     if (final != retirement_sample or final[1] < MIN_KIB
                             or time.time() - max(terminal, final[0]) < IDLE_SECONDS):
