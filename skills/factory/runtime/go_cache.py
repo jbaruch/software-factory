@@ -221,7 +221,7 @@ def checkout_binding(cwd, admin, repository_identity) -> dict | None:
     return dict(cwd=str(cwd), git_dir=str(admin), repository=repository_identity, head=head, marker=marker, inodes=inodes)
 
 
-def terminal_attempt(record, directory, work, admin, name, assignment, *, ordinary_release=False):
+def terminal_attempt(record, directory, work, admin, name, assignment, *, ordinary_release=False, native_aging=False):
     reader = None
     job = record["task"] + "/" + name
     req = assignment["request"]
@@ -255,7 +255,9 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
         bound = args.worktree_git_dir == admin
         if not args.write and launch is not None:
             observed = checkout_binding(work, admin, record["admission"]["repository_identity"])
-            if observed and ordinary_release:
+            if observed and (ordinary_release or (
+                    native_aging and closed["state"] == "exited" and assignment.get("native_collected") is True
+                    and observed["head"] == record["inputs"]["candidate"])):
                 observed = {**observed, "head": req["inputs"]["candidate"]}
             if not observed or launch != observed:
                 raise factory.FactoryError(f"{job}: changed original reader worktree ownership at {cwd}")
@@ -345,13 +347,14 @@ def terminal_attempt(record, directory, work, admin, name, assignment, *, ordina
     return (start, closed["at"]), reader, selected_writer, (path, raw)
 
 
-def terminal_attempts(record, directory, work, admin):
+def terminal_attempts(record, directory, work, admin, *, native_aging):
     intervals = []
     readers = {}
     selected_writer = False
     receipts = {}
     for name, assignment in record["assignments"].items():
-        interval, reader, selected, (path, raw) = terminal_attempt(record, directory, work, admin, name, assignment)
+        interval, reader, selected, (path, raw) = terminal_attempt(
+            record, directory, work, admin, name, assignment, native_aging=native_aging)
         intervals.append(interval)
         if reader:
             readers[name] = reader
@@ -979,7 +982,8 @@ def _census(directory, repo, clean_task, trim_go):
                 if trim_go is None:
                     retirement_sample = cache_contents(fds[-1], mount)
                     result.update(last_cache_write=retirement_sample[0], size_kib=retirement_sample[1])
-                intervals, readers, receipts = terminal_attempts(current, directory, work, admin)
+                native_aging = trim_go is not None
+                intervals, readers, receipts = terminal_attempts(current, directory, work, admin, native_aging=native_aging)
                 terminal = max(closed for _, closed in intervals)
                 result.update(last_terminal=terminal, attempts=len(current["assignments"]))
                 if retirement_sample and retirement_sample[1] < MIN_KIB:
@@ -995,7 +999,8 @@ def _census(directory, repo, clean_task, trim_go):
                     confirm_window(task)
                 if clean_task == task or trim_go is not None:
                     if (factory.read_record_bytes(path, private=True) != original_raw
-                            or terminal_attempts(current, directory, work, admin) != (intervals, readers, receipts)):
+                            or terminal_attempts(current, directory, work, admin, native_aging=native_aging)
+                            != (intervals, readers, receipts)):
                         raise factory.FactoryError("Owner, receipt or cache changed during observation; rerun the census")
                     if check_reuse(directory, current, original_raw, work, admin, readers) != evidence:
                         raise factory.FactoryError("Release evidence changed before cleanup; retry census")

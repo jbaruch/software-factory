@@ -121,7 +121,21 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         row, = json.loads(out)
         return row
 
-    def test_native_go_ages_only_old_entries_when_go_deems_trim_due(self):
+    def historical_local_reader(self):
+        writer_inputs = self.record["inputs"]
+        original = self.assignment["request"]["inputs"]
+        branch = self.record["provisioning"]["request"]["branch"]
+        self.git("-C", str(self.destination), "switch", "--quiet", "--detach", original["candidate"])
+        self.record = factory.set_inputs(self.path, **original)
+        self.reader_fixture("qa", self.destination)
+        self.git("-C", str(self.destination), "switch", "--quiet", branch)
+        self.record = factory.set_inputs(self.path, **writer_inputs)
+        return self.record["assignments"]["qa"]
+
+    def test_native_go_ages_only_old_entries_after_local_reader_head_advances(self):
+        self.historical_local_reader()
+        for clean in (False, True):
+            self.assertIn("changed original reader worktree ownership", self.inspect(clean)["reason"])
         # The fixture gives the existing Go entries old mtimes. Go owns the actual clock and trim marker.
         old = next(self.cache.glob("*/*-a"))
         recent = self.cache / "ab" / ("ab" + "1" * 62 + "-d")
@@ -148,6 +162,33 @@ class LinkedCache(test_provisioning.ProvisionedRepository):
         self.assertEqual(self.protected(), protected)
         self.observer.assert_not_called()
         self.build()
+
+    def test_historical_local_reader_requires_original_binding_and_collection(self):
+        reader = self.historical_local_reader()
+        launch = reader["launch_checkout"]
+        with patch.object(go_cache, "native_build") as build:
+            for target, changes in (
+                (launch, {"marker": "different"}),
+                (launch, {"inodes": [*launch["inodes"][:-1], [1, 1]]}),
+                (launch, {"head": self.record["inputs"]["candidate"]}),
+                (self.record, {"inputs": reader["request"]["inputs"]}),
+                (reader, {"result": None, "native_collected": False}),
+                (reader, {"closed": dict(reader["closed"], state="failed", exit={"exit_code": 1}),
+                          "native_collected": False, "result": None}),
+            ):
+                with self.subTest(changes=changes), patch.dict(target, changes):
+                    factory.save(self.path, self.record)
+                    self.assertEqual(self.trim()["decision"], "retained")
+            factory.save(self.path, self.record)
+            stream = self.state / "fixture.qa.codex.jsonl"
+            original = stream.read_text()
+            factory.save(stream, original.replace("thread.started", "unexpected.event"))
+            self.assertEqual(self.trim()["decision"], "retained")
+            factory.save(stream, original)
+            del self.record["provisioning"]["checkout_inodes"]
+            factory.save(self.path, self.record)
+            self.assertIn("at provisioning", self.trim()["reason"])
+            build.assert_not_called()
 
     def test_native_aging_requires_owner_terminal_local_cache_and_exclusive_locks(self):
         with patch.object(go_cache, "native_build") as build:
