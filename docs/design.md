@@ -115,7 +115,14 @@ execution and task locks. Launch intent and cache cleanup also synchronize on
 the linked Git admin directory inode across lines. Before saving intent for a
 provisioned tree, the launcher identifies its state store on that inode's directory.
 Owner release takes the same exclusive physical lock through Git deregistration
-and receipt publication. Direct checkout and cache users require independent
+and receipt publication. Only the destructive Git child inherits the held task
+and admin locks, so it still excludes competing Factory mutations if the
+parent dies during removal. Before Git starts, the owner saves the exact
+checkout witness and expected tip in a private intent beside the original
+completion receipt. Recovery holds the owner line lock only while reconciling
+missing endpoints. It can record an absence observation without attributing
+removal or reserving either path across lines or stores. Release retains the branch.
+Direct checkout and cache users require independent
 exclusion through release readback. Provisioning and native launch supply the
 original physical bindings used by maintenance. An additional launch store makes the selected store
 insufficient for cleanup or release. The hourly host job can explicitly select

@@ -863,8 +863,8 @@ raise SystemExit(factory.main())
         self.assertNotEqual(pointer.stat().st_ino, saved.stat().st_ino)
         entries = set(self.cache.rglob("*"))
         self.assertIn("original writer checkout", self.inspect(True)["reason"])
-        with self.assertRaisesRegex(factory.FactoryError, "original provisioning identity"):
-            factory.release_worktree(self.path)
+        with self.release_locks() as lock_fds, self.assertRaisesRegex(factory.FactoryError, "original provisioning identity"):
+            factory.release_worktree(self.path, lock_fds=lock_fds)
         self.assertTrue(pointer.exists())
         self.assertEqual(set(self.cache.rglob("*")), entries)
 
@@ -960,11 +960,11 @@ raise SystemExit(factory.main())
             self.assertEqual(set(self.cache.rglob("*")), entries)
         owner.write_bytes(raw_owner)
 
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "qa"):
+        with self.release_locks("qa") as lock_fds:
             self.terminal.seek(0)
             self.terminal.write("qa\n")
             self.terminal.seek(0)
-            released = factory.release_worktree(owner)
+            released = factory.release_worktree(owner, lock_fds=lock_fds)
         self.assertFalse(released["already_released"])
         self.assertFalse(os.path.lexists(linked))
         self.assertIn("direct-user exclusion", self.inspect(True)["reason"])
@@ -974,9 +974,10 @@ raise SystemExit(factory.main())
         release_receipt = owner.with_suffix(".worktree-release.json")
         original = json.loads(release_receipt.read_text())
         release_receipt.unlink()
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "qa"):
-            with self.assertRaisesRegex(factory.FactoryError, "Missing original owner release"):
-                factory.release_worktree(owner)
+        with self.release_locks("qa") as lock_fds:
+            observed = factory.release_worktree(owner, lock_fds=lock_fds)
+        self.assertEqual(observed["phase"], "absent")
+        self.assertFalse(observed["already_released"])
         self.assertIn("owner release outcome", self.inspect(True)["reason"])
         self.assertFalse(release_receipt.exists())
         for changes in ({"owner_token": "another-owner"}, {"worktree": str(self.destination)},
@@ -1202,15 +1203,15 @@ raise SystemExit(factory.main())
         factory.save(self.receipt, self.native)
         factory.save(self.path, self.record)
         before = self.protected()
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"), \
+        with self.release_locks() as lock_fds, \
                 self.assertRaisesRegex(factory.FactoryError, "window unconfirmed"):
-            factory.release_worktree(self.path)
+            factory.release_worktree(self.path, lock_fds=lock_fds)
         self.assertEqual(self.protected(), before)
         self.assertFalse(self.path.with_suffix(".worktree-release.json").exists())
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
+        with self.release_locks() as lock_fds:
             self.terminal.write("fixture\n")
             self.terminal.seek(0)
-            factory.release_worktree(self.path)
+            factory.release_worktree(self.path, lock_fds=lock_fds)
         proof = json.loads(self.path.with_suffix(".worktree-release.json").read_bytes())
         self.assertNotIn("exclusive", proof)
 
@@ -1224,8 +1225,8 @@ raise SystemExit(factory.main())
         factory.save(patch_path, "original private patch")
         self.terminal.write("fixture\n")
         self.terminal.seek(0)
-        with factory.execution_lock(self.state), factory.task_lock(self.state, "fixture"):
-            factory.release_worktree(self.path)
+        with self.release_locks() as lock_fds:
+            factory.release_worktree(self.path, lock_fds=lock_fds)
         self.assertFalse(self.destination.exists())
         self.assertEqual(patch_path.read_text(), "original private patch")
         self.assertNotIn("exclusive", json.loads(self.path.with_suffix(".worktree-release.json").read_bytes()))
@@ -1371,10 +1372,13 @@ raise SystemExit(factory.main())
             self.assertEqual(self.protected(), before)
 
     def test_surviving_writer_with_release_receipt_retains_every_entry(self):
-        factory.save(self.path.with_suffix(".worktree-release.json"), "conflicting release")
         entries = set(self.cache.rglob("*"))
-        self.assertIn("surviving writer checkout", self.inspect(True)["reason"])
-        self.assertEqual(set(self.cache.rglob("*")), entries)
+        for path in (self.release_receipt, self.release_intent):
+            with self.subTest(path=path):
+                factory.save(path, "conflicting release")
+                self.assertIn("surviving writer checkout", self.inspect(True)["reason"])
+                self.assertEqual(set(self.cache.rglob("*")), entries)
+                path.unlink()
 
     def test_replaced_lock_or_owner_marker_retains(self):
         def replace_lock(*_):

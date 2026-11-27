@@ -21,7 +21,7 @@ import sys
 sys.dont_write_bytecode = True  # Installed copies stay free of generated files.
 import tempfile
 import time
-from typing import Any
+from typing import Any, TypeGuard
 import uuid
 
 if __name__ == "__main__":
@@ -127,6 +127,14 @@ class Rex:
             raise FactoryError("Cannot decode Rex response; inspect the pinned binary/server API compatibility") from None
 
 
+def sync_parent(path):
+    directory = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 @contextmanager
 def publish_record(path, *, exclusive=False):
     """Publish the completed private file. The stream name is its original temporary alias."""
@@ -140,11 +148,7 @@ def publish_record(path, *, exclusive=False):
                 os.link(name, path)
             else:
                 os.replace(name, path)
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            sync_parent(path)
         finally:
             name.unlink(missing_ok=True)
 
@@ -205,7 +209,7 @@ def execution_lock(directory, line=DEFAULT_LINE):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ExecutionBusy("Another launcher or ready-work controller owns execution; wait for it to finish before starting more work") from None
-        yield
+        yield fd
     finally:
         os.close(fd)
 
@@ -213,6 +217,13 @@ def execution_lock(directory, line=DEFAULT_LINE):
 @contextmanager
 def task_lock(directory, task, *, wait=False, patience=0.0):
     """Hold one task exclusively; a busy lock is retried for `patience` seconds before refusing."""
+    with _task_lock(directory, task, wait=wait, patience=patience) as (path, _):
+        yield path
+
+
+@contextmanager
+def _task_lock(directory, task, *, wait=False, patience=0.0):
+    """Expose the held descriptor when Git removal needs to inherit the lock."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", task):
         raise FactoryError("Task ID must be a lowercase slug, at most 64 characters")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -227,7 +238,7 @@ def task_lock(directory, task, *, wait=False, patience=0.0):
                 if time.monotonic() >= deadline:
                     raise TaskLockBusy("Another command is working on this task; retry later") from exc
                 time.sleep(0.1)
-        yield directory / (task + ".json")
+        yield directory / (task + ".json"), fd
     finally:
         os.close(fd)
 
@@ -1131,7 +1142,7 @@ def validate_provisioning(record):
         raise FactoryError("Invalid task provisioning request; restore the original record")
 
 
-def provisioning_git(repository, *args, output=None, timeout=30):
+def provisioning_git(repository, *args, output=None, timeout=30, pass_fds=()):
     """Metadata/index operations and raw blobs only; never checkout callbacks."""
     scope = GIT_EXECUTION.get()
     environment = git_environment() if scope is None else scope[1]
@@ -1144,7 +1155,7 @@ def provisioning_git(repository, *args, output=None, timeout=30):
             "--work-tree=" + str(repository), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args],
             env=environment, stdout=subprocess.PIPE if output is None else output,
-            stderr=subprocess.PIPE, timeout=timeout, check=False)
+            stderr=subprocess.PIPE, timeout=timeout, check=False, pass_fds=pass_fds)
         diagnostic = result.stderr.decode("utf-8")
         output_text = "" if result.stdout is None else result.stdout.decode("utf-8")
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
@@ -1805,6 +1816,17 @@ def check_legacy_registration(record, witness):
                            "branch and dependent caches for owner inspection.")
 
 
+def release_witness_matches(witness, record) -> TypeGuard[dict]:
+    item = record["provisioning"]
+    marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
+    return (isinstance(witness, dict) and witness.get("marker") == marker
+            and witness.get("repository") == record["admission"]["repository_identity"]
+            and witness.get("cwd") == item["request"]["path"] and witness.get("git_dir") == item["git_dir"]
+            and isinstance(witness.get("head"), str)
+            and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", witness["head"]) is not None
+            and valid_checkout_inodes(witness.get("inodes")))
+
+
 def release_proof(path, record):
     """Only the locked release producer binds the removed physical checkout to its receipt."""
     item = record["provisioning"]
@@ -1834,7 +1856,6 @@ def release_proof(path, record):
         if not all(os.path.samestat(entry.lstat(), info) for entry in (path, alias)):
             raise FactoryError(f"Release publication changed during inspection at {path}; preserve both names")
     proof = decode_json(raw)
-    marker = f'factory-{record["task"]}-{item["id"]}-{item["owner_token"]}'
     version = proof.get("schema_version") if isinstance(proof, dict) else None
     # Only a completed owner with no original observation can replay an attended observation.
     legacy = version == 3
@@ -1850,11 +1871,7 @@ def release_proof(path, record):
                 or not legacy and not original_checkout(item, witness)):
             raise FactoryError(f"Restore the original owner release outcome for deregistered checkout {destination}")
         extra["publication_alias"] = proof["publication_alias"]
-    if (not isinstance(witness, dict) or witness.get("marker") != marker
-            or witness.get("repository") != record["admission"]["repository_identity"]
-            or witness.get("cwd") != destination or witness.get("git_dir") != item["git_dir"]
-            or not isinstance(witness.get("head"), str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", witness["head"])
-            or not valid_checkout_inodes(witness.get("inodes"))
+    if (not release_witness_matches(witness, record)
             or type(version) is not int or version not in (1, 2, 3) or proof.get("already_released") is not False
             or type(proof.get("at")) not in (int, float) or not 0 < proof["at"] <= time.time()
             or proof != dict(**extra, schema_version=version, at=proof["at"], owner_token=item["owner_token"],
@@ -1872,8 +1889,29 @@ def release_proof(path, record):
     return proof, raw
 
 
-def release_worktree(path):
-    """Caller holds the owner's execution and task locks. Keep launch exclusion through publication."""
+def read_release_intent(path, record):
+    """release-worktree owns TASK.worktree-release-intent.json. Version 1 binds branch and the
+    pre-removal checkout witness to the provisioned task. Only the owner advances removing
+    to absent after observing deregistration. Consumers require the separate completion receipt.
+    The gate-store migration exception applies: intent presence blocks cache cleanup for a
+    surviving checkout even on an unsupported version, which release-worktree refuses.
+    Only release-worktree migrates and rewrites accepted older versions on read. Version 1
+    is the first accepted version.
+    """
+    item = record["provisioning"]
+    intent = decode_json(read_record_bytes(path, private=True))
+    field = "checkout" if "checkout_inodes" in item else "observed_checkout"
+    if (not isinstance(intent, dict) or set(intent) != {"schema_version", "phase", "branch", field}
+            or type(intent["schema_version"]) is not int or intent["schema_version"] != 1
+            or intent["phase"] not in ("removing", "absent") or intent["branch"] != item["request"]["branch"]
+            or not release_witness_matches(intent[field], record)
+            or field == "checkout" and not original_checkout(item, intent[field])):
+        raise FactoryError(f"Inspect the conflicting owner release intent at {path}; preserve both endpoints")
+    return intent
+
+
+def release_worktree(path, *, lock_fds: tuple[int, ...]):
+    """Caller holds the task lock through readback and supplies its descriptor for Git."""
     import go_cache
 
     raw = read_record_bytes(path, private=True)
@@ -1884,23 +1922,42 @@ def release_worktree(path):
     destination = Path(item["request"]["path"])
     directory = Path(item["git_dir"])
     receipt_path = path.with_suffix(".worktree-release.json")
+    intent_path = path.with_suffix(".worktree-release-intent.json")
+    repo = admission["repository_identity"]
+    legacy = "checkout_inodes" not in item
+    field = "observed_checkout" if legacy else "checkout"
     if not os.path.lexists(destination):
-        check_repository(admission)
-        if go_cache.checkout_binding(destination, directory, admission["repository_identity"]) is not None:
-            raise FactoryError("Checkout reappeared during release readback; inspect incomplete teardown")
-        proof, _ = release_proof(receipt_path, record)
-        if "observed_checkout" in proof and (read_record_bytes(path, private=True) != raw
-                or go_cache.checkout_binding(destination, directory, admission["repository_identity"]) is not None):
-            raise FactoryError("Legacy release readback changed. Inspect the owner record and retain dependent caches.")
-        return dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"], head=None,
-                    already_released=True)
+        # The old admin inode is gone. Ordinary provisioning takes this line lock first;
+        # our reverse acquisition under the task lock is nonblocking.
+        with execution_lock(path.parent, task_line(record)):
+            check_repository(admission)
+            if go_cache.checkout_binding(destination, directory, repo) is not None:
+                raise FactoryError("Checkout reappeared during release readback; inspect incomplete teardown")
+            outcome = dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"],
+                           head=None, already_released=True)
+            if os.path.lexists(receipt_path) or not os.path.lexists(intent_path):
+                sync_parent(receipt_path)
+                release_proof(receipt_path, record)
+            else:
+                intent = read_release_intent(intent_path, record)
+                if intent["phase"] == "removing":
+                    intent["phase"] = "absent"
+                    save(intent_path, intent)
+                else:
+                    sync_parent(intent_path)
+                if read_release_intent(intent_path, record) != intent:
+                    raise FactoryError(f"Release intent changed during readback at {intent_path}; inspect the owner store")
+                outcome.update(phase="absent", intent_id=item["owner_token"], head=intent[field]["head"],
+                               already_released=False)
+            if (read_record_bytes(path, private=True) != raw
+                    or go_cache.checkout_binding(destination, directory, repo) is not None):
+                raise FactoryError("Release readback changed. Inspect the owner record and retain dependent caches.")
+            return outcome
     with go_cache.inode_lock(directory) as fd:
         if os.path.lexists(receipt_path):
             raise FactoryError("Inspect the existing owner release receipt before removing a surviving worktree")
         provisioning_owned(record, item)
-        repo = admission["repository_identity"]
         witness = go_cache.checkout_binding(destination, directory, repo)
-        legacy = "checkout_inodes" not in item
         if not witness:
             raise FactoryError("Missing current checkout. Preserve the registration and inspect the owner record.")
         if legacy:
@@ -1916,8 +1973,7 @@ def release_worktree(path):
         go_cache.confirm_window(record["task"])
         check_checkout(admission["repository"], str(destination), head, expected_identity=repo,
                        expected_git_dir=directory, read_only=True)
-        if legacy:
-            check_legacy_registration(record, witness)
+        check_legacy_registration(record, witness)
         for user_path, saved in user_records.items():
             if read_record_bytes(user_path, private=True) != saved:
                 raise FactoryError(f"Checkout user changed before release at {user_path}; inspect before retrying")
@@ -1927,22 +1983,33 @@ def release_worktree(path):
             raise FactoryError("Checkout changed during release; inspect ownership before retrying")
         if provisioning_git(destination, "symbolic-ref", "HEAD").strip() != "refs/heads/" + item["request"]["branch"]:
             raise FactoryError("Restore the original provisioned branch before release")
-        provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination), timeout=600)
-        if go_cache.checkout_binding(destination, directory, repo) is not None:
-            raise FactoryError("Git removal left a checkout endpoint; inspect incomplete teardown")
         outcome = dict(task=record["task"], worktree=str(destination), branch=item["request"]["branch"],
                        head=head, already_released=False)
-        receipt: dict[str, object] = dict(outcome, schema_version=3 if legacy else 2, at=time.time(), git_dir=str(directory),
-                                          owner_token=item["owner_token"])
-        receipt["observed_checkout" if legacy else "checkout"] = witness
+        intent = {"schema_version": 1, "branch": outcome["branch"], "phase": "removing", field: witness}
+        if os.path.lexists(intent_path):
+            sync_parent(intent_path)
+        else:
+            save(intent_path, intent)
+        if read_release_intent(intent_path, record) != intent:
+            raise FactoryError("Release intent differs from the current checkout; preserve both endpoints")
+        # Pass the held descriptions, not new opens, so parent death cannot drop
+        # the task or admin lock while Git still mutates the checkout.
+        provisioning_git(admission["repository"], "worktree", "remove", "--force", "--force", str(destination),
+                         timeout=600, pass_fds=(*lock_fds, fd))
+        if go_cache.checkout_binding(destination, directory, repo) is not None:
+            raise FactoryError("Git removal left a checkout endpoint; inspect incomplete teardown")
+        receipt: dict[str, object] = dict(outcome, schema_version=3 if legacy else 2, at=time.time(),
+                                          git_dir=str(directory), owner_token=item["owner_token"])
+        receipt[field] = witness
         try:
             with publish_record(receipt_path, exclusive=True) as stream:
                 receipt["publication_alias"] = Path(stream.name).name
                 published = json.dumps(receipt, indent=2) + "\n"
                 stream.write(published)
+            sync_parent(receipt_path)  # Persist removal of the temporary publication alias.
         except OSError as exc:
-            raise FactoryError("Git removed the worktree but saving the owner release outcome failed; "
-                               "inspect the owner store before relying on teardown evidence") from exc
+            raise FactoryError(f"Git removed the worktree but receipt publication failed at {receipt_path}: {exc}. "
+                               "Inspect the owner store and retry release readback.") from exc
         _, readback = release_proof(receipt_path, record)
         if (readback != published.encode() or read_record_bytes(path, private=True) != raw
                 or go_cache.checkout_binding(destination, directory, repo) is not None):
@@ -5665,9 +5732,11 @@ def main(argv=None):
                 raise FactoryError("Admit a task and supply a nonempty requirements revision first")
             acceptance = inputs_acceptance(prepared, args.requirements, owner_decision=args.owner_decision)  # Network, before any lock.
         locked = args.action in {"start", "codex-start", "grok-start", "claude-start", "antigravity-start", "provision", "reset",
-                                 "release-worktree", "rebase-worktree", "line"}
-        line = peek_line(args.state_dir.resolve() / (args.task + ".json")) or DEFAULT_LINE
-        with (execution_lock(args.state_dir.resolve(), line) if locked else nullcontext()), task_lock(args.state_dir.resolve(), args.task) as path:
+                                 "rebase-worktree", "line"}
+        state_dir = args.state_dir.resolve()
+        line = peek_line(state_dir / (args.task + ".json")) or DEFAULT_LINE
+        with (execution_lock(state_dir, line) if locked else nullcontext()), \
+                _task_lock(state_dir, args.task) as (path, task_fd):
             if locked and os.path.lexists(path) and task_line(load_task(path, persist_migration=False)) != line:
                 raise FactoryError("The task moved to another line while waiting for its lock; run the command again")
             if args.action == "line":
@@ -5677,7 +5746,7 @@ def main(argv=None):
                 print(json.dumps(rebase_worktree(path, onto=args.onto), indent=2))
                 return 0
             if args.action == "release-worktree":
-                print(json.dumps(release_worktree(path), indent=2))
+                print(json.dumps(release_worktree(path, lock_fds=(task_fd,)), indent=2))
                 return 0
             if args.action == "reset":
                 print(json.dumps(reset_writer(path, assignment_id=args.id), indent=2))
