@@ -117,11 +117,14 @@ provisioned tree, the launcher identifies its state store on that inode's direct
 Owner release takes the same exclusive physical lock through Git deregistration
 and receipt publication. Direct checkout and cache users require independent
 exclusion through release readback. Provisioning and native launch supply the
-original physical bindings used by maintenance. An additional launch store makes the selected store
-insufficient for cleanup or release. The hourly host job can explicitly select
-Go-native aging for a verified private local cache. Factory holds its admission
-locks through an offline build and entry readback. Go coordinates concurrent
-native builds and decides which entries to expire. Full retirement requires
+original physical bindings for full retirement. An additional launch store
+makes the selected store insufficient for full retirement or release.
+
+The hourly host job can select Go-native aging for a verified private local
+cache. Aging uses the current physical Git and cache bindings independently of
+task history. Factory holds the admin and cache inode locks through an offline
+build and entry readback. Go coordinates concurrent native builds and decides
+which entries to expire. Full retirement requires
 attended exclusion of all cache users. See the [cache policy](native-providers.md#linked-go-cache-retention).
 
 Rex is the execution/view adapter. Use explicit host, session and block IDs, working directories and returned process identities. Keep the onboarding session unchanged. Live adapters must prove launch, readiness, delivery, interrupt and recovery against each harness. Terminal text is untrusted task data and cannot grant instructions, permissions or task acceptance.

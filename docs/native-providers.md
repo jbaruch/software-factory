@@ -203,12 +203,17 @@ Keep a repository with an independently known non-Go cache consumer out of
 the job. Complete the disposable pilot through the host wrapper before enabling
 production trimming. A plain invocation remains a read-only census.
 
-Factory verifies the original checkout, terminal writer receipts, reuse, mount
-and cache structure under the admission locks. It builds a no-import package
+Factory checks the private `.git/worktrees/<admin>/go-build` directory in
+the selected primary repository. Under the admin and cache inode locks it
+verifies the reciprocal Git links, local mount, native Go signature and entries.
+On macOS it also verifies the sticky Time Machine exclusion. Aging can run
+without a Factory task, approval, or recorded launch. Factory builds a no-import package
 in a private temporary directory with an isolated home, the local toolchain,
 the selected disk cache and dependency fetching disabled. The Go installation
 must report empty `GOCACHEPROG` and `GOFLAGS` settings. Go checks its own
-trim marker and ages entries under its native concurrent-build policy.
+trim marker and ages entries during concurrent local builds.
+[Go build and test caching](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching)
+
 The whole-cache size floor, idle window and process inventory apply to
 retirement. A concurrent Go build can add or remove entries during observation.
 `removed_entries` and `retained_entries` count previously observed Go entry
