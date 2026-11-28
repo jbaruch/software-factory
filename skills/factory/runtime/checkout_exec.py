@@ -71,7 +71,6 @@ def main(argv=None):
         if args.runtime_digest and harness is not None:
             os.environ.clear()
             os.environ.update(environment)
-            factory.ENVIRONMENT_TOKEN = ""
             offset = 3 if command[1:3] == ["-E", "-s"] else 1
             sys.argv = command[offset:]
             # Execute the allowlisted script as source, just as a fresh script launch would.

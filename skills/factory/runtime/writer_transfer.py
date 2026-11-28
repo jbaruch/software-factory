@@ -73,8 +73,8 @@ def _acceptance_digest(record, requirements):
     capture = record.get("acceptance", {}).get(requirements)
     if capture is None:
         return None
-    for owner, repo, number in factory.acceptance_issues(record["admission"]):
-        issue = re.escape(f"{owner}/{repo}#{number}")
+    for ref in factory.acceptance_issues(record["admission"]):
+        issue = re.escape("{}/{}#{}".format(*ref.groups()))
         header = re.compile(rf"(?m)^(### {issue}: [^\n]*\n)Updated [^\n]+\n\n")
         # A body can quote an issue header. Keep ambiguous text byte-exact.
         if len(header.findall(capture)) == 1:

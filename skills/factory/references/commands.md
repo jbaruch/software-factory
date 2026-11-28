@@ -111,7 +111,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 |---|---|---|---|
 | `admit` | Records the task's goal, acceptance, allowances and line, and selects the repository's HEAD as its first inputs | Task view | `admit()` |
 | `line` | Moves a task with nothing open to another line | Task view | `move_line()` |
-| `inputs` | Selects the candidate and requirements revision, capturing admitted GitHub issues and any comment selected with `--owner-decision PERMALINK` | Task view | `set_inputs()` |
+| `inputs` | Selects the candidate and requirements revision, reading uncaptured GitHub acceptance from `--acceptance-snapshot FILE` and including the comment selected with `--owner-decision PERMALINK` | Task view | `set_inputs()` |
 | `extend-allowance` | Raises a correction or investigation allowance with the operator's approval, or adds the one correction round a current `completed` judge ruling grants (`--judge ID`, three per task) | Task view | `extend_allowance()` |
 | `pause`, `resume` | Holds or releases new launches | Task view | `hold_task()` |
 | `show` | None; an assignment's `state` is its launch, and `closed.state` how its process ended (`failed` with no result: relaunch under a new ID) | Task view | `task_view()` |
@@ -136,6 +136,40 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 - **Task view:** the task record (`task`, `line`, `admission`, `inputs`, `assignments`, `hold`, `provisioning` and its event logs), plus `allowances` and each assignment's `result_current`.
 - **Status object:** `{role, state, session_id, window_id, block_id, exit}`, plus `reason` for a lost or abandoned attempt and `closed: true` once tidied.
 
+## GitHub acceptance at triage
+
+Use the foreman's first authenticated GitHub read to save one snapshot in a private local file. Inspect that file to select work. For an issue or PR URL in `ref`, the following call records the requirements revision alongside the GraphQL response. Set `snapshot` to a new file in the foreman's private scratch directory.
+
+```sh
+fields='url title body createdAt updatedAt lastEditedAt
+  timelineItems(itemTypes: [RENAMED_TITLE_EVENT], last: 1) { nodes { ... on RenamedTitleEvent { createdAt } } }'
+query="query(\$url: URI!) { ref1: resource(url: \$url) {
+  ... on Issue { $fields } ... on PullRequest { $fields headRefOid } } }"
+gh api graphql -f url="$ref" -f query="$query" --jq '
+  . + {requirements: (.data.ref1 | (.url | split("/")) as $p |
+    if .headRefOid then "PR" + $p[6] + "@" + .headRefOid
+    else $p[3] + "/" + $p[4] + "#" + $p[6] + "@" + .updatedAt end)}' > "$snapshot"
+```
+
+For multiple admitted GitHub URLs, query them together as `ref1`, `ref2`, … in admission order, skipping local references. Keep the revision expression bound to the selected source. For an operator-selected revision label, set `requirements` to that exact string in the output filter. Preserve the response's `data` and any `errors`.
+
+When selecting an owner decision, include the relevant comments page on the parent issue or PR in that same query, for example by appending the following selection to its fields before retrieval.
+
+```graphql
+comments(last: 20) {
+  nodes { url fullDatabaseId authorAssociation author { login ... on User { databaseId } } updatedAt body }
+}
+```
+
+After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file.
+
+```sh
+python3 -B "$SKILL_DIR/runtime/factory.py" inputs --task "$task" --candidate "$candidate" \
+  --requirements "$(jq -er '.requirements' "$snapshot")" --acceptance-snapshot "$snapshot"
+```
+
+An incomplete or mismatched snapshot refuses input selection. Report the missing evidence. Keep retries, subsequent candidate selections and worker launches offline. Local-only acceptance and previously saved revisions need no snapshot.
+
 ## Cross-host writer transfer
 
 Transfer a settled writer's provenance from SOURCE_HOST (task `SRC`) to DEST_HOST (task `DST`). Both commands use bundle `schema_version` 1. The bundle file must be outside the state directory, written to a path only the operator can read.
@@ -153,7 +187,7 @@ python3 -B "$SKILL_DIR/runtime/factory.py" \
 
 Transfer the bundle to the destination host by any secure operator channel. Confirm the SHA-256 of the received file matches the printed value before proceeding.
 
-On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. Use a fresh admission with the original acceptance references and select the same requirements revision.
+On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. For GitHub acceptance, transfer the original foreman snapshot for the destination’s `inputs --acceptance-snapshot FILE`. Use a fresh admission with the original acceptance references and select the same requirements revision.
 
 ```sh
 # 1. Admit the task (use the exact candidate C and requirements R from the source).

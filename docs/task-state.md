@@ -135,7 +135,7 @@ runtime's `new_task`, `admit`, `launch`, `hold_task`, `extend_allowance`,
 | `task` | Task slug matching the JSON filename |
 | `admission` | `null`, or goal, repository, repository identity, initial candidate, acceptance references and correction/investigation limits |
 | `inputs` | `null` without admission; otherwise the selected candidate commit and requirements revision |
-| `acceptance` | Optional; maps each requirements revision `inputs` selected to the acceptance issues' text captured for it the first time |
+| `acceptance` | Optional; maps each requirements revision `inputs` selected to the rendered GitHub acceptance text saved on its first selection |
 | `hold` | `null`, or the operator's nonempty pause reason |
 | `control_events` | Ordered pause/resume requests; each has a unique `id`, nullable integer `expected_revision`, `previous_hold`, resulting `hold`, and `at` in UTC epoch seconds |
 | `provisioning` | `null`, or one immutable writer-worktree request, unique owner token, effect state and nullable returned Git directory |
@@ -509,9 +509,21 @@ change the identifier when the relevant requirements change. Admission defaults
 the identifier to its initial Git commit. Set it explicitly before launch for
 requirements versioned elsewhere. The runtime does not monitor external documents.
 
-To include a later GitHub owner decision, select a new requirements revision with
+### GitHub acceptance
+
+For an uncaptured revision with admitted GitHub references, the foreman supplies the
+[saved triage response](../skills/factory/references/commands.md#github-acceptance-at-triage)
+to `inputs --acceptance-snapshot FILE`. A regular UTF-8 JSON file up to 1 MiB carries
+the exact requirements string and one result per admitted GitHub URL in order.
+`PR<N>@<head>` must identify an admitted PR at that head. For a timestamp-bound
+`owner/repo#N@T`, creation, the latest body edit and latest title rename must all
+fall at or before T. Later closures, labels and unrelated comments can advance
+`updatedAt` while leaving acceptance current. The revision and candidate are separate
+inputs. Selecting a new candidate against a saved revision reuses its original text.
+
+To include a later GitHub owner decision, supply its snapshot on a new requirements revision with
 `inputs --owner-decision 'https://github.com/OWNER/REPO/issues/123#issuecomment-456'`.
-The issue must be in the task's admission. The capture includes the selected comment,
+The parent issue or PR must be in the task's admission. The capture includes the selected comment,
 GitHub author identity, edit time and original body alongside the issue. Reviews use
 the captured decision to interpret acceptance within the authorized task. Previous
 captures and reviews stay bound to their original revision. For an `OWNER/REPO#123@TIME`

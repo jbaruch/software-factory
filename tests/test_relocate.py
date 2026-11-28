@@ -46,9 +46,7 @@ class Relocate(unittest.TestCase):
                          execv=lambda path, args: self.fail("A source checkout never re-executes"))
         self.assertFalse(self.home.exists())
 
-    def test_the_installed_runtime_still_reads_the_linux_token(self):
-        # Review of #152: loading factory.py takes the token out of the environment, and an ACR-realized copy then
-        # re-executes the installed runtime, which must still read it while no child of its own inherits it.
+    def test_relocation_discards_an_obsolete_foreman_token_before_exec(self):
         runtime = self.copy("0.19.0")
         for path in factory.ROOT.glob("*.py"):
             (runtime / path.name).write_bytes(path.read_bytes())
@@ -56,16 +54,17 @@ class Relocate(unittest.TestCase):
         (runtime / "probe.py").write_text(
             "import os, subprocess, sys\n"
             "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+            "before = os.environ.get('SOFTWARE_FACTORY_GITHUB_READ_TOKEN')\n"
             "import factory\n"
             "factory.relocate('probe.py', sys.argv[1:])\n"
             "child = subprocess.run([sys.executable, '-c', 'import os; print(os.environ.get(\"SOFTWARE_FACTORY_GITHUB_READ_TOKEN\"))'],"
             " capture_output=True, text=True, check=True).stdout.strip()\n"
-            "print(__file__, factory.ENVIRONMENT_TOKEN, child)\n")
-        environment = {**os.environ, "XDG_DATA_HOME": str(self.root / "data"), factory.TOKEN_VARIABLE: "github_pat_linux"}
+            "print(__file__, before, child)\n")
+        environment = {**os.environ, "XDG_DATA_HOME": str(self.root / "data"), "SOFTWARE_FACTORY_GITHUB_READ_TOKEN": "retired-credential"}
         result = subprocess.run([sys.executable, "-B", str(runtime / "probe.py")], env=environment,
                                 capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.split(), [str(self.root / "data" / "software-factory" / "skill" / "runtime" / "probe.py"),
-                                                 "github_pat_linux", "None"])
+                                                 "None", "None"])
 
     def test_first_use_installs_the_copy_and_runs_it(self):
         path, args = self.relocate(self.copy("0.19.0"), ["status", "--task", "t"])

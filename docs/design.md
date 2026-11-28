@@ -79,6 +79,7 @@ Use learned outcomes to rank suitable candidates and controlled rotation to expl
 ## Integration and recovery
 
 Bind review evidence to the inputs it assessed, including candidate commit and requirements revision. A changed input invalidates only dependent work; a new source commit must not inherit an old approval. Integration ownership covers shared interfaces, merge ordering, conflicts and required revalidation.
+The foreman owns the single authenticated GitHub read for triage. It supplies that frozen response to `inputs`, which validates the admitted references and selected revision offline and saves their untrusted text in the existing acceptance map. Readers and writers reuse that entry. See the [acceptance contract](task-state.md#github-acceptance).
 The release judgment alone consumes the complete frozen external-review packet;
 ordinary exact-input specialist approvals remain valid when only review prose changes.
 Failed native writers retain their original contributor identity for independence,
