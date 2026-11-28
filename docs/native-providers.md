@@ -794,42 +794,15 @@ remotes must resolve as they do in CI (#188). Pushes to other repositories, or t
 URL, are not refused: the guard stops a misbriefed push, not a hostile one. Readers work on a
 local checkout, and a release judgment's GitHub evidence is captured before launch, so
 no worker needs GitHub; a worker can't look up private issues or pull requests on its
-own. The factory reads its acceptance issues for it. `factory.py inputs`, before
-taking any lock, fetches each `https://github.com/OWNER/REPO/issues/N` acceptance
-reference through GitHub's GraphQL API and stores the text in the task record with the requirements revision, in
-the same save as the inputs (`acceptance` in [task-state.md](task-state.md)).
-Every agent's brief, writers and generic `start` assignments included, renders it as
-untrusted data while the revision is current, and launches never touch the network. A task migrated from schema 10 has
-no capture, so a new launch refuses until `inputs` selects the revision again. When the requirements revision names
-the issue (`owner/repo#N@T`, owner and repository compared without case, surrounding
-whitespace ignored), its title and body must not have changed after `T`: its creation,
-its last body edit (`lastEditedAt`) and its last title rename must all be at or before
-`T`. Closing it, labels and comments move `updatedAt` but not the acceptance, so the
-task's own merge closing its issue keeps the revision current (#167).
+own. The foreman saves its first authenticated issue or PR retrieval during triage.
+`factory.py inputs --acceptance-snapshot FILE` validates it offline and saves the rendered
+text with the selected requirements revision. Every native and generic assignment reads
+the saved text as untrusted data. A foreman upgraded from a token-based installation may
+still have an obsolete acceptance token in its environment. Factory discards that variable
+before relocation or child execution.
 
-On macOS, open Keychain Access as the user who runs the factory. Select the `login`
-keychain and choose **File → New Password Item**. Use `software-factory-github-read`
-as the item name, your macOS username as the account name, and a fine-grained GitHub
-token with read-only Contents, Issues, Pull requests and Metadata as the password.
-If the current Keychain search misses the item, the factory checks the account's
-`Library/Keychains/login.keychain-db` directly when the user-domain Keychain list
-confirms that exact path. If it cannot confirm the path, check that the login
-keychain is available in Keychain Access as the same user and retry.
-If the read requires interaction, open native macOS Terminal as
-that same user. Rerun the same `factory.py inputs` command with the same state
-directory, task, candidate and requirements revision. Respond to the macOS
-authorization prompt. A denial stops capture. Once the capture is saved, subsequent
-runs reuse it for that revision, including in background sessions.
-
-On other platforms, such as Linux, the factory reads
-`SOFTWARE_FACTORY_GITHUB_READ_TOKEN` once when it loads and
-removes it from its own environment, so no child process, agent, generic command or
-Git, inherits it; only an ACR-realized copy hands it to the installed runtime it
-re-executes, which removes it again. Only the factory reads it, and it never enters an agent's
-environment, brief or the task record. Capture fails
-closed: without the token, or with an unreadable issue, `inputs` refuses. This stops a misbriefed agent, not a hostile one: an unconfined agent can
-still reach the operator's credentials on disk; only running workers as another
-user would stop that.
+See the [foreman snapshot command](../skills/factory/references/commands.md#github-acceptance-at-triage)
+and the [revision and owner-decision contract](task-state.md#github-acceptance).
 
 New Codex model children additionally use per-run
 `allow_login_shell=false`, `features.shell_snapshot=false` and

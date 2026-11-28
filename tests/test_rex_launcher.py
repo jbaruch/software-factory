@@ -862,6 +862,50 @@ class TaskAdmission(unittest.TestCase):
                          acceptance=["docs/example.md#acceptance"], corrections=1, investigations=1)
         return factory.admit(self.path, **{**arguments, **changes})
 
+    def test_inputs_and_launch_require_local_promisor_objects(self):
+        pin = self.admit()["inputs"]["candidate"]
+        self.commit("Candidate")
+        git = [factory.git_binary(), "-C", str(self.repo)]
+        candidate = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+        remote = self.root / "promisor.git"
+        file_transport = dict(factory.git_environment(), GIT_ALLOW_PROTOCOL="file")
+        subprocess.run([*git, "clone", "--quiet", "--bare", "--no-local", str(self.repo), str(remote)],
+                       check=True, env=file_transport)
+        subprocess.run([*git, "remote", "add", "fixture", str(remote)], check=True)
+        subprocess.run([*git, "config", "remote.fixture.promisor", "true"], check=True)
+        inputs = ["--state-dir", str(self.state), "inputs", "--task", "task",
+                  "--candidate", candidate, "--requirements", "local-v1"]
+        def local_object_status(oid):
+            offline = dict(factory.git_environment(), GIT_ALLOW_PROTOCOL="", GIT_NO_LAZY_FETCH="1")
+            return subprocess.run([*git, "cat-file", "-e", oid], capture_output=True, env=offline).returncode
+
+        original = self.path.read_bytes()
+        for missing in (pin, candidate):
+            with self.subTest(missing=missing):
+                obj = self.repo / ".git/objects" / missing[:2] / missing[2:]
+                held = self.root / missing
+                obj.rename(held)
+                self.assertNotEqual(local_object_status(missing), 0)
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+                    self.assertNotEqual(factory.main(inputs), 0)
+                self.assertIn("fetch the missing objects as foreman", errors.getvalue())
+                self.assertNotEqual(local_object_status(missing), 0)
+                self.assertEqual(self.path.read_bytes(), original)
+                held.rename(obj)
+        with redirect_stdout(StringIO()):
+            self.assertEqual(factory.main(inputs), 0)
+        self.assertEqual(factory.load_task(self.path)["inputs"]["candidate"], candidate)
+        selected = self.path.read_bytes()
+        obj = self.repo / ".git/objects" / candidate[:2] / candidate[2:]
+        obj.rename(self.root / candidate)
+        with self.assertRaisesRegex(factory.FactoryError, "fetch the missing objects as foreman"):
+            self.start()
+        self.assertEqual(self.path.read_bytes(), selected)
+        self.assertNotEqual(local_object_status(candidate), 0)
+        # Positive control: ordinary Git can materialize this exact commit from the disposable promisor.
+        subprocess.run([*git, "cat-file", "-e", candidate], check=True, capture_output=True, env=file_transport)
+        self.assertEqual(local_object_status(candidate), 0)
+
     def start(self, **changes):
         arguments = dict(task="task", assignment_id="qa", role="qa", goal="Inspect only",
                          cwd=str(self.repo), command=[sys.executable, "{instructions}"],
@@ -1445,7 +1489,8 @@ class TaskAdmission(unittest.TestCase):
     def test_spawn_consumer_preserves_git_transport_and_prompt_settings(self):
         record = self.admit()
         settings = {"GIT_SSH_COMMAND": "ssh -o BatchMode=yes", "GIT_ASKPASS": "/fixture/askpass",
-                    "GIT_SSL_CAINFO": "/fixture/ca.pem", "GIT_TERMINAL_PROMPT": "0"}
+                    "GIT_SSL_CAINFO": "/fixture/ca.pem", "GIT_TERMINAL_PROMPT": "1",
+                    "GIT_ALLOW_PROTOCOL": "file", "GIT_NO_LAZY_FETCH": "0"}
         result = subprocess.run([sys.executable, str(factory.ROOT / "checkout_exec.py"),
             "--identity", json.dumps(record["admission"]["repository_identity"]),
             "--git-dir", str(factory.git_dir(str(self.repo))),

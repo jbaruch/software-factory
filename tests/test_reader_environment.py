@@ -12,9 +12,8 @@ import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 import codex_worker
 import factory
@@ -121,411 +120,328 @@ class ReaderEnvironment(unittest.TestCase):
 
 
 class AcceptanceEvidence(unittest.TestCase):
-    """Readers have no GitHub identity, so `inputs` captures their acceptance issues (0.39.3 regression)."""
-
-    marker = "fixture-marker"
-    account_home = "/Users/Fixture User"
-    login_keychain = account_home + "/Library/Keychains/login.keychain-db"
-    other_keychain = "/Users/Another User/Library/Keychains/login.keychain-db"
-    lookup = ["/usr/bin/security", "find-generic-password", "-s", "software-factory-github-read"]
-    list_keychains = ["/usr/bin/security", "list-keychains", "-d", "user"]
-    security_options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            encoding="utf-8", timeout=30, check=False)
-    metadata_options = security_options | {"stdout": subprocess.DEVNULL}
+    issue_url = "https://github.com/jbaruch/agentic-context-registry/issues/248"
+    pr_url = "https://github.com/jbaruch/agentic-context-registry/pull/249"
+    timestamp = "2026-11-13T03:37:26Z"
+    requirements = "jbaruch/agentic-context-registry#248@" + timestamp
 
     def setUp(self):
-        self.requirements = "jbaruch/nanoclaw#1368@2026-11-13T03:37:26Z"
-        self.admission = dict(acceptance=["https://github.com/jbaruch/nanoclaw/issues/1368", "fixture/notes.md"])
-        self.reader = [factory.sys.executable, "-E", "-s", str(factory.ROOT / "codex_worker.py"), "--role", "qa"]
-        self.fetches = []
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.snapshot = self.root / "snapshot.json"
+        self.issue = dict(url=self.issue_url, title="Acceptance", body="Original issue body.",
+                          createdAt="2026-11-12T00:00:00Z", updatedAt=self.timestamp,
+                          lastEditedAt=None, timelineItems=dict(nodes=[]))
+        self.permalink = self.issue_url + "#issuecomment-3000000000"
+        self.comment = dict(url=self.permalink, fullDatabaseId="3000000000", authorAssociation="OWNER",
+                            author=dict(login="jbaruch", databaseId=12345), body="Selected decision.", updatedAt=self.timestamp)
+        self.issue["comments"] = dict(nodes=[dict(self.comment, url=self.issue_url + "#issuecomment-1",
+                                                  body="Unselected discussion."), self.comment])
+        self.record: dict[str, Any] = dict(admission=dict(acceptance=[self.issue_url]), acceptance={})
 
-    def security_result(self, status, stdout=""):
-        return subprocess.CompletedProcess([], status, stdout, self.marker)
-
-    def login_lookup_results(self):
-        listing = f'    "{self.other_keychain}"\n    "{self.login_keychain}"\n'
-        return [self.security_result(44), self.security_result(0, listing)]
-
-    def respond(self, updated_at="2026-11-13T03:37:26Z", *, edited_at=None, renamed_at=None, answer=None, comment=None):
-        """GitHub's GraphQL answer for the acceptance issue, created 2026-11-12 and changed as the arguments say."""
-        class Response(io.BytesIO):
-            def __enter__(self):
-                return self
-            def __exit__(self, *exc):
-                return False
-        def urlopen(request, timeout):
-            if request.data is None:
-                self.assertIsNotNone(comment, "only the explicitly selected comment may be fetched")
-                self.fetches.append((request.full_url, request.get_header("Authorization"), None))
-                return Response(json.dumps(comment).encode())
-            self.fetches.append((request.full_url, request.get_header("Authorization"), json.loads(request.data)["variables"]))
-            issue = dict(title="Cap context at 200K", body="Acceptance: first call under 200K tokens.",
-                         createdAt="2026-11-12T06:07:07Z", updatedAt=updated_at, lastEditedAt=edited_at,
-                         timelineItems=dict(nodes=[dict(createdAt=renamed_at)] if renamed_at else []))
-            return Response(json.dumps(answer or dict(data=dict(repository=dict(issueOrPullRequest=issue)))).encode())
-        return patch("urllib.request.OpenerDirector.open", side_effect=lambda request, timeout: urlopen(request, timeout))
-
-    def capture(self, token: str | None = "github_pat_keychainonly", updated_at="2026-11-13T03:37:26Z", **changes):
-        with patch.object(factory, "read_token", return_value=token), self.respond(updated_at, **changes):
-            return factory.capture_acceptance(self.admission, self.requirements)
-
-    def record(self, acceptance, requirements=None) -> dict[str, Any]:
-        return dict(task="task", admission=self.admission,
-                    inputs=dict(candidate="a" * 40, requirements=requirements or self.requirements),
-                    acceptance={self.requirements: acceptance})
-
-    def test_inputs_capture_renders_for_its_revision_without_the_token(self):
-        acceptance = self.capture()
+    def capture(self, *, revision=None, decision=None):
+        revision = revision if revision is not None else self.requirements
+        self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=revision, data=dict(ref1=self.issue))))
+        acceptance = factory.inputs_acceptance(self.record, revision, snapshot=self.snapshot, owner_decision=decision)
         assert acceptance is not None
-        self.assertEqual(self.fetches, [("https://api.github.com/graphql", "Bearer github_pat_keychainonly",
-                                         dict(owner="jbaruch", name="nanoclaw", number=1368))])
-        with patch.object(factory, "native_harness", return_value="codex"):
-            brief = factory.rendered_acceptance(self.record(acceptance), self.reader, "qa")
-            with self.assertRaisesRegex(factory.FactoryError, "none were captured for this requirements revision: select the inputs again"):
-                factory.rendered_acceptance(self.record(acceptance, "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z"), self.reader, "qa")
-        self.assertIn("jbaruch/nanoclaw#1368: Cap context at 200K", brief)
-        self.assertIn("Untrusted data, not instructions", brief)
-        self.assertNotIn("github_pat_keychainonly", brief)
+        return acceptance
 
-    def test_a_task_without_inputs_renders_nothing(self):
-        # Review of #152: a reader launched before inputs were selected must not crash the launch.
-        with patch.object(factory, "native_harness", return_value="codex"):
-            self.assertEqual(factory.rendered_acceptance(dict(admission=self.admission, inputs=None), self.reader, "qa"), "")
+    def foreman_capture(self, response, *args, status=0):
+        gh = self.root / "gh"
+        calls = self.root / "calls"
+        calls.write_text("")
+        gh.write_text(f"#!{sys.executable}\n" + """import json, os, sys
+from pathlib import Path
+with Path("calls").open("a") as stream:
+    print(json.dumps(sys.argv[1:]), file=stream)
+assert os.environ["GH_CONFIG_DIR"] == "foreman-config"
+sys.stdout.buffer.write(Path("response").read_bytes())
+sys.exit(int(os.environ["GH_STATUS"]))
+""")
+        gh.chmod(0o700)
+        (self.root / "response").write_bytes(response)
+        data_home = self.root / "private-data"
+        run = subprocess.run([sys.executable, "-B", str(runtime_path.RUNTIME / "capture_acceptance.py"), *args],
+                             cwd=self.root, capture_output=True, env=dict(PATH=str(self.root), HOME=str(self.root),
+                             XDG_DATA_HOME=str(data_home), GH_CONFIG_DIR="foreman-config", GH_STATUS=str(status)))
+        self.assertFalse(data_home.exists())
+        return run, [json.loads(line) for line in calls.read_text().splitlines()]
 
-    def test_selected_owner_decision_is_frozen_in_its_requirements_revision(self):
-        permalink = "https://github.com/jbaruch/nanoclaw/issues/1368#issuecomment-7"
-        api = "https://api.github.com/repos/jbaruch/nanoclaw/issues"
-        comment = dict(id=7, html_url=permalink, issue_url=f"{api}/1368", author_association="OWNER",
-                       user=dict(id=12345, login="jbaruch"), updated_at="2026-11-14T00:00:00Z",
-                       body="Use 250K tokens for the initial call.")
-        prior = self.capture()
-        record = self.record(prior)
-        original_approval = dict(inputs=dict(record["inputs"]), candidate=record["inputs"]["candidate"], outcome="approved")
-        self.assertTrue(factory.result_current(record, original_approval))
-        revision = "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z"
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond(comment=comment):
-            with self.assertRaisesRegex(factory.FactoryError, "select a new revision"):
-                factory.inputs_acceptance(record, self.requirements, owner_decision=permalink)
-            with self.assertRaisesRegex(factory.FactoryError, "changed at"):
-                factory.capture_acceptance(self.admission, self.requirements, owner_decision=permalink)
-            fresh = factory.inputs_acceptance(record, revision, owner_decision=permalink)
-        self.assertEqual(self.fetches[-1], (f"{api}/comments/7", "Bearer github_pat_keychainonly", None))
-        assert fresh is not None
-        record["acceptance"][revision] = fresh
-        record["inputs"]["requirements"] = revision
-        self.assertFalse(factory.result_current(record, original_approval))
-        with patch.object(factory, "read_token", side_effect=AssertionError("frozen revisions are offline")):
-            self.assertIsNone(factory.inputs_acceptance(record, revision, owner_decision=permalink))
-            with self.assertRaisesRegex(factory.FactoryError, "select a new revision"):
-                factory.inputs_acceptance(record, revision, owner_decision=permalink.removesuffix("7") + "8")
-            brief = factory.rendered_acceptance(record, self.reader, "qa")
-        for excerpt in (permalink, "jbaruch (GitHub account 12345)", comment["updated_at"], comment["body"], "200K tokens"):
-            self.assertIn(excerpt, brief)
-        self.assertEqual(record["acceptance"][self.requirements], prior)
+    def test_foreman_single_read_preserves_order_revision_and_comments(self):
+        head = "a" * 40
+        pr = dict(self.issue, url=self.pr_url, headRefOid=head)
+        for urls, data, options, revision in (
+                ([self.pr_url, self.issue_url], dict(ref1=pr, ref2=self.issue), ["--comments-for", self.issue_url], "PR249@" + head),
+                ([self.issue_url, self.pr_url], dict(ref1=self.issue, ref2=pr), [], self.requirements),
+                ([self.issue_url], dict(ref1=self.issue), ["--requirements", " exact $label "], " exact $label ")):
+            with self.subTest(urls=urls, options=options):
+                result, calls = self.foreman_capture(json.dumps(dict(data=data)).encode(), *options, *urls)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), dict(schema_version=1, requirements=revision, data=data))
+                self.assertEqual(len(calls), 1)
+                argv = calls[0]
+                self.assertEqual(argv[:5], ["api", "--hostname", "github.com", "graphql", "-f"])
+                query = argv[5]
+                for index, url in enumerate(urls, 1):
+                    self.assertEqual(argv[4 + 2 * index:6 + 2 * index], ["-f", f"url{index}={url}"])
+                    self.assertIn(f"$url{index}: URI!", query)
+                    self.assertIn(f"ref{index}: resource(url: $url{index})", query)
+                    fragment = query.split(f"ref{index}: resource", 1)[1].split(f"ref{index+1}: resource", 1)[0]
+                    self.assertIn("... on PullRequest" if url == self.pr_url else "... on Issue", fragment)
+                    self.assertEqual("headRefOid" in fragment, url == self.pr_url)
+                    self.assertNotIn(url, query)
+                if "--comments-for" in options:
+                    before, after = query.split("ref2: resource")
+                    self.assertNotIn("comments(", before)
+                    self.assertIn("comments(last: 20)", after)
+                    self.snapshot.write_bytes(result.stdout)
+                    record = dict(admission=dict(acceptance=urls))
+                    evidence = factory.inputs_acceptance(record, revision, snapshot=self.snapshot, owner_decision=self.permalink)
+                    self.assertIn("Selected decision.", evidence or "")
+                else:
+                    self.assertNotIn("comments(", query)
 
-    def test_unrelated_or_nonowner_comments_cannot_be_selected(self):
-        permalink = "https://github.com/jbaruch/nanoclaw/issues/1368#issuecomment-7"
-        api = "https://api.github.com/repos/jbaruch/nanoclaw/issues"
-        comment = dict(id=7, html_url=permalink, issue_url=f"{api}/1368", author_association="OWNER",
-                       user=dict(id=12345, login="jbaruch"), updated_at="2026-11-13T00:00:00Z", body="Decision.")
-        with patch.object(factory, "read_token", side_effect=AssertionError("check admission before network")):
-            with self.assertRaisesRegex(factory.FactoryError, "one of this task's admitted issues"):
-                factory.capture_acceptance(self.admission, self.requirements, owner_decision=permalink.replace("1368", "1369"))
-        for changes in ({"author_association": "MEMBER"}, {"issue_url": f"{api}/1369"}, {"id": 8}):
-            with (self.subTest(changes=changes), patch.object(factory, "read_token", return_value="github_pat_keychainonly"),
-                  self.respond(comment=comment | changes), self.assertRaisesRegex(factory.FactoryError, "check its permalink, authorship and access")):
-                factory.capture_acceptance(self.admission, self.requirements, owner_decision=permalink)
+    def test_foreman_capture_fails_without_partial_output_or_retry(self):
+        valid = json.dumps(dict(data=dict(ref1=self.issue))).encode()
+        for raw, status in ((valid, 1), (b"{", 0), (b"x" * (1024**2 + 1), 0),
+                            (b'{"errors":[{"message":"private marker"}],"data":{}}', 0),
+                            (b'{"data":{"ref1":null}}', 0)):
+            result, calls = self.foreman_capture(raw, self.issue_url, status=status)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertTrue(result.stderr)
+            self.assertNotIn(b"private marker", result.stderr)
+            self.assertEqual(len(calls), 1)
+        result, calls = self.foreman_capture(valid, "--comments-for", self.pr_url, self.issue_url)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
 
-    def test_a_redirect_is_never_followed_with_the_token(self):
-        import urllib.error
-        import urllib.request
-        handlers = []
-        real = urllib.request.build_opener
-        def build(*args):
-            handlers.extend(args)
-            return real(*args)
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
-                patch("urllib.request.build_opener", side_effect=build), \
-                patch("urllib.request.OpenerDirector.open", side_effect=urllib.error.HTTPError(
-                    "https://api.github.com/repos/jbaruch/nanoclaw/issues/1368", 301, "Moved", cast(Any, None), None)), \
-                self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance"):
-            factory.capture_acceptance(self.admission, self.requirements)
-        redirect = next(handler for handler in handlers if isinstance(handler, type) and issubclass(handler, urllib.request.HTTPRedirectHandler))
-        self.assertIsNone(redirect().redirect_request(cast(Any, None), cast(Any, None), 301, "Moved", cast(Any, {}), "https://evil.example/"))
+    def test_timestamp_compares_creation_body_rename_and_selected_comment(self):
+        later = "2026-11-15T04:55:03Z"
+        revision = " " + self.requirements.upper() + " "
+        with patch.dict(self.issue, updatedAt=later, lastEditedAt=self.timestamp):
+            self.assertIn("Original issue body.", self.capture(revision=revision))
+        for changes in (dict(createdAt=later), dict(lastEditedAt=later), dict(timelineItems=dict(nodes=[dict(createdAt=later)]))):
+            with self.subTest(changes=changes), patch.dict(self.issue, changes), self.assertRaisesRegex(factory.FactoryError, "changed since"):
+                self.capture(revision=revision)
+        with patch.dict(self.comment, updatedAt=later), self.assertRaisesRegex(factory.FactoryError, "decision.*changed"):
+            self.capture(decision=self.permalink)
+        for revision in (self.requirements.replace("248", "1"), self.requirements[:-1], self.requirements.split("@")[0] + "@"):
+            with self.subTest(revision=revision), self.assertRaises(factory.FactoryError):
+                self.capture(revision=revision)
 
-    def test_every_agent_renders_the_capture(self):
-        # Review of #152: generic `start` readers and writers judge the same capture as native ones; writers, who
-        # keep the operator's identity and could read the issues anyway, need no separate detection.
-        acceptance = self.capture()
-        for command, role in ((["/usr/bin/reviewer", "{instructions}"], "qa"), (["/usr/bin/builder", "{instructions}"], "backend"),
-                              ([*self.reader, "--write"], "backend")):
-            with self.subTest(command=command):
-                self.assertIn("Cap context at 200K", factory.rendered_acceptance(self.record(acceptance), command, role))
-
-    def test_a_migrated_task_without_a_capture_refuses_new_launches_until_inputs(self):
-        # Review of #152: a schema-10 task migrates with no capture; a reader without GitHub must not judge blind.
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        repo = root / "repo"
-        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
+    def test_first_freeze_requires_evidence_reaching_the_named_issue_revision(self):
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet",
-                        "--allow-empty", "-m", "Fixture"], check=True)
-        path = root / "state" / "task.json"
-        path.parent.mkdir(mode=0o700)
-        factory.admit(path, task="task", goal="Cap the context", repository=str(repo), acceptance=self.admission["acceptance"])
-        candidate = factory.git_commit(str(repo), "HEAD")
-        factory.set_inputs(path, candidate=candidate, requirements=self.requirements, acceptance=self.capture())
-        legacy = json.loads(path.read_text())
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit",
+                        "--quiet", "--allow-empty", "-m", "Fixture"], check=True)
+        path = self.root / "test.json"
+        factory.admit(path, task="test", goal="Check acceptance", repository=str(repo), acceptance=[self.issue_url],
+                      corrections=1, investigations=1)
+        args = ["--state-dir", str(self.root), "inputs", "--task", "test", "--candidate", "HEAD",
+                "--requirements", self.requirements, "--acceptance-snapshot", str(self.snapshot)]
+        # A refused first capture must also leave an older admission in its original on-disk form.
+        legacy = json.loads(path.read_bytes())
         legacy["schema_version"] = 10
-        del legacy["acceptance"]
+        legacy.pop("acceptance", None)
         factory.save(path, legacy)
-        with self.assertRaisesRegex(factory.FactoryError, "select the inputs again"):
-            factory.launch(path, task="task", assignment_id="qa-1", role="qa", goal="Check it", cwd=str(repo),
-                           command=["/bin/echo", "{instructions}"], purpose="work")
-        self.assertEqual(factory.load_task(path)["assignments"], {})
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond():
-            factory.set_inputs(path, candidate=candidate, requirements=self.requirements,
-                               acceptance=factory.inputs_acceptance(factory.load_task(path), self.requirements))
-        self.assertIn("Cap context at 200K", factory.rendered_acceptance(factory.load_task(path), ["/bin/echo"], "qa"))
-
-    def test_without_a_keychain_the_token_comes_from_its_variable_and_no_child_inherits_it(self):
-        # Review of #152: Linux has no `security`; the factory reads the variable once and removes it from its own
-        # environment, so no child process of any kind inherits it.
-        script = ("import os, subprocess, sys; os.environ['SOFTWARE_FACTORY_GITHUB_READ_TOKEN'] = 'github_pat_linux'; "
-                  "sys.path.insert(0, sys.argv[1]); import factory; "
-                  "print(factory.ENVIRONMENT_TOKEN); "
-                  "print(subprocess.run([sys.executable, '-c', 'import os; print(os.environ.get(\\'SOFTWARE_FACTORY_GITHUB_READ_TOKEN\\'))'], "
-                  "capture_output=True, text=True).stdout.strip())")
-        result = subprocess.run([factory.sys.executable, "-B", "-c", script, str(factory.ROOT)], capture_output=True, text=True, check=True)
-        self.assertEqual(result.stdout.split(), ["github_pat_linux", "None"])
-        with patch.object(factory.sys, "platform", "linux"):
-            with patch.object(factory, "ENVIRONMENT_TOKEN", "github_pat_linux"):
-                self.assertEqual(factory.read_token(), "github_pat_linux")
-            with patch.object(factory, "ENVIRONMENT_TOKEN", ""):
-                self.assertIsNone(factory.read_token())
-
-    def test_capture_fails_closed_without_a_token_or_on_drift(self):
-        with self.assertRaisesRegex(factory.FactoryError, "(?i)no read-only token"):
-            self.capture(token=None)
-        for changes in (dict(edited_at="2026-11-14T09:00:00Z"), dict(renamed_at="2026-11-14T09:00:00Z")):
-            with self.subTest(**changes), self.assertRaisesRegex(factory.FactoryError,
-                    "changed since the task's requirements revision .*title or body changed at 2026-11-14T09:00:00"):
-                self.capture(updated_at="2026-11-14T09:00:00Z", **changes)
-        self.assertIsNone(factory.capture_acceptance(dict(acceptance=["fixture/notes.md"]), self.requirements))
-
-    def test_the_tasks_own_merge_closing_its_issue_is_not_changed_acceptance(self):
-        # #167: the PR's merge closed the issue at 04:55:03Z and moved updatedAt; its title and body never changed,
-        # and an edit before the revision is part of it.
-        acceptance = self.capture(updated_at="2026-11-15T04:55:03Z", edited_at="2026-11-13T00:00:00Z")
-        assert acceptance is not None
-        self.assertIn("Cap context at 200K", acceptance)
-
-    def test_an_unreadable_issue_or_revision_time_refuses(self):
-        missing = dict(data=dict(repository=dict(issueOrPullRequest=None)),
-                       errors=[dict(type="NOT_FOUND", message=self.marker)])
-        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*inspect the acceptance reference") as error:
-            self.capture(token=self.marker, answer=missing)
-        self.assertNotIn(self.marker, str(error.exception))
-        # Review of #173: partial data beside an error, its body and edit time nulled, refuses too.
-        partial = dict(data=dict(repository=dict(issueOrPullRequest=dict(
-            title="Cap context at 200K", body=None, createdAt="2026-11-12T06:07:07Z", updatedAt="2026-11-13T03:37:26Z",
-            lastEditedAt=None, timelineItems=dict(nodes=[])))),
-            errors=[dict(type="FORBIDDEN", path=["repository", "issueOrPullRequest", "body"], message="Resource not accessible")])
-        with self.assertRaisesRegex(factory.FactoryError, "returned no complete issue .*read-only token's access") as error:
-            self.capture(answer=partial)
-        self.assertNotIn("Resource not accessible", str(error.exception))
-        for revision in ("yesterday", "2026-11-13T03:37:26", "2026-11-13"):  # A zoneless time can't be compared.
-            with self.subTest(revision=revision), patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
-                    self.respond(), self.assertRaisesRegex(factory.FactoryError, "is not a time"):
-                factory.capture_acceptance(self.admission, "jbaruch/nanoclaw#1368@" + revision)
-
-    def test_whitespace_or_case_never_dodges_the_revision_guard(self):
-        # Review of #152: ' Owner/Repo#N@T' must still be checked against the issue's last title or body change.
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), \
-                self.respond("2026-11-14T09:00:00Z", edited_at="2026-11-14T09:00:00Z"):
-            for requirements in ("  jbaruch/nanoclaw#1368@2026-11-13T03:37:26Z ", "JBaruch/NanoClaw#1368@2026-11-13T03:37:26Z"):
-                with self.subTest(requirements=requirements), \
-                        self.assertRaisesRegex(factory.FactoryError, "changed since the task's requirements revision"):
-                    factory.capture_acceptance(self.admission, requirements)
-
-    def test_repeated_inputs_keep_the_first_capture_of_a_revision(self):
-        # Review of #152: re-running inputs after an issue edit must not replace what earlier readers judged.
-        # A, then B, then A again after an issue edit: A keeps its first capture.
-        stored = {self.requirements: "first capture of A", "jbaruch/nanoclaw#1368@B": "capture of B"}
-        with patch.object(factory, "capture_acceptance", side_effect=AssertionError("refetched")):
-            self.assertIsNone(factory.inputs_acceptance(dict(admission=self.admission, acceptance=stored), self.requirements))
-        with patch.object(factory, "read_token", return_value="github_pat_keychainonly"), self.respond("2026-11-14T00:00:00Z"):
-            fresh = factory.inputs_acceptance(dict(admission=self.admission, acceptance=stored), "jbaruch/nanoclaw#1368@2026-11-14T00:00:00Z")
-        assert fresh is not None
-        self.assertIn("Cap context at 200K", fresh)
-
-    def test_overlapping_inputs_keep_the_capture_saved_first(self):
-        # Review of #152: both runs decided to capture before either saved; the save under the lock keeps the first.
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        repo, path = Path(temporary.name) / "repo", Path(temporary.name) / "state" / "task.json"
-        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet",
-                        "--allow-empty", "-m", "Fixture"], check=True)
-        path.parent.mkdir(mode=0o700)
-        factory.admit(path, task="task", goal="Cap the context", repository=str(repo), acceptance=self.admission["acceptance"])
-        candidate = factory.git_commit(str(repo), "HEAD")
-        factory.set_inputs(path, candidate=candidate, requirements=self.requirements, acceptance="saved first")
-        factory.set_inputs(path, candidate=candidate, requirements=self.requirements, acceptance="fetched after an edit")
-        self.assertEqual(factory.load_task(path)["acceptance"], {self.requirements: "saved first"})
-
-    def test_fetch_and_tls_failures_explain_recovery(self):
-        import http.client
-        import ssl
-        import urllib.error
-        for failure in (http.client.IncompleteRead(self.marker.encode()), urllib.error.URLError(self.marker)):
-            with self.subTest(failure=type(failure).__name__), patch.object(factory, "read_token", return_value=self.marker), \
-                    patch("urllib.request.OpenerDirector.open", side_effect=failure), \
-                    self.assertRaisesRegex(factory.FactoryError, "Cannot capture acceptance.*run factory.py inputs again") as error:
-                factory.capture_acceptance(self.admission, self.requirements)
-            self.assertNotIn(self.marker, str(error.exception))
-        with patch.object(factory, "read_token", return_value=self.marker), \
-                patch.object(ssl, "create_default_context", side_effect=ssl.SSLError(self.marker)), \
-                self.assertRaisesRegex(factory.FactoryError, "Cannot set up TLS for GitHub") as error:
-            factory.capture_acceptance(self.admission, self.requirements)
-        self.assertNotIn(self.marker, str(error.exception))
-
-    def test_working_implicit_keychain_read_captures_without_a_login_lookup(self):
-        with self.respond(), patch.object(factory.sys, "platform", "darwin"), \
-                patch.object(factory.subprocess, "run", side_effect=[
-                    self.security_result(0), self.security_result(0, self.marker + "\n")]) as run:
-            capture = factory.capture_acceptance(self.admission, self.requirements)
-        assert capture is not None
-        self.assertIn("Cap context at 200K", capture)
-        self.assertNotIn(self.marker, capture)
-        self.assertEqual(self.fetches[0][:2], ("https://api.github.com/graphql", "Bearer " + self.marker))
-        self.assertEqual(run.call_args_list, [call(self.lookup, **self.metadata_options),
-                                              call([*self.lookup, "-w"], **self.security_options)])
-
-    def test_login_keychain_denial_and_interactive_recovery_on_inputs(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        repo = root / "repo"
-        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet",
-                        "--allow-empty", "-m", "Fixture"], check=True)
-        state = root / "state"
-        state.mkdir(mode=0o700)
-        path = state / "task.json"
-        factory.admit(path, task="task", goal="Cap the context", repository=str(repo), acceptance=self.admission["acceptance"])
-        candidate = factory.git_commit(str(repo), "HEAD")
-        args = ["--state-dir", str(state), "inputs", "--task", "task", "--candidate", candidate,
-                "--requirements", self.requirements]
-        before = path.read_bytes()
-        commands = [call(self.lookup, **self.metadata_options),
-                    call(self.list_keychains, **self.security_options),
-                    call([*self.lookup, self.login_keychain], **self.metadata_options),
-                    call([*self.lookup, "-w", self.login_keychain], **self.security_options)]
-        steps = [*self.login_lookup_results(), self.security_result(0, self.marker)]
-        denied = self.security_result(36, self.marker)
-        results = iter([*steps[:1], denied, *steps[:2], denied, *steps, denied,
-                        *steps, self.security_result(0, self.marker + "\n")])
-        real_run = subprocess.run
-        security_calls = []
-
-        def run(command, *args, **options):
-            if command[0] == "/usr/bin/security":
-                security_calls.append(call(command, *args, **options))
-                return next(results)
-            return real_run(command, *args, **options)
-
-        errors, output = io.StringIO(), io.StringIO()
-        with self.respond(), patch.object(factory.sys, "platform", "darwin"), \
-                patch.object(factory.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=self.account_home)), \
-                patch.object(factory.subprocess, "run", side_effect=run), redirect_stderr(errors), redirect_stdout(output):
-            recovery = ("requires macOS user interaction. In native macOS Terminal as the same user, rerun the same "
-                        "factory.py inputs command with the same state directory, task, candidate and requirements revision, "
-                        "and respond to the macOS authorization prompt")
-            denials = ["Listing the user Keychains", "Looking up software-factory-github-read metadata in the login Keychain",
-                       "Found software-factory-github-read in the login Keychain outside the current Keychain search. "
-                       "Reading software-factory-github-read"]
-            for command_count, operation in enumerate(denials, start=2):
-                with self.subTest(operation=operation):
-                    self.assertEqual(factory.main(args), 1)
-                    self.assertEqual(security_calls, commands[:command_count])
-                    self.assertEqual(self.fetches, [])
-                    self.assertEqual(path.read_bytes(), before)
-                    self.assertEqual(output.getvalue(), "")
-                    self.assertEqual(errors.getvalue(), f"factory: {operation} {recovery}\n")
-                security_calls.clear()
-                errors.seek(0)
-                errors.truncate()
+        original = path.read_bytes()
+        older = dict(self.issue, body="Superseded body", updatedAt=self.issue["createdAt"],
+                     lastEditedAt=self.issue["createdAt"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=self.requirements, data=dict(ref1=older))))
+            self.assertNotEqual(factory.main(args), 0)
+            self.assertIn("predates the requirements revision", errors.getvalue())
+            self.assertEqual(original, path.read_bytes())
+            self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=self.requirements, data=dict(ref1=self.issue))))
             self.assertEqual(factory.main(args), 0)
-            saved = factory.load_task(path)["acceptance"]
-            self.assertIn("Cap context at 200K", saved[self.requirements])
+            saved = path.read_bytes()
+            self.assertIn(self.issue["body"], factory.load_task(path)["acceptance"][self.requirements])
+            self.snapshot.unlink()
             self.assertEqual(factory.main(args), 0)
-            self.assertEqual(factory.load_task(path)["acceptance"], saved)
-        self.assertEqual(security_calls, commands)
-        self.assertEqual(self.fetches, [("https://api.github.com/graphql", "Bearer " + self.marker,
-                                         dict(owner="jbaruch", name="nanoclaw", number=1368))])
-        self.assertNotIn(self.marker, errors.getvalue() + output.getvalue() + path.read_text())
-        self.assertNotIn(self.marker, factory.rendered_acceptance(factory.load_task(path), self.reader, "qa"))
-        with patch.dict(os.environ, {factory.TOKEN_VARIABLE: self.marker}), \
-                patch.object(factory, "READER_GH_CONFIG", root / "gh-reader"):
-            environment = factory.worker_environment(codex_worker.native_environment(), str(repo))
-        self.assertNotIn(self.marker, environment.values())
+            self.assertEqual(saved, path.read_bytes())
 
-    def test_keychain_failures_do_not_fetch_or_expose_subprocess_output(self):
-        missing = self.security_result(44, self.marker)
-        login = self.login_lookup_results()
-        cases = [
-            ([*login, missing], "No read-only token entry .* was found.*In Keychain Access, select login"),
-            ([self.security_result(36, self.marker)], "requires macOS user interaction.*native macOS Terminal"),
-            ([self.security_result(0), self.security_result(36, self.marker)],
-             "requires macOS user interaction.*native macOS Terminal"),
-            ([missing, self.security_result(51)], "Cannot locate the user login Keychain .*status 51"),
-            ([*login, self.security_result(51, self.marker)], "Cannot check .* in the login Keychain .*status 51"),
-            ([*login, self.security_result(0), missing], "Found .* outside the current Keychain search.*Cannot read .*status 44"),
-            ([self.security_result(51, self.marker)], "Cannot read .*status 51"),
-            ([self.security_result(0), self.security_result(0, self.marker + " invalid\n")], "must hold one read-only GitHub token"),
-            ([self.security_result(0), self.security_result(0)], "must hold one read-only GitHub token"),
-            ([missing, subprocess.TimeoutExpired("security", 30, output=self.marker)],
-             "did not answer within 30 seconds during user Keychain list lookup"),
-            ([OSError(self.marker)], "Cannot run the Keychain implicit item lookup.*check /usr/bin/security"),
-            ([UnicodeDecodeError("utf-8", b"\xff", 0, 1, self.marker)], "malformed output during implicit item lookup"),
-        ]
-        for results, message in cases:
-            with self.subTest(message=message), self.respond(), patch.object(factory.sys, "platform", "darwin"), \
-                    patch.object(factory.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=self.account_home)), \
-                    patch.object(factory, "ENVIRONMENT_TOKEN", "unused-environment-marker"), \
-                    patch.object(factory.subprocess, "run", side_effect=results) as run, \
-                    self.assertRaisesRegex(factory.FactoryError, message) as error:
-                factory.capture_acceptance(self.admission, self.requirements)
-            self.assertEqual(run.call_count, len(results))
-            self.assertNotIn(self.marker, str(error.exception))
-            self.assertNotIn(self.marker, repr(run.call_args_list))
-        self.assertEqual(self.fetches, [])
+    def test_offline_inputs_requires_a_full_head_for_a_secondary_pr(self):
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit",
+                        "--quiet", "--allow-empty", "-m", "Fixture"], check=True)
+        path = self.root / "test.json"
+        factory.admit(path, task="test", goal="Check acceptance", repository=str(repo),
+                      acceptance=[self.issue_url, self.pr_url], corrections=1, investigations=1)
+        original = path.read_bytes()
+        args = ["--state-dir", str(self.root), "inputs", "--task", "test", "--candidate", "HEAD",
+                "--requirements", self.requirements, "--acceptance-snapshot", str(self.snapshot)]
+        pr = dict(self.issue, url=self.pr_url, body="Secondary PR body.")
+        document = dict(schema_version=1, requirements=self.requirements, data=dict(ref1=self.issue, ref2=pr))
 
-    def test_user_list_must_confirm_the_exact_standard_login_path_before_any_password_read(self):
-        for listing in ("", f'    "{self.other_keychain}"\n', f'"{self.login_keychain[:-3]}"\n',
-                        '"Library/Keychains/login.keychain-db"\n', f'{self.login_keychain}\n',
-                        f'"{self.login_keychain}\n', f'"{self.login_keychain}\x00"\n',
-                        f'"{self.login_keychain}" "{self.other_keychain}"\n'):
-            with self.subTest(listing=listing), self.respond(), patch.object(factory.sys, "platform", "darwin"), \
-                    patch.object(factory.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=self.account_home)), \
-                    patch.object(factory.subprocess, "run", side_effect=[
-                        self.security_result(44), self.security_result(0, listing)]) as run, \
-                    self.assertRaisesRegex(factory.FactoryError, "did not identify the standard login Keychain.*"
-                                           "Keychain Access as the same user") as error:
-                factory.capture_acceptance(self.admission, self.requirements)
-            self.assertEqual(run.call_args_list, [call(self.lookup, **self.metadata_options),
-                                                  call(self.list_keychains, **self.security_options)])
-            self.assertNotIn(listing.strip() or self.marker, str(error.exception))
-        self.assertEqual(self.fetches, [])
+        run = subprocess.run
+        git_binary = factory.git_binary()
 
+        def local_git(command, *args, **kwargs):
+            self.assertEqual(command[0], git_binary)
+            return run(command, *args, **kwargs)
 
-if __name__ == "__main__":
-    unittest.main()
+        with patch.object(subprocess, "run", side_effect=local_git), patch("socket.socket.connect", side_effect=AssertionError), \
+                redirect_stdout(io.StringIO()):
+            for head in (None, "not-a-sha"):
+                with self.subTest(head=head), redirect_stderr(io.StringIO()) as errors:
+                    if head is not None:
+                        pr["headRefOid"] = head
+                    content = json.dumps(document).encode()
+                    self.snapshot.write_bytes(content)
+                    self.assertNotEqual(factory.main(args), 0)
+                    self.assertIn("full PR head for admitted reference 2 (jbaruch/agentic-context-registry#249)", errors.getvalue())
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(self.snapshot.read_bytes(), content)
+            pr["headRefOid"] = "a" * 40
+            self.snapshot.write_text(json.dumps(document))
+            self.assertEqual(factory.main(args), 0)
+            self.assertIn(pr["body"], factory.load_task(path)["acceptance"][self.requirements])
+
+    def test_owner_decision_needs_exact_comment_at_admitted_url(self):
+        self.assertNotIn("Selected decision.", self.capture())
+        for changes in (dict(authorAssociation="MEMBER"), dict(author=None), dict(author=dict(login="", databaseId=12345)),
+                        dict(author=dict(login="jbaruch", databaseId=True)), dict(fullDatabaseId=1), dict(body=" "),
+                        dict(url=self.permalink.replace("/issues/", "/pull/")), dict(updatedAt=None)):
+            with self.subTest(changes=changes), patch.dict(self.comment, changes), self.assertRaises(factory.FactoryError):
+                self.capture(decision=self.permalink)
+        with self.assertRaises(factory.FactoryError):
+            self.capture(decision=self.permalink.replace("248", "777"))
+        with patch.dict(self.issue, comments=dict(nodes=[self.comment, self.comment])), self.assertRaises(factory.FactoryError):
+            self.capture(decision=self.permalink)
+
+    def test_malformed_or_partial_evidence_refuses_without_echoing_input(self):
+        marker = "private-snapshot-marker"
+        for changes in (dict(url=self.issue_url.replace("issues", "pull")), dict(title=None), dict(body=marker + "\0"),
+                        dict(body="\ud800"), dict(lastEditedAt="bad"), dict(updatedAt=None), dict(timelineItems={}),
+                        dict(timelineItems=dict(nodes=[None])), dict(timelineItems=dict(nodes=[{}]))):
+            with self.subTest(changes=changes), patch.dict(self.issue, changes), self.assertRaises(factory.FactoryError):
+                self.capture()
+        del self.issue["lastEditedAt"]
+        with self.assertRaises(factory.FactoryError):
+            self.capture()
+        for content in (b"[]", b'{"data":{}, "data":{}}', b"[" * 2000 + b"]" * 2000, b"\xff", b" " * (1024**2 + 1),
+                        json.dumps(dict(schema_version=1, errors=[dict(message=marker)], requirements=self.requirements,
+                                        data=dict(ref1=self.issue))).encode()):
+            self.snapshot.write_bytes(content)
+            with self.assertRaises(factory.FactoryError) as error:
+                factory.inputs_acceptance(self.record, self.requirements, snapshot=self.snapshot)
+            self.assertNotIn(marker, str(error.exception))
+        self.snapshot.unlink()
+        os.mkfifo(self.snapshot)
+        with self.assertRaises(factory.FactoryError):
+            factory.inputs_acceptance(self.record, self.requirements, snapshot=self.snapshot)
+
+    def test_local_acceptance_and_previously_saved_text_need_no_snapshot(self):
+        self.assertIsNone(factory.inputs_acceptance(dict(admission=dict(acceptance=["notes.md"])), "local-v1"))
+        self.record["acceptance"]["legacy"] = "verbatim legacy text\r\n"
+        self.assertIsNone(factory.inputs_acceptance(self.record, "legacy", snapshot=self.root / "missing"))
+        self.record["inputs"] = dict(requirements="legacy")
+        self.assertEqual(factory.rendered_acceptance(self.record, [], "backend"), "verbatim legacy text\r\n")
+        self.record["inputs"] = None
+        self.assertEqual(factory.rendered_acceptance(self.record, [], "backend"), "")
+
+    def test_offline_pr_admissions_bind_and_replay_the_first_snapshot(self):
+        from test_rex_launcher import FakeRex
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
+        git = ["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+               "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"]
+        subprocess.run([*git, "commit", "--quiet", "--allow-empty", "-m", "Original"], check=True)
+        head = factory.git_commit(str(repo), "HEAD")
+        subprocess.run([*git, "commit", "--quiet", "--allow-empty", "-m", "New candidate"], check=True)
+        candidate = factory.git_commit(str(repo), "HEAD")
+        state = self.root / "state"
+        common = ["--state-dir", str(state)]
+        # Only local Git may run during admission and inputs. Fail immediately on a gh/security invocation or HTTP.
+        run = subprocess.run
+        git_binary = factory.git_binary()
+        def local_git(command, *args, **kwargs):
+            self.assertEqual(command[0], git_binary)
+            return run(command, *args, **kwargs)
+
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(subprocess, "run", side_effect=local_git), patch("socket.socket.connect", side_effect=AssertionError), \
+                redirect_stdout(output), redirect_stderr(errors):
+            for number in ("249", "251"):
+                task = "pr" + number
+                path = state / (task + ".json")
+                revision = "PR" + number + "@" + head
+                url = self.pr_url.replace("249", number)
+                pr = dict(self.issue, url=url, title="Selected PR", headRefOid=head, body="Untrusted PR body.")
+                self.assertEqual(factory.main([*common, "admit", "--task", task, "--line", "test", "--goal", "Check the PR", "--repo", str(repo),
+                                               "--acceptance", url, "--acceptance", "notes.md", "--acceptance", self.issue_url]), 0)
+                args = [*common, "inputs", "--task", task, "--candidate", head, "--requirements", revision,
+                        "--owner-decision", self.permalink]
+                if number == "251":
+                    legacy = json.loads(path.read_bytes())
+                    legacy["schema_version"] = 10
+                    legacy.pop("acceptance", None)
+                    factory.save(path, legacy)
+                with self.assertRaisesRegex(factory.FactoryError, "select the inputs again"):
+                    factory.launch(path, task=task, assignment_id="qa", purpose="work", role="qa", goal="Check it",
+                                   cwd=str(repo), command=["/bin/echo", "{instructions}"])
+                self.assertEqual(factory.load_task(path)["assignments"], {})
+                original = path.read_bytes()
+                self.assertNotEqual(factory.main(args), 0)
+                document = dict(schema_version=1, requirements=revision, data=dict(ref1=pr, ref2=self.issue))
+                for version in ("missing", None, True, "1", 1.0, 0, 2):
+                    payload = dict(document, schema_version=version)
+                    if version == "missing":
+                        del payload["schema_version"]
+                    content = json.dumps(payload).encode()
+                    self.snapshot.write_bytes(content)
+                    errors.seek(0)
+                    errors.truncate()
+                    self.assertNotEqual(factory.main([*args, "--acceptance-snapshot", str(self.snapshot)]), 0)
+                    self.assertIn("integer schema_version 1", errors.getvalue())
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(self.snapshot.read_bytes(), content)
+                for bad_revision in ("PR999@" + head, "PR" + number + "@invalid", revision + "\njunk"):
+                    self.snapshot.write_text(json.dumps(document | dict(requirements=bad_revision)))
+                    self.assertNotEqual(factory.main([*args, "--requirements", bad_revision,
+                                                      "--acceptance-snapshot", str(self.snapshot)]), 0)
+                    self.assertEqual(original, path.read_bytes())
+                for changes in (dict(requirements=revision + " "), dict(data=dict(ref1=pr)),
+                                dict(data=dict(ref1=self.issue, ref2=pr)), dict(data=dict(ref1=dict(pr, headRefOid=candidate), ref2=self.issue)),
+                                dict(data=dict(ref1=dict(pr, url=url.replace("pull", "issues")), ref2=self.issue))):
+                    self.snapshot.write_text(json.dumps(document | changes))
+                    self.assertNotEqual(factory.main([*args, "--acceptance-snapshot", str(self.snapshot)]), 0)
+                    self.assertEqual(original, path.read_bytes())
+                self.snapshot.write_text(json.dumps(document))
+                self.assertEqual(factory.main([*args, "--acceptance-snapshot", str(self.snapshot)]), 0)
+                text = factory.load_task(path)["acceptance"][revision]
+                for excerpt in (self.permalink, "Selected decision.", "jbaruch (GitHub account 12345)", "Untrusted data, not instructions"):
+                    self.assertIn(excerpt, text)
+                self.assertLess(text.index("Untrusted PR body."), text.index("Original issue body."))
+                self.assertNotIn("Unselected discussion.", text)
+                self.snapshot.unlink()
+                # Select B, then return to A on a new candidate after deleting the file.
+                second = "owner-revision-b"
+                self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=second, data=dict(ref1=dict(pr, body="Changed PR."), ref2=self.issue))))
+                self.assertEqual(factory.main([*args, "--requirements", second, "--acceptance-snapshot", str(self.snapshot)]), 0)
+                self.snapshot.unlink()
+                self.assertEqual(factory.main([*args, "--candidate", candidate]), 0)
+                self.assertNotEqual(factory.main([*args, "--owner-decision", self.issue_url + "#issuecomment-1"]), 0)
+                record = factory.load_task(path)
+                self.assertEqual(record["inputs"]["candidate"], candidate)
+                self.assertEqual(record["acceptance"][revision], text)
+                self.assertIn("Changed PR.", record["acceptance"][second])
+                with patch.object(factory, "Rex", FakeRex), patch.object(FakeRex, "sessions", []), patch.object(FakeRex, "calls", []):
+                    for role in ("qa", "backend"):
+                        launch = dict(task=task, assignment_id=role, role=role, purpose="work", goal="Inspect frozen acceptance",
+                                      cwd=str(repo), command=[sys.executable, "{instructions}"], binary=sys.executable,
+                                      server="unix:///fixture.sock")
+                        _, assignment = factory.launch(path, **launch)
+                        brief = Path(assignment["brief"]).read_bytes()
+                        self.assertIn(text.encode(), brief)
+                        _, replay = factory.launch(path, **launch)
+                        self.assertEqual(replay["block_id"], assignment["block_id"])
+                        self.assertEqual(Path(replay["brief"]).read_bytes(), brief)
 
 
 class AppleGitShim(unittest.TestCase):

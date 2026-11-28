@@ -2,6 +2,8 @@
 
 `factory.py` is `python3 -B "$SKILL_DIR/runtime/factory.py"` and `ready_runner.py` is `python3 -B "$SKILL_DIR/runtime/ready_runner.py"`. Their parsers, in each script's `main()`, are the source of truth for flags: `factory.py COMMAND --help` lists a command's flags, required ones unbracketed. `--state-dir`, `--rex` and `--server` go before the command.
 
+These are normal operations examples. Factory invocations without explicit isolation use the configured per-user paths. For a disposable run, follow the [required offline pilot procedure](https://github.com/jbaruch/software-factory/blob/main/docs/native-rex.md#disposable-offline-acceptance-pilot) instead.
+
 ## Exit codes
 
 - **0:** success; stdout is one JSON document, except for `--help`, which prints usage text.
@@ -111,7 +113,7 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 |---|---|---|---|
 | `admit` | Records the task's goal, acceptance, allowances and line, and selects the repository's HEAD as its first inputs | Task view | `admit()` |
 | `line` | Moves a task with nothing open to another line | Task view | `move_line()` |
-| `inputs` | Selects the candidate and requirements revision, capturing admitted GitHub issues and any comment selected with `--owner-decision PERMALINK` | Task view | `set_inputs()` |
+| `inputs` | Selects the candidate and requirements revision, reading uncaptured GitHub acceptance from `--acceptance-snapshot FILE` and including the comment selected with `--owner-decision PERMALINK` | Task view | `set_inputs()` |
 | `extend-allowance` | Raises a correction or investigation allowance with the operator's approval, or adds the one correction round a current `completed` judge ruling grants (`--judge ID`, three per task) | Task view | `extend_allowance()` |
 | `pause`, `resume` | Holds or releases new launches | Task view | `hold_task()` |
 | `show` | None; an assignment's `state` is its launch, and `closed.state` how its process ended (`failed` with no result: relaunch under a new ID) | Task view | `task_view()` |
@@ -136,6 +138,29 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 - **Task view:** the task record (`task`, `line`, `admission`, `inputs`, `assignments`, `hold`, `provisioning` and its event logs), plus `allowances` and each assignment's `result_current`.
 - **Status object:** `{role, state, session_id, window_id, block_id, exit}`, plus `reason` for a lost or abandoned attempt and `closed: true` once tidied.
 
+## GitHub acceptance at triage
+
+Before triage, set `SKILL_DIR` to the installed Factory skill directory and `snapshot` to a new path in the foreman's private directory. Run the capture command once with the foreman's ordinary authenticated gh environment. Pass every issue or PR URL in admission order, skipping local references.
+
+```sh
+(umask 077 && set -C && python3 -B "$SKILL_DIR/runtime/capture_acceptance.py" "$ref" > "$snapshot")
+```
+
+Add further URLs as positional arguments. The first URL supplies the default revision, `PR<N>@<full head>` or `owner/repo#N@<updatedAt>`. For an operator-selected label, pass `--requirements "$requirements"` exactly. To inspect possible owner decisions, include `--comments-for "$parent_url"` on that first call. Inspect the saved response to select work and any owner permalink. If the command fails or the required evidence is absent, stop and report what is missing. A failed capture can leave an empty file at the new path.
+
+**Snapshot contract.** The Factory capture command owns and writes a regular UTF-8 JSON file of at most 1 MiB. It emits one object on success, with integer `schema_version` equal to 1, the exact string `requirements`, and GraphQL `data` containing `ref1`, `ref2`, … in supplied order. Each reference includes its URL, title, body, creation/update/edit timestamps and latest title rename. PRs include their head OID. The requested parent includes its latest 20 comments with permalink, database ID, author identity and association, update time and body. On failure the command exits nonzero with a diagnostic on stderr. Capture uses one GitHub read and runs directly from the skill directory.
+
+For an uncaptured GitHub revision, the offline reader `inputs` requires all three envelope fields, checks the integer version, ordered references, exact revision and any selected owner evidence before saving acceptance. Missing, invalid or unknown versions stop selection. The file stays read-only. Saved acceptance entries retain their original plain text.
+
+Before selecting inputs, the foreman intentionally fetches any missing Git objects for the admitted pin and selected candidate. After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file. This example is for normal operations, not the disposable pilot.
+
+```sh
+python3 -B "$SKILL_DIR/runtime/factory.py" inputs --task "$task" --candidate "$candidate" \
+  --requirements "$(jq -er '.requirements' "$snapshot")" --acceptance-snapshot "$snapshot"
+```
+
+An incomplete or mismatched snapshot refuses input selection. Report the missing evidence. Keep retries, subsequent candidate selections and worker launches offline. Local-only acceptance and previously saved revisions need no snapshot.
+
 ## Cross-host writer transfer
 
 Transfer a settled writer's provenance from SOURCE_HOST (task `SRC`) to DEST_HOST (task `DST`). Both commands use bundle `schema_version` 1. The bundle file must be outside the state directory, written to a path only the operator can read.
@@ -153,7 +178,7 @@ python3 -B "$SKILL_DIR/runtime/factory.py" \
 
 Transfer the bundle to the destination host by any secure operator channel. Confirm the SHA-256 of the received file matches the printed value before proceeding.
 
-On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. Use a fresh admission with the original acceptance references and select the same requirements revision.
+On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. For GitHub acceptance, transfer the original foreman snapshot for the destination’s `inputs --acceptance-snapshot FILE`. Carry forward the original explicitly selected owner-decision permalink, if any. If original evidence is missing, stop the transfer without refetching GitHub. Use a fresh admission with the original acceptance references and select the same requirements revision.
 
 ```sh
 # 1. Admit the task (use the exact candidate C and requirements R from the source).
@@ -161,9 +186,14 @@ python3 -B "$SKILL_DIR/runtime/factory.py" \
   admit --task DST --line DST --goal 'Imported writer provenance' \
   --repo /dst/checkout --acceptance "$ACCEPTANCE_REF"
 
-# 2. Select inputs (must match the source bundle's candidate and requirements).
+# 2. For GitHub acceptance, set snapshot to the transferred original file.
+# Set owner_decision to the source's selected permalink, or leave it unset if none.
+set --
+if [ -n "${owner_decision:-}" ]; then
+  set -- --owner-decision "$owner_decision"
+fi
 python3 -B "$SKILL_DIR/runtime/factory.py" \
-  inputs --task DST --candidate C --requirements R
+  inputs --task DST --candidate C --requirements R --acceptance-snapshot "$snapshot" "$@"
 
 # 3. Import; --from-host and --sha256 come from the export output, never from the bundle.
 python3 -B "$SKILL_DIR/runtime/factory.py" \

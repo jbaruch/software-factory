@@ -2479,7 +2479,7 @@ def check_checkout(*args, **kwargs):
 """)
         worker_script = engine / "codex_worker.py"
         worker_script.write_text(worker_script.read_text().replace("def main(argv=None):",
-            "def main(argv=None):\n    assert not factory.ENVIRONMENT_TOKEN and factory.TOKEN_VARIABLE not in os.environ"
+            "def main(argv=None):\n    assert 'SOFTWARE_FACTORY_GITHUB_READ_TOKEN' not in os.environ"
             "\n    assert os.environ['GIT_NO_REPLACE_OBJECTS'] == '1' and sys.flags.ignore_environment and sys.flags.no_user_site"))
         with patch.object(factory, "ROOT", engine), patch.object(sys, "executable", str(alias)):
             record, assignment = self.launch_assignment(codex=str(binary), execute=False)
@@ -2492,7 +2492,7 @@ def check_checkout(*args, **kwargs):
         self.assertFalse(self.args.receipt.exists())
         self.assertFalse(self.args.events.exists())
         result = subprocess.run(self.worker_argv, capture_output=True, text=True, timeout=15,
-            env={**os.environ, "PYTHONPATH": str(self.repo), factory.TOKEN_VARIABLE: "fixture"})
+            env={**os.environ, "PYTHONPATH": str(self.repo), "SOFTWARE_FACTORY_GITHUB_READ_TOKEN": "fixture"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(effect.exists())
         self.assertFalse((engine / "__pycache__").exists())

@@ -13,13 +13,15 @@ Use the smallest factory operation that finishes the request. Follow the project
 
 Reuse the existing task and selected inputs for continuation. Admit a task and provision an isolated writer worktree when the work needs them. Select only the roles the task needs from the [role catalog](references/roles.json).
 
+For GitHub-backed work, run the installed capture command once before triage using the [command reference](references/commands.md) under “GitHub acceptance at triage”. Pass that file to `inputs --acceptance-snapshot` for the first selection of a revision. Reuse saved acceptance on continuation.
+
 Record the requester's words as original acceptance evidence. Label coordinator inferences as nonbinding assumptions. Apply relevant repository requirements and acceptance criteria established by authorized roles within the requested scope. Start each correction plan by restating the problem in the requester's words and naming the simplest approach.
 
 Use the [ready-plan contract](references/ready-plan.md) for inputs, provider routing, and result states. Run the plan with the controller command in the [command reference](references/commands.md). Inspect its JSON result and reconcile partial effects before retrying. Keep active work within the selected limits. Leave spare capacity idle. Finish here.
 
 ## Step 2 — Launch one assignment
 
-Reuse an admitted task and its selected inputs. For a new task, use `admit` and `inputs` from the [command reference](references/commands.md).
+Reuse an admitted task and its selected inputs. For a new task, use `admit` and `inputs` from the [command reference](references/commands.md), including its first-read snapshot for GitHub acceptance.
 
 Use the matching native start command from that reference. Supply the task, role, exact inputs, checkout, local Rex endpoint, and eligible model. Collect the result when requested. Finish here.
 

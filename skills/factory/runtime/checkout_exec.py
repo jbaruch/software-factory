@@ -56,8 +56,9 @@ def main(argv=None):
         verify_reader()
         harness = harness or factory.native_harness(command)
         pending = {} if harness and "--write" in command else None
-        factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
-                               expected_git_dir=args.git_dir, pending_links=pending)
+        with factory.local_git_reads():
+            factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
+                                   expected_git_dir=args.git_dir, pending_links=pending)
         environment = factory.command_environment()
         environment.pop(factory.WRITER_SOURCE_ENV, None)
         if pending is not None:
@@ -71,7 +72,6 @@ def main(argv=None):
         if args.runtime_digest and harness is not None:
             os.environ.clear()
             os.environ.update(environment)
-            factory.ENVIRONMENT_TOKEN = ""
             offset = 3 if command[1:3] == ["-E", "-s"] else 1
             sys.argv = command[offset:]
             # Execute the allowlisted script as source, just as a fresh script launch would.
