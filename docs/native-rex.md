@@ -2,11 +2,63 @@
 
 `factory.py` is the first live application slice. Each factory line (one coordinator's stream of work, such as nanoclaw or ACR, named at admission with `--line`) has one Rex session, named after the line, and each explicit specialist assignment gets its own tab/pane there, labeled `<task>:<role>-<assignment>-<8 hex>` so the tasks' tabs tell apart. A line's launches run under its own execution lock, so no two of its tasks create the session at once, and other lines launch in parallel. A coordinator whose own Rex session carries the line's name gets its agents' tabs there, beside its own; the factory adds and closes only its own tabs and kills the session only once it holds no tab at all. Without such a session, the first launch opens one under the line's name. Tasks recorded before lines belong to the `default` line; ones still holding an older session, `factory-<line>` or their own `factory-<task>-<8 hex>`, keep it until it closes. It runs the actual command directly through Rex with `--shell=none`; there is no Herdr or nested tmux layer. It never renames an existing session or switches the user's visible session.
 
+## Disposable offline acceptance pilot
+
+Use a separate ACR-realized project for the Factory release under test. Set `SKILL_DIR` to its absolute realized Factory skill directory, not the source checkout or the shared runtime. Set `repo` to a local Git checkout at the candidate to test and `snapshot` to the original private, single-reference GitHub snapshot with no selected owner decision. Use the [foreman's saved first read](../skills/factory/references/commands.md#github-acceptance-at-triage). Do not fetch it again for this pilot.
+
+Fill in the three paths and run this block in Bash. It needs Git, Python 3.11+, jq and an existing `TMPDIR`. The disposable clone keeps admission's Git-local repository marker out of the source checkout. Both isolation settings must be present from the first Factory invocation. Runtime relocation happens before argument parsing, so `--state-dir` alone does not isolate the runtime.
+
+```bash
+(
+  set -euo pipefail
+  umask 077
+  SKILL_DIR='/absolute/private/project/.codex/skills/acr__jbaruch__software-factory__factory'
+  repo='/absolute/local/candidate-checkout'
+  snapshot='/absolute/private/foreman-snapshot.json'
+
+  pilot=$(mktemp -d "${TMPDIR:?Set TMPDIR to an existing scratch directory}/factory-pilot.XXXXXXXX")
+  pilot=$(cd "$pilot" && pwd -P)
+  printf 'Pilot directory: %s\n' "$pilot"
+  git clone -q --no-hardlinks -- "$repo" "$pilot/repo"
+  candidate=$(git -C "$pilot/repo" rev-parse HEAD)
+  ref=$(jq -er '.data.ref1.url' "$snapshot")
+  requirements=$(jq -er '.requirements' "$snapshot")
+  task=offline-acceptance-pilot
+
+  XDG_DATA_HOME="$pilot/data" python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir "$pilot/state" \
+    admit --task "$task" --line pilot --goal 'Verify offline acceptance' --repo "$pilot/repo" --acceptance "$ref" \
+    > /dev/null
+
+  runtime="$pilot/data/software-factory/skill/runtime"
+  diff -qr "$SKILL_DIR/runtime" "$runtime"
+  printf 'Private runtime version: '
+  cat "$runtime/VERSION"
+
+  XDG_DATA_HOME="$pilot/data" python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir "$pilot/state" \
+    inputs --task "$task" --candidate "$candidate" --requirements "$requirements" --acceptance-snapshot "$snapshot" \
+    | jq -ej --arg rev "$requirements" '.acceptance[$rev] | strings | select(length > 0)' > "$pilot/selected.txt"
+
+  XDG_DATA_HOME="$pilot/data" python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir "$pilot/state" \
+    inputs --task "$task" --candidate "$candidate" --requirements "$requirements" > /dev/null
+  XDG_DATA_HOME="$pilot/data" python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir "$pilot/state" \
+    show --task "$task" > "$pilot/shown.json"
+
+  jq -e --arg candidate "$candidate" --arg requirements "$requirements" \
+    '.inputs == {candidate: $candidate, requirements: $requirements}' "$pilot/shown.json"
+  jq -ej --arg rev "$requirements" '.acceptance[$rev] | strings | select(length > 0)' \
+    "$pilot/shown.json" > "$pilot/replayed.txt"
+  cmp "$pilot/selected.txt" "$pilot/replayed.txt"
+  shasum -a 256 "$runtime/VERSION" "$runtime/factory.py" "$pilot/selected.txt" "$pilot/replayed.txt"
+)
+```
+
+Success means the isolated runtime matches the realized skill's runtime, the private task selects the expected candidate and requirements revision, and replay without a snapshot preserves the acceptance bytes. Record the release identity and printed digests before discarding the printed pilot directory. This does not launch Rex, prove task acceptance, or activate the shared runtime.
+
 ## Launch and inspect
 
 In a project that installed the factory with ACR, run these commands from the realized skill. ACR rewrites the `skills/factory/...` paths in the skill's own instructions to that location, and the first command installs the per-user runtime it then runs from. Upgrade with `acr update` and `acr realize`; the next command upgrades the per-user runtime in place. Restart long-running controllers such as the ready runner or dashboard after an upgrade.
 
-For a disposable Mini pilot, set an absolute private `XDG_DATA_HOME` and pass a separate private `--state-dir` on every call from the ACR-realized skill. The [command reference](../skills/factory/references/commands.md#github-acceptance-at-triage) shows the invocation. Using shared paths activates the runtime for other projects and requires a coordinated upgrade window.
+The examples below are for normal operations. Using shared paths activates the runtime for other projects and requires a coordinated upgrade window.
 
 Upgrades exchange the complete active and staged directories under the install lock and the active runtime's VERSION lock. The native worker, Factory CLI and ready runner hold VERSION from module loading through completion. Let active workers and collectors finish and stop idle ready runners before upgrading.
 

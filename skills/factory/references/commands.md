@@ -2,6 +2,8 @@
 
 `factory.py` is `python3 -B "$SKILL_DIR/runtime/factory.py"` and `ready_runner.py` is `python3 -B "$SKILL_DIR/runtime/ready_runner.py"`. Their parsers, in each script's `main()`, are the source of truth for flags: `factory.py COMMAND --help` lists a command's flags, required ones unbracketed. `--state-dir`, `--rex` and `--server` go before the command.
 
+These are normal operations examples. Factory invocations without explicit isolation use the configured per-user paths. For a disposable run, follow the [required offline pilot procedure](https://github.com/jbaruch/software-factory/blob/main/docs/native-rex.md#disposable-offline-acceptance-pilot) instead.
+
 ## Exit codes
 
 - **0:** success; stdout is one JSON document, except for `--help`, which prints usage text.
@@ -138,14 +140,6 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 
 ## GitHub acceptance at triage
 
-For a disposable Mini pilot from an ACR-realized skill, create private runtime and task directories under an absolute, owner-only pilot directory. Set `pilot` to that absolute directory and use both paths on every Factory call, beginning with the first invocation (runtime relocation precedes argument parsing). For example:
-
-```sh
-XDG_DATA_HOME="$pilot/data" python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir "$pilot/state" show --task "$task"
-```
-
-Reserve the shared paths for a coordinated activation after workers and collectors finish and idle controllers stop.
-
 Use the foreman's first authenticated GitHub read to save one snapshot in a private local file. Inspect that file to select work. For an issue or PR URL in `ref`, the following call records the requirements revision alongside the GraphQL response. Set `snapshot` to a new file in the foreman's private scratch directory.
 
 ```sh
@@ -169,7 +163,7 @@ comments(last: 20) {
 }
 ```
 
-Before selecting inputs, the foreman intentionally fetches any missing Git objects for the admitted pin and selected candidate. After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file.
+Before selecting inputs, the foreman intentionally fetches any missing Git objects for the admitted pin and selected candidate. After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file. This example is for normal operations, not the disposable pilot.
 
 ```sh
 python3 -B "$SKILL_DIR/runtime/factory.py" inputs --task "$task" --candidate "$candidate" \
