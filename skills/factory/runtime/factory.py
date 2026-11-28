@@ -2343,8 +2343,11 @@ def acceptance_evidence(issues, requirements, data, decision):
                 or "lastEditedAt" not in issue or not isinstance(issue.get("timelineItems"), dict)
                 or not isinstance(issue["timelineItems"].get("nodes"), list)):
             raise FactoryError(f"Supply complete title, body and edit evidence for admitted reference {index} ({identity})")
-        if pinned_pr and ref[0].endswith("/pull/" + pinned_pr[1]):
-            if not re.fullmatch(r"[0-9a-f]{40}", pinned_pr[2]) or issue.get("headRefOid") != pinned_pr[2]:
+        if ref[0].endswith("/pull/" + ref[3]):
+            head = issue.get("headRefOid")
+            if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+                raise FactoryError(f"Supply the full PR head for admitted reference {index} ({identity})")
+            if pinned_pr and ref[3] == pinned_pr[1] and head != pinned_pr[2]:
                 raise FactoryError(f"The requirements revision must match the saved PR head for {identity}")
 
         edits = [github_time(issue.get("createdAt"))]

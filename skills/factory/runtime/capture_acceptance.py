@@ -1,7 +1,6 @@
 """Capture the foreman's first GitHub read for offline Factory acceptance."""
 import argparse
 import json
-import re
 import subprocess
 import sys
 
@@ -65,12 +64,8 @@ def capture(args):
             revision = f"{owner}/{repo}#{number}@{first.get('updatedAt')}"
     factory.acceptance_evidence(refs, revision, data, None)
     for index, ref in enumerate(refs, 1):
-        node = data[f"ref{index}"]
-        head = node.get("headRefOid")
-        if ref[0].endswith("/pull/" + ref[3]) and not (isinstance(head, str) and re.fullmatch("[0-9a-f]{40}", head)):
-            raise factory.FactoryError(f"GitHub omitted the full head for reference {index}")
         if ref[0] == args.comments_for:
-            comments = node.get("comments")
+            comments = data[f"ref{index}"].get("comments")
             if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list):
                 raise factory.FactoryError("GitHub omitted the requested comments page")
     result = json.dumps(dict(schema_version=1, requirements=revision, data=data), ensure_ascii=False,

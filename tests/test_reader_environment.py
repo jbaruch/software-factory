@@ -263,6 +263,45 @@ sys.exit(int(os.environ["GH_STATUS"]))
             self.assertEqual(factory.main(args), 0)
             self.assertEqual(saved, path.read_bytes())
 
+    def test_offline_inputs_requires_a_full_head_for_a_secondary_pr(self):
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit",
+                        "--quiet", "--allow-empty", "-m", "Fixture"], check=True)
+        path = self.root / "test.json"
+        factory.admit(path, task="test", goal="Check acceptance", repository=str(repo),
+                      acceptance=[self.issue_url, self.pr_url], corrections=1, investigations=1)
+        original = path.read_bytes()
+        args = ["--state-dir", str(self.root), "inputs", "--task", "test", "--candidate", "HEAD",
+                "--requirements", self.requirements, "--acceptance-snapshot", str(self.snapshot)]
+        pr = dict(self.issue, url=self.pr_url, body="Secondary PR body.")
+        document = dict(schema_version=1, requirements=self.requirements, data=dict(ref1=self.issue, ref2=pr))
+
+        run = subprocess.run
+        git_binary = factory.git_binary()
+
+        def local_git(command, *args, **kwargs):
+            self.assertEqual(command[0], git_binary)
+            return run(command, *args, **kwargs)
+
+        with patch.object(subprocess, "run", side_effect=local_git), patch("socket.socket.connect", side_effect=AssertionError), \
+                redirect_stdout(io.StringIO()):
+            for head in (None, "not-a-sha"):
+                with self.subTest(head=head), redirect_stderr(io.StringIO()) as errors:
+                    if head is not None:
+                        pr["headRefOid"] = head
+                    content = json.dumps(document).encode()
+                    self.snapshot.write_bytes(content)
+                    self.assertNotEqual(factory.main(args), 0)
+                    self.assertIn("full PR head for admitted reference 2 (jbaruch/agentic-context-registry#249)", errors.getvalue())
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(self.snapshot.read_bytes(), content)
+            pr["headRefOid"] = "a" * 40
+            self.snapshot.write_text(json.dumps(document))
+            self.assertEqual(factory.main(args), 0)
+            self.assertIn(pr["body"], factory.load_task(path)["acceptance"][self.requirements])
+
     def test_owner_decision_needs_exact_comment_at_admitted_url(self):
         self.assertNotIn("Selected decision.", self.capture())
         for changes in (dict(authorAssociation="MEMBER"), dict(author=None), dict(author=dict(login="", databaseId=12345)),
