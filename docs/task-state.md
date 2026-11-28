@@ -513,8 +513,7 @@ requirements versioned elsewhere. The runtime does not monitor external document
 
 For an uncaptured revision with admitted GitHub references, the foreman supplies the
 [saved triage response](../skills/factory/references/commands.md#github-acceptance-at-triage)
-to `inputs --acceptance-snapshot FILE`. A regular UTF-8 JSON file up to 1 MiB carries
-the exact requirements string and one result per admitted GitHub URL in order.
+to `inputs --acceptance-snapshot FILE`. The installed capture command owns the versioned file. Its linked contract defines the writer and offline reader.
 `PR<N>@<head>` must identify an admitted PR at that head. For a timestamp-bound
 `owner/repo#N@T`, creation, the latest body edit and latest title rename must all
 fall at or before T, and the named issue’s `updatedAt` must reach at least T. Later closures, labels and unrelated comments can advance

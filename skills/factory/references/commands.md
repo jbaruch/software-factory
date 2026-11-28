@@ -140,28 +140,17 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 
 ## GitHub acceptance at triage
 
-Use the foreman's first authenticated GitHub read to save one snapshot in a private local file. Inspect that file to select work. For an issue or PR URL in `ref`, the following call records the requirements revision alongside the GraphQL response. Set `snapshot` to a new file in the foreman's private scratch directory.
+Before triage, set `SKILL_DIR` to the installed Factory skill directory and `snapshot` to a new path in the foreman's private directory. Run the capture command once with the foreman's ordinary authenticated gh environment. Pass every issue or PR URL in admission order, skipping local references.
 
 ```sh
-fields='url title body createdAt updatedAt lastEditedAt
-  timelineItems(itemTypes: [RENAMED_TITLE_EVENT], last: 1) { nodes { ... on RenamedTitleEvent { createdAt } } }'
-query="query(\$url: URI!) { ref1: resource(url: \$url) {
-  ... on Issue { $fields } ... on PullRequest { $fields headRefOid } } }"
-gh api graphql -f url="$ref" -f query="$query" --jq '
-  . + {requirements: (.data.ref1 | (.url | split("/")) as $p |
-    if .headRefOid then "PR" + $p[6] + "@" + .headRefOid
-    else $p[3] + "/" + $p[4] + "#" + $p[6] + "@" + .updatedAt end)}' > "$snapshot"
+(umask 077 && set -C && python3 -B "$SKILL_DIR/runtime/capture_acceptance.py" "$ref" > "$snapshot")
 ```
 
-For multiple admitted GitHub URLs, query them together as `ref1`, `ref2`, … in admission order, skipping local references. Keep the revision expression bound to the selected source. For an operator-selected revision label, set `requirements` to that exact string in the output filter. Preserve the response's `data` and any `errors`.
+Add further URLs as positional arguments. The first URL supplies the default revision, `PR<N>@<full head>` or `owner/repo#N@<updatedAt>`. For an operator-selected label, pass `--requirements "$requirements"` exactly. To inspect possible owner decisions, include `--comments-for "$parent_url"` on that first call. Inspect the saved response to select work and any owner permalink. If the command fails or the required evidence is absent, stop and report what is missing. A failed capture can leave an empty file at the new path.
 
-When selecting an owner decision, include the relevant comments page on the parent issue or PR in that same query, for example by appending the following selection to its fields before retrieval.
+**Snapshot contract.** The Factory capture command owns and writes a regular UTF-8 JSON file of at most 1 MiB. It emits one object on success, with integer `schema_version` equal to 1, the exact string `requirements`, and GraphQL `data` containing `ref1`, `ref2`, … in supplied order. Each reference includes its URL, title, body, creation/update/edit timestamps and latest title rename. PRs include their head OID. The requested parent includes its latest 20 comments with permalink, database ID, author identity and association, update time and body. On failure the command exits nonzero with a diagnostic on stderr. Capture uses one GitHub read and runs directly from the skill directory.
 
-```graphql
-comments(last: 20) {
-  nodes { url fullDatabaseId authorAssociation author { login ... on User { databaseId } } updatedAt body }
-}
-```
+For an uncaptured GitHub revision, the offline reader `inputs` requires all three envelope fields, checks the integer version, ordered references, exact revision and any selected owner evidence before saving acceptance. Missing, invalid or unknown versions stop selection. The file stays read-only. Saved acceptance entries retain their original plain text.
 
 Before selecting inputs, the foreman intentionally fetches any missing Git objects for the admitted pin and selected candidate. After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file. This example is for normal operations, not the disposable pilot.
 

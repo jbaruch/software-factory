@@ -13,7 +13,7 @@ Use the smallest factory operation that finishes the request. Follow the project
 
 Reuse the existing task and selected inputs for continuation. Admit a task and provision an isolated writer worktree when the work needs them. Select only the roles the task needs from the [role catalog](references/roles.json).
 
-For GitHub-backed work, save the first authenticated triage read using the [command reference](references/commands.md) under “GitHub acceptance at triage”. Pass that file to `inputs --acceptance-snapshot` for the first selection of a revision. Reuse saved acceptance on continuation.
+For GitHub-backed work, run the installed capture command once before triage using the [command reference](references/commands.md) under “GitHub acceptance at triage”. Pass that file to `inputs --acceptance-snapshot` for the first selection of a revision. Reuse saved acceptance on continuation.
 
 Record the requester's words as original acceptance evidence. Label coordinator inferences as nonbinding assumptions. Apply relevant repository requirements and acceptance criteria established by authorized roles within the requested scope. Start each correction plan by restating the problem in the requester's words and naming the simplest approach.
 

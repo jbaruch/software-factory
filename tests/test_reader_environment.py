@@ -142,10 +142,80 @@ class AcceptanceEvidence(unittest.TestCase):
 
     def capture(self, *, revision=None, decision=None):
         revision = revision if revision is not None else self.requirements
-        self.snapshot.write_text(json.dumps(dict(requirements=revision, data=dict(ref1=self.issue))))
+        self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=revision, data=dict(ref1=self.issue))))
         acceptance = factory.inputs_acceptance(self.record, revision, snapshot=self.snapshot, owner_decision=decision)
         assert acceptance is not None
         return acceptance
+
+    def foreman_capture(self, response, *args, status=0):
+        gh = self.root / "gh"
+        calls = self.root / "calls"
+        calls.write_text("")
+        gh.write_text(f"#!{sys.executable}\n" + """import json, os, sys
+from pathlib import Path
+with Path("calls").open("a") as stream:
+    print(json.dumps(sys.argv[1:]), file=stream)
+assert os.environ["GH_CONFIG_DIR"] == "foreman-config"
+sys.stdout.buffer.write(Path("response").read_bytes())
+sys.exit(int(os.environ["GH_STATUS"]))
+""")
+        gh.chmod(0o700)
+        (self.root / "response").write_bytes(response)
+        data_home = self.root / "private-data"
+        run = subprocess.run([sys.executable, "-B", str(runtime_path.RUNTIME / "capture_acceptance.py"), *args],
+                             cwd=self.root, capture_output=True, env=dict(PATH=str(self.root), HOME=str(self.root),
+                             XDG_DATA_HOME=str(data_home), GH_CONFIG_DIR="foreman-config", GH_STATUS=str(status)))
+        self.assertFalse(data_home.exists())
+        return run, [json.loads(line) for line in calls.read_text().splitlines()]
+
+    def test_foreman_single_read_preserves_order_revision_and_comments(self):
+        head = "a" * 40
+        pr = dict(self.issue, url=self.pr_url, headRefOid=head)
+        for urls, data, options, revision in (
+                ([self.pr_url, self.issue_url], dict(ref1=pr, ref2=self.issue), ["--comments-for", self.issue_url], "PR249@" + head),
+                ([self.issue_url, self.pr_url], dict(ref1=self.issue, ref2=pr), [], self.requirements),
+                ([self.issue_url], dict(ref1=self.issue), ["--requirements", " exact $label "], " exact $label ")):
+            with self.subTest(urls=urls, options=options):
+                result, calls = self.foreman_capture(json.dumps(dict(data=data)).encode(), *options, *urls)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), dict(schema_version=1, requirements=revision, data=data))
+                self.assertEqual(len(calls), 1)
+                argv = calls[0]
+                self.assertEqual(argv[:5], ["api", "--hostname", "github.com", "graphql", "-f"])
+                query = argv[5]
+                for index, url in enumerate(urls, 1):
+                    self.assertEqual(argv[4 + 2 * index:6 + 2 * index], ["-f", f"url{index}={url}"])
+                    self.assertIn(f"$url{index}: URI!", query)
+                    self.assertIn(f"ref{index}: resource(url: $url{index})", query)
+                    fragment = query.split(f"ref{index}: resource", 1)[1].split(f"ref{index+1}: resource", 1)[0]
+                    self.assertIn("... on PullRequest" if url == self.pr_url else "... on Issue", fragment)
+                    self.assertEqual("headRefOid" in fragment, url == self.pr_url)
+                    self.assertNotIn(url, query)
+                if "--comments-for" in options:
+                    before, after = query.split("ref2: resource")
+                    self.assertNotIn("comments(", before)
+                    self.assertIn("comments(last: 20)", after)
+                    self.snapshot.write_bytes(result.stdout)
+                    record = dict(admission=dict(acceptance=urls))
+                    evidence = factory.inputs_acceptance(record, revision, snapshot=self.snapshot, owner_decision=self.permalink)
+                    self.assertIn("Selected decision.", evidence or "")
+                else:
+                    self.assertNotIn("comments(", query)
+
+    def test_foreman_capture_fails_without_partial_output_or_retry(self):
+        valid = json.dumps(dict(data=dict(ref1=self.issue))).encode()
+        for raw, status in ((valid, 1), (b"{", 0), (b"x" * (1024**2 + 1), 0),
+                            (b'{"errors":[{"message":"private marker"}],"data":{}}', 0),
+                            (b'{"data":{"ref1":null}}', 0)):
+            result, calls = self.foreman_capture(raw, self.issue_url, status=status)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertTrue(result.stderr)
+            self.assertNotIn(b"private marker", result.stderr)
+            self.assertEqual(len(calls), 1)
+        result, calls = self.foreman_capture(valid, "--comments-for", self.pr_url, self.issue_url)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
 
     def test_timestamp_compares_creation_body_rename_and_selected_comment(self):
         later = "2026-11-15T04:55:03Z"
@@ -181,11 +251,11 @@ class AcceptanceEvidence(unittest.TestCase):
         older = dict(self.issue, body="Superseded body", updatedAt=self.issue["createdAt"],
                      lastEditedAt=self.issue["createdAt"])
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
-            self.snapshot.write_text(json.dumps(dict(requirements=self.requirements, data=dict(ref1=older))))
+            self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=self.requirements, data=dict(ref1=older))))
             self.assertNotEqual(factory.main(args), 0)
             self.assertIn("predates the requirements revision", errors.getvalue())
             self.assertEqual(original, path.read_bytes())
-            self.snapshot.write_text(json.dumps(dict(requirements=self.requirements, data=dict(ref1=self.issue))))
+            self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=self.requirements, data=dict(ref1=self.issue))))
             self.assertEqual(factory.main(args), 0)
             saved = path.read_bytes()
             self.assertIn(self.issue["body"], factory.load_task(path)["acceptance"][self.requirements])
@@ -216,7 +286,7 @@ class AcceptanceEvidence(unittest.TestCase):
         with self.assertRaises(factory.FactoryError):
             self.capture()
         for content in (b"[]", b'{"data":{}, "data":{}}', b"[" * 2000 + b"]" * 2000, b"\xff", b" " * (1024**2 + 1),
-                        json.dumps(dict(errors=[dict(message=marker)], requirements=self.requirements,
+                        json.dumps(dict(schema_version=1, errors=[dict(message=marker)], requirements=self.requirements,
                                         data=dict(ref1=self.issue))).encode()):
             self.snapshot.write_bytes(content)
             with self.assertRaises(factory.FactoryError) as error:
@@ -279,7 +349,19 @@ class AcceptanceEvidence(unittest.TestCase):
                 self.assertEqual(factory.load_task(path)["assignments"], {})
                 original = path.read_bytes()
                 self.assertNotEqual(factory.main(args), 0)
-                document = dict(requirements=revision, data=dict(ref1=pr, ref2=self.issue))
+                document = dict(schema_version=1, requirements=revision, data=dict(ref1=pr, ref2=self.issue))
+                for version in ("missing", None, True, "1", 1.0, 0, 2):
+                    payload = dict(document, schema_version=version)
+                    if version == "missing":
+                        del payload["schema_version"]
+                    content = json.dumps(payload).encode()
+                    self.snapshot.write_bytes(content)
+                    errors.seek(0)
+                    errors.truncate()
+                    self.assertNotEqual(factory.main([*args, "--acceptance-snapshot", str(self.snapshot)]), 0)
+                    self.assertIn("integer schema_version 1", errors.getvalue())
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertEqual(self.snapshot.read_bytes(), content)
                 for bad_revision in ("PR999@" + head, "PR" + number + "@invalid", revision + "\njunk"):
                     self.snapshot.write_text(json.dumps(document | dict(requirements=bad_revision)))
                     self.assertNotEqual(factory.main([*args, "--requirements", bad_revision,
@@ -301,7 +383,7 @@ class AcceptanceEvidence(unittest.TestCase):
                 self.snapshot.unlink()
                 # Select B, then return to A on a new candidate after deleting the file.
                 second = "owner-revision-b"
-                self.snapshot.write_text(json.dumps(dict(requirements=second, data=dict(ref1=dict(pr, body="Changed PR."), ref2=self.issue))))
+                self.snapshot.write_text(json.dumps(dict(schema_version=1, requirements=second, data=dict(ref1=dict(pr, body="Changed PR."), ref2=self.issue))))
                 self.assertEqual(factory.main([*args, "--requirements", second, "--acceptance-snapshot", str(self.snapshot)]), 0)
                 self.snapshot.unlink()
                 self.assertEqual(factory.main([*args, "--candidate", candidate]), 0)

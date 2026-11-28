@@ -2257,6 +2257,7 @@ CONFIG_DIRECTORY = Path(os.environ.get("SOFTWARE_FACTORY_CONFIG") or Path.home()
 READER_GH_CONFIG = CONFIG_DIRECTORY / "gh-reader"
 # Discard the retired credential before relocation or any child inherits the old foreman's environment.
 os.environ.pop("SOFTWARE_FACTORY_GITHUB_READ_TOKEN", None)
+ACCEPTANCE_SNAPSHOT_LIMIT = 1024**2
 ACCEPTANCE_ISSUE = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(?:issues|pull)/(\d+)")
 OWNER_DECISION = re.compile(r"(https://github\.com/[A-Za-z0-9-]+/(?!\.{1,2}/)[A-Za-z0-9_.-]+/(?:issues|pull)/"
                             r"[1-9][0-9]*)#issuecomment-([1-9][0-9]*)")
@@ -2285,10 +2286,12 @@ def inputs_acceptance(record, requirements, *, snapshot=None, owner_decision=Non
     if snapshot is None:
         raise FactoryError("Supply --acceptance-snapshot FILE from the foreman's first gh retrieval for this revision")
     try:
-        answer = decode_json(read_record(snapshot, max_bytes=1024**2))
+        answer = decode_json(read_record(snapshot, max_bytes=ACCEPTANCE_SNAPSHOT_LIMIT))
     except (OSError, ValueError):
         raise FactoryError("Supply a readable regular acceptance snapshot of at most 1 MiB containing complete UTF-8 JSON") from None
-    if (not isinstance(answer, dict) or "errors" in answer or answer.get("requirements") != requirements
+    if not isinstance(answer, dict) or type(answer.get("schema_version")) is not int or answer["schema_version"] != 1:
+        raise FactoryError("Supply a foreman acceptance snapshot with integer schema_version 1")
+    if ("errors" in answer or answer.get("requirements") != requirements
             or not isinstance(answer.get("data"), dict) or len(answer["data"]) != len(issues)):
         raise FactoryError("Supply the complete GraphQL snapshot for the admitted references and exact requirements revision")
     return acceptance_evidence(issues, requirements, answer["data"], decision)
