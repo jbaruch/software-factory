@@ -852,7 +852,7 @@ def git_run_bytes(repository, *args, environment=None):
 def git_commit(repository, revision):
     result = git_run(repository, "rev-parse", "--verify", "--end-of-options", revision + "^{commit}")
     if result.returncode:
-        raise FactoryError("Revision is not an existing Git commit; fetch it or supply a local commit")
+        raise FactoryError("Revision is not an existing Git commit; fetch the missing objects as foreman or supply a local commit")
     return result.stdout.strip()
 
 
@@ -2107,13 +2107,13 @@ def provision_worktree(path, *, worktree_id, destination):
 
 def set_inputs(path, *, candidate, requirements, acceptance=None):
     """Select the task's inputs; `inputs` passes the acceptance it captured for this revision, stored in the same save."""
-    record = load_task(path)
+    record = load_task(path, persist_migration=False)
     if record["admission"] is None or not requirements.strip():
         raise FactoryError("Admit a task and supply a nonempty requirements revision first")
-    check_repository(record["admission"])
-    record["inputs"] = dict(candidate=pinned_commit(record["admission"]["repository"], candidate,
-                                                   record["admission"]["repository_identity"]),
-                            requirements=requirements)
+    with local_git_reads():
+        check_repository(record["admission"])
+        commit = pinned_commit(record["admission"]["repository"], candidate, record["admission"]["repository_identity"])
+    record["inputs"] = dict(candidate=commit, requirements=requirements)
     if acceptance is not None:
         # The first capture of a revision wins, including when a later candidate selects it again.
         record["acceptance"] = {requirements: acceptance, **record.get("acceptance", {})}
@@ -2345,12 +2345,14 @@ def acceptance_evidence(issues, requirements, data, decision):
                 raise FactoryError(f"The requirements revision must match the saved PR head for {identity}")
 
         edits = [github_time(issue.get("createdAt"))]
-        github_time(issue.get("updatedAt"))
+        issue_updated = github_time(issue.get("updatedAt"))
         if issue["lastEditedAt"] is not None:
             edits.append(github_time(issue["lastEditedAt"]))
         for node in issue["timelineItems"]["nodes"]:
             edits.append(github_time(node.get("createdAt") if isinstance(node, dict) else None))
         cutoff = github_time(pinned_issue[2]) if pinned_issue and pinned_issue[1].lower() == identity.lower() else None
+        if cutoff is not None and issue_updated < cutoff:
+            raise FactoryError(f"Acceptance snapshot for {identity} predates the requirements revision; supply the matching snapshot")
         if cutoff is not None and max(edits) > cutoff:
             raise FactoryError(f"Acceptance {identity} changed since the task's requirements revision; select the revised inputs")
 
@@ -3560,9 +3562,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError("Claude command is damaged; restore its arguments before creating an assignment") from None
         if record["admission"] is None or not valid_inputs(record["inputs"]) or native_args.role != role:
             raise FactoryError("Admit the Claude task and select matching role/revision inputs before launching")
-        check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
-                       expected_identity=record["admission"]["repository_identity"],
-                       expected_git_dir=native_args.worktree_git_dir, pending_links=pending_links)
+        with local_git_reads():
+            check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"],
+                           expected_git_dir=native_args.worktree_git_dir, pending_links=pending_links)
         if native_args.write:
             check_role_write(role)
         elif any(value is not None for value in (native_args.decision_store, native_args.decision, native_args.question)):
@@ -3585,9 +3588,10 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
             raise FactoryError(f"{name} command is damaged; restore its arguments before creating an assignment") from None
         if record["admission"] is None or not valid_inputs(record["inputs"]) or native_args.role != role:
             raise FactoryError(f"Admit the {name} task and select matching role/revision inputs before launching")
-        check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
-                       expected_identity=record["admission"]["repository_identity"],
-                       expected_git_dir=native_args.worktree_git_dir, pending_links=pending_links)
+        with local_git_reads():
+            check_checkout(record["admission"]["repository"], cwd, record["inputs"]["candidate"],
+                           expected_identity=record["admission"]["repository_identity"],
+                           expected_git_dir=native_args.worktree_git_dir, pending_links=pending_links)
         if native_args.write:
             check_role_write(role)
         elif not judged(command):
@@ -3644,12 +3648,13 @@ def launch(path, *, task, assignment_id, role, goal, cwd, command,
         owner = "architecture" if purpose == "correction" else "judge"
         raise FactoryError(f"Task {purpose} allowance exhausted; route to {owner}")
     if record["admission"] is not None:
-        check_repository(record["admission"])
-        current = record["inputs"]["candidate"]
-        worktree_git_dir = git_dir(cwd)
-        check_checkout(record["admission"]["repository"], cwd, current,
-                       expected_identity=record["admission"]["repository_identity"],
-                       expected_git_dir=worktree_git_dir, pending_links=pending_links)
+        with local_git_reads():
+            check_repository(record["admission"])
+            current = record["inputs"]["candidate"]
+            worktree_git_dir = git_dir(cwd)
+            check_checkout(record["admission"]["repository"], cwd, current,
+                           expected_identity=record["admission"]["repository_identity"],
+                           expected_git_dir=worktree_git_dir, pending_links=pending_links)
     if (not existing and command[:4] == [sys.executable, "-E", "-s", str(ROOT / "codex_worker.py")]
             and any(flag in command for flag in ("--decision-store", "--decision", "--question"))):
         import codex_worker
@@ -5560,7 +5565,7 @@ def main(argv=None):
                     record = extend_allowance(path, purpose=args.purpose, additional=args.additional,
                         expected_limit=args.expected_limit, request_id=args.request_id, reason=args.reason, judge=args.judge)
                 elif args.action == "inputs":
-                    prepared = load_task(path)
+                    prepared = load_task(path, persist_migration=False)
                     if prepared["admission"] is None:
                         raise FactoryError("Admit a task and supply a nonempty requirements revision first")
                     acceptance = inputs_acceptance(prepared, args.requirements, snapshot=args.acceptance_snapshot,

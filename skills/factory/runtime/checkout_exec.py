@@ -56,8 +56,9 @@ def main(argv=None):
         verify_reader()
         harness = harness or factory.native_harness(command)
         pending = {} if harness and "--write" in command else None
-        factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
-                               expected_git_dir=args.git_dir, pending_links=pending)
+        with factory.local_git_reads():
+            factory.check_checkout(".", ".", args.candidate, expected_identity=identity,
+                                   expected_git_dir=args.git_dir, pending_links=pending)
         environment = factory.command_environment()
         environment.pop(factory.WRITER_SOURCE_ENV, None)
         if pending is not None:

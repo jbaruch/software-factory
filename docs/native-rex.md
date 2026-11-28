@@ -6,6 +6,8 @@
 
 In a project that installed the factory with ACR, run these commands from the realized skill. ACR rewrites the `skills/factory/...` paths in the skill's own instructions to that location, and the first command installs the per-user runtime it then runs from. Upgrade with `acr update` and `acr realize`; the next command upgrades the per-user runtime in place. Restart long-running controllers such as the ready runner or dashboard after an upgrade.
 
+For a disposable Mini pilot, set an absolute private `XDG_DATA_HOME` and pass a separate private `--state-dir` on every call from the ACR-realized skill. The [command reference](../skills/factory/references/commands.md#github-acceptance-at-triage) shows the invocation. Using shared paths activates the runtime for other projects and requires a coordinated upgrade window.
+
 Upgrades exchange the complete active and staged directories under the install lock and the active runtime's VERSION lock. The native worker, Factory CLI and ready runner hold VERSION from module loading through completion. Let active workers and collectors finish and stop idle ready runners before upgrading.
 
 If an older installer stopped with no active skill and a retired tree under `.installing-*/retired`, recover it before invoking an older bootstrap. Run this command from the corrected Factory's `runtime` directory, supplying the runtime path from the verified original ACR-realized package.

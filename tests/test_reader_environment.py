@@ -161,6 +161,38 @@ class AcceptanceEvidence(unittest.TestCase):
             with self.subTest(revision=revision), self.assertRaises(factory.FactoryError):
                 self.capture(revision=revision)
 
+    def test_first_freeze_requires_evidence_reaching_the_named_issue_revision(self):
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit",
+                        "--quiet", "--allow-empty", "-m", "Fixture"], check=True)
+        path = self.root / "test.json"
+        factory.admit(path, task="test", goal="Check acceptance", repository=str(repo), acceptance=[self.issue_url],
+                      corrections=1, investigations=1)
+        args = ["--state-dir", str(self.root), "inputs", "--task", "test", "--candidate", "HEAD",
+                "--requirements", self.requirements, "--acceptance-snapshot", str(self.snapshot)]
+        # A refused first capture must also leave an older admission in its original on-disk form.
+        legacy = json.loads(path.read_bytes())
+        legacy["schema_version"] = 10
+        legacy.pop("acceptance", None)
+        factory.save(path, legacy)
+        original = path.read_bytes()
+        older = dict(self.issue, body="Superseded body", updatedAt=self.issue["createdAt"],
+                     lastEditedAt=self.issue["createdAt"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            self.snapshot.write_text(json.dumps(dict(requirements=self.requirements, data=dict(ref1=older))))
+            self.assertNotEqual(factory.main(args), 0)
+            self.assertIn("predates the requirements revision", errors.getvalue())
+            self.assertEqual(original, path.read_bytes())
+            self.snapshot.write_text(json.dumps(dict(requirements=self.requirements, data=dict(ref1=self.issue))))
+            self.assertEqual(factory.main(args), 0)
+            saved = path.read_bytes()
+            self.assertIn(self.issue["body"], factory.load_task(path)["acceptance"][self.requirements])
+            self.snapshot.unlink()
+            self.assertEqual(factory.main(args), 0)
+            self.assertEqual(saved, path.read_bytes())
+
     def test_owner_decision_needs_exact_comment_at_admitted_url(self):
         self.assertNotIn("Selected decision.", self.capture())
         for changes in (dict(authorAssociation="MEMBER"), dict(author=None), dict(author=dict(login="", databaseId=12345)),

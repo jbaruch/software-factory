@@ -138,6 +138,14 @@ Sources are in `skills/factory/runtime/factory.py` unless the row names another 
 
 ## GitHub acceptance at triage
 
+For a disposable Mini pilot from an ACR-realized skill, create private runtime and task directories under an absolute, owner-only pilot directory. Set `pilot` to that absolute directory and use both paths on every Factory call, beginning with the first invocation (runtime relocation precedes argument parsing). For example:
+
+```sh
+XDG_DATA_HOME="$pilot/data" python3 -B "$SKILL_DIR/runtime/factory.py" --state-dir "$pilot/state" show --task "$task"
+```
+
+Reserve the shared paths for a coordinated activation after workers and collectors finish and idle controllers stop.
+
 Use the foreman's first authenticated GitHub read to save one snapshot in a private local file. Inspect that file to select work. For an issue or PR URL in `ref`, the following call records the requirements revision alongside the GraphQL response. Set `snapshot` to a new file in the foreman's private scratch directory.
 
 ```sh
@@ -161,7 +169,7 @@ comments(last: 20) {
 }
 ```
 
-After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file.
+Before selecting inputs, the foreman intentionally fetches any missing Git objects for the admitted pin and selected candidate. After a successful retrieval and admission, pass the saved file to `inputs`. Include `--owner-decision PERMALINK` only for an explicitly selected comment present in the file.
 
 ```sh
 python3 -B "$SKILL_DIR/runtime/factory.py" inputs --task "$task" --candidate "$candidate" \
@@ -187,7 +195,7 @@ python3 -B "$SKILL_DIR/runtime/factory.py" \
 
 Transfer the bundle to the destination host by any secure operator channel. Confirm the SHA-256 of the received file matches the printed value before proceeding.
 
-On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. For GitHub acceptance, transfer the original foreman snapshot for the destination’s `inputs --acceptance-snapshot FILE`. Use a fresh admission with the original acceptance references and select the same requirements revision.
+On the destination host, fetch the exact candidate into a local ref. Fetch the requirements revision if it is a Git commit. For GitHub acceptance, transfer the original foreman snapshot for the destination’s `inputs --acceptance-snapshot FILE`. Carry forward the original explicitly selected owner-decision permalink, if any. If original evidence is missing, stop the transfer without refetching GitHub. Use a fresh admission with the original acceptance references and select the same requirements revision.
 
 ```sh
 # 1. Admit the task (use the exact candidate C and requirements R from the source).
@@ -195,9 +203,14 @@ python3 -B "$SKILL_DIR/runtime/factory.py" \
   admit --task DST --line DST --goal 'Imported writer provenance' \
   --repo /dst/checkout --acceptance "$ACCEPTANCE_REF"
 
-# 2. Select inputs (must match the source bundle's candidate and requirements).
+# 2. For GitHub acceptance, set snapshot to the transferred original file.
+# Set owner_decision to the source's selected permalink, or leave it unset if none.
+set --
+if [ -n "${owner_decision:-}" ]; then
+  set -- --owner-decision "$owner_decision"
+fi
 python3 -B "$SKILL_DIR/runtime/factory.py" \
-  inputs --task DST --candidate C --requirements R
+  inputs --task DST --candidate C --requirements R --acceptance-snapshot "$snapshot" "$@"
 
 # 3. Import; --from-host and --sha256 come from the export output, never from the bundle.
 python3 -B "$SKILL_DIR/runtime/factory.py" \

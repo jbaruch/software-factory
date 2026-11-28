@@ -517,7 +517,7 @@ to `inputs --acceptance-snapshot FILE`. A regular UTF-8 JSON file up to 1 MiB ca
 the exact requirements string and one result per admitted GitHub URL in order.
 `PR<N>@<head>` must identify an admitted PR at that head. For a timestamp-bound
 `owner/repo#N@T`, creation, the latest body edit and latest title rename must all
-fall at or before T. Later closures, labels and unrelated comments can advance
+fall at or before T, and the named issue’s `updatedAt` must reach at least T. Later closures, labels and unrelated comments can advance
 `updatedAt` while leaving acceptance current. The revision and candidate are separate
 inputs. Selecting a new candidate against a saved revision reuses its original text.
 
